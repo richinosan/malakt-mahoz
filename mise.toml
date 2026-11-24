@@ -1,0 +1,37 @@
+[tools]
+rust = { version = "1.100.0", components = "rustfmt,clippy" }
+
+[tasks.dev]
+description = "開発用にアプリを起動する（デバッグビルド）"
+run = "cargo run -p malakt-mahoz"
+
+[tasks.start]
+description = "アプリを起動する（リリースビルド）"
+run = "cargo run --release -p malakt-mahoz"
+
+[tasks.build]
+description = "リリース用にビルドする。成果物は target/release/malakt-mahoz"
+run = "cargo build --release --locked -p malakt-mahoz"
+
+[tasks.test]
+description = "ユニットテストとシナリオテストをすべて実行する"
+run = "cargo test --workspace --locked"
+
+[tasks.lint]
+description = "書式と clippy を確かめる"
+run = [
+  "cargo fmt --all -- --check",
+  "cargo clippy --workspace --all-targets --locked -- -D warnings",
+]
+
+[tasks.fmt]
+description = "書式をそろえる"
+run = "cargo fmt --all"
+
+[tasks.bench]
+description = "core のベンチマークを実行する"
+run = "cargo bench -p malakt-core"
+
+[tasks.mutants]
+description = "core のミューテーションテストを実行する（cargo-mutants が必要）"
+run = "cargo mutants -p malakt-core --no-shuffle"
