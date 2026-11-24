@@ -200,6 +200,12 @@ pub struct MainView {
     pub ai_session: Entity<Session>,
     /// 広いウィンドウで、左のメニューを閉じている
     pub sidebar_hidden: bool,
+    /// 左のメニューの幅（拡大率を掛ける前の値）。境界をドラッグして変えられ、保存される。
+    pub sidebar_width: f32,
+    /// 左のメニューの境界をドラッグしている間だけ `true`。
+    pub sidebar_resizing: bool,
+    /// 上のバーの空いているところを押している間だけ `true`（ウィンドウを動かし始めるため）。
+    pub header_pressed: bool,
     /// 出入りの動きを付ける。テストでは止めて、すぐ最後の位置に出す
     pub motion: bool,
     pub today: String,
@@ -398,11 +404,15 @@ impl MainView {
             ai_pane: None,
             ai_session,
             sidebar_hidden: false,
+            sidebar_width: SIDEBAR_WIDTH,
+            sidebar_resizing: false,
+            header_pressed: false,
             motion: true,
             today: view::today(),
             inputs,
             _subscriptions: subs,
         };
+        this.load_sidebar_width(cx);
         this.reload(cx);
         // ウィンドウの準備が終わってから、たまっている通知を出す
         // 「システムに合わせる」のとき、OS の外観が変わったら塗り直す
@@ -1427,6 +1437,45 @@ impl MainView {
         cx.notify();
     }
 
+    // ---- 左のメニューの幅 ----
+
+    /// 保存してある幅を読む。
+    fn load_sidebar_width(&mut self, cx: &App) {
+        let saved = self.db.read(cx).store.setting(SIDEBAR_WIDTH_SETTING);
+        if let Ok(Some(saved)) = saved {
+            if let Ok(width) = saved.parse::<f32>() {
+                self.sidebar_width = width.clamp(SIDEBAR_MIN, SIDEBAR_MAX);
+            }
+        }
+    }
+
+    /// ドラッグ中の幅。`width` は拡大率を掛ける前の値。
+    pub fn drag_sidebar(&mut self, width: f32, cx: &mut Context<Self>) {
+        let width = width.clamp(SIDEBAR_MIN, SIDEBAR_MAX).round();
+        if width != self.sidebar_width {
+            self.sidebar_width = width;
+            cx.notify();
+        }
+    }
+
+    /// ドラッグを終えて、幅を保存する。
+    pub fn finish_sidebar_drag(&mut self, cx: &mut Context<Self>) {
+        if !self.sidebar_resizing {
+            return;
+        }
+        self.sidebar_resizing = false;
+        let width = self.sidebar_width.to_string();
+        self.write(cx, |s| s.set_setting(SIDEBAR_WIDTH_SETTING, Some(&width)));
+        cx.notify();
+    }
+
+    /// 境界をダブルクリックして、最初の幅に戻す。
+    pub fn reset_sidebar_width(&mut self, cx: &mut Context<Self>) {
+        self.sidebar_width = SIDEBAR_WIDTH;
+        self.sidebar_resizing = true;
+        self.finish_sidebar_drag(cx);
+    }
+
     // ---- ロック ----
 
     pub fn lock_enabled(&self, cx: &App) -> bool {
@@ -1991,6 +2040,12 @@ impl MainView {
 
 /// 通知の一覧に出す数。
 const NOTICES_SHOWN: usize = 100;
+
+/// 左のメニューの最初の幅と、変えられる範囲（拡大率を掛ける前の値）。
+pub const SIDEBAR_WIDTH: f32 = 256.;
+pub const SIDEBAR_MIN: f32 = 200.;
+pub const SIDEBAR_MAX: f32 = 480.;
+const SIDEBAR_WIDTH_SETTING: &str = "sidebar.width";
 
 /// 「、」や「,」で区切った入力を、空でない項目の並びにする。
 fn split_list(text: &str) -> Vec<String> {

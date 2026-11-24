@@ -8,7 +8,7 @@ use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::{Input, Textarea};
 use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu, PopupMenu, PopupMenuItem};
 use gpui_kit::component::text::TextView;
-use gpui_kit::component::{ActiveTheme, Icon, Sizable, TitleBar, TITLE_BAR_HEIGHT};
+use gpui_kit::component::{ActiveTheme, Icon, IconName, Sizable};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use malakt_core::bulk::{BulkOp, ListMode};
@@ -34,7 +34,6 @@ const TILE_ICON_SIZE: Pixels = px(24.);
 const CARD_ICON_SIZE: Pixels = px(32.);
 /// アイコンを選ぶ画面のアイコンの大きさ。
 const PICKER_ICON_SIZE: Pixels = px(22.);
-const SIDEBAR_WIDTH: Pixels = px(256.);
 const HEADER_HEIGHT: Pixels = px(84.);
 const PANEL_WIDTH: Pixels = px(544.);
 const ROW_HEIGHT: Pixels = px(60.);
@@ -557,7 +556,42 @@ impl MainView {
                     },
                 ))
             });
-        div().w(SIDEBAR_WIDTH).flex_none().h_full().child(inner)
+        let outer = div()
+            .relative()
+            .w(px(self.sidebar_width))
+            .flex_none()
+            .h_full()
+            .child(inner);
+        if !wide {
+            return outer;
+        }
+        // 右の境界をドラッグして幅を変える。ダブルクリックで最初の幅に戻す
+        let resizing = self.sidebar_resizing;
+        outer.child(
+            div()
+                .id("sidebar-resize")
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .right(px(-3.))
+                .w(px(6.))
+                .cursor_col_resize()
+                .when(resizing, |d| d.bg(theme.ring))
+                .hover(|s| s.bg(theme.ring))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                        cx.stop_propagation();
+                        if event.click_count >= 2 {
+                            this.reset_sidebar_width(cx);
+                        } else {
+                            this.sidebar_resizing = true;
+                            cx.notify();
+                        }
+                    }),
+                )
+                .test_support(),
+        )
     }
 
     // ---- 上のバー ----
@@ -628,40 +662,172 @@ impl MainView {
         toggle
     }
 
-    fn render_header(&self, unlocked: bool, wide: bool, cx: &mut Context<Self>) -> Div {
+    /// 最小化・最大化・閉じるのボタン。macOS は OS が描くので出さない。
+    /// 上のバーのほかのボタンと同じ高さで並べ、乗せたときの色はボタンの中だけに付ける。
+    fn window_controls(&self, window: &Window, cx: &mut Context<Self>) -> Option<Div> {
+        if cfg!(target_os = "macos") {
+            return None;
+        }
+        // OS がタイトルバーを描いているときは、そちらのボタンを使う
+        #[cfg(target_os = "linux")]
+        if !matches!(window.window_decorations(), Decorations::Client { .. }) {
+            return None;
+        }
         let theme = cx.theme().clone();
-        // ウィンドウを動かす帯と、最小化・最大化・閉じるのボタンは、OS のタイトルバーと同じ高さで
-        // 右上に置く。macOS はボタンを OS が描くので、バー全体でウィンドウを動かせるようにする
-        let strip = if cfg!(target_os = "macos") {
-            HEADER_HEIGHT
+        let supported = window.window_controls();
+        let max = if window.is_maximized() {
+            IconName::WindowRestore
         } else {
-            TITLE_BAR_HEIGHT
+            IconName::WindowMaximize
         };
+        let buttons = [
+            (
+                "window-minimize",
+                IconName::WindowMinimize,
+                WindowControlArea::Min,
+                supported.minimize,
+            ),
+            (
+                "window-maximize",
+                max,
+                WindowControlArea::Max,
+                supported.maximize,
+            ),
+            (
+                "window-close",
+                IconName::WindowClose,
+                WindowControlArea::Close,
+                true,
+            ),
+        ];
+        let mut controls = row().flex_none().ml_1();
+        for (id, icon, area, shown) in buttons {
+            if !shown {
+                continue;
+            }
+            let close = area == WindowControlArea::Close;
+            // 閉じるは Windows の標準と同じ赤
+            let (hover_bg, hover_fg, active_bg) = if close {
+                (
+                    gpui_kit::rgb(0xc42b1c).into(),
+                    gpui_kit::white(),
+                    gpui_kit::rgb(0x94141a).into(),
+                )
+            } else {
+                (
+                    theme.secondary_hover,
+                    theme.foreground,
+                    theme.secondary_active,
+                )
+            };
+            controls = controls.child(
+                div()
+                    .id(id)
+                    .h_8()
+                    .w(rems(2.75))
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .justify_center()
+                    .rounded_md()
+                    .text_color(theme.foreground)
+                    .hover(move |s| s.bg(hover_bg).text_color(hover_fg))
+                    .active(move |s| s.bg(active_bg).text_color(hover_fg))
+                    // Windows では、OS がこの場所をウィンドウのボタンとして扱う
+                    .when(cfg!(target_os = "windows"), |d| d.window_control_area(area))
+                    .when(!cfg!(target_os = "windows"), |d| {
+                        d.on_mouse_down(MouseButton::Left, |_, window, cx| {
+                            window.prevent_default();
+                            cx.stop_propagation();
+                        })
+                        .on_click(move |_, window, cx| {
+                            cx.stop_propagation();
+                            match area {
+                                WindowControlArea::Min => window.minimize_window(),
+                                WindowControlArea::Max => window.zoom_window(),
+                                _ => window.remove_window(),
+                            }
+                        })
+                    })
+                    .child(Icon::new(icon).small())
+                    .test_support(),
+            );
+        }
+        Some(controls)
+    }
+
+    fn render_header(
+        &self,
+        unlocked: bool,
+        wide: bool,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let theme = cx.theme().clone();
+        // バーの空いているところを掴むと、ウィンドウを動かせる。
+        // Windows は OS に任せ、ほかは押したまま動かしたときに自分で動かし始める
         let bar = row()
-            .relative()
             .flex_none()
             .h(HEADER_HEIGHT)
             .border_b_1()
             .border_color(theme.border)
             .bg(theme.background)
-            .child(
-                TitleBar::new()
-                    .absolute()
-                    .top_0()
-                    .left_0()
-                    .right_0()
-                    .h(strip)
-                    .border_0()
-                    .bg(theme.transparent),
-            );
+            .when(cfg!(target_os = "windows"), |d| {
+                d.window_control_area(WindowControlArea::Drag)
+            })
+            .when(!cfg!(target_os = "windows"), |d| {
+                d.on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                        // ボタンが受けた押下では動かさない
+                        if window.default_prevented() {
+                            return;
+                        }
+                        if event.click_count == 2 {
+                            if cfg!(target_os = "macos") {
+                                window.titlebar_double_click();
+                            } else {
+                                window.zoom_window();
+                            }
+                            return;
+                        }
+                        this.header_pressed = true;
+                        cx.notify();
+                    }),
+                )
+                .on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, _| this.header_pressed = false),
+                )
+                .on_mouse_move(cx.listener(
+                    |this, event: &MouseMoveEvent, window, _| {
+                        if !this.header_pressed {
+                            return;
+                        }
+                        this.header_pressed = false;
+                        if event.pressed_button == Some(MouseButton::Left) {
+                            window.start_window_move();
+                        }
+                    },
+                ))
+            });
         if !unlocked {
-            return bar.child(
-                div()
-                    .px_4()
-                    .text_sm()
-                    .text_color(theme.muted_foreground)
-                    .child(crate::APP_NAME),
-            );
+            return bar
+                .child(
+                    div()
+                        .flex_1()
+                        .px_4()
+                        .text_sm()
+                        .text_color(theme.muted_foreground)
+                        .child(crate::APP_NAME),
+                )
+                // 下のバーの判定に取られないよう、ボタンのある場所はマウスを受け止める
+                .child(
+                    row()
+                        .occlude()
+                        .pr_3()
+                        .children(self.window_controls(window, cx)),
+                );
         }
         let sidebar_shown = if wide {
             !self.sidebar_hidden
@@ -683,11 +849,16 @@ impl MainView {
                     d.pl(px(84.))
                 })
                 .child(
-                    Button::new("toggle-sidebar")
-                        .icon(app_icon("menu"))
-                        .framed(cx)
-                        .tooltip("メニュー")
-                        .on_click(cx.listener(move |this, _, _, cx| this.toggle_sidebar(wide, cx))),
+                    // ボタンのある場所はマウスを受け止める（右のボタンと同じ理由）
+                    div().occlude().child(
+                        Button::new("toggle-sidebar")
+                            .icon(app_icon("menu"))
+                            .framed(cx)
+                            .tooltip("メニュー")
+                            .on_click(
+                                cx.listener(move |this, _, _, cx| this.toggle_sidebar(wide, cx)),
+                            ),
+                    ),
                 )
                 .when_some(icon, |d, icon| {
                     d.child(
@@ -728,10 +899,9 @@ impl MainView {
                 .flex_none()
                 .gap_2()
                 .pr_3()
-                // 右上のウィンドウのボタン（3 つ）の分を空ける
-                .when(!cfg!(target_os = "macos"), |d| {
-                    d.pr(TITLE_BAR_HEIGHT * 3. + gpui_kit::px(12.))
-                })
+                // 下のバーの判定に取られないよう、ボタンのある場所はマウスを受け止める。
+                // これがないと、Windows ではボタンを離したときのクリックがウィンドウの移動に取られる
+                .occlude()
                 .child(self.theme_toggle(cx))
                 .child(
                     Button::new("ai-toggle")
@@ -815,7 +985,8 @@ impl MainView {
                                     window.dispatch_action(Box::new(NewWindow), cx)
                                 }))
                         }),
-                ),
+                )
+                .children(self.window_controls(window, cx)),
         )
     }
 
@@ -4120,12 +4291,12 @@ impl Render for MainView {
                 .size_full()
                 .bg(theme.background)
                 .text_color(theme.foreground)
-                .child(self.render_header(false, wide, cx))
+                .child(self.render_header(false, wide, window, cx))
                 .child(div().flex_1().min_h_0().child(self.render_lock_screen(cx)))
                 .into_any_element();
         }
         let main_width = if wide && sidebar {
-            width - SIDEBAR_WIDTH
+            width - px(self.sidebar_width)
         } else {
             width
         };
@@ -4170,6 +4341,20 @@ impl Render for MainView {
             .track_focus(&self.focus)
             .on_action(cx.listener(|this, _: &Dismiss, _, cx| this.dismiss(cx)))
             .on_action(cx.listener(|this, _: &ToggleAi, window, cx| this.toggle_ai(window, cx)))
+            // 左のメニューの境界をドラッグしている間は、どこにマウスがあっても幅を追う
+            .when(self.sidebar_resizing, |d| {
+                d.on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
+                    if event.pressed_button == Some(MouseButton::Left) {
+                        this.drag_sidebar(f32::from(event.position.x) / crate::UI_SCALE, cx);
+                    } else {
+                        this.finish_sidebar_drag(cx);
+                    }
+                }))
+                .on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, cx| this.finish_sidebar_drag(cx)),
+                )
+            })
             .size_full()
             .relative()
             .flex()
@@ -4182,7 +4367,7 @@ impl Render for MainView {
                     .flex_1()
                     .min_w_0()
                     .h_full()
-                    .child(self.render_header(true, wide, cx))
+                    .child(self.render_header(true, wide, window, cx))
                     .child(
                         // 上のバーの下に、タスクの画面と AI チャットを横に並べる
                         row()
