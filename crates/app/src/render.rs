@@ -10,6 +10,7 @@ use gpui_kit::component::text::TextView;
 use gpui_kit::component::{ActiveTheme, Sizable};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
+use malakt_core::bulk::{BulkOp, ListMode};
 use malakt_core::view::{self, AssigneeFilter, DueState, Priority as Prio, Sort, Tab};
 use malakt_core::{Comment, DueRule, Role as Raci, Roles, Status, Task as Todo};
 
@@ -301,6 +302,11 @@ impl MainView {
                     .label("追加")
                     .primary()
                     .on_click(cx.listener(|this, _, window, cx| this.submit_quick_add(window, cx))),
+            )
+            .child(
+                Button::new("new-task-open")
+                    .label("詳しく入力")
+                    .on_click(cx.listener(|this, _, window, cx| this.open_new_task(window, cx))),
             )
     }
 
@@ -698,7 +704,9 @@ impl MainView {
         for (i, s) in Status::ALL.into_iter().enumerate() {
             bar = bar.child(
                 chip(("bulk-status", i), s.label(), false, cx).on_click(cx.listener(
-                    move |this, _: &ClickEvent, _, cx| this.bulk_edit(cx, |d| d.status = s),
+                    move |this, _: &ClickEvent, _, cx| {
+                        this.bulk_apply(&BulkOp::Status(s), cx);
+                    },
                 )),
             );
         }
@@ -712,10 +720,19 @@ impl MainView {
             bar = bar.child(
                 chip(("bulk-prio", i), p.label(), false, cx).on_click(cx.listener(
                     move |this, _: &ClickEvent, _, cx| {
-                        this.bulk_edit(cx, |d| d.priority = p.value())
+                        this.bulk_apply(&BulkOp::Priority(p.value()), cx);
                     },
                 )),
             );
+        }
+        for (button, label, modal) in [
+            ("bulk-due", "期限", Modal::BulkDue),
+            ("bulk-assignees", "担当", Modal::BulkAssignees),
+            ("bulk-categories", "カテゴリ", Modal::BulkCategories),
+        ] {
+            bar = bar.child(Button::new(button).label(label).small().on_click(
+                cx.listener(move |this, _, window, cx| this.open_bulk(modal.clone(), window, cx)),
+            ));
         }
         bar.child(div().flex_1())
             .child(
@@ -1022,7 +1039,10 @@ impl MainView {
                     .accessibility_label(format!("「{}」を選択", task.title))
                     .checked(self.selected.contains(&task.id))
                     .on_click(
-                        cx.listener(move |this, _: &bool, _, cx| this.toggle_selected(&id, cx)),
+                        // Shift を押しながらなら、前に押した行からの範囲をまとめて選ぶ
+                        cx.listener(move |this, _: &bool, window, cx| {
+                            this.click_select(&id, window.modifiers().shift, cx)
+                        }),
                     ),
             )
         };
@@ -2495,6 +2515,253 @@ impl MainView {
                             ),
                     );
                 self.dialog("状態を変更", body, cx)
+            }
+            Modal::BulkDue => {
+                let count = self.selected_ids().len();
+                let body =
+                    col()
+                        .gap_3()
+                        .child(muted(format!(
+                            "選んだ {count} 件の期限を、まとめて決めます。"
+                        )))
+                        .child(
+                            Input::new(&self.inputs.bulk_due)
+                                .id("bulk-due-input")
+                                .aria_label("期限"),
+                        )
+                        .when_some(self.error.clone(), |d, error| {
+                            d.child(div().text_sm().text_color(cx.theme().danger).child(error))
+                        })
+                        .child(
+                            row()
+                                .gap_2()
+                                .justify_end()
+                                .child(cancel(cx))
+                                .child(
+                                    Button::new("bulk-due-clear")
+                                        .label("期限をなくす")
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.submit_bulk_due(true, cx)
+                                        })),
+                                )
+                                .child(
+                                    Button::new("bulk-due-submit")
+                                        .label("決める")
+                                        .primary()
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.submit_bulk_due(false, cx)
+                                        })),
+                                ),
+                        );
+                self.dialog("期限をまとめて変更", body, cx)
+            }
+            Modal::BulkAssignees => {
+                let count = self.selected_ids().len();
+                let mut modes = row().gap_1();
+                for (ix, mode) in ListMode::ALL.into_iter().enumerate() {
+                    modes = modes.child(
+                        chip(("bulk-mode", ix), mode.label(), self.bulk_mode == mode, cx)
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                this.bulk_mode = mode;
+                                cx.notify();
+                            }))
+                            .test_support(),
+                    );
+                }
+                let mut people = row().gap_1().flex_wrap();
+                for (ix, p) in self.people.iter().enumerate() {
+                    let pid = p.id.clone();
+                    people = people.child(
+                        chip(
+                            ("bulk-person", ix),
+                            p.name.clone(),
+                            self.bulk_people.contains(&p.id),
+                            cx,
+                        )
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            this.toggle_bulk_person(&pid, cx)
+                        }))
+                        .test_support(),
+                    );
+                }
+                let hint = match self.bulk_mode {
+                    ListMode::Add => "選んだ人を、いまの担当者に足します。",
+                    ListMode::Remove => "選んだ人を、担当者から外します。",
+                    ListMode::Set => {
+                        "担当者を、選んだ人だけにします。誰も選ばなければ、担当者なしにします。"
+                    }
+                };
+                let body = col()
+                    .gap_3()
+                    .child(muted(format!(
+                        "選んだ {count} 件の担当者を、まとめて変えます。"
+                    )))
+                    .child(modes)
+                    .child(muted(hint.to_owned()))
+                    .child(people)
+                    .when_some(self.error.clone(), |d, error| {
+                        d.child(div().text_sm().text_color(cx.theme().danger).child(error))
+                    })
+                    .child(
+                        row().gap_2().justify_end().child(cancel(cx)).child(
+                            Button::new("bulk-assignees-submit")
+                                .label("変更する")
+                                .primary()
+                                .on_click(
+                                    cx.listener(|this, _, _, cx| this.submit_bulk_assignees(cx)),
+                                ),
+                        ),
+                    );
+                self.dialog("担当者をまとめて変更", body, cx)
+            }
+            Modal::BulkCategories => {
+                let count = self.selected_ids().len();
+                let mut modes = row().gap_1();
+                for (ix, (text, add)) in [("追加", true), ("外す", false)].into_iter().enumerate()
+                {
+                    modes = modes.child(
+                        chip(
+                            ("bulk-cat-mode", ix),
+                            text,
+                            self.bulk_category_add == add,
+                            cx,
+                        )
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            this.bulk_category_add = add;
+                            cx.notify();
+                        }))
+                        .test_support(),
+                    );
+                }
+                let body = col()
+                    .gap_3()
+                    .child(muted(format!(
+                        "選んだ {count} 件のカテゴリを、まとめて変えます。"
+                    )))
+                    .child(modes)
+                    .child(
+                        Input::new(&self.inputs.bulk_categories)
+                            .id("bulk-categories-input")
+                            .aria_label("カテゴリ"),
+                    )
+                    .when_some(self.error.clone(), |d, error| {
+                        d.child(div().text_sm().text_color(cx.theme().danger).child(error))
+                    })
+                    .child(
+                        row().gap_2().justify_end().child(cancel(cx)).child(
+                            Button::new("bulk-categories-submit")
+                                .label("変更する")
+                                .primary()
+                                .on_click(
+                                    cx.listener(|this, _, _, cx| this.submit_bulk_categories(cx)),
+                                ),
+                        ),
+                    );
+                self.dialog("カテゴリをまとめて変更", body, cx)
+            }
+            Modal::NewTask => {
+                let theme = cx.theme().clone();
+                let label =
+                    |text: &'static str| div().text_sm().font_weight(FontWeight::BOLD).child(text);
+                let mut priority = row().gap_1().flex_wrap();
+                for (ix, p) in Prio::ALL.into_iter().enumerate() {
+                    priority = priority.child(
+                        chip(
+                            ("nt-prio", ix),
+                            p.label(),
+                            Prio::of(self.new_task.priority) == p,
+                            cx,
+                        )
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            this.set_new_task_priority(p.value(), cx)
+                        }))
+                        .test_support(),
+                    );
+                }
+                let mut assignees = row().gap_1().flex_wrap();
+                for (ix, p) in self.people.iter().enumerate() {
+                    let pid = p.id.clone();
+                    assignees = assignees.child(
+                        chip(
+                            ("nt-as", ix),
+                            p.name.clone(),
+                            self.new_task.assignee_ids.contains(&p.id),
+                            cx,
+                        )
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            this.toggle_new_task_assignee(&pid, cx)
+                        }))
+                        .test_support(),
+                    );
+                }
+                let field = |text: &'static str, input: Input| {
+                    col().gap_1().child(label(text)).child(input)
+                };
+                let form = col()
+                    .gap_3()
+                    .child(field(
+                        "タイトル",
+                        Input::new(&self.inputs.nt_title)
+                            .id("nt-title")
+                            .aria_label("タイトル"),
+                    ))
+                    .child(
+                        col()
+                            .gap_1()
+                            .child(label("説明"))
+                            .child(Textarea::new(&self.inputs.nt_description).h(px(96.))),
+                    )
+                    .child(col().gap_1().child(label("優先度")).child(priority))
+                    .when(!self.people.is_empty(), |d| {
+                        d.child(col().gap_1().child(label("担当者")).child(assignees))
+                    })
+                    .child(field(
+                        "開始",
+                        Input::new(&self.inputs.nt_start)
+                            .id("nt-start")
+                            .aria_label("開始"),
+                    ))
+                    .child(field(
+                        "期限",
+                        Input::new(&self.inputs.nt_due)
+                            .id("nt-due")
+                            .aria_label("期限"),
+                    ))
+                    .child(field(
+                        "カテゴリ",
+                        Input::new(&self.inputs.nt_categories)
+                            .id("nt-categories")
+                            .aria_label("カテゴリ"),
+                    ));
+                let place = self.workspace_name(self.current_workspace());
+                let body = col()
+                    .gap_3()
+                    .min_h_0()
+                    .child(muted(format!(
+                        "「{place}」に作ります。状態は未着手で始まります。"
+                    )))
+                    .child(
+                        div()
+                            .id("new-task-scroll")
+                            .flex_1()
+                            .min_h_0()
+                            .overflow_y_scroll()
+                            .child(form),
+                    )
+                    .when_some(self.error.clone(), |d, error| {
+                        d.child(div().text_sm().text_color(theme.danger).child(error))
+                    })
+                    .child(
+                        row().gap_2().justify_end().child(cancel(cx)).child(
+                            Button::new("new-task-submit")
+                                .label("作成")
+                                .primary()
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.submit_new_task(window, cx)
+                                })),
+                        ),
+                    );
+                self.dialog("新しいタスク", body, cx)
             }
             Modal::LinkTask(id) => {
                 let task = self

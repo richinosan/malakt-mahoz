@@ -6,6 +6,7 @@ use std::rc::Rc;
 use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
 use gpui_kit::component::text::TextViewState;
 use gpui_kit::*;
+use malakt_core::bulk::{self, BulkOp, ListMode};
 use malakt_core::view::{self, ListQuery};
 use malakt_core::{
     archive, lock, mention, Anchor, Attachment, Change, Comment, DueRule, Id, NewComment, Person,
@@ -49,6 +50,14 @@ pub enum Modal {
     WorkspaceSettings(Id),
     /// タスクをほかのワークスペースにも表示する（表示先を選ぶ）
     LinkTask(Id),
+    /// 選んだタスクの期限をまとめて変える
+    BulkDue,
+    /// 選んだタスクの担当者をまとめて変える
+    BulkAssignees,
+    /// 選んだタスクのカテゴリをまとめて変える
+    BulkCategories,
+    /// 項目を入れてタスクを作る
+    NewTask,
 }
 
 /// 詳細パネルで編集中の項目。
@@ -108,6 +117,13 @@ pub struct Inputs {
     pub def_time: Entity<InputState>,
     pub def_categories: Entity<InputState>,
     pub def_description: Entity<TextareaState>,
+    pub bulk_due: Entity<InputState>,
+    pub bulk_categories: Entity<InputState>,
+    pub nt_title: Entity<InputState>,
+    pub nt_start: Entity<InputState>,
+    pub nt_due: Entity<InputState>,
+    pub nt_categories: Entity<InputState>,
+    pub nt_description: Entity<TextareaState>,
 }
 
 pub struct MainView {
@@ -130,6 +146,14 @@ pub struct MainView {
     pub query: ListQuery,
     pub filters_open: bool,
     pub selected: HashSet<Id>,
+    /// Shift を押しながらの範囲選択の起点（最後に押した行）
+    pub select_anchor: Option<Id>,
+    /// まとめて変えるダイアログの入力（担当者の変え方、選んだ担当者、カテゴリを足すか外すか）
+    pub bulk_mode: ListMode,
+    pub bulk_people: Vec<Id>,
+    pub bulk_category_add: bool,
+    /// 新しいタスクのダイアログで編集中の下書き（入力欄にないもの: 優先度・担当者）
+    pub new_task: TaskDraft,
     pub panel: Option<Id>,
     pub detail: Option<Detail>,
     pub editing: Option<Editing>,
@@ -189,6 +213,13 @@ impl MainView {
             def_time: input(window, cx, "HH:MM（空なら日付だけ）"),
             def_categories: input(window, cx, "「、」か「,」で区切る"),
             def_description: area(window, cx, "新しいタスクの説明に最初から入れる文章"),
+            bulk_due: input(window, cx, "YYYY-MM-DD（時刻は続けて HH:MM）"),
+            bulk_categories: input(window, cx, "「、」か「,」で区切る"),
+            nt_title: input(window, cx, "タイトル"),
+            nt_start: input(window, cx, "YYYY-MM-DD（時刻は続けて HH:MM）"),
+            nt_due: input(window, cx, "YYYY-MM-DD（時刻は続けて HH:MM）"),
+            nt_categories: input(window, cx, "「、」か「,」で区切る"),
+            nt_description: area(window, cx, "説明"),
         };
 
         let mut subs = vec![cx.observe(&db, |this, _, cx| this.reload(cx))];
@@ -278,6 +309,11 @@ impl MainView {
             query: ListQuery::default(),
             filters_open: false,
             selected: HashSet::new(),
+            select_anchor: None,
+            bulk_mode: ListMode::Add,
+            bulk_people: Vec::new(),
+            bulk_category_add: true,
+            new_task: TaskDraft::default(),
             panel: None,
             detail: None,
             editing: None,
@@ -385,6 +421,7 @@ impl MainView {
             &self.query,
             self.self_id.as_deref(),
         ));
+        // 見えなくなったタスクは、選択から外す（見えていないものをまとめて変えないように）
         let shown: HashSet<&str> = self
             .visible
             .iter()
@@ -989,22 +1026,29 @@ impl MainView {
     // ---- 選択と一括操作 ----
 
     pub fn toggle_selected(&mut self, id: &str, cx: &mut Context<Self>) {
-        if !self.selected.remove(id) {
-            self.selected.insert(id.to_owned());
+        self.click_select(id, false, cx);
+    }
+
+    /// 行のチェックボックスを押した。Shift つきなら、前に押した行からの範囲をまとめて変える。
+    pub fn click_select(&mut self, id: &str, shift: bool, cx: &mut Context<Self>) {
+        let visible: Vec<&Id> = self.visible.iter().map(|&i| &self.tasks[i].id).collect();
+        if shift {
+            bulk::toggle_range(
+                &mut self.selected,
+                &visible,
+                self.select_anchor.as_deref(),
+                id,
+            );
+        } else {
+            bulk::toggle(&mut self.selected, id);
         }
+        self.select_anchor = Some(id.to_owned());
         cx.notify();
     }
 
     pub fn toggle_select_all(&mut self, cx: &mut Context<Self>) {
-        if self.selected.len() == self.visible.len() {
-            self.selected.clear();
-        } else {
-            self.selected = self
-                .visible
-                .iter()
-                .map(|&i| self.tasks[i].id.clone())
-                .collect();
-        }
+        let visible: Vec<&Id> = self.visible.iter().map(|&i| &self.tasks[i].id).collect();
+        bulk::toggle_all(&mut self.selected, &visible);
         cx.notify();
     }
 
@@ -1017,18 +1061,178 @@ impl MainView {
             .collect()
     }
 
-    pub fn bulk_edit(&mut self, cx: &mut Context<Self>, f: impl Fn(&mut TaskDraft)) {
+    /// 選んだタスクすべてに同じ変更を当てる。
+    pub fn bulk_apply(&mut self, op: &BulkOp, cx: &mut Context<Self>) -> bool {
         let ids = self.selected_ids();
-        let done = self.write(cx, |s| {
-            for id in &ids {
-                let mut draft = TaskDraft::from(&s.task(id)?);
-                f(&mut draft);
-                s.update_task(id, &draft)?;
+        match self.write(cx, |s| s.bulk_apply(&ids, op)) {
+            Some(changed) => {
+                self.notice = Some(if changed == ids.len() {
+                    format!("{changed} 件のタスクを変更しました。").into()
+                } else {
+                    format!(
+                        "{changed} 件のタスクを変更しました（{} 件は、もともと同じでした）。",
+                        ids.len() - changed
+                    )
+                    .into()
+                });
+                true
             }
-            Ok(())
-        });
-        if done.is_some() {
-            self.notice = Some(format!("{} 件のタスクを変更しました。", ids.len()).into());
+            None => false,
+        }
+    }
+
+    /// まとめて変えるダイアログを開く。入力は毎回空から始める。
+    pub fn open_bulk(&mut self, modal: Modal, window: &mut Window, cx: &mut Context<Self>) {
+        Self::take(&self.inputs.bulk_due.clone(), window, cx);
+        Self::take(&self.inputs.bulk_categories.clone(), window, cx);
+        self.bulk_mode = ListMode::Add;
+        self.bulk_people.clear();
+        self.bulk_category_add = true;
+        self.error = None;
+        self.modal = modal;
+        cx.notify();
+    }
+
+    /// 期限をまとめて決める。`clear` なら期限をなくす。
+    pub fn submit_bulk_due(&mut self, clear: bool, cx: &mut Context<Self>) {
+        let due = if clear {
+            None
+        } else {
+            let value = self.inputs.bulk_due.read(cx).value().trim().to_owned();
+            if value.is_empty() {
+                self.error =
+                    Some("期限を入れてください。なくすときは「期限をなくす」を押します。".into());
+                cx.notify();
+                return;
+            }
+            Some(value)
+        };
+        if self.bulk_apply(&BulkOp::Due(due), cx) {
+            self.modal = Modal::None;
+        }
+    }
+
+    pub fn toggle_bulk_person(&mut self, person: &str, cx: &mut Context<Self>) {
+        toggle(&mut self.bulk_people, person);
+        cx.notify();
+    }
+
+    pub fn submit_bulk_assignees(&mut self, cx: &mut Context<Self>) {
+        if self.bulk_people.is_empty() && self.bulk_mode != ListMode::Set {
+            self.error = Some("担当者を選んでください。".into());
+            cx.notify();
+            return;
+        }
+        let op = BulkOp::Assignees {
+            mode: self.bulk_mode,
+            ids: self.bulk_people.clone(),
+        };
+        if self.bulk_apply(&op, cx) {
+            self.modal = Modal::None;
+        }
+    }
+
+    pub fn submit_bulk_categories(&mut self, cx: &mut Context<Self>) {
+        let values = split_list(self.inputs.bulk_categories.read(cx).value().as_ref());
+        if values.is_empty() {
+            self.error = Some("カテゴリを入れてください。".into());
+            cx.notify();
+            return;
+        }
+        let op = BulkOp::Categories {
+            add: self.bulk_category_add,
+            values,
+        };
+        if self.bulk_apply(&op, cx) {
+            self.modal = Modal::None;
+        }
+    }
+
+    // ---- 新しいタスク（項目を入れて作る） ----
+
+    /// 新しいタスクのダイアログを開く。いまのワークスペースの既定値と、
+    /// 上の入力欄に書きかけたタイトルを入れておく。
+    pub fn open_new_task(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let workspace = self.current_workspace().map(str::to_owned);
+        let title = Self::take(&self.inputs.quick_add.clone(), window, cx);
+        let draft = match self
+            .db
+            .read(cx)
+            .store
+            .draft_for(workspace.as_deref(), title.trim())
+        {
+            Ok(draft) => draft,
+            Err(error) => {
+                self.error = Some(error.to_string().into());
+                cx.notify();
+                return;
+            }
+        };
+        let set = |input: &Entity<InputState>,
+                   value: String,
+                   window: &mut Window,
+                   cx: &mut Context<Self>| {
+            input.update(cx, |s, cx| s.set_value(value, window, cx));
+        };
+        let inputs = &self.inputs;
+        set(&inputs.nt_title.clone(), draft.title.clone(), window, cx);
+        set(
+            &inputs.nt_start.clone(),
+            draft.start.clone().unwrap_or_default(),
+            window,
+            cx,
+        );
+        set(
+            &inputs.nt_due.clone(),
+            draft.due.clone().unwrap_or_default(),
+            window,
+            cx,
+        );
+        set(
+            &inputs.nt_categories.clone(),
+            draft.categories.join("、"),
+            window,
+            cx,
+        );
+        let description = draft.description.clone();
+        self.inputs
+            .nt_description
+            .update(cx, |s, cx| s.set_value(description, window, cx));
+        self.inputs.nt_title.update(cx, |s, cx| s.focus(window, cx));
+        self.new_task = draft;
+        self.error = None;
+        self.modal = Modal::NewTask;
+        cx.notify();
+    }
+
+    pub fn toggle_new_task_assignee(&mut self, person: &str, cx: &mut Context<Self>) {
+        toggle(&mut self.new_task.assignee_ids, person);
+        cx.notify();
+    }
+
+    pub fn set_new_task_priority(&mut self, priority: u8, cx: &mut Context<Self>) {
+        self.new_task.priority = priority;
+        cx.notify();
+    }
+
+    pub fn submit_new_task(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.modal != Modal::NewTask {
+            return;
+        }
+        let read = |input: &Entity<InputState>| input.read(cx).value().trim().to_owned();
+        let some = |value: String| (!value.is_empty()).then_some(value);
+        let mut draft = self.new_task.clone();
+        draft.title = read(&self.inputs.nt_title);
+        draft.start = some(read(&self.inputs.nt_start));
+        draft.due = some(read(&self.inputs.nt_due));
+        draft.categories = split_list(self.inputs.nt_categories.read(cx).value().as_ref());
+        draft.description = self.inputs.nt_description.read(cx).value().to_string();
+        let workspace = self.current_workspace().map(str::to_owned);
+        let created = self.write(cx, |s| s.create_task_shown(workspace.as_deref(), &draft));
+        if let Some(task) = created {
+            self.modal = Modal::None;
+            self.query.tab = view::Tab::Open;
+            self.open_panel(&task.id, window, cx);
         }
     }
 
@@ -1306,10 +1510,7 @@ impl MainView {
             }
         };
         defaults.due_time = read(&self.inputs.def_time);
-        defaults.categories = read(&self.inputs.def_categories)
-            .split(['、', ',', '，'])
-            .map(str::to_owned)
-            .collect();
+        defaults.categories = split_list(&read(&self.inputs.def_categories));
         defaults.description = self.inputs.def_description.read(cx).value().to_string();
         let date = read(&self.inputs.ws_date);
         let saved = self.write(cx, |s| {
@@ -1517,6 +1718,14 @@ impl MainView {
         self.error = None;
         cx.notify();
     }
+}
+
+/// 「、」や「,」で区切った入力を、空でない項目の並びにする。
+fn split_list(text: &str) -> Vec<String> {
+    text.split(['、', ',', '，'])
+        .map(|item| item.trim().to_owned())
+        .filter(|item| !item.is_empty())
+        .collect()
 }
 
 /// あれば外し、なければ足す。
