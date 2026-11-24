@@ -7,6 +7,7 @@ pub mod db;
 pub mod icons;
 pub mod passkey;
 mod render;
+pub mod shadow;
 pub mod state;
 pub mod theme;
 

@@ -19,6 +19,7 @@ use malakt_core::{Comment, DueRule, Role as Raci, Roles, Status, Task as Todo, W
 
 use crate::ai::ShellPlace;
 use crate::ai_view::{docked_width, TASKS_MIN};
+use crate::shadow::{Elevate, Elevation};
 use crate::state::{Column, CommentMode, Detail, DropTarget, Editing, MainView, Modal, Nav};
 use crate::{Dismiss, LockNow, NewWindow, ToggleAi};
 use malakt_core::Id;
@@ -58,6 +59,7 @@ impl Framed for Button {
         )
         .border_1()
         .border_color(theme.border)
+        .elevate(Elevation::Low, cx)
     }
 }
 
@@ -234,6 +236,7 @@ fn card(cx: &App) -> Div {
         .border_1()
         .border_color(theme.border)
         .bg(theme.popover)
+        .elevate(Elevation::Low, cx)
 }
 
 impl MainView {
@@ -662,7 +665,9 @@ impl MainView {
             toggle = toggle.child(
                 div()
                     .rounded_md()
-                    .when(active, |d| d.bg(theme.background).shadow_sm())
+                    .when(active, |d| {
+                        d.bg(theme.background).elevate(Elevation::Mid, cx)
+                    })
                     .child(
                         Button::new(("theme", ix))
                             .icon(app_icon(icon))
@@ -1100,6 +1105,7 @@ impl MainView {
                     let id = ws.id.clone();
                     row()
                         .id(("home-ws", ix))
+                        .elevate(Elevation::Low, cx)
                         .w(px(248.))
                         .p_2()
                         .pr_3()
@@ -1603,6 +1609,7 @@ impl MainView {
                 .icon(app_icon("plus"))
                 .label("新しいタスク")
                 .primary()
+                .elevate(Elevation::Low, cx)
                 .on_click(cx.listener(|this, _, window, cx| this.open_new_task(window, cx))),
         );
 
@@ -1667,6 +1674,7 @@ impl MainView {
             .border_color(theme.border)
             .rounded_lg()
             .bg(theme.popover)
+            .elevate(Elevation::Low, cx)
             .overflow_hidden()
             .child(
                 row()
@@ -1724,7 +1732,7 @@ impl MainView {
                         .primary()
                         .large()
                         .rounded(px(999.))
-                        .shadow_lg()
+                        .elevate(Elevation::High, cx)
                         .tooltip("新しいタスク")
                         .on_click(
                             cx.listener(|this, _, window, cx| this.open_new_task(window, cx)),
@@ -3611,7 +3619,7 @@ impl MainView {
                     d.w(PANEL_WIDTH)
                         .border_l_1()
                         .border_color(theme.border)
-                        .shadow_lg()
+                        .elevate(Elevation::High, cx)
                 })
                 .bg(theme.background)
                 .occlude()
@@ -3659,7 +3667,7 @@ impl MainView {
                     .border_1()
                     .border_color(theme.border)
                     .bg(theme.background)
-                    .shadow_lg()
+                    .elevate(Elevation::High, cx)
                     .child(
                         row()
                             .child(div().flex_1().text_lg().child(title.into()))
@@ -4932,7 +4940,7 @@ impl Render for MainView {
                     .border_1()
                     .border_color(theme.primary)
                     .bg(theme.popover)
-                    .shadow_lg()
+                    .elevate(Elevation::High, cx)
                     .text_sm()
                     .truncate()
                     .child(drag.title.clone())
@@ -4966,7 +4974,7 @@ impl Render for MainView {
                                     .px_3()
                                     .py_2()
                                     .rounded_md()
-                                    .shadow_lg()
+                                    .elevate(Elevation::High, cx)
                                     .text_sm()
                                     .cursor_pointer()
                                     .when(is_error, |d| {
