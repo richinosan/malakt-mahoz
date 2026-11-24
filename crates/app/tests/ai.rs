@@ -1042,3 +1042,114 @@ fn the_periodic_check_is_set_up_in_settings(cx: &mut TestAppContext) {
     assert_eq!(read(cx, |s| s.shell.len()), 2);
     assert!(world.sent().is_empty());
 }
+
+/// オート実行は標準ではオフ。設定でオンにすると、コマンドの実行もタスクの削除も確認なしで進み、
+/// オンであることがチャットの上にいつも出る。
+#[gpui_kit::test]
+fn auto_run_skips_the_confirmations(cx: &mut TestAppContext) {
+    let world = start(cx);
+    world.keys.set(Provider::Claude, "k").unwrap();
+    let (window, view) = open(cx, wide());
+    let pane = open_chat(cx, window, &view);
+    assert!(!read(cx, |s| s.auto_run));
+    ui(cx, window, |window, _| {
+        assert!(window.try_find("ai-auto-badge").is_none());
+    });
+
+    // オフの間は確認が出る。待っている間にオンにすると、そのまま実行へ進む
+    world.reply(tool_reply(
+        "t1",
+        "run_shell",
+        json!({"command": "echo first-auto"}),
+    ));
+    world.reply(text_reply("実行しました。"));
+    say(cx, window, &pane, "実行して");
+    assert!(read(cx, |s| s.pending.is_some()));
+    ui(cx, window, |window, cx| {
+        window.click("ai-settings-toggle", cx)
+    });
+    ui(cx, window, |window, cx| {
+        window.click(("ai-auto", 1usize), cx)
+    });
+    wait(cx, "コマンドが終わる", |s| !s.busy);
+    assert!(read(cx, |s| s.auto_run));
+    assert!(read(cx, |s| s.shell.iter().any(|l| l.text == "first-auto")));
+    ui(cx, window, |window, _| {
+        assert!(window.find("ai-auto-badge").visible());
+    });
+
+    // オンの間は、コマンドも削除も確認なしで進む
+    world.reply(tool_reply(
+        "t2",
+        "create_task",
+        json!({"title": "消すタスク"}),
+    ));
+    world.reply(text_reply("作りました。"));
+    say(cx, window, &pane, "作って");
+    wait(cx, "作り終わる", |s| !s.busy);
+    let id = all_tasks(cx)[0].id.clone();
+    world.reply(tool_reply("t3", "delete_task", json!({"id": id})));
+    world.reply(tool_reply(
+        "t4",
+        "run_shell",
+        json!({"command": "echo second-auto"}),
+    ));
+    world.reply(text_reply("消して、実行しました。"));
+    say(cx, window, &pane, "消して実行して");
+    wait(cx, "終わる", |s| !s.busy);
+    assert!(read(cx, |s| s.pending.is_none()));
+    assert!(all_tasks(cx).is_empty());
+    assert!(read(cx, |s| s
+        .shell
+        .iter()
+        .any(|l| l.text == "second-auto")));
+
+    // 保存されていて、オフに戻すとまた確認が出る
+    let saved = cx.update(|cx| {
+        db::shared(cx)
+            .read(cx)
+            .store
+            .setting("ai.auto_run")
+            .unwrap()
+    });
+    assert_eq!(saved.as_deref(), Some("1"));
+    ui(cx, window, |window, cx| {
+        window.click(("ai-auto", 0usize), cx)
+    });
+    ui(cx, window, |window, _| {
+        assert!(window.try_find("ai-auto-badge").is_none());
+    });
+    world.reply(tool_reply(
+        "t5",
+        "run_shell",
+        json!({"command": "echo third-auto"}),
+    ));
+    say(cx, window, &pane, "もう一度");
+    assert!(read(cx, |s| s.pending.is_some()));
+    assert!(read(cx, |s| s.shell.iter().all(|l| l.text != "third-auto")));
+}
+
+/// オート実行がオンでも、定期確認からは削除もコマンドの実行もしない。
+#[gpui_kit::test]
+fn auto_run_does_not_reach_the_periodic_check(cx: &mut TestAppContext) {
+    let world = start(cx);
+    world.keys.set(Provider::Claude, "k").unwrap();
+    let task = watched_task(cx, 30);
+    let session = session(cx);
+    cx.update(|cx| session.update(cx, |s, cx| s.set_auto_run(true, cx)));
+    tick(cx, 30);
+    *world.github.lock().unwrap() = " state: CLOSED".into();
+    world.reply(tool_reply("t1", "delete_task", json!({"id": task})));
+    world.reply(tool_reply(
+        "t2",
+        "run_shell",
+        json!({"command": "echo never"}),
+    ));
+    world.reply(text_reply("できませんでした。"));
+    tick(cx, 30);
+    assert_eq!(all_tasks(cx).len(), 1);
+    assert!(read(cx, |s| s
+        .shell
+        .iter()
+        .all(|l| !l.text.contains("never"))));
+}

@@ -415,6 +415,20 @@ impl AiPane {
         let watch = session.watch.clone();
         let watch_status = session.watch_status.clone();
         let busy = session.busy;
+        let auto_run = session.auto_run;
+        let mut auto_row = row().gap_1().flex_wrap();
+        for (ix, (text, on)) in [("毎回確認する", false), ("オート実行（確認なし）", true)]
+            .into_iter()
+            .enumerate()
+        {
+            auto_row = auto_row.child(
+                chip(("ai-auto", ix), text, auto_run == on, cx)
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.session.update(cx, |s, cx| s.set_auto_run(on, cx));
+                    }))
+                    .test_support(),
+            );
+        }
         let mut watch_row = row().gap_1().flex_wrap();
         for (ix, (text, on)) in [("オフ", false), ("オン", true)].into_iter().enumerate() {
             watch_row = watch_row.child(
@@ -534,6 +548,8 @@ impl AiPane {
             .child(label(
                 "API キーは OS のキーチェーンに保存します。エクスポートの zip には入りません。",
             ))
+            .child(label("コマンドの実行とタスクの削除"))
+            .child(auto_row)
             .child(label("GitHub の定期確認"))
             .child(watch_row)
             .when_some(watch_status, |d, status| {
@@ -666,6 +682,7 @@ impl AiPane {
         let theme = cx.theme().clone();
         let session = self.session.read(cx);
         let busy = session.busy;
+        let auto_run = session.auto_run;
         let shell_label = match session.shell_place {
             ShellPlace::Closed => "シェルを開く",
             ShellPlace::Docked => "シェルを閉じる",
@@ -764,6 +781,20 @@ impl AiPane {
                             .child(title)
                             .test_support(),
                     )
+                    .when(auto_run, |d| {
+                        d.child(
+                            div()
+                                .id("ai-auto-badge")
+                                .flex_none()
+                                .px_2()
+                                .rounded_md()
+                                .bg(theme.warning)
+                                .text_color(theme.warning_foreground)
+                                .text_xs()
+                                .child("オート実行")
+                                .test_support(),
+                        )
+                    })
                     .child(
                         Button::new("ai-settings-toggle")
                             .label(if self.settings_open {

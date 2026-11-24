@@ -221,6 +221,8 @@ pub struct Session {
     running: Option<shell::Handle>,
     /// シェルのコマンドを、確認なしで実行する（このチャットの間）。
     pub allow_shell: bool,
+    /// オート実行。オンの間、コマンドの実行とタスクの削除を確認なしで行う。標準はオフ。
+    pub auto_run: bool,
     /// 別ウィンドウに出したチャット。
     pub chat_window: Option<AnyWindowHandle>,
     pub shell_place: ShellPlace,
@@ -260,6 +262,7 @@ impl Session {
     fn new(db: Entity<Db>, config: AiConfig, cx: &mut Context<Self>) -> Self {
         let mut error = None;
         let watch;
+        let auto_run;
         let (provider, effort, models) = {
             let store = &db.read(cx).store;
             let mut read = |key: &str| match store.setting(key) {
@@ -279,6 +282,7 @@ impl Session {
                 .into_iter()
                 .filter_map(|p| read(&setting_key(p)).map(|m| (p, m)))
                 .collect();
+            auto_run = read("ai.auto_run").as_deref() == Some("1");
             let defaults = Watch::default();
             watch = Watch {
                 enabled: read("ai.watch.enabled").as_deref() == Some("1"),
@@ -308,6 +312,7 @@ impl Session {
             shell: Vec::new(),
             running: None,
             allow_shell: false,
+            auto_run,
             chat_window: None,
             shell_place: ShellPlace::Docked,
             conversation: malakt_core::new_id(),
@@ -320,6 +325,19 @@ impl Session {
         };
         this.restart_watch(cx);
         this
+    }
+
+    /// オート実行を切り替える。待っている確認があれば、オンにしたときに実行へ進める。
+    pub fn set_auto_run(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.auto_run == on || !self.save_setting("ai.auto_run", if on { "1" } else { "0" }, cx)
+        {
+            return;
+        }
+        self.auto_run = on;
+        if on && self.pending.is_some() {
+            self.answer(Decision::Allow, cx);
+        }
+        cx.notify();
     }
 
     // ---- GitHub の定期確認 ----
@@ -1059,7 +1077,7 @@ impl Session {
             let (tx, rx) = async_channel::bounded(1);
             let asked = this
                 .update(cx, |s, cx| {
-                    if name == tools::RUN_SHELL && s.allow_shell {
+                    if s.auto_run || name == tools::RUN_SHELL && s.allow_shell {
                         return false;
                     }
                     let text = tools::confirmation_text(&s.db.read(cx).store, name, &call.args);
