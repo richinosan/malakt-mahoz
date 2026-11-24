@@ -1536,3 +1536,41 @@ fn workspace_icon_is_found_by_search(cx: &mut TestAppContext) {
     let saved = store(cx, |s| s.workspace(&ws).unwrap());
     assert_eq!(saved.icon.as_deref(), Some("cat"));
 }
+
+/// 上のバーのメニューのボタンで左のメニューを閉じて開ける。境界で変えた幅は保存される。
+#[gpui_kit::test]
+fn sidebar_toggles_and_keeps_its_width(cx: &mut TestAppContext) {
+    use malakt_mahoz::state::{SIDEBAR_MAX, SIDEBAR_WIDTH};
+    start(cx);
+    let (window, view) = open(cx, wide());
+    ui(cx, window, |window, cx| {
+        assert!(window.try_find("nav-all").is_some());
+        window.click("toggle-sidebar", cx);
+    });
+    ui(cx, window, |window, _| {
+        assert!(window.try_find("nav-all").is_none())
+    });
+    ui(cx, window, |window, cx| window.click("toggle-sidebar", cx));
+    ui(cx, window, |window, _| {
+        assert!(window.try_find("nav-all").is_some());
+        assert!(window.try_find("sidebar-resize").is_some());
+    });
+
+    // 境界をドラッグした幅は、範囲の中に収めて保存する
+    cx.update(|cx| {
+        view.update(cx, |v, cx| {
+            assert_eq!(v.sidebar_width, SIDEBAR_WIDTH);
+            v.sidebar_resizing = true;
+            v.drag_sidebar(320., cx);
+            v.drag_sidebar(9999., cx);
+            v.finish_sidebar_drag(cx);
+            assert_eq!(v.sidebar_width, SIDEBAR_MAX);
+            assert!(!v.sidebar_resizing);
+        })
+    });
+    let saved = store(cx, |s| s.setting("sidebar.width").unwrap());
+    assert_eq!(saved.as_deref(), Some(SIDEBAR_MAX.to_string().as_str()));
+    // 新しく開いたウィンドウも同じ幅で始まる
+    let (_second, second_view) = open(cx, wide());
+    cx.update(|cx| assert_eq!(second_view.read(cx).sidebar_width, SIDEBAR_MAX));
+}
