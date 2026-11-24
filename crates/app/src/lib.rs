@@ -2,6 +2,7 @@
 
 pub mod ai;
 pub mod ai_view;
+pub mod cli;
 pub mod db;
 mod render;
 pub mod state;
@@ -13,7 +14,7 @@ use gpui_kit::*;
 pub use ai::AiConfig;
 pub use ai_view::{AiPane, PaneMode};
 pub use db::{Db, Shared};
-pub use state::{MainView, Modal, Nav};
+pub use state::{anchor_at, CommentMode, MainView, Modal, Nav};
 
 actions!(
     malakt,
@@ -39,6 +40,8 @@ pub fn init(store: malakt_core::Store, cx: &mut App) {
 
 /// AI の外とのやり取り（API、キーチェーン、gh）を差し替えて準備する。テスト用。
 pub fn init_with(store: malakt_core::Store, ai: AiConfig, cx: &mut App) {
+    // OS の通知に出るアプリの名前。通知を出す前に決めておく
+    cx.set_app_identity("io.github.richinosan.malakt-mahoz", "malakt-mahoz");
     gpui_kit::init(cx);
     db::init(store, cx);
     ai::init(ai, cx);

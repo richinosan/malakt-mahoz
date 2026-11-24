@@ -4,11 +4,16 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
+use gpui_kit::component::text::TextViewState;
+use gpui_kit::component::WindowExt;
 use gpui_kit::*;
+use malakt_core::bulk::{self, BulkOp, ListMode};
+use malakt_core::notice::Notice;
+use malakt_core::ticket::IssuedTicket;
 use malakt_core::view::{self, ListQuery};
 use malakt_core::{
-    archive, lock, Change, Comment, Id, Person, Scope, Status, Store, Task as Todo, TaskDraft,
-    TaskFilter, Workspace,
+    archive, lock, mention, Anchor, Attachment, Change, Comment, DueRule, Id, NewComment, Person,
+    Scope, Status, Store, Task as Todo, TaskDefaults, TaskDraft, TaskFilter, Workspace,
 };
 
 use crate::ai::{self, Session};
@@ -44,6 +49,24 @@ pub enum Modal {
     /// 状態の変更（コメントを添えられる）
     Status(Id, Status),
     Lock,
+    /// ディスクの使用量と整理
+    Usage,
+    /// ワークスペースの基準日と、タスク追加時の既定値
+    WorkspaceSettings(Id),
+    /// タスクをほかのワークスペースにも表示する（表示先を選ぶ）
+    LinkTask(Id),
+    /// 選んだタスクの期限をまとめて変える
+    BulkDue,
+    /// 選んだタスクの担当者をまとめて変える
+    BulkAssignees,
+    /// 選んだタスクのカテゴリをまとめて変える
+    BulkCategories,
+    /// 項目を入れてタスクを作る
+    NewTask,
+    /// 通知の一覧
+    Notices,
+    /// 完了チケットの発行
+    Ticket(Id),
 }
 
 /// 詳細パネルで編集中の項目。
@@ -53,10 +76,23 @@ pub enum Editing {
     Description,
 }
 
+/// コメント欄でいま書いているもの。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum CommentMode {
+    /// 新しいコメント
+    #[default]
+    New,
+    /// スレッドへの返信（ルートのコメント）
+    Reply(Id),
+    /// 書いたコメントの書き直し
+    Edit(Id),
+}
+
 /// 詳細パネルに出すタスクと、その周りのデータ。
 pub struct Detail {
     pub task: Todo,
     pub comments: Vec<Comment>,
+    pub attachments: Vec<Attachment>,
     pub changes: Vec<Change>,
     pub subtasks: Vec<Todo>,
     pub parent: Option<Todo>,
@@ -84,6 +120,19 @@ pub struct Inputs {
     pub description: Entity<TextareaState>,
     pub comment: Entity<TextareaState>,
     pub status_comment: Entity<TextareaState>,
+    pub ws_date: Entity<InputState>,
+    pub def_days: Entity<InputState>,
+    pub def_date: Entity<InputState>,
+    pub def_time: Entity<InputState>,
+    pub def_categories: Entity<InputState>,
+    pub def_description: Entity<TextareaState>,
+    pub bulk_due: Entity<InputState>,
+    pub bulk_categories: Entity<InputState>,
+    pub nt_title: Entity<InputState>,
+    pub nt_start: Entity<InputState>,
+    pub nt_due: Entity<InputState>,
+    pub nt_categories: Entity<InputState>,
+    pub nt_description: Entity<TextareaState>,
 }
 
 pub struct MainView {
@@ -106,10 +155,35 @@ pub struct MainView {
     pub query: ListQuery,
     pub filters_open: bool,
     pub selected: HashSet<Id>,
+    /// Shift を押しながらの範囲選択の起点（最後に押した行）
+    pub select_anchor: Option<Id>,
+    /// まとめて変えるダイアログの入力（担当者の変え方、選んだ担当者、カテゴリを足すか外すか）
+    pub bulk_mode: ListMode,
+    pub bulk_people: Vec<Id>,
+    pub bulk_category_add: bool,
+    /// 新しいタスクのダイアログで編集中の下書き（入力欄にないもの: 優先度・担当者）
+    pub new_task: TaskDraft,
     pub panel: Option<Id>,
     pub detail: Option<Detail>,
     pub editing: Option<Editing>,
+    pub comment_mode: CommentMode,
+    /// 次のコメントを付ける、説明の選択範囲。
+    pub pending_anchor: Option<Anchor>,
+    /// 開いて見せている、解決済みのスレッド。
+    pub expanded_threads: HashSet<Id>,
+    /// 説明の表示。文字を選んでレビューコメントを付けられる。
+    pub description_view: Entity<TextViewState>,
+    description_shown: String,
     pub modal: Modal,
+    /// 完了チケットをだれの分として発行するか（`None` は自分）と、発行したばかりのチケット。
+    /// チケットの文字列は発行したときしか分からないので、ダイアログを閉じるまで持つ
+    pub ticket_person: Option<Id>,
+    pub issued_ticket: Option<IssuedTicket>,
+    /// 通知（新しい順）と、未読の数
+    pub notices: Vec<Notice>,
+    pub unread_notices: u32,
+    /// 設定のダイアログで編集中の既定値（入力欄にないもの: 担当者・期限の決め方・優先度・表示先）
+    pub defaults_draft: TaskDefaults,
     pub error: Option<SharedString>,
     pub notice: Option<SharedString>,
     pub sidebar_open: bool,
@@ -153,6 +227,19 @@ impl MainView {
             description: area(window, cx, "説明"),
             comment: area(window, cx, "コメントを書く"),
             status_comment: area(window, cx, "コメントを書く"),
+            ws_date: input(window, cx, "YYYY-MM-DD"),
+            def_days: input(window, cx, "例: -7（7 日前）"),
+            def_date: input(window, cx, "YYYY-MM-DD"),
+            def_time: input(window, cx, "HH:MM（空なら日付だけ）"),
+            def_categories: input(window, cx, "「、」か「,」で区切る"),
+            def_description: area(window, cx, "新しいタスクの説明に最初から入れる文章"),
+            bulk_due: input(window, cx, "YYYY-MM-DD（時刻は続けて HH:MM）"),
+            bulk_categories: input(window, cx, "「、」か「,」で区切る"),
+            nt_title: input(window, cx, "タイトル"),
+            nt_start: input(window, cx, "YYYY-MM-DD（時刻は続けて HH:MM）"),
+            nt_due: input(window, cx, "YYYY-MM-DD（時刻は続けて HH:MM）"),
+            nt_categories: input(window, cx, "「、」か「,」で区切る"),
+            nt_description: area(window, cx, "説明"),
         };
 
         let ai_session = ai::shared(cx);
@@ -160,6 +247,10 @@ impl MainView {
             cx.observe(&db, |this, _, cx| this.reload(cx)),
             // チャットを別ウィンドウに出した・戻したときに、右の表示を合わせる
             cx.observe(&ai_session, |_, _, cx| cx.notify()),
+            // 読み直すたびに、まだ出していない通知を OS に出す
+            cx.observe_in(&db, window, |this, _, window, cx| {
+                this.deliver_notices(window, cx)
+            }),
         ];
         macro_rules! on_enter {
             ($field:ident, $method:ident) => {
@@ -215,6 +306,16 @@ impl MainView {
         }
         on_secondary_enter!(description, save_description);
         on_secondary_enter!(comment, submit_comment);
+        // `@` の候補を、打つたびに出し直す
+        subs.push(cx.subscribe_in(
+            &inputs.comment,
+            window,
+            |_, _, event: &InputEvent, _, cx| {
+                if matches!(event, InputEvent::Change) {
+                    cx.notify();
+                }
+            },
+        ));
         on_secondary_enter!(status_comment, submit_status);
 
         let mut this = Self {
@@ -237,13 +338,28 @@ impl MainView {
             query: ListQuery::default(),
             filters_open: false,
             selected: HashSet::new(),
+            select_anchor: None,
+            bulk_mode: ListMode::Add,
+            bulk_people: Vec::new(),
+            bulk_category_add: true,
+            new_task: TaskDraft::default(),
             panel: None,
             detail: None,
             editing: None,
+            comment_mode: CommentMode::New,
+            pending_anchor: None,
+            expanded_threads: HashSet::new(),
+            description_view: cx.new(|cx| TextViewState::markdown("", cx).selectable(true)),
+            description_shown: String::new(),
             modal: Modal::None,
+            ticket_person: None,
+            issued_ticket: None,
+            notices: Vec::new(),
+            unread_notices: 0,
+            defaults_draft: TaskDefaults::default(),
             error: None,
             notice: None,
-            sidebar_open: true,
+            sidebar_open: false,
             ai_open: false,
             ai_pane: None,
             ai_session,
@@ -252,6 +368,8 @@ impl MainView {
             _subscriptions: subs,
         };
         this.reload(cx);
+        // ウィンドウの準備が終わってから、たまっている通知を出す
+        cx.defer_in(window, |this, window, cx| this.deliver_notices(window, cx));
         this
     }
 
@@ -267,6 +385,15 @@ impl MainView {
         let result = self.load(cx);
         if let Err(error) = result {
             self.error = Some(error.to_string().into());
+        }
+        let description = self
+            .detail
+            .as_ref()
+            .map_or("", |d| d.task.description.as_str());
+        if self.description_shown != description {
+            self.description_shown = description.to_owned();
+            self.description_view
+                .update(cx, |view, cx| view.set_text(description, cx));
         }
         self.refilter();
         cx.notify();
@@ -285,6 +412,8 @@ impl MainView {
         self.people = store.people()?;
         self.self_id = self.people.iter().find(|p| p.is_self).map(|p| p.id.clone());
         self.categories = store.categories()?;
+        self.notices = store.notices(NOTICES_SHOWN)?;
+        self.unread_notices = store.unread_notice_count()?;
         let filter = TaskFilter {
             include_descendants: self.include_descendants,
             ..Default::default()
@@ -306,6 +435,7 @@ impl MainView {
             Some(id) => match store.task(id) {
                 Ok(task) => Some(Detail {
                     comments: store.comments(id)?,
+                    attachments: store.attachments(id)?,
                     changes: store.changes(id)?,
                     subtasks: store.subtasks(id)?,
                     parent: task.parent_id.as_deref().and_then(|p| store.task(p).ok()),
@@ -331,6 +461,7 @@ impl MainView {
             &self.query,
             self.self_id.as_deref(),
         ));
+        // 見えなくなったタスクは、選択から外す（見えていないものをまとめて変えないように）
         let shown: HashSet<&str> = self
             .visible
             .iter()
@@ -366,6 +497,8 @@ impl MainView {
     // ---- 移動 ----
 
     pub fn go(&mut self, nav: Nav, cx: &mut Context<Self>) {
+        // 狭いウィンドウでは、行き先を選んだらメニューを閉じて中身を見せる
+        self.sidebar_open = false;
         if self.nav != nav {
             self.nav = nav;
             self.selected.clear();
@@ -441,12 +574,9 @@ impl MainView {
             return;
         }
         let workspace = self.current_workspace().map(str::to_owned);
-        let draft = TaskDraft {
-            title,
-            ..Default::default()
-        };
+        // ワークスペースの既定値（担当・期限・優先度・カテゴリ・説明の雛形）を入れてから作る
         if self
-            .write(cx, |s| s.create_task(workspace.as_deref(), &draft))
+            .write(cx, |s| s.add_task_in(workspace.as_deref(), &title))
             .is_some()
         {
             Self::take(&self.inputs.quick_add.clone(), window, cx);
@@ -456,6 +586,11 @@ impl MainView {
     }
 
     pub fn open_panel(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.panel.as_deref() != Some(id) {
+            self.comment_mode = CommentMode::New;
+            self.pending_anchor = None;
+            self.expanded_threads.clear();
+        }
         self.panel = Some(id.to_owned());
         self.editing = None;
         self.reload(cx);
@@ -475,6 +610,8 @@ impl MainView {
         self.panel = None;
         self.detail = None;
         self.editing = None;
+        self.comment_mode = CommentMode::New;
+        self.pending_anchor = None;
         cx.notify();
     }
 
@@ -576,6 +713,39 @@ impl MainView {
         });
     }
 
+    /// 担当者の役を付ける・外す。最後の 1 つは外せない。
+    pub fn toggle_role(
+        &mut self,
+        person_id: &str,
+        role: malakt_core::Role,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(detail) = &self.detail else { return };
+        let Some(current) = detail.task.roles_of(person_id) else {
+            return;
+        };
+        let next = if current.contains(role) {
+            current.without(role)
+        } else {
+            current.with(role)
+        };
+        if next.is_empty() {
+            self.error = Some("役は 1 つ以上必要です。別の役を付けてから外してください。".into());
+            cx.notify();
+            return;
+        }
+        let id = detail.task.id.clone();
+        self.write(cx, |s| s.set_assignee_roles(&id, person_id, next));
+    }
+
+    /// 担当者の「自分の分」を完了にする・取り消す。
+    pub fn toggle_assignee_done(&mut self, person_id: &str, cx: &mut Context<Self>) {
+        let Some(detail) = &self.detail else { return };
+        let id = detail.task.id.clone();
+        let done = !detail.task.is_done_by(person_id);
+        self.write(cx, |s| s.set_assignee_done(&id, person_id, done));
+    }
+
     pub fn submit_category(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let value = Self::take(&self.inputs.category.clone(), window, cx);
         self.edit_task(cx, |d| d.categories.push(value));
@@ -606,18 +776,152 @@ impl MainView {
     }
 
     pub fn submit_comment(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.submit_comment_as(false, window, cx);
+    }
+
+    /// コメント欄の内容を送る。返信・書き直しの途中ならそれを、
+    /// 選択範囲があるか `review` ならレビューコメントを書く。
+    pub fn submit_comment_as(&mut self, review: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(id) = self.panel.clone() else { return };
         let body = self.inputs.comment.read(cx).value().to_string();
         if body.trim().is_empty() {
             return;
         }
         let author = self.self_id.clone();
-        if self
-            .write(cx, |s| s.add_comment(&id, author.as_deref(), &body))
-            .is_some()
-        {
+        let mode = self.comment_mode.clone();
+        let anchor = self.pending_anchor.clone();
+        let done = self.write(cx, |s| match mode {
+            CommentMode::Edit(comment_id) => s.update_comment(&comment_id, &body),
+            CommentMode::Reply(root) => s.add_comment_with(
+                &id,
+                author.as_deref(),
+                &NewComment {
+                    body,
+                    reply_to: Some(root),
+                    ..Default::default()
+                },
+            ),
+            CommentMode::New => s.add_comment_with(
+                &id,
+                author.as_deref(),
+                &NewComment {
+                    body,
+                    review,
+                    anchor,
+                    ..Default::default()
+                },
+            ),
+        });
+        if done.is_some() {
+            Self::take_area(&self.inputs.comment.clone(), window, cx);
+            self.comment_mode = CommentMode::New;
+            self.pending_anchor = None;
+        }
+    }
+
+    /// 説明で選んでいる文字列に、次のコメントを付ける。
+    pub fn quote_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(detail) = &self.detail else { return };
+        let source = detail.task.description.as_str();
+        let view = self.description_view.read(cx);
+        let range = view
+            .selected_source_range()
+            .filter(|r| r.start < r.end && r.end <= source.len())
+            .filter(|r| source.is_char_boundary(r.start) && source.is_char_boundary(r.end));
+        let Some(range) = range else {
+            self.error = Some("説明の文章を選んでから押してください。".into());
+            cx.notify();
+            return;
+        };
+        self.set_pending_anchor(anchor_at(source, range), window, cx);
+    }
+
+    pub fn set_pending_anchor(
+        &mut self,
+        anchor: Anchor,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.pending_anchor = Some(anchor);
+        self.comment_mode = CommentMode::New;
+        self.error = None;
+        self.inputs.comment.update(cx, |s, cx| s.focus(window, cx));
+        cx.notify();
+    }
+
+    pub fn start_reply(&mut self, root: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.comment_mode = CommentMode::Reply(root.to_owned());
+        self.pending_anchor = None;
+        self.inputs.comment.update(cx, |s, cx| s.focus(window, cx));
+        cx.notify();
+    }
+
+    pub fn start_edit_comment(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(body) = self
+            .detail
+            .as_ref()
+            .and_then(|d| d.comments.iter().find(|c| c.id == id))
+            .map(|c| c.body.clone())
+        else {
+            return;
+        };
+        self.comment_mode = CommentMode::Edit(id.to_owned());
+        self.pending_anchor = None;
+        self.inputs.comment.update(cx, |s, cx| {
+            s.set_value(body, window, cx);
+            s.focus(window, cx);
+        });
+        cx.notify();
+    }
+
+    /// 返信・書き直し・選択範囲の指定をやめる。
+    pub fn cancel_comment_mode(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(self.comment_mode, CommentMode::Edit(_)) {
             Self::take_area(&self.inputs.comment.clone(), window, cx);
         }
+        self.comment_mode = CommentMode::New;
+        self.pending_anchor = None;
+        cx.notify();
+    }
+
+    pub fn set_thread_resolved(&mut self, id: &str, resolved: bool, cx: &mut Context<Self>) {
+        self.expanded_threads.remove(id);
+        self.write(cx, |s| s.set_comment_resolved(id, resolved));
+    }
+
+    pub fn toggle_thread(&mut self, id: &str, cx: &mut Context<Self>) {
+        if !self.expanded_threads.remove(id) {
+            self.expanded_threads.insert(id.to_owned());
+        }
+        cx.notify();
+    }
+
+    /// 書きかけの `@` に合う人。
+    pub fn mention_candidates(&self, cx: &App) -> Vec<Person> {
+        let text = self.inputs.comment.read(cx).value();
+        match mention::pending(&text) {
+            Some(query) => mention::candidates(query, &self.people)
+                .into_iter()
+                .take(8)
+                .cloned()
+                .collect(),
+            None => Vec::new(),
+        }
+    }
+
+    pub fn complete_mention(
+        &mut self,
+        person: &Person,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let text = self.inputs.comment.read(cx).value().to_string();
+        let next = mention::complete(&text, person);
+        self.inputs.comment.update(cx, |s, cx| {
+            s.set_value(next, window, cx);
+            s.focus(window, cx);
+        });
+        cx.notify();
     }
 
     /// 状態を変える前に、コメントを添えるダイアログを出す。
@@ -654,9 +958,16 @@ impl MainView {
         let body = self.inputs.status_comment.read(cx).value().to_string();
         let author = self.self_id.clone();
         let done = self.write(cx, |s| {
-            s.set_task_status(&id, status)?;
-            if !body.trim().is_empty() {
-                s.add_comment(&id, author.as_deref(), &body)?;
+            if body.trim().is_empty() {
+                s.set_task_status(&id, status)?;
+            } else {
+                // 状態つきのコメント。完了なら完了報告として残る
+                let new = NewComment {
+                    body,
+                    status: Some(status),
+                    ..Default::default()
+                };
+                s.add_comment_with(&id, author.as_deref(), &new)?;
             }
             Ok(())
         });
@@ -684,6 +995,56 @@ impl MainView {
         }
     }
 
+    /// 選んだタスクを、いま見ているワークスペースから外す（タスクは消さない）。
+    /// ほかに出ている場所がないタスクは、そのまま残す。
+    pub fn unlink_selected_here(&mut self, cx: &mut Context<Self>) {
+        let Modal::DeleteTasks(ids) = self.modal.clone() else {
+            return;
+        };
+        let Some(here) = self.current_workspace().map(str::to_owned) else {
+            return;
+        };
+        let done = self.write(cx, |s| {
+            let mut removed = 0;
+            for id in &ids {
+                if s.task(id)?.places().count() > 1 {
+                    s.unlink_task(id, &here)?;
+                    removed += 1;
+                }
+            }
+            Ok(removed)
+        });
+        if let Some(removed) = done {
+            self.modal = Modal::None;
+            self.selected.clear();
+            let kept = ids.len() - removed;
+            self.notice = Some(if kept == 0 {
+                format!("{removed} 件をこのワークスペースから外しました。").into()
+            } else {
+                format!(
+                    "{removed} 件をこのワークスペースから外しました。ここにしかない {kept} 件は残しています。"
+                )
+                .into()
+            });
+        }
+    }
+
+    /// 開いているタスクを、ほかのワークスペースにも表示する。
+    pub fn link_task_to(&mut self, workspace: &str, cx: &mut Context<Self>) {
+        let Modal::LinkTask(id) = self.modal.clone() else {
+            return;
+        };
+        if self.write(cx, |s| s.link_task(&id, workspace)).is_some() {
+            self.modal = Modal::None;
+            let name = self.workspace_name(Some(workspace));
+            self.notice = Some(format!("「{name}」にも表示しました。").into());
+        }
+    }
+
+    pub fn unlink_task_from(&mut self, id: &str, workspace: &str, cx: &mut Context<Self>) {
+        self.write(cx, |s| s.unlink_task(id, workspace));
+    }
+
     pub fn move_tasks_to(&mut self, workspace: Option<Id>, cx: &mut Context<Self>) {
         let Modal::MoveTasks(ids) = self.modal.clone() else {
             return;
@@ -705,22 +1066,29 @@ impl MainView {
     // ---- 選択と一括操作 ----
 
     pub fn toggle_selected(&mut self, id: &str, cx: &mut Context<Self>) {
-        if !self.selected.remove(id) {
-            self.selected.insert(id.to_owned());
+        self.click_select(id, false, cx);
+    }
+
+    /// 行のチェックボックスを押した。Shift つきなら、前に押した行からの範囲をまとめて変える。
+    pub fn click_select(&mut self, id: &str, shift: bool, cx: &mut Context<Self>) {
+        let visible: Vec<&Id> = self.visible.iter().map(|&i| &self.tasks[i].id).collect();
+        if shift {
+            bulk::toggle_range(
+                &mut self.selected,
+                &visible,
+                self.select_anchor.as_deref(),
+                id,
+            );
+        } else {
+            bulk::toggle(&mut self.selected, id);
         }
+        self.select_anchor = Some(id.to_owned());
         cx.notify();
     }
 
     pub fn toggle_select_all(&mut self, cx: &mut Context<Self>) {
-        if self.selected.len() == self.visible.len() {
-            self.selected.clear();
-        } else {
-            self.selected = self
-                .visible
-                .iter()
-                .map(|&i| self.tasks[i].id.clone())
-                .collect();
-        }
+        let visible: Vec<&Id> = self.visible.iter().map(|&i| &self.tasks[i].id).collect();
+        bulk::toggle_all(&mut self.selected, &visible);
         cx.notify();
     }
 
@@ -733,18 +1101,178 @@ impl MainView {
             .collect()
     }
 
-    pub fn bulk_edit(&mut self, cx: &mut Context<Self>, f: impl Fn(&mut TaskDraft)) {
+    /// 選んだタスクすべてに同じ変更を当てる。
+    pub fn bulk_apply(&mut self, op: &BulkOp, cx: &mut Context<Self>) -> bool {
         let ids = self.selected_ids();
-        let done = self.write(cx, |s| {
-            for id in &ids {
-                let mut draft = TaskDraft::from(&s.task(id)?);
-                f(&mut draft);
-                s.update_task(id, &draft)?;
+        match self.write(cx, |s| s.bulk_apply(&ids, op)) {
+            Some(changed) => {
+                self.notice = Some(if changed == ids.len() {
+                    format!("{changed} 件のタスクを変更しました。").into()
+                } else {
+                    format!(
+                        "{changed} 件のタスクを変更しました（{} 件は、もともと同じでした）。",
+                        ids.len() - changed
+                    )
+                    .into()
+                });
+                true
             }
-            Ok(())
-        });
-        if done.is_some() {
-            self.notice = Some(format!("{} 件のタスクを変更しました。", ids.len()).into());
+            None => false,
+        }
+    }
+
+    /// まとめて変えるダイアログを開く。入力は毎回空から始める。
+    pub fn open_bulk(&mut self, modal: Modal, window: &mut Window, cx: &mut Context<Self>) {
+        Self::take(&self.inputs.bulk_due.clone(), window, cx);
+        Self::take(&self.inputs.bulk_categories.clone(), window, cx);
+        self.bulk_mode = ListMode::Add;
+        self.bulk_people.clear();
+        self.bulk_category_add = true;
+        self.error = None;
+        self.modal = modal;
+        cx.notify();
+    }
+
+    /// 期限をまとめて決める。`clear` なら期限をなくす。
+    pub fn submit_bulk_due(&mut self, clear: bool, cx: &mut Context<Self>) {
+        let due = if clear {
+            None
+        } else {
+            let value = self.inputs.bulk_due.read(cx).value().trim().to_owned();
+            if value.is_empty() {
+                self.error =
+                    Some("期限を入れてください。なくすときは「期限をなくす」を押します。".into());
+                cx.notify();
+                return;
+            }
+            Some(value)
+        };
+        if self.bulk_apply(&BulkOp::Due(due), cx) {
+            self.modal = Modal::None;
+        }
+    }
+
+    pub fn toggle_bulk_person(&mut self, person: &str, cx: &mut Context<Self>) {
+        toggle(&mut self.bulk_people, person);
+        cx.notify();
+    }
+
+    pub fn submit_bulk_assignees(&mut self, cx: &mut Context<Self>) {
+        if self.bulk_people.is_empty() && self.bulk_mode != ListMode::Set {
+            self.error = Some("担当者を選んでください。".into());
+            cx.notify();
+            return;
+        }
+        let op = BulkOp::Assignees {
+            mode: self.bulk_mode,
+            ids: self.bulk_people.clone(),
+        };
+        if self.bulk_apply(&op, cx) {
+            self.modal = Modal::None;
+        }
+    }
+
+    pub fn submit_bulk_categories(&mut self, cx: &mut Context<Self>) {
+        let values = split_list(self.inputs.bulk_categories.read(cx).value().as_ref());
+        if values.is_empty() {
+            self.error = Some("カテゴリを入れてください。".into());
+            cx.notify();
+            return;
+        }
+        let op = BulkOp::Categories {
+            add: self.bulk_category_add,
+            values,
+        };
+        if self.bulk_apply(&op, cx) {
+            self.modal = Modal::None;
+        }
+    }
+
+    // ---- 新しいタスク（項目を入れて作る） ----
+
+    /// 新しいタスクのダイアログを開く。いまのワークスペースの既定値と、
+    /// 上の入力欄に書きかけたタイトルを入れておく。
+    pub fn open_new_task(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let workspace = self.current_workspace().map(str::to_owned);
+        let title = Self::take(&self.inputs.quick_add.clone(), window, cx);
+        let draft = match self
+            .db
+            .read(cx)
+            .store
+            .draft_for(workspace.as_deref(), title.trim())
+        {
+            Ok(draft) => draft,
+            Err(error) => {
+                self.error = Some(error.to_string().into());
+                cx.notify();
+                return;
+            }
+        };
+        let set = |input: &Entity<InputState>,
+                   value: String,
+                   window: &mut Window,
+                   cx: &mut Context<Self>| {
+            input.update(cx, |s, cx| s.set_value(value, window, cx));
+        };
+        let inputs = &self.inputs;
+        set(&inputs.nt_title.clone(), draft.title.clone(), window, cx);
+        set(
+            &inputs.nt_start.clone(),
+            draft.start.clone().unwrap_or_default(),
+            window,
+            cx,
+        );
+        set(
+            &inputs.nt_due.clone(),
+            draft.due.clone().unwrap_or_default(),
+            window,
+            cx,
+        );
+        set(
+            &inputs.nt_categories.clone(),
+            draft.categories.join("、"),
+            window,
+            cx,
+        );
+        let description = draft.description.clone();
+        self.inputs
+            .nt_description
+            .update(cx, |s, cx| s.set_value(description, window, cx));
+        self.inputs.nt_title.update(cx, |s, cx| s.focus(window, cx));
+        self.new_task = draft;
+        self.error = None;
+        self.modal = Modal::NewTask;
+        cx.notify();
+    }
+
+    pub fn toggle_new_task_assignee(&mut self, person: &str, cx: &mut Context<Self>) {
+        toggle(&mut self.new_task.assignee_ids, person);
+        cx.notify();
+    }
+
+    pub fn set_new_task_priority(&mut self, priority: u8, cx: &mut Context<Self>) {
+        self.new_task.priority = priority;
+        cx.notify();
+    }
+
+    pub fn submit_new_task(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.modal != Modal::NewTask {
+            return;
+        }
+        let read = |input: &Entity<InputState>| input.read(cx).value().trim().to_owned();
+        let some = |value: String| (!value.is_empty()).then_some(value);
+        let mut draft = self.new_task.clone();
+        draft.title = read(&self.inputs.nt_title);
+        draft.start = some(read(&self.inputs.nt_start));
+        draft.due = some(read(&self.inputs.nt_due));
+        draft.categories = split_list(self.inputs.nt_categories.read(cx).value().as_ref());
+        draft.description = self.inputs.nt_description.read(cx).value().to_string();
+        let workspace = self.current_workspace().map(str::to_owned);
+        let created = self.write(cx, |s| s.create_task_shown(workspace.as_deref(), &draft));
+        if let Some(task) = created {
+            self.modal = Modal::None;
+            self.query.tab = view::Tab::Open;
+            self.open_panel(&task.id, window, cx);
         }
     }
 
@@ -817,6 +1345,20 @@ impl MainView {
         }
     }
 
+    /// ディスクの使用量。
+    pub fn usage(&self, cx: &App) -> malakt_core::Usage {
+        self.db.read(cx).store.usage().unwrap_or_default()
+    }
+
+    /// 消したデータの跡を整理して、ディスクに返す。
+    pub fn compact(&mut self, cx: &mut Context<Self>) {
+        let before = self.usage(cx);
+        if let Some(after) = self.write(cx, |s| s.compact()) {
+            let freed = before.database_bytes.saturating_sub(after.database_bytes);
+            self.notice = Some(format!("{} を空けました。", view::format_bytes(freed)).into());
+        }
+    }
+
     pub fn open_people(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.inputs.name.update(cx, |s, cx| {
             s.set_value("", window, cx);
@@ -886,6 +1428,373 @@ impl MainView {
             self.modal = Modal::None;
             self.notice = Some("ロックを無効にしました。".into());
         }
+    }
+
+    // ---- 完了チケット ----
+
+    pub fn open_ticket_dialog(&mut self, task_id: &str, cx: &mut Context<Self>) {
+        self.ticket_person = self.self_id.clone();
+        self.issued_ticket = None;
+        self.error = None;
+        self.modal = Modal::Ticket(task_id.to_owned());
+        cx.notify();
+    }
+
+    pub fn issue_ticket(&mut self, cx: &mut Context<Self>) {
+        let Modal::Ticket(task_id) = self.modal.clone() else {
+            return;
+        };
+        let person = self.ticket_person.clone();
+        self.issued_ticket = self.write(cx, |s| s.issue_ticket(&task_id, person.as_deref()));
+    }
+
+    /// 発行したチケットをクリップボードに写す。
+    pub fn copy_ticket(&mut self, cx: &mut Context<Self>) {
+        if let Some(ticket) = &self.issued_ticket {
+            cx.write_to_clipboard(ClipboardItem::new_string(ticket.secret.clone()));
+            self.notice = Some("完了チケットをコピーしました。".into());
+            cx.notify();
+        }
+    }
+
+    pub fn revoke_tickets(&mut self, cx: &mut Context<Self>) {
+        let Modal::Ticket(task_id) = self.modal.clone() else {
+            return;
+        };
+        if let Some(count) = self.write(cx, |s| s.revoke_tickets(&task_id)) {
+            self.issued_ticket = None;
+            self.notice = Some(format!("{count} 枚の完了チケットを取り消しました。").into());
+        }
+    }
+
+    /// そのタスクの、引き換えていない有効なチケットの数。
+    pub fn active_tickets(&self, task_id: &str, cx: &App) -> usize {
+        self.db
+            .read(cx)
+            .store
+            .active_ticket_count(task_id)
+            .unwrap_or(0)
+    }
+
+    // ---- 通知 ----
+
+    /// 期限が今日のタスクの通知を作り、まだ出していない通知を OS の通知に出す。
+    /// ロック中はタイトルを外に出さないよう、解除してから出す。
+    pub fn deliver_notices(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.unlocked(cx) {
+            return;
+        }
+        let today = view::today();
+        let (pending, changed) = self.db.update(cx, |db, cx| {
+            let (pending, made) = db.take_notices(&today);
+            // 通知が増えたときだけ、ほかのウィンドウにも読み直させる
+            if made {
+                cx.notify();
+            }
+            (pending, made)
+        });
+        if changed || !pending.is_empty() {
+            self.reload(cx);
+        }
+        for notice in pending {
+            let view = cx.entity().downgrade();
+            let id = notice.id.clone();
+            let mut note = gpui_kit::component::notification::Notification::new()
+                .id1::<Notice>(SharedString::from(notice.id.clone()))
+                .title(notice.headline())
+                .system()
+                .on_click(move |_, window, cx| {
+                    let _ = view.update(cx, |this, cx| this.open_notice(&id, window, cx));
+                });
+            if !notice.excerpt.is_empty() {
+                note = note.message(notice.excerpt.clone());
+            }
+            window.push_notification(note, cx);
+        }
+    }
+
+    /// 通知を開く。既読にして、そのタスクの詳細を出す。
+    pub fn open_notice(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(task_id) = self
+            .notices
+            .iter()
+            .find(|n| n.id == id)
+            .map(|n| n.task_id.clone())
+        else {
+            return;
+        };
+        self.write(cx, |s| s.mark_notice_read(id));
+        self.modal = Modal::None;
+        self.query.tab = if self
+            .db
+            .read(cx)
+            .store
+            .task(&task_id)
+            .is_ok_and(|t| t.status.is_open())
+        {
+            view::Tab::Open
+        } else {
+            view::Tab::Closed
+        };
+        self.go(Nav::All, cx);
+        self.open_panel(&task_id, window, cx);
+    }
+
+    pub fn mark_all_notices_read(&mut self, cx: &mut Context<Self>) {
+        self.write(cx, |s| s.mark_all_notices_read());
+    }
+
+    // ---- ワークスペースの設定 ----
+
+    pub fn open_workspace_settings(
+        &mut self,
+        id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let store = &self.db.read(cx).store;
+        let loaded = store
+            .workspace(id)
+            .and_then(|w| Ok((w, store.task_defaults(id)?)));
+        let (workspace, defaults) = match loaded {
+            Ok(loaded) => loaded,
+            Err(error) => {
+                self.error = Some(error.to_string().into());
+                cx.notify();
+                return;
+            }
+        };
+        let (days, date) = match &defaults.due {
+            DueRule::Relative { days } => (days.to_string(), String::new()),
+            DueRule::Fixed { date } => (String::new(), date.clone()),
+            DueRule::None => (String::new(), String::new()),
+        };
+        let set = |input: &Entity<InputState>,
+                   value: String,
+                   window: &mut Window,
+                   cx: &mut Context<Self>| {
+            input.update(cx, |s, cx| s.set_value(value, window, cx));
+        };
+        let inputs = &self.inputs;
+        set(
+            &inputs.ws_date.clone(),
+            workspace.date.unwrap_or_default(),
+            window,
+            cx,
+        );
+        set(&inputs.def_days.clone(), days, window, cx);
+        set(&inputs.def_date.clone(), date, window, cx);
+        set(
+            &inputs.def_time.clone(),
+            defaults.due_time.clone(),
+            window,
+            cx,
+        );
+        set(
+            &inputs.def_categories.clone(),
+            defaults.categories.join("、"),
+            window,
+            cx,
+        );
+        let description = defaults.description.clone();
+        self.inputs
+            .def_description
+            .update(cx, |s, cx| s.set_value(description, window, cx));
+        self.defaults_draft = defaults;
+        self.modal = Modal::WorkspaceSettings(id.to_owned());
+        self.error = None;
+        cx.notify();
+    }
+
+    pub fn toggle_default_assignee(&mut self, person: &str, cx: &mut Context<Self>) {
+        toggle(&mut self.defaults_draft.assignee_ids, person);
+        cx.notify();
+    }
+
+    pub fn toggle_default_link(&mut self, workspace: &str, cx: &mut Context<Self>) {
+        toggle(&mut self.defaults_draft.link_workspace_ids, workspace);
+        cx.notify();
+    }
+
+    pub fn set_default_priority(&mut self, priority: Option<u8>, cx: &mut Context<Self>) {
+        self.defaults_draft.priority = priority;
+        cx.notify();
+    }
+
+    /// 期限の決め方を切り替える。日数や日付は、保存するときに入力欄から読む。
+    pub fn set_default_due(&mut self, due: DueRule, cx: &mut Context<Self>) {
+        self.defaults_draft.due = due;
+        cx.notify();
+    }
+
+    pub fn save_workspace_settings(&mut self, cx: &mut Context<Self>) {
+        let Modal::WorkspaceSettings(id) = self.modal.clone() else {
+            return;
+        };
+        let read = |input: &Entity<InputState>| input.read(cx).value().trim().to_owned();
+        let mut defaults = self.defaults_draft.clone();
+        defaults.workspace_id = id.clone();
+        defaults.due = match defaults.due {
+            DueRule::None => DueRule::None,
+            DueRule::Fixed { .. } => DueRule::Fixed {
+                date: read(&self.inputs.def_date),
+            },
+            DueRule::Relative { .. } => {
+                let text = read(&self.inputs.def_days);
+                // 全角の数字やマイナスで入れても読む
+                let ascii: String = text
+                    .chars()
+                    .map(|c| match c {
+                        '０'..='９' => char::from(b'0' + (c as u32 - '０' as u32) as u8),
+                        '－' | 'ー' | '−' => '-',
+                        '＋' => '+',
+                        c => c,
+                    })
+                    .collect();
+                match ascii.parse::<i32>() {
+                    Ok(days) => DueRule::Relative { days },
+                    Err(_) if ascii.is_empty() => DueRule::Relative { days: 0 },
+                    Err(_) => {
+                        self.error =
+                            Some("基準日からの日数は、-7 のような整数で入れてください。".into());
+                        cx.notify();
+                        return;
+                    }
+                }
+            }
+        };
+        defaults.due_time = read(&self.inputs.def_time);
+        defaults.categories = split_list(&read(&self.inputs.def_categories));
+        defaults.description = self.inputs.def_description.read(cx).value().to_string();
+        let date = read(&self.inputs.ws_date);
+        let saved = self.write(cx, |s| {
+            // 先に両方を確かめて、片方だけ保存されることがないようにする
+            malakt_core::defaults::clean(&defaults)?;
+            s.set_workspace_date(&id, Some(&date))?;
+            s.set_task_defaults(&defaults)
+        });
+        if saved.is_some() {
+            self.modal = Modal::None;
+            self.notice = Some("ワークスペースの設定を保存しました。".into());
+        }
+    }
+
+    // ---- 添付 ----
+
+    /// ファイルを選んで、開いているタスクに添付する。
+    pub fn attach(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let chosen = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: true,
+            prompt: Some("添付".into()),
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(paths))) = chosen.await else {
+                return;
+            };
+            let _ = this.update(cx, |this, cx| this.attach_paths(&paths, cx));
+        })
+        .detach();
+    }
+
+    pub fn attach_paths(&mut self, paths: &[std::path::PathBuf], cx: &mut Context<Self>) {
+        let Some(task_id) = self.detail.as_ref().map(|d| d.task.id.clone()) else {
+            return;
+        };
+        let author = self.self_id.clone();
+        let mut failed = Vec::new();
+        for path in paths {
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            // 大きすぎるファイルは、読む前に断る
+            let result = std::fs::metadata(path)
+                .map_err(malakt_core::Error::from)
+                .and_then(|meta| {
+                    if meta.len() > malakt_core::MAX_ATTACHMENT_BYTES {
+                        return Err(malakt_core::Error::Invalid(format!(
+                            "添付できるのは 1 ファイル {} までです",
+                            view::format_bytes(malakt_core::MAX_ATTACHMENT_BYTES)
+                        )));
+                    }
+                    Ok(std::fs::read(path)?)
+                })
+                .and_then(|bytes| {
+                    self.db.update(cx, |db, cx| {
+                        cx.notify();
+                        db.store
+                            .add_attachment(&task_id, author.as_deref(), &name, &bytes)
+                    })
+                });
+            if let Err(error) = result {
+                failed.push(format!("{name}: {error}"));
+            }
+        }
+        self.error = (!failed.is_empty()).then(|| failed.join("\n").into());
+        cx.notify();
+    }
+
+    /// 添付を一時ファイルに書き出す。外のアプリで開くためのもので、
+    /// 起動時・ロック時・終了時にまとめて消す。
+    pub fn opened_copy(&self, id: &str, cx: &App) -> malakt_core::Result<std::path::PathBuf> {
+        let db = self.db.read(cx);
+        let store = &db.store;
+        let attachment = store.attachment(id)?;
+        let dir = db.opened_dir.join(&attachment.id);
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join(&attachment.name);
+        std::fs::write(&path, store.attachment_data(id)?)?;
+        Ok(path)
+    }
+
+    /// 添付を OS の既定のアプリで開く。
+    pub fn open_attachment(&mut self, id: &str, cx: &mut Context<Self>) {
+        match self.opened_copy(id, cx) {
+            Ok(path) => {
+                self.error = None;
+                cx.open_with_system(&path);
+            }
+            Err(error) => self.error = Some(error.to_string().into()),
+        }
+        cx.notify();
+    }
+
+    /// 添付を、選んだ場所に保存する。
+    pub fn save_attachment(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Ok(attachment) = self.db.read(cx).store.attachment(id) else {
+            return;
+        };
+        let dir = dirs::download_dir()
+            .or_else(dirs::home_dir)
+            .unwrap_or_else(|| ".".into());
+        let chosen = cx.prompt_for_new_path(&dir, Some(&attachment.name));
+        let id = id.to_owned();
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(path))) = chosen.await else {
+                return;
+            };
+            let _ = this.update(cx, |this, cx| this.save_attachment_to(&id, &path, cx));
+        })
+        .detach();
+    }
+
+    pub fn save_attachment_to(&mut self, id: &str, path: &std::path::Path, cx: &mut Context<Self>) {
+        let result = self
+            .db
+            .read(cx)
+            .store
+            .attachment_data(id)
+            .and_then(|bytes| Ok(std::fs::write(path, bytes)?));
+        match result {
+            Ok(()) => {
+                self.error = None;
+                self.notice = Some(format!("{} に保存しました。", path.display()).into());
+            }
+            Err(error) => self.error = Some(error.to_string().into()),
+        }
+        cx.notify();
     }
 
     // ---- エクスポート / インポート ----
@@ -1008,6 +1917,7 @@ impl MainView {
     pub fn dismiss(&mut self, cx: &mut Context<Self>) {
         if self.modal != Modal::None {
             self.modal = Modal::None;
+            self.issued_ticket = None;
         } else if self.editing.is_some() {
             self.editing = None;
         } else if self.panel.is_some() {
@@ -1017,6 +1927,48 @@ impl MainView {
         }
         self.error = None;
         cx.notify();
+    }
+}
+
+/// 通知の一覧に出す数。
+const NOTICES_SHOWN: usize = 100;
+
+/// 「、」や「,」で区切った入力を、空でない項目の並びにする。
+fn split_list(text: &str) -> Vec<String> {
+    text.split(['、', ',', '，'])
+        .map(|item| item.trim().to_owned())
+        .filter(|item| !item.is_empty())
+        .collect()
+}
+
+/// あれば外し、なければ足す。
+fn toggle(list: &mut Vec<Id>, id: &str) {
+    match list.iter().position(|x| x == id) {
+        Some(ix) => {
+            list.remove(ix);
+        }
+        None => list.push(id.to_owned()),
+    }
+}
+
+/// 選んだ範囲と、その前後の文脈（探し直すための手がかり）。
+pub fn anchor_at(source: &str, range: std::ops::Range<usize>) -> Anchor {
+    const CONTEXT: usize = 32;
+    let before = &source[..range.start];
+    let after = &source[range.end..];
+    let prefix_start = before
+        .char_indices()
+        .rev()
+        .nth(CONTEXT - 1)
+        .map_or(0, |(i, _)| i);
+    let suffix_end = after
+        .char_indices()
+        .nth(CONTEXT)
+        .map_or(after.len(), |(i, _)| i);
+    Anchor {
+        exact: source[range].to_owned(),
+        prefix: before[prefix_start..].to_owned(),
+        suffix: after[..suffix_end].to_owned(),
     }
 }
 
@@ -1062,6 +2014,7 @@ mod tests {
             id: id.into(),
             parent_id: parent.map(str::to_owned),
             name: id.into(),
+            date: None,
             position,
             created_at: 0,
             updated_at: 0,

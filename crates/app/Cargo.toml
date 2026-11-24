@@ -20,6 +20,7 @@ gpui-kit = "0.11.0"
 dirs = "5"
 malakt-ai.workspace = true
 async-channel = "2"
+serde.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
