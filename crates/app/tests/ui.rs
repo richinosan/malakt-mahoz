@@ -6,7 +6,7 @@ use gpui_kit::{
     WindowBounds, WindowOptions,
 };
 use malakt_core::view::Tab;
-use malakt_core::{lock, Scope, Status, Store, TaskFilter};
+use malakt_core::{lock, Role, Roles, Scope, Status, Store, TaskFilter};
 use malakt_mahoz::{db, MainView, Modal, Nav};
 
 fn start(cx: &mut TestAppContext) {
@@ -481,4 +481,103 @@ fn narrow_window_menu_opens_and_closes(cx: &mut TestAppContext) {
     // 中身が出ているので、一覧のタスクを開ける
     ui(cx, window, |window, cx| window.click(("title", 0usize), cx));
     assert!(cx.update(|cx| view.read(cx).panel.is_some()));
+}
+
+/// 詳細で担当者を選び、役（RACI）を付け、1 人ずつ完了にしていく。
+#[gpui_kit::test]
+fn assignee_roles_and_per_person_completion(cx: &mut TestAppContext) {
+    start(cx);
+    let (window, view) = open(cx, wide());
+    let (me, sato) = cx.update(|cx| {
+        view.update(cx, |v, cx| {
+            v.write(cx, |s| {
+                Ok((
+                    s.create_person("自分", true)?.id,
+                    s.create_person("佐藤", false)?.id,
+                ))
+            })
+            .unwrap()
+        })
+    });
+    ui(cx, window, |window, cx| {
+        window.click("quick-add", cx);
+        window.input("会場を決める", cx);
+        window.press("enter", cx);
+    });
+    ui(cx, window, |window, cx| window.click("nav-all", cx));
+    ui(cx, window, |window, cx| window.click(("title", 0usize), cx));
+    let id = all_tasks(cx).remove(0).id;
+    let load = |cx: &mut TestAppContext| store(cx, |s| s.task(&id).unwrap());
+
+    // 2 人を担当にすると、どちらも R から始まる
+    ui(cx, window, |window, cx| window.click(("p-as", 0usize), cx));
+    ui(cx, window, |window, cx| window.click(("p-as", 1usize), cx));
+    let t = load(cx);
+    assert_eq!(t.assignee_ids.len(), 2);
+    assert!(t.assignee_roles.iter().all(|r| *r == Roles::R));
+    let row_of = |t: &malakt_core::Task, person: &str| {
+        t.assignee_ids.iter().position(|p| p == person).unwrap()
+    };
+    let (mine, theirs) = (row_of(&t, &me), row_of(&t, &sato));
+    let role_chip = |row: usize, role: Role| ("p-role", row * 4 + role as usize);
+
+    // 自分に A を足し、佐藤を C だけにする
+    ui(cx, window, |window, cx| {
+        window.click(role_chip(mine, Role::A), cx)
+    });
+    ui(cx, window, |window, cx| {
+        window.click(role_chip(theirs, Role::C), cx)
+    });
+    ui(cx, window, |window, cx| {
+        window.click(role_chip(theirs, Role::R), cx)
+    });
+    let t = load(cx);
+    assert_eq!(t.roles_of(&me).unwrap().to_string(), "R,A");
+    assert_eq!(t.roles_of(&sato).unwrap().to_string(), "C");
+
+    // 最後の 1 つの役は外せず、理由が出る
+    ui(cx, window, |window, cx| {
+        window.click(role_chip(theirs, Role::C), cx)
+    });
+    assert_eq!(load(cx).roles_of(&sato).unwrap().to_string(), "C");
+    cx.update(|cx| assert!(view.read(cx).error.is_some()));
+
+    // A を佐藤に移すと、自分の A は外れる
+    ui(cx, window, |window, cx| {
+        window.click(role_chip(theirs, Role::A), cx)
+    });
+    let t = load(cx);
+    assert_eq!(t.roles_of(&me).unwrap().to_string(), "R");
+    assert_eq!(t.roles_of(&sato).unwrap().to_string(), "A,C");
+    cx.update(|cx| assert!(view.read(cx).error.is_none()));
+
+    // 「自分の役」で絞り込める
+    cx.update(|cx| {
+        view.update(cx, |v, cx| {
+            v.query.my_role = Some(Role::A);
+            v.reload(cx);
+            assert!(v.visible.is_empty());
+            v.query.my_role = Some(Role::R);
+            v.reload(cx);
+            assert_eq!(v.visible.len(), 1);
+        })
+    });
+
+    // 1 人ずつ完了にする。全員そろうとタスクが完了になる
+    ui(cx, window, |window, cx| window.click(("p-done", mine), cx));
+    let t = load(cx);
+    assert_eq!((t.status, t.done_count()), (Status::NeedsAction, (1, 2)));
+    ui(cx, window, |window, cx| {
+        window.click(("p-done", theirs), cx)
+    });
+    let t = load(cx);
+    assert_eq!((t.status, t.done_count()), (Status::Completed, (2, 2)));
+
+    // 1 人の分を取り消すと、タスクは進行中に戻る
+    ui(cx, window, |window, cx| {
+        window.click(("p-done", theirs), cx)
+    });
+    let t = load(cx);
+    assert_eq!((t.status, t.done_count()), (Status::InProcess, (1, 2)));
+    assert!(t.is_done_by(&me));
 }

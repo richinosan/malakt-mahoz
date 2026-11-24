@@ -564,6 +564,39 @@ impl MainView {
         });
     }
 
+    /// 担当者の役を付ける・外す。最後の 1 つは外せない。
+    pub fn toggle_role(
+        &mut self,
+        person_id: &str,
+        role: malakt_core::Role,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(detail) = &self.detail else { return };
+        let Some(current) = detail.task.roles_of(person_id) else {
+            return;
+        };
+        let next = if current.contains(role) {
+            current.without(role)
+        } else {
+            current.with(role)
+        };
+        if next.is_empty() {
+            self.error = Some("役は 1 つ以上必要です。別の役を付けてから外してください。".into());
+            cx.notify();
+            return;
+        }
+        let id = detail.task.id.clone();
+        self.write(cx, |s| s.set_assignee_roles(&id, person_id, next));
+    }
+
+    /// 担当者の「自分の分」を完了にする・取り消す。
+    pub fn toggle_assignee_done(&mut self, person_id: &str, cx: &mut Context<Self>) {
+        let Some(detail) = &self.detail else { return };
+        let id = detail.task.id.clone();
+        let done = !detail.task.is_done_by(person_id);
+        self.write(cx, |s| s.set_assignee_done(&id, person_id, done));
+    }
+
     pub fn submit_category(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let value = Self::take(&self.inputs.category.clone(), window, cx);
         self.edit_task(cx, |d| d.categories.push(value));

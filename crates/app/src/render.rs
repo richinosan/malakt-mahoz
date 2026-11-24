@@ -10,7 +10,7 @@ use gpui_kit::component::{ActiveTheme, Sizable};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use malakt_core::view::{self, AssigneeFilter, DueState, Priority as Prio, Sort, Tab};
-use malakt_core::{Status, Task as Todo};
+use malakt_core::{Role as Raci, Roles, Status, Task as Todo};
 
 use crate::state::{Editing, MainView, Modal, Nav};
 use crate::{Dismiss, LockNow, NewWindow};
@@ -581,6 +581,20 @@ impl MainView {
                 |this| this.query.assignee = AssigneeFilter::Person(id.clone())
             ));
         }
+        let mut my_role = vec![pick!(
+            "f-role-all",
+            "すべて",
+            q.my_role.is_none(),
+            |this| this.query.my_role = None
+        )];
+        for (i, role) in Raci::ALL.into_iter().enumerate() {
+            my_role.push(pick!(
+                ("f-role", i),
+                format!("{}（{}）", role.code(), role.label()),
+                q.my_role == Some(role),
+                |this| this.query.my_role = Some(role)
+            ));
+        }
         let mut priority = vec![pick!(
             "f-pr-all",
             "すべて",
@@ -650,6 +664,7 @@ impl MainView {
             )
             .child(group("状態", status))
             .child(group("担当", assignee))
+            .child(group("自分の役", my_role))
             .child(group("優先度", priority))
             .when(!self.categories.is_empty(), |d| {
                 d.child(group("カテゴリ", category))
@@ -1039,10 +1054,16 @@ impl MainView {
                     this.edit_task_by_id(&id, cx, |d| d.priority = next.value())
                 }))
         };
-        let assignees = div()
-            .truncate()
-            .text_sm()
-            .child(self.assignee_label(&task.assignee_ids));
+        let assignees = div().truncate().text_sm().child({
+            // 担当者が複数いるときは、何人が自分の分を終えたかを先に出す
+            let (done, total) = task.done_count();
+            let names = self.assignee_label(&task.assignee_ids);
+            if total > 1 {
+                SharedString::from(format!("{done}/{total} {names}"))
+            } else {
+                names
+            }
+        });
         let due = self.due_label(task, cx).text_sm();
         let updated = div()
             .text_xs()
@@ -1300,7 +1321,8 @@ impl MainView {
                 )
                 .on_click(
                     cx.listener(move |this, _: &ClickEvent, _, cx| this.toggle_assignee(&id, cx)),
-                ),
+                )
+                .test_support(),
             );
         }
         people = people.child(
@@ -1314,6 +1336,56 @@ impl MainView {
                 .xsmall()
                 .on_click(cx.listener(|this, _, window, cx| this.open_people(window, cx))),
         );
+
+        // 担当者ごとの行: 自分の分の完了と、役（R・A・C・I）
+        let mut people = col().gap_1().child(people);
+        let (finished, total) = task.done_count();
+        if total > 1 {
+            people = people.child(
+                div()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(format!("{finished}/{total} 完了")),
+            );
+        }
+        for (i, person_id) in task.assignee_ids.iter().enumerate() {
+            let roles = task.roles_of(person_id).unwrap_or_default();
+            let mut line = row().gap_1().child(
+                Checkbox::new(("p-done", i))
+                    .checked(task.is_done_by(person_id))
+                    .on_click(cx.listener({
+                        let id = person_id.clone();
+                        move |this, _, _, cx| this.toggle_assignee_done(&id, cx)
+                    })),
+            );
+            line = line.child(
+                div()
+                    .w(px(132.))
+                    .flex_none()
+                    .truncate()
+                    .text_sm()
+                    .child(self.person_name(person_id).to_owned()),
+            );
+            for role in Raci::ALL {
+                let id = person_id.clone();
+                line = line.child(
+                    chip(
+                        ("p-role", i * 4 + role as usize),
+                        role.code(),
+                        roles.contains(role),
+                        cx,
+                    )
+                    .tooltip(move |window, cx| {
+                        gpui_kit::component::tooltip::Tooltip::new(role.label()).build(window, cx)
+                    })
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.toggle_role(&id, role, cx)
+                    }))
+                    .test_support(),
+                );
+            }
+            people = people.child(line);
+        }
 
         let due_buttons = [
             ("今日", Some(0)),
@@ -1889,6 +1961,19 @@ impl MainView {
                                 .map(|v| self.person_name(v))
                                 .collect::<Vec<_>>()
                                 .join("、"),
+                            // 「人=R,A」の形
+                            "assignee_roles" => match value.split_once('=') {
+                                Some((person, roles)) => format!(
+                                    "{}（{}）",
+                                    self.person_name(person),
+                                    Roles::parse(roles).labels()
+                                ),
+                                None => value.to_owned(),
+                            },
+                            "assignee_done" if !value.is_empty() => {
+                                format!("{} が完了", self.person_name(value))
+                            }
+                            "assignee_done" => "未完了".to_owned(),
                             "workspace" => self
                                 .workspace_name((!value.is_empty()).then_some(value))
                                 .to_string(),

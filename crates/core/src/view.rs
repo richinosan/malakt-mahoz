@@ -93,6 +93,8 @@ pub struct ListQuery {
     pub q: String,
     pub status: Option<Status>,
     pub assignee: AssigneeFilter,
+    /// 自分の役。自分がその役を持つタスクだけにする。
+    pub my_role: Option<Role>,
     pub priority: Option<Priority>,
     pub category: Option<String>,
     pub sort: Sort,
@@ -104,6 +106,7 @@ impl ListQuery {
         usize::from(!self.q.trim().is_empty())
             + usize::from(self.status.is_some())
             + usize::from(self.assignee != AssigneeFilter::All)
+            + usize::from(self.my_role.is_some())
             + usize::from(self.priority.is_some())
             + usize::from(self.category.is_some())
     }
@@ -145,6 +148,11 @@ pub fn apply(tasks: &[Task], query: &ListQuery, self_id: Option<&str>) -> Vec<us
                     AssigneeFilter::Unassigned => t.assignee_ids.is_empty(),
                     AssigneeFilter::Person(id) => t.assignee_ids.contains(id),
                 }
+                && query.my_role.is_none_or(|role| {
+                    self_id
+                        .and_then(|me| t.roles_of(me))
+                        .is_some_and(|roles| roles.contains(role))
+                })
                 && query.priority.is_none_or(|p| Priority::of(t.priority) == p)
                 && query
                     .category
@@ -260,6 +268,8 @@ pub fn field_label(field: &str) -> &str {
         "percent" => "進捗",
         "parent" => "親タスク",
         "assignees" => "担当",
+        "assignee_roles" => "担当者の役",
+        "assignee_done" => "担当者ごとの完了",
         "categories" => "カテゴリ",
         "workspace" => "ワークスペース",
         other => other,
@@ -283,6 +293,8 @@ mod tests {
             percent: 0,
             parent_id: None,
             assignee_ids: vec![],
+            assignee_roles: vec![],
+            assignee_done: vec![],
             categories: vec![],
             position: 0,
             created_at: 0,
@@ -492,6 +504,37 @@ mod tests {
         // 時計がずれて未来になっていても崩れない
         assert_eq!(ago(-100), "たった今");
         assert_eq!(format_datetime(now).len(), 16);
+    }
+
+    #[test]
+    fn filters_by_my_role() {
+        let mut a = task("a", Status::NeedsAction);
+        a.assignee_ids = vec!["me".into(), "you".into()];
+        a.assignee_roles = vec![Roles::of(&[Role::R, Role::A]), Roles::of(&[Role::C])];
+        // 役の記録がない担当者は R として読む
+        let mut b = task("b", Status::NeedsAction);
+        b.assignee_ids = vec!["me".into()];
+        let mut c = task("c", Status::NeedsAction);
+        c.assignee_ids = vec!["you".into()];
+        c.assignee_roles = vec![Roles::of(&[Role::A])];
+        let tasks = [a, b, c];
+        let pick = |role, me| {
+            let query = ListQuery {
+                my_role: Some(role),
+                ..Default::default()
+            };
+            assert_eq!(query.active_count(), 1);
+            apply(&tasks, &query, me)
+                .into_iter()
+                .map(|i| tasks[i].id.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(pick(Role::R, Some("me")), ["a", "b"]);
+        assert_eq!(pick(Role::A, Some("me")), ["a"]);
+        assert!(pick(Role::C, Some("me")).is_empty());
+        assert_eq!(pick(Role::C, Some("you")), ["a"]);
+        // 自分が分からなければ 0 件
+        assert!(pick(Role::R, None).is_empty());
     }
 
     #[test]

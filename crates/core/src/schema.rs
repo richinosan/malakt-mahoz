@@ -1,7 +1,8 @@
 use rusqlite::Connection;
 
 /// 順番に適用するマイグレーション。追記のみで、既存の要素は書き換えない。
-const MIGRATIONS: &[&str] = &[r#"
+const MIGRATIONS: &[&str] = &[
+    r#"
     CREATE TABLE workspaces (
         id TEXT PRIMARY KEY NOT NULL,
         parent_id TEXT REFERENCES workspaces(id) ON DELETE CASCADE,
@@ -80,7 +81,13 @@ const MIGRATIONS: &[&str] = &[r#"
         key TEXT PRIMARY KEY NOT NULL,
         value TEXT NOT NULL
     ) STRICT, WITHOUT ROWID;
-    "#];
+    "#,
+    // 2: 担当者ごとの役（RACI）と、担当者ごとの完了
+    r#"
+    ALTER TABLE task_assignees ADD COLUMN roles TEXT NOT NULL DEFAULT 'R';
+    ALTER TABLE task_assignees ADD COLUMN completed_at INTEGER;
+    "#,
+];
 
 pub(crate) fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
     let current: usize =
@@ -97,4 +104,39 @@ pub(crate) fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
 #[cfg(test)]
 pub(crate) fn version() -> usize {
     MIGRATIONS.len()
+}
+
+#[cfg(test)]
+mod tests {
+    use rusqlite::Connection;
+
+    /// 最初の版のデータベースを開くと、担当者は全員 R、未完了として読める。
+    #[test]
+    fn upgrades_assignees_from_the_first_version() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(super::MIGRATIONS[0]).unwrap();
+        conn.pragma_update(None, "user_version", 1).unwrap();
+        conn.execute_batch(
+            "INSERT INTO people(id, name, is_self, created_at, updated_at) VALUES ('p', '佐藤', 0, 0, 0);
+             INSERT INTO tasks(id, title, description, status, priority, position, created_at, updated_at)
+             VALUES ('t', '下見', '', 'needs_action', 0, 0, 0, 0);
+             INSERT INTO task_assignees(task_id, person_id) VALUES ('t', 'p');",
+        )
+        .unwrap();
+        super::migrate(&mut conn).unwrap();
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version as usize, super::MIGRATIONS.len());
+        let (roles, done): (String, Option<i64>) = conn
+            .query_row(
+                "SELECT roles, completed_at FROM task_assignees WHERE task_id = 't'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((roles.as_str(), done), ("R", None));
+        // もう一度開いても何もしない
+        super::migrate(&mut conn).unwrap();
+    }
 }

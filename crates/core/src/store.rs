@@ -249,6 +249,11 @@ impl Store {
             due: draft.due,
             percent: draft.percent,
             parent_id: draft.parent_id,
+            assignee_roles: vec![Roles::R; draft.assignee_ids.len()],
+            assignee_done: vec![
+                (draft.status == Status::Completed).then_some(now);
+                draft.assignee_ids.len()
+            ],
             assignee_ids: draft.assignee_ids,
             categories: draft.categories,
             position,
@@ -270,11 +275,17 @@ impl Store {
             .optional()?
             .ok_or_else(|| Error::NotFound(format!("タスク {id}")))?;
         let mut stmt = self.conn.prepare_cached(
-            "SELECT person_id FROM task_assignees WHERE task_id = ?1 ORDER BY person_id",
+            "SELECT person_id, roles, completed_at FROM task_assignees \
+             WHERE task_id = ?1 ORDER BY person_id",
         )?;
-        task.assignee_ids = stmt
-            .query_map(params![id], |r| r.get(0))?
-            .collect::<rusqlite::Result<_>>()?;
+        let mut rows = stmt.query(params![id])?;
+        while let Some(row) = rows.next()? {
+            task.assignee_ids.push(row.get(0)?);
+            task.assignee_roles
+                .push(Roles::parse(row.get_ref(1)?.as_str().unwrap_or_default()));
+            task.assignee_done.push(row.get(2)?);
+        }
+        drop(rows);
         let mut stmt = self.conn.prepare_cached(
             "SELECT category FROM task_categories WHERE task_id = ?1 ORDER BY category",
         )?;
@@ -389,16 +400,18 @@ impl Store {
             .enumerate()
             .map(|(i, t)| (t.id.as_str(), i))
             .collect();
-        let mut found: Vec<(usize, Id)> = Vec::new();
+        let mut found: Vec<(usize, Id, Roles, Option<i64>)> = Vec::new();
         {
             let mut stmt = self.conn.prepare_cached(
-                "SELECT task_id, person_id FROM task_assignees ORDER BY task_id, person_id",
+                "SELECT task_id, person_id, roles, completed_at FROM task_assignees \
+                 ORDER BY task_id, person_id",
             )?;
             let mut rows = stmt.query([])?;
             while let Some(row) = rows.next()? {
                 let task_id = row.get_ref(0)?.as_str().map_err(rusqlite::Error::from)?;
                 if let Some(&i) = index.get(task_id) {
-                    found.push((i, row.get(1)?));
+                    let roles = Roles::parse(row.get_ref(2)?.as_str().unwrap_or_default());
+                    found.push((i, row.get(1)?, roles, row.get(3)?));
                 }
             }
         }
@@ -416,8 +429,10 @@ impl Store {
             }
         }
         drop(index);
-        for (i, person_id) in found {
+        for (i, person_id, roles, done) in found {
             tasks[i].assignee_ids.push(person_id);
+            tasks[i].assignee_roles.push(roles);
+            tasks[i].assignee_done.push(done);
         }
         for (i, category) in categories {
             tasks[i].categories.push(category);
@@ -516,8 +531,33 @@ impl Store {
             ],
         )?;
         if old.assignee_ids != draft.assignee_ids {
-            tx.execute("DELETE FROM task_assignees WHERE task_id = ?1", params![id])?;
-            insert_assignees(&tx, id, &draft.assignee_ids)?;
+            // 残る人の役と完了は変えない。足した人は R から始まる
+            for person_id in &old.assignee_ids {
+                if !draft.assignee_ids.contains(person_id) {
+                    tx.execute(
+                        "DELETE FROM task_assignees WHERE task_id = ?1 AND person_id = ?2",
+                        params![id, person_id],
+                    )?;
+                }
+            }
+            insert_assignees(&tx, id, &draft.assignee_ids, &[], &[])?;
+        }
+        // タスクごと完了にしたら全員の分を完了にし、完了から戻したら全員の分を取り消す
+        match (old.status, draft.status) {
+            (Status::Completed, s) if s != Status::Completed => {
+                tx.execute(
+                    "UPDATE task_assignees SET completed_at = NULL WHERE task_id = ?1",
+                    params![id],
+                )?;
+            }
+            (_, Status::Completed) => {
+                tx.execute(
+                    "UPDATE task_assignees SET completed_at = ?2 \
+                     WHERE task_id = ?1 AND completed_at IS NULL",
+                    params![id, now],
+                )?;
+            }
+            _ => {}
         }
         if old.categories != draft.categories {
             tx.execute(
@@ -527,21 +567,7 @@ impl Store {
             insert_categories(&tx, id, &draft.categories)?;
         }
         tx.commit()?;
-        Ok(Task {
-            title: draft.title,
-            description: draft.description,
-            status: draft.status,
-            priority: draft.priority,
-            start: draft.start,
-            due: draft.due,
-            percent: draft.percent,
-            parent_id: draft.parent_id,
-            assignee_ids: draft.assignee_ids,
-            categories: draft.categories,
-            updated_at: now,
-            completed_at,
-            ..old
-        })
+        self.task(id)
     }
 
     /// 親タスクにできるか。自分自身や、自分の子孫は親にできない。
@@ -571,6 +597,123 @@ impl Store {
         let mut draft = TaskDraft::from(&self.task(id)?);
         draft.status = status;
         self.update_task(id, &draft)
+    }
+
+    /// 担当者の役を変える。
+    ///
+    /// 役は 1 つ以上。A（説明責任者）は 1 つのタスクに 1 人までなので、
+    /// A を付けるとほかの人の A は外れる（役がなくなる人は R に戻る）。
+    pub fn set_assignee_roles(&mut self, id: &str, person_id: &str, roles: Roles) -> Result<Task> {
+        let old = self.task(id)?;
+        let Some(current) = old.roles_of(person_id) else {
+            return Err(Error::Invalid(
+                "担当者ではない人の役は変えられません".into(),
+            ));
+        };
+        if roles.is_empty() {
+            return Err(Error::Invalid("役は 1 つ以上必要です".into()));
+        }
+        if roles == current {
+            return Ok(old);
+        }
+        let now = now_ms();
+        let tx = self.conn.transaction()?;
+        let write = |person: &str, before: Roles, after: Roles| -> Result<()> {
+            tx.prepare_cached(
+                "UPDATE task_assignees SET roles = ?3 WHERE task_id = ?1 AND person_id = ?2",
+            )?
+            .execute(params![id, person, after.to_string()])?;
+            insert_change(
+                &tx,
+                id,
+                "assignee_roles",
+                &format!("{person}={before}"),
+                &format!("{person}={after}"),
+                now,
+            )?;
+            Ok(())
+        };
+        if roles.contains(Role::A) {
+            for other in old.assignee_ids.iter().filter(|p| *p != person_id) {
+                let before = old.roles_of(other).unwrap_or_default();
+                if before.contains(Role::A) {
+                    let after = before.without(Role::A);
+                    write(
+                        other,
+                        before,
+                        if after.is_empty() { Roles::R } else { after },
+                    )?;
+                }
+            }
+        }
+        write(person_id, current, roles)?;
+        tx.execute(
+            "UPDATE tasks SET updated_at = ?2 WHERE id = ?1",
+            params![id, now],
+        )?;
+        tx.commit()?;
+        self.task(id)
+    }
+
+    /// 担当者の「自分の分」を完了にする・取り消す。
+    ///
+    /// 全員の分がそろうとタスクが完了になる。完了したタスクで誰かの分を
+    /// 取り消すと、タスクは進行中に戻る。
+    pub fn set_assignee_done(&mut self, id: &str, person_id: &str, done: bool) -> Result<Task> {
+        let old = self.task(id)?;
+        if old.roles_of(person_id).is_none() {
+            return Err(Error::Invalid(
+                "担当者ではない人の分は完了にできません".into(),
+            ));
+        }
+        if old.is_done_by(person_id) == done {
+            return Ok(old);
+        }
+        let (was_done, total) = old.done_count();
+        if done && was_done + 1 == total {
+            // 最後の 1 人。タスクごと完了にする（全員の分も完了になる）
+            return self.set_task_status(id, Status::Completed);
+        }
+        if !done && old.status == Status::Completed {
+            // タスクを戻すと全員の分が取り消されるので、ほかの人の分を戻す
+            let keep: Vec<(Id, i64)> = old
+                .assignee_ids
+                .iter()
+                .zip(&old.assignee_done)
+                .filter(|(p, _)| *p != person_id)
+                .filter_map(|(p, at)| at.map(|at| (p.clone(), at)))
+                .collect();
+            self.set_task_status(id, Status::InProcess)?;
+            let tx = self.conn.transaction()?;
+            for (person, at) in &keep {
+                tx.execute(
+                    "UPDATE task_assignees SET completed_at = ?3 \
+                     WHERE task_id = ?1 AND person_id = ?2",
+                    params![id, person, at],
+                )?;
+            }
+            insert_change(&tx, id, "assignee_done", person_id, "", now_ms())?;
+            tx.commit()?;
+            return self.task(id);
+        }
+        let now = now_ms();
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "UPDATE task_assignees SET completed_at = ?3 WHERE task_id = ?1 AND person_id = ?2",
+            params![id, person_id, done.then_some(now)],
+        )?;
+        let (before, after) = if done {
+            ("", person_id)
+        } else {
+            (person_id, "")
+        };
+        insert_change(&tx, id, "assignee_done", before, after, now)?;
+        tx.execute(
+            "UPDATE tasks SET updated_at = ?2 WHERE id = ?1",
+            params![id, now],
+        )?;
+        tx.commit()?;
+        self.task(id)
     }
 
     /// 別のワークスペースの末尾に移す。`None` ならどこにも入れない状態に戻す。
@@ -941,7 +1084,13 @@ fn insert_task(conn: &Connection, t: &Task) -> rusqlite::Result<()> {
         t.percent,
         t.parent_id
     ])?;
-    insert_assignees(conn, &t.id, &t.assignee_ids)?;
+    insert_assignees(
+        conn,
+        &t.id,
+        &t.assignee_ids,
+        &t.assignee_roles,
+        &t.assignee_done,
+    )?;
     insert_categories(conn, &t.id, &t.categories)
 }
 
@@ -959,12 +1108,26 @@ fn insert_categories(
     Ok(())
 }
 
-fn insert_assignees(conn: &Connection, task_id: &str, ids: &[Id]) -> rusqlite::Result<()> {
+/// 担当者を足す。すでにいる人はそのままにする。役の指定がない人は R。
+fn insert_assignees(
+    conn: &Connection,
+    task_id: &str,
+    ids: &[Id],
+    roles: &[Roles],
+    done: &[Option<i64>],
+) -> rusqlite::Result<()> {
     let mut stmt = conn.prepare_cached(
-        "INSERT OR IGNORE INTO task_assignees(task_id, person_id) VALUES (?1, ?2)",
+        "INSERT OR IGNORE INTO task_assignees(task_id, person_id, roles, completed_at) \
+         VALUES (?1, ?2, ?3, ?4)",
     )?;
-    for person_id in ids {
-        stmt.execute(params![task_id, person_id])?;
+    for (i, person_id) in ids.iter().enumerate() {
+        let roles = roles.get(i).copied().unwrap_or_default();
+        stmt.execute(params![
+            task_id,
+            person_id,
+            roles.to_string(),
+            done.get(i).copied().flatten()
+        ])?;
     }
     Ok(())
 }
@@ -1038,6 +1201,8 @@ fn task_from_row(r: &Row<'_>) -> rusqlite::Result<Task> {
         percent: r.get(12)?,
         parent_id: r.get(13)?,
         assignee_ids: Vec::new(),
+        assignee_roles: Vec::new(),
+        assignee_done: Vec::new(),
         categories: Vec::new(),
         position: r.get(7)?,
         created_at: r.get(8)?,
@@ -1801,5 +1966,238 @@ mod unfiled_tests {
             s.tasks(Scope::All, &TaskFilter::default()).unwrap().len(),
             2
         );
+    }
+}
+
+#[cfg(test)]
+mod raci_tests {
+    use super::Store;
+    use crate::model::*;
+    use crate::Error;
+
+    /// 担当者 3 人のタスクを用意する。
+    fn setup() -> (Store, Task, [Id; 3]) {
+        let mut s = Store::open_in_memory().unwrap();
+        let ids = ["あ", "い", "う"].map(|name| s.create_person(name, false).unwrap().id);
+        let task = s
+            .create_task(
+                None,
+                &TaskDraft {
+                    title: "会場を決める".into(),
+                    assignee_ids: ids.to_vec(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        (s, task, ids)
+    }
+
+    #[test]
+    fn new_assignees_start_as_r() {
+        let (s, task, ids) = setup();
+        assert_eq!(task.assignee_roles, [Roles::R; 3]);
+        let loaded = s.task(&task.id).unwrap();
+        assert_eq!(loaded, task);
+        assert_eq!(loaded.roles_of(&ids[0]), Some(Roles::R));
+        assert_eq!(loaded.roles_of("いない人"), None);
+        let listed = s.tasks(Scope::All, &TaskFilter::default()).unwrap();
+        assert_eq!(listed[0], task);
+    }
+
+    #[test]
+    fn accountable_is_one_person_per_task() {
+        let (mut s, task, ids) = setup();
+        let ra = Roles::of(&[Role::R, Role::A]);
+        let t = s.set_assignee_roles(&task.id, &ids[0], ra).unwrap();
+        assert_eq!(t.roles_of(&ids[0]), Some(ra));
+        // A だけの人から A が移ると、その人は R に戻る
+        let only_a = Roles::of(&[Role::A]);
+        let t = s.set_assignee_roles(&task.id, &ids[1], only_a).unwrap();
+        assert_eq!(t.roles_of(&ids[0]), Some(Roles::R));
+        assert_eq!(t.roles_of(&ids[1]), Some(only_a));
+        let t = s
+            .set_assignee_roles(&task.id, &ids[2], Roles::of(&[Role::A, Role::I]))
+            .unwrap();
+        assert_eq!(t.roles_of(&ids[1]), Some(Roles::R));
+        assert_eq!(t.roles_of(&ids[2]).unwrap().to_string(), "A,I");
+        assert_eq!(
+            t.assignee_roles
+                .iter()
+                .filter(|r| r.contains(Role::A))
+                .count(),
+            1
+        );
+        // A 以外は何人でも持てる
+        let c = Roles::of(&[Role::C]);
+        s.set_assignee_roles(&task.id, &ids[0], c).unwrap();
+        let t = s.set_assignee_roles(&task.id, &ids[1], c).unwrap();
+        assert_eq!(t.assignee_roles[..2], [c, c]);
+    }
+
+    #[test]
+    fn roles_need_at_least_one_and_an_assignee() {
+        let (mut s, task, ids) = setup();
+        assert!(matches!(
+            s.set_assignee_roles(&task.id, &ids[0], Roles::NONE),
+            Err(Error::Invalid(_))
+        ));
+        let outsider = s.create_person("え", false).unwrap();
+        assert!(matches!(
+            s.set_assignee_roles(&task.id, &outsider.id, Roles::R),
+            Err(Error::Invalid(_))
+        ));
+        assert!(matches!(
+            s.set_assignee_done(&task.id, &outsider.id, true),
+            Err(Error::Invalid(_))
+        ));
+        assert_eq!(s.task(&task.id).unwrap(), task);
+    }
+
+    #[test]
+    fn role_changes_are_recorded() {
+        let (mut s, task, ids) = setup();
+        s.set_assignee_roles(&task.id, &ids[0], Roles::of(&[Role::A]))
+            .unwrap();
+        // 同じ役をもう一度付けても履歴は増えない
+        s.set_assignee_roles(&task.id, &ids[0], Roles::of(&[Role::A]))
+            .unwrap();
+        s.set_assignee_roles(&task.id, &ids[1], Roles::of(&[Role::A, Role::C]))
+            .unwrap();
+        let changes: Vec<(String, String)> = s
+            .changes(&task.id)
+            .unwrap()
+            .into_iter()
+            .filter(|c| c.field == "assignee_roles")
+            .map(|c| (c.old_value, c.new_value))
+            .collect();
+        assert_eq!(
+            changes,
+            [
+                (format!("{}=R", ids[0]), format!("{}=A", ids[0])),
+                (format!("{}=A", ids[0]), format!("{}=R", ids[0])),
+                (format!("{}=R", ids[1]), format!("{}=A,C", ids[1])),
+            ]
+        );
+    }
+
+    #[test]
+    fn roles_survive_adding_and_removing_other_assignees() {
+        let (mut s, task, ids) = setup();
+        let ci = Roles::of(&[Role::C, Role::I]);
+        s.set_assignee_roles(&task.id, &ids[0], ci).unwrap();
+        s.set_assignee_done(&task.id, &ids[0], true).unwrap();
+        let mut draft = TaskDraft::from(&s.task(&task.id).unwrap());
+        draft.assignee_ids = vec![ids[0].clone(), ids[2].clone()];
+        let t = s.update_task(&task.id, &draft).unwrap();
+        assert_eq!(t.assignee_ids, [ids[0].clone(), ids[2].clone()]);
+        assert_eq!(t.assignee_roles, [ci, Roles::R]);
+        assert!(t.is_done_by(&ids[0]) && !t.is_done_by(&ids[2]));
+        // 外して足し直した人は R から
+        draft.assignee_ids = vec![ids[2].clone()];
+        s.update_task(&task.id, &draft).unwrap();
+        draft.assignee_ids = vec![ids[0].clone(), ids[2].clone()];
+        let t = s.update_task(&task.id, &draft).unwrap();
+        assert_eq!(t.roles_of(&ids[0]), Some(Roles::R));
+        assert!(!t.is_done_by(&ids[0]));
+    }
+
+    #[test]
+    fn task_completes_when_everyone_is_done() {
+        let (mut s, task, ids) = setup();
+        let t = s.set_assignee_done(&task.id, &ids[0], true).unwrap();
+        assert_eq!((t.status, t.done_count()), (Status::NeedsAction, (1, 3)));
+        let t = s.set_assignee_done(&task.id, &ids[1], true).unwrap();
+        assert_eq!((t.status, t.done_count()), (Status::NeedsAction, (2, 3)));
+        // 役に関わらず全員を数える
+        s.set_assignee_roles(&task.id, &ids[2], Roles::of(&[Role::I]))
+            .unwrap();
+        let t = s.set_assignee_done(&task.id, &ids[2], true).unwrap();
+        assert_eq!((t.status, t.done_count()), (Status::Completed, (3, 3)));
+        assert_eq!(t.percent, 100);
+        assert!(t.completed_at.is_some());
+    }
+
+    #[test]
+    fn undoing_one_person_reopens_the_task() {
+        let (mut s, task, ids) = setup();
+        for id in &ids {
+            s.set_assignee_done(&task.id, id, true).unwrap();
+        }
+        let t = s.set_assignee_done(&task.id, &ids[1], false).unwrap();
+        assert_eq!((t.status, t.done_count()), (Status::InProcess, (2, 3)));
+        assert!(t.is_done_by(&ids[0]) && !t.is_done_by(&ids[1]) && t.is_done_by(&ids[2]));
+        assert_eq!(t.completed_at, None);
+        // 取り消しの取り消しは何もしない
+        assert_eq!(s.set_assignee_done(&task.id, &ids[1], false).unwrap(), t);
+    }
+
+    #[test]
+    fn completing_the_whole_task_completes_everyone() {
+        let (mut s, task, ids) = setup();
+        s.set_assignee_done(&task.id, &ids[0], true).unwrap();
+        let first = s.task(&task.id).unwrap().assignee_done[0];
+        let t = s.set_task_status(&task.id, Status::Completed).unwrap();
+        assert_eq!(t.done_count(), (3, 3));
+        // 先に完了していた人の時刻は変えない
+        assert_eq!(t.assignee_done[0], first);
+        // タスクを戻すと全員の分が取り消される
+        let t = s.set_task_status(&task.id, Status::NeedsAction).unwrap();
+        assert_eq!(t.done_count(), (0, 3));
+        // 中止では誰の分も完了にしない
+        let t = s.set_task_status(&task.id, Status::Cancelled).unwrap();
+        assert_eq!(t.done_count(), (0, 3));
+    }
+
+    #[test]
+    fn a_single_assignee_completes_the_task() {
+        let mut s = Store::open_in_memory().unwrap();
+        let me = s.create_person("自分", true).unwrap();
+        let task = s
+            .create_task(
+                None,
+                &TaskDraft {
+                    title: "牛乳を買う".into(),
+                    assignee_ids: vec![me.id.clone()],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let t = s.set_assignee_done(&task.id, &me.id, true).unwrap();
+        assert_eq!((t.status, t.done_count()), (Status::Completed, (1, 1)));
+        let t = s.set_assignee_done(&task.id, &me.id, false).unwrap();
+        assert_eq!((t.status, t.done_count()), (Status::InProcess, (0, 1)));
+    }
+
+    #[test]
+    fn done_changes_are_recorded() {
+        let (mut s, task, ids) = setup();
+        s.set_assignee_done(&task.id, &ids[0], true).unwrap();
+        s.set_assignee_done(&task.id, &ids[0], false).unwrap();
+        let changes: Vec<(String, String)> = s
+            .changes(&task.id)
+            .unwrap()
+            .into_iter()
+            .filter(|c| c.field == "assignee_done")
+            .map(|c| (c.old_value, c.new_value))
+            .collect();
+        assert_eq!(
+            changes,
+            [
+                (String::new(), ids[0].clone()),
+                (ids[0].clone(), String::new())
+            ]
+        );
+    }
+
+    #[test]
+    fn roles_and_done_round_trip_through_dump_and_merge() {
+        let (mut s, task, ids) = setup();
+        s.set_assignee_roles(&task.id, &ids[0], Roles::of(&[Role::A, Role::C]))
+            .unwrap();
+        s.set_assignee_done(&task.id, &ids[1], true).unwrap();
+        let expect = s.task(&task.id).unwrap();
+        let mut other = Store::open_in_memory().unwrap();
+        other.merge(&s.dump().unwrap()).unwrap();
+        assert_eq!(other.task(&task.id).unwrap(), expect);
     }
 }
