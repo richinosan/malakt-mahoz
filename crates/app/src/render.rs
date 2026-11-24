@@ -3710,6 +3710,11 @@ impl MainView {
                                     .ghost()
                                     .xsmall()
                                     .on_click(cx.listener(|this, _, _, cx| {
+                                        // ペインのキーの一覧やプリセットは、いちばん上に出ている
+                                        if this.pane_overlay.take().is_some() {
+                                            cx.notify();
+                                            return;
+                                        }
                                         this.modal = Modal::None;
                                         this.issued_ticket = None;
                                         cx.notify();

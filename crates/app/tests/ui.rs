@@ -2040,6 +2040,74 @@ fn the_last_screen_comes_back_after_a_restart(cx: &mut TestAppContext) {
 /// 画面はペインに分けられる。Ctrl+B のキーで分割・移動・入れ替え・拡大・リサイズ・閉じるができ、
 /// どのペインも別々の場所を持ち、配置は再起動しても戻る。
 #[gpui_kit::test]
+fn pane_presets_are_saved_applied_and_deleted(cx: &mut TestAppContext) {
+    use malakt_core::panes::{Action, Dir};
+    start(cx);
+    let (window, view) = open(cx, win(1600., 1000.));
+    let act = |cx: &mut TestAppContext, action: Action| {
+        cx.update(|cx| {
+            window
+                .update(cx, |_, window, cx| {
+                    view.update(cx, |v, cx| v.pane_action(action, window, cx))
+                })
+                .unwrap()
+        });
+        ui(cx, window, |_, _| {});
+    };
+    // 3 つに分けて、プリセットの一覧から保存する
+    act(cx, Action::Split(Dir::Right));
+    act(cx, Action::Split(Dir::Down));
+    let saved = cx.update(|cx| view.read(cx).layout.encode());
+    act(cx, Action::Presets);
+    ui(cx, window, |window, cx| {
+        window.click("pane-preset-save", cx)
+    });
+    // 同じ配置は 2 つにならない
+    ui(cx, window, |window, cx| {
+        window.click("pane-preset-save", cx)
+    });
+    cx.update(|cx| {
+        assert_eq!(
+            view.read(cx).pane_presets,
+            vec![("配置 1".to_string(), saved.clone())]
+        )
+    });
+
+    // 1 画面に戻してから、保存した配置を選ぶと 3 つに戻る
+    ui(cx, window, |window, cx| {
+        window.click(("pane-preset", 0usize), cx)
+    });
+    cx.update(|cx| assert_eq!(view.read(cx).layout.panes().len(), 1));
+    act(cx, Action::Presets);
+    ui(cx, window, |window, cx| {
+        window.click(("pane-preset-own", 0usize), cx)
+    });
+    cx.update(|cx| {
+        let v = view.read(cx);
+        assert_eq!(v.layout.panes().len(), 3);
+        assert_eq!(v.layout.encode().split('@').next(), saved.split('@').next());
+    });
+
+    // 開き直したウィンドウにも出る。消すと一覧からなくなる
+    let (window, view) = open(cx, win(1600., 1000.));
+    cx.update(|cx| assert_eq!(view.read(cx).pane_presets.len(), 1));
+    cx.update(|cx| {
+        window
+            .update(cx, |_, window, cx| {
+                view.update(cx, |v, cx| v.pane_action(Action::Presets, window, cx))
+            })
+            .unwrap()
+    });
+    ui(cx, window, |window, cx| {
+        window.click(("pane-preset-delete", 0usize), cx)
+    });
+    ui(cx, window, |window, _| {
+        assert!(window.try_find(("pane-preset-own", 0usize)).is_none());
+    });
+    cx.update(|cx| assert!(view.read(cx).pane_presets.is_empty()));
+}
+
+#[gpui_kit::test]
 fn panes_split_move_resize_close_and_come_back(cx: &mut TestAppContext) {
     use gpui_kit::Keystroke;
     use malakt_core::panes::{Action, Dir, Keys};

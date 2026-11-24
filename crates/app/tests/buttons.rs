@@ -11,6 +11,7 @@ use gpui_kit::{
     px, size, AnyWindowHandle, AppContext, Bounds, ElementId, Entity, Pixels, Point, Role, Size,
     TestAppContext, WindowBounds, WindowOptions,
 };
+use malakt_core::panes::{Action, Dir};
 use malakt_core::view::Priority;
 use malakt_core::{NewComment, Scope, Status, Store, TaskDraft, TaskFilter};
 use malakt_mahoz::state::Editing;
@@ -95,6 +96,7 @@ const QUIET: &[(&str, &str)] = &[
     ("bulk-cat-mode#0", "今選んでいる変え方"),
     ("ticket-who#0", "今選んでいる人"),
     // 入力が空のときは送らない
+    ("pane-keys#0", "今選んでいるキーの割り当て"),
     ("quick-add-submit", "タイトルが空"),
     ("comment-submit", "コメントが空"),
     ("comment-review", "コメントが空"),
@@ -383,7 +385,11 @@ fn fingerprint(cx: &mut TestAppContext, world: &World) -> String {
     cx.update(|cx| {
         let v = world.view.read(cx);
         let state = format!(
-            "{:?} {:?} {:?} {:?} {:?} {:?} {:?} {:?} {:?} {} {} {} {} {} {} {} {} {:?} {} {} {} {} {:?} {:?} {:?} {:?} {:?} {:?} {:?} {:?} {:?}",
+            "{} {:?} {:?} {:?} {:?} {:?} {:?} {:?} {:?} {:?} {:?} {:?} {:?} {} {} {} {} {} {} {} {} {:?} {} {} {} {} {:?} {:?} {:?} {:?} {:?} {:?} {:?} {:?} {:?}",
+            v.layout.encode(),
+            v.pane_keys,
+            v.pane_overlay,
+            v.pane_presets,
             v.nav,
             v.panel,
             v.modal,
@@ -577,6 +583,27 @@ fn screens() -> Vec<(&'static str, Size<Pixels>, Setup)> {
                 })
             },
         ),
+        ("ペインを分けた画面", wide, |cx, w| {
+            with_view(cx, w, |v, window, cx| {
+                v.go(Nav::Home, cx);
+                v.pane_action(Action::Split(Dir::Right), window, cx);
+            })
+        }),
+        ("ペインのキーの一覧", wide, |cx, w| {
+            with_view(cx, w, |v, window, cx| {
+                v.go(Nav::Home, cx);
+                v.pane_action(Action::Help, window, cx);
+            })
+        }),
+        ("配置のプリセット", wide, |cx, w| {
+            with_view(cx, w, |v, window, cx| {
+                v.go(Nav::Home, cx);
+                v.pane_action(Action::Split(Dir::Right), window, cx);
+                v.save_pane_preset(cx);
+                v.pane_action(Action::Split(Dir::Down), window, cx);
+                v.pane_action(Action::Presets, window, cx);
+            })
+        }),
         ("狭いウィンドウ", window_size(420., 900.), |cx, w| {
             with_view(cx, w, |v, _, cx| v.go(Nav::All, cx))
         }),
@@ -659,6 +686,7 @@ fn every_button_responds(cx: &mut TestAppContext) {
     let source = [
         include_str!("../src/render.rs"),
         include_str!("../src/ai_view.rs"),
+        include_str!("../src/panes.rs"),
     ]
     .concat();
     let mut missed: Vec<&str> = Vec::new();

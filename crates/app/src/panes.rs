@@ -17,6 +17,7 @@ use crate::shadow::{Elevate, Elevation};
 use crate::state::{MainView, Nav};
 
 const KEYS_SETTING: &str = "panes.keys";
+const PRESETS_SETTING: &str = "panes.presets";
 
 /// ペインの上に重ねて出すもの。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,6 +57,48 @@ impl MainView {
     pub fn load_pane_keys(&mut self, cx: &App) {
         if let Ok(Some(code)) = db::shared(cx).read(cx).store.setting(KEYS_SETTING) {
             self.pane_keys = Keys::from_code(&code);
+        }
+    }
+
+    pub fn load_pane_presets(&mut self, cx: &App) {
+        if let Ok(Some(json)) = db::shared(cx).read(cx).store.setting(PRESETS_SETTING) {
+            self.pane_presets = serde_json::from_str(&json).unwrap_or_default();
+        }
+    }
+
+    fn store_pane_presets(&mut self, presets: Vec<(String, String)>, cx: &mut Context<Self>) {
+        let Ok(json) = serde_json::to_string(&presets) else {
+            return;
+        };
+        if self
+            .write(cx, |s| s.set_setting(PRESETS_SETTING, Some(&json)))
+            .is_some()
+        {
+            self.pane_presets = presets;
+        }
+        cx.notify();
+    }
+
+    /// 今の配置を「配置 N」の名前で保存する。同じ配置がもうあれば増やさない。
+    pub fn save_pane_preset(&mut self, cx: &mut Context<Self>) {
+        let text = self.layout.encode();
+        if self.pane_presets.iter().any(|(_, saved)| *saved == text) {
+            return;
+        }
+        let name = (1..)
+            .map(|n| format!("配置 {n}"))
+            .find(|name| self.pane_presets.iter().all(|(used, _)| used != name))
+            .unwrap_or_default();
+        let mut presets = self.pane_presets.clone();
+        presets.push((name, text));
+        self.store_pane_presets(presets, cx);
+    }
+
+    pub fn delete_pane_preset(&mut self, at: usize, cx: &mut Context<Self>) {
+        if at < self.pane_presets.len() {
+            let mut presets = self.pane_presets.clone();
+            presets.remove(at);
+            self.store_pane_presets(presets, cx);
         }
     }
 
@@ -568,6 +611,41 @@ impl MainView {
                                 })),
                         );
                     }
+                    for (n, (name, text)) in self.pane_presets.iter().cloned().enumerate() {
+                        body = body.child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap_1()
+                                .child(
+                                    div().flex_1().flex().flex_col().child(
+                                        Button::new(("pane-preset-own", n))
+                                            .label(name)
+                                            .ghost()
+                                            .on_click(cx.listener(move |this, _, window, cx| {
+                                                this.apply_pane_layout(&text, window, cx)
+                                            })),
+                                    ),
+                                )
+                                .child(
+                                    Button::new(("pane-preset-delete", n))
+                                        .icon(app_icon("trash"))
+                                        .ghost()
+                                        .xsmall()
+                                        .tooltip("この配置を削除")
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.delete_pane_preset(n, cx)
+                                        })),
+                                ),
+                        );
+                    }
+                    body = body.child(
+                        Button::new("pane-preset-save")
+                            .icon(app_icon("plus"))
+                            .label("今の配置を保存")
+                            .on_click(cx.listener(|this, _, _, cx| this.save_pane_preset(cx))),
+                    );
                 }
             }
             let title = match overlay {

@@ -240,6 +240,8 @@ pub struct MainView {
     pub pane_resize: bool,
     pub pane_keys: malakt_core::panes::Keys,
     pub pane_overlay: Option<crate::panes::PaneOverlay>,
+    /// 自分で保存した配置（名前、配置）
+    pub pane_presets: Vec<(String, String)>,
     pub border_drag: Option<crate::panes::BorderDrag>,
     /// ドラッグして動かしているタスク。
     pub task_drag: Option<TaskDrag>,
@@ -461,6 +463,7 @@ impl MainView {
             pane_resize: false,
             pane_keys: Default::default(),
             pane_overlay: None,
+            pane_presets: Vec::new(),
             border_drag: None,
             window_place: None,
             motion: true,
@@ -471,6 +474,7 @@ impl MainView {
         this.load_sidebar_width(cx);
         this.load_columns(cx);
         this.load_pane_keys(cx);
+        this.load_pane_presets(cx);
         this.reload(cx);
         // ウィンドウの準備が終わってから、たまっている通知を出す
         // 「システムに合わせる」のとき、OS の外観が変わったら塗り直す
