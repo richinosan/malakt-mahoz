@@ -177,6 +177,11 @@ const MIGRATIONS: &[&str] = &[
     ) STRICT;
     CREATE INDEX tickets_task ON tickets(task_id);
     "#,
+    // 9: ワークスペースのアイコンと色
+    r#"
+    ALTER TABLE workspaces ADD COLUMN icon TEXT;
+    ALTER TABLE workspaces ADD COLUMN color TEXT;
+    "#,
 ];
 
 pub(crate) fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {

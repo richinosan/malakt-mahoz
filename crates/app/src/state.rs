@@ -49,10 +49,10 @@ pub enum Modal {
     /// 状態の変更（コメントを添えられる）
     Status(Id, Status),
     Lock,
-    /// ディスクの使用量と整理
-    Usage,
     /// ワークスペースの基準日と、タスク追加時の既定値
     WorkspaceSettings(Id),
+    /// ワークスペースのアイコンと色を選ぶ
+    WorkspaceIcon(Id),
     /// タスクをほかのワークスペースにも表示する（表示先を選ぶ）
     LinkTask(Id),
     /// 選んだタスクの期限をまとめて変える
@@ -492,6 +492,17 @@ impl MainView {
                 None
             }
         }
+    }
+
+    /// ワークスペースのアイコンと色を決める。`None` は既定に戻す。
+    pub fn set_workspace_icon(
+        &mut self,
+        id: &str,
+        icon: Option<&str>,
+        color: Option<&str>,
+        cx: &mut Context<Self>,
+    ) {
+        self.write(cx, |s| s.set_workspace_icon(id, icon, color));
     }
 
     // ---- 移動 ----
@@ -1322,15 +1333,8 @@ impl MainView {
                     }
                 }
             }
-            Modal::People => {
-                // 最初の 1 人は「自分」にする
-                let is_self = self.people.is_empty();
-                if self
-                    .write(cx, |s| s.create_person(&name, is_self))
-                    .is_some()
-                {
-                    Self::take(&self.inputs.name.clone(), window, cx);
-                }
+            Modal::People if self.write(cx, |s| s.create_person(&name, false)).is_some() => {
+                Self::take(&self.inputs.name.clone(), window, cx);
             }
             _ => {}
         }
@@ -1348,15 +1352,6 @@ impl MainView {
     /// ディスクの使用量。
     pub fn usage(&self, cx: &App) -> malakt_core::Usage {
         self.db.read(cx).store.usage().unwrap_or_default()
-    }
-
-    /// 消したデータの跡を整理して、ディスクに返す。
-    pub fn compact(&mut self, cx: &mut Context<Self>) {
-        let before = self.usage(cx);
-        if let Some(after) = self.write(cx, |s| s.compact()) {
-            let freed = before.database_bytes.saturating_sub(after.database_bytes);
-            self.notice = Some(format!("{} を空けました。", view::format_bytes(freed)).into());
-        }
     }
 
     pub fn open_people(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2004,10 +1999,135 @@ pub fn build_tree(workspaces: &[Workspace], collapsed: &HashSet<Id>) -> Vec<Tree
     rows
 }
 
+/// アイコンを選ばなかったワークスペースに出すアイコン。
+pub const DEFAULT_WORKSPACE_ICON: &str = "folder";
+
+macro_rules! bundled_icons {
+    (workspace: [$($name:literal),* $(,)?], other: [$($other:literal),* $(,)?] $(,)?) => {
+        /// ワークスペースに付けられるアイコン。名前は同梱の線画アイコンのファイル名。
+        pub const WORKSPACE_ICONS: [&str; 48] = [$($name),*];
+
+        /// 同梱しているアイコンの SVG。
+        pub fn icon_svg(name: &str) -> Option<&'static [u8]> {
+            match name {
+                $($name => Some(include_bytes!(concat!("../assets/icons/", $name, ".svg"))),)*
+                $($other => Some(include_bytes!(concat!("../assets/icons/", $other, ".svg"))),)*
+                _ => None,
+            }
+        }
+    };
+}
+
+bundled_icons! {
+    workspace: [
+        "folder",
+        "briefcase",
+        "house",
+        "book",
+        "bookmark",
+        "calendar",
+        "clipboard",
+        "list-todo",
+        "circle-check",
+        "flag",
+        "star",
+        "heart",
+        "target",
+        "rocket",
+        "lightbulb",
+        "sparkles",
+        "zap",
+        "feather",
+        "pen",
+        "palette",
+        "camera",
+        "music",
+        "mic",
+        "gamepad-2",
+        "code",
+        "terminal",
+        "bug",
+        "wrench",
+        "hammer",
+        "package",
+        "box",
+        "archive",
+        "inbox",
+        "mail",
+        "bell",
+        "users",
+        "globe",
+        "plane",
+        "truck",
+        "coffee",
+        "gift",
+        "leaf",
+        "sun",
+        "moon",
+        "pipette",
+        "layers",
+        "graduation-cap",
+        "shopping-cart",
+    ],
+    other: ["settings", "trash", "ellipsis", "plus", "download", "upload"],
+}
+
+/// アイコンのファイルの場所。[`Assets`] が読む。
+pub fn icon_path(icon: &str) -> String {
+    format!("{ICON_DIR}{icon}.svg")
+}
+
+/// ワークスペースのアイコンのファイルの場所。選んでいなければ既定のアイコン。
+pub fn workspace_icon_path(icon: Option<&str>) -> String {
+    icon_path(icon.unwrap_or(DEFAULT_WORKSPACE_ICON))
+}
+
+const ICON_DIR: &str = "app-icons/";
+
+/// アプリが使う絵の置き場。このアプリのアイコンはここから、ほかは UI 部品の同梱分から読む。
+pub struct Assets;
+
+impl AssetSource for Assets {
+    fn load(&self, path: &str) -> Result<Option<std::borrow::Cow<'static, [u8]>>> {
+        let own = path
+            .strip_prefix(ICON_DIR)
+            .and_then(|file| file.strip_suffix(".svg"));
+        match own {
+            // 取り込んだデータに知らない名前があっても、既定のアイコンで出す
+            Some(name) => Ok(icon_svg(name)
+                .or_else(|| icon_svg(DEFAULT_WORKSPACE_ICON))
+                .map(Into::into)),
+            None => gpui_kit::assets::Assets.load(path),
+        }
+    }
+
+    fn list(&self, path: &str) -> Result<Vec<SharedString>> {
+        gpui_kit::assets::Assets.list(path)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     // `super::*` は gpui の `test` マクロまで持ち込むので、使うものだけを書く
     use super::{build_tree, HashSet, Id, TreeRow, Workspace};
+
+    #[test]
+    fn every_workspace_icon_is_bundled() {
+        use gpui_kit::AssetSource;
+        let load = |icon| {
+            let path = super::workspace_icon_path(icon);
+            super::Assets.load(&path).unwrap().unwrap()
+        };
+        let folder = load(None);
+        for icon in super::WORKSPACE_ICONS {
+            assert!(load(Some(icon)).starts_with(b"<svg"), "{icon}");
+        }
+        assert_ne!(load(Some("rocket")), folder);
+        // 知らない名前は既定のアイコンになる
+        assert_eq!(load(Some("no-such-icon")), folder);
+        // UI 部品のアイコンも読める
+        assert!(super::Assets.load("icons/check.svg").unwrap().is_some());
+    }
 
     fn ws(id: &str, parent: Option<&str>, position: i64) -> Workspace {
         Workspace {
@@ -2015,6 +2135,8 @@ mod tests {
             parent_id: parent.map(str::to_owned),
             name: id.into(),
             date: None,
+            icon: None,
+            color: None,
             position,
             created_at: 0,
             updated_at: 0,
