@@ -23,6 +23,7 @@ use crate::ai::{
 };
 use crate::db::{self, Db};
 use crate::render::app_icon;
+use crate::shadow::{Elevate, Elevation};
 use crate::state::MainView;
 use crate::{ClearShell, StopAi};
 
@@ -100,7 +101,7 @@ fn avatar(cx: &App) -> Div {
         .justify_center()
         .bg(theme.primary)
         .text_color(theme.primary_foreground)
-        .shadow_sm()
+        .elevate(Elevation::Low, cx)
         .child(app_icon("sparkles").size_3())
 }
 
@@ -832,7 +833,7 @@ impl AiPane {
                 .border_1()
                 .border_color(theme.border)
                 .bg(theme.background)
-                .shadow_sm()
+                .elevate(Elevation::Low, cx)
         };
 
         col()
@@ -884,7 +885,7 @@ impl AiPane {
                                 .border_1()
                                 .border_color(theme.border)
                                 .bg(theme.background)
-                                .shadow_md()
+                                .elevate(Elevation::Mid, cx)
                                 .child(
                                     row()
                                         .gap_1()
@@ -1084,7 +1085,7 @@ impl AiPane {
                         .rounded_lg()
                         .bg(theme.primary)
                         .text_color(theme.primary_foreground)
-                        .shadow_sm()
+                        .elevate(Elevation::Low, cx)
                         .text_sm()
                         .child(text.clone())
                         .test_support(),
@@ -1103,7 +1104,7 @@ impl AiPane {
                         .py_2()
                         .rounded_lg()
                         .bg(theme.muted)
-                        .shadow_sm()
+                        .elevate(Elevation::Low, cx)
                         .text_sm()
                         .child(text.clone())
                         .test_support(),
@@ -1206,7 +1207,7 @@ impl AiPane {
             .border_1()
             .border_color(theme.border)
             .bg(theme.background)
-            .shadow_sm()
+            .elevate(Elevation::Low, cx)
             .child(
                 row()
                     .id(("ai-tools", start))
@@ -1606,7 +1607,7 @@ impl AiPane {
                     .border_1()
                     .border_color(theme.primary)
                     .bg(theme.background)
-                    .shadow_md()
+                    .elevate(Elevation::Mid, cx)
                     .child(div().text_sm().child(pending.text.clone()))
                     .child(
                         row()
@@ -2057,7 +2058,10 @@ impl Render for AiPane {
                     .occlude()
                     .when_some(docked, |d, w| {
                         // タスクの画面の上に乗って見えるように、左に影を落とす
-                        d.w(w).border_l_1().border_color(theme.border).shadow_lg()
+                        d.w(w)
+                            .border_l_1()
+                            .border_color(theme.border)
+                            .elevate(Elevation::High, cx)
                     })
                     .when(docked.is_none(), |d| {
                         // 上のバーとタスクの画面を残して、右に重ねる
@@ -2069,7 +2073,7 @@ impl Render for AiPane {
                             .max_w_full()
                             .border_l_1()
                             .border_color(theme.border)
-                            .shadow_lg()
+                            .elevate(Elevation::High, cx)
                     })
                     .when(side_by_side, |d| d.flex_row())
                     .when(!side_by_side, |d| d.flex_col())
