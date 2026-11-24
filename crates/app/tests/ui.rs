@@ -426,6 +426,7 @@ fn every_screen_renders_at_any_size(cx: &mut TestAppContext) {
             Modal::History,
             Modal::Status(task.clone(), Status::Completed),
             Modal::Lock,
+            Modal::Usage,
         ];
         for modal in modals {
             cx.update(|cx| {
@@ -742,4 +743,27 @@ fn comments_edit_mention_review_and_report(cx: &mut TestAppContext) {
         Status::Completed
     );
     ui(cx, window, |_, _| {});
+}
+
+/// 使用量を見て、その場で整理できる。
+#[gpui_kit::test]
+fn usage_dialog_shows_size_and_compacts(cx: &mut TestAppContext) {
+    start(cx);
+    let (window, view) = open(cx, wide());
+    ui(cx, window, |window, cx| window.click("open-usage", cx));
+    cx.update(|cx| {
+        let view = view.read(cx);
+        assert_eq!(view.modal, Modal::Usage);
+        assert!(view.usage(cx).database_bytes > 0);
+    });
+    ui(cx, window, |window, cx| window.click("usage-compact", cx));
+    cx.update(|cx| {
+        let view = view.read(cx);
+        assert!(view.error.is_none());
+        assert!(view
+            .notice
+            .as_ref()
+            .is_some_and(|n| n.contains("空けました")));
+        assert_eq!(view.usage(cx).reclaimable_bytes, 0);
+    });
 }

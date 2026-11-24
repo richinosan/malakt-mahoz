@@ -267,6 +267,12 @@ impl MainView {
                     cx.listener(|this, _, window, cx| this.open_lock_settings(window, cx)),
                 ),
             )
+            .child(
+                action("open-usage", "使用量").on_click(cx.listener(|this, _, _, cx| {
+                    this.modal = Modal::Usage;
+                    cx.notify();
+                })),
+            )
             .when(self.lock_enabled(cx), |d| {
                 d.child(
                     action("lock-now", "今すぐロック")
@@ -2306,6 +2312,40 @@ impl MainView {
                             ),
                     );
                 self.dialog("状態を変更", body, cx)
+            }
+            Modal::Usage => {
+                let usage = self.usage(cx);
+                let line = |label: &'static str, bytes: u64| {
+                    row()
+                        .gap_2()
+                        .text_sm()
+                        .child(div().flex_1().child(label))
+                        .child(view::format_bytes(bytes))
+                };
+                let body = col()
+                    .gap_3()
+                    .child(muted(
+                        "このアプリがディスクに置くのはデータベースだけです。ログやキャッシュは書きません。"
+                            .to_owned(),
+                    ))
+                    .child(
+                        col()
+                            .gap_1()
+                            .child(line("データベース", usage.database_bytes))
+                            .child(line("うち、整理すると空く分", usage.reclaimable_bytes)),
+                    )
+                    .child(muted(
+                        "消したデータの跡は、アプリを閉じるときに自動で整理します。".to_owned(),
+                    ))
+                    .child(
+                        row().child(
+                            Button::new("usage-compact")
+                                .label("いま整理する")
+                                .small()
+                                .on_click(cx.listener(|this, _, _, cx| this.compact(cx))),
+                        ),
+                    );
+                self.dialog("使用量", body, cx)
             }
             Modal::Lock => {
                 let enabled = self.lock_enabled(cx);
