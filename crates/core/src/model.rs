@@ -200,6 +200,16 @@ impl Role {
         }
     }
 
+    /// 役を選ぶところで出す補足。
+    pub fn hint(self) -> &'static str {
+        match self {
+            Role::R => "実行責任者（Responsible）。作業をする人",
+            Role::A => "説明責任者（Accountable）。結果に責任を持つ人。1 つのタスクにつき 1 人まで",
+            Role::C => "相談先（Consulted）。作業の前後に意見を聞く人",
+            Role::I => "報告先（Informed）。結果を知らせる人",
+        }
+    }
+
     fn bit(self) -> u8 {
         1 << self as u8
     }

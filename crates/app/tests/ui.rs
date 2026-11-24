@@ -616,7 +616,8 @@ fn assignee_roles_and_per_person_completion(cx: &mut TestAppContext) {
     let id = all_tasks(cx).remove(0).id;
     let load = |cx: &mut TestAppContext| store(cx, |s| s.task(&id).unwrap());
 
-    // 2 人を担当にすると、どちらも R から始まる
+    // 担当を押すと選ぶところが開く。2 人を担当にすると、どちらも R から始まる
+    ui(cx, window, |window, cx| window.click("p-assignees", cx));
     ui(cx, window, |window, cx| window.click(("p-as", 0usize), cx));
     ui(cx, window, |window, cx| window.click(("p-as", 1usize), cx));
     let t = load(cx);
@@ -1649,4 +1650,175 @@ fn sidebar_toggles_and_keeps_its_width(cx: &mut TestAppContext) {
     // 新しく開いたウィンドウも同じ幅で始まる
     let (_second, second_view) = open(cx, wide());
     cx.update(|cx| assert_eq!(second_view.read(cx).sidebar_width, SIDEBAR_MAX));
+}
+
+/// 表の列は、幅を変え、並べ替え、隠せる。見出しのメニューで並び順を変えられる。どれも保存される。
+#[gpui_kit::test]
+fn table_columns_resize_reorder_hide_and_sort(cx: &mut TestAppContext) {
+    use malakt_core::view::Sort;
+    use malakt_mahoz::state::{Column, COLUMN_MAX, COLUMN_MIN};
+    start(cx);
+    let (window, view) = open(cx, wide());
+    ui(cx, window, |window, cx| {
+        window.click("nav-all", cx);
+        window.click("quick-add", cx);
+        window.input("会場を決める", cx);
+        window.press("enter", cx);
+    });
+    let head = |column: Column| ("col-head", column as usize);
+    ui(cx, window, |window, _| {
+        for column in Column::ALL {
+            assert!(window.try_find(head(column)).is_some());
+            assert!(window.try_find(("col-resize", column as usize)).is_some());
+        }
+        assert!(window.try_find("col-title").is_some());
+    });
+
+    // 左の境界を左へ動かすと広がり、右へ動かすと狭まる。範囲の外には出ない
+    cx.update(|cx| {
+        view.update(cx, |v, cx| {
+            let width =
+                |v: &MainView, column| v.columns.iter().find(|c| c.column == column).unwrap().width;
+            let scale = malakt_mahoz::UI_SCALE;
+            v.start_column_resize(Column::Due, 500., cx);
+            v.drag_column(500. - 40. * scale, cx);
+            assert_eq!(width(v, Column::Due), Column::Due.default_width() + 40.);
+            v.drag_column(-9999., cx);
+            assert_eq!(width(v, Column::Due), COLUMN_MAX);
+            v.drag_column(9999., cx);
+            v.finish_column_resize(cx);
+            assert_eq!(width(v, Column::Due), COLUMN_MIN);
+            assert!(v.column_resize.is_none());
+            // ダブルクリックで最初の幅に戻す
+            v.reset_column_width(Column::Due, cx);
+            assert_eq!(width(v, Column::Due), Column::Due.default_width());
+            v.start_column_resize(Column::Status, 0., cx);
+            v.drag_column(-20. * scale, cx);
+            v.finish_column_resize(cx);
+
+            // 見出しをほかの列の上まで動かして離すと、そこへ入る
+            v.column_drag = Some(malakt_mahoz::state::ColumnDrag {
+                column: Column::Updated,
+                start_x: 0.,
+                moved: true,
+                over: Some(Column::Status),
+            });
+            v.finish_column_drag(cx);
+            assert_eq!(v.columns[0].column, Column::Updated);
+            // 動かさずに離したら（クリック）、並びは変わらない
+            v.column_drag = Some(malakt_mahoz::state::ColumnDrag {
+                column: Column::Due,
+                start_x: 0.,
+                moved: false,
+                over: Some(Column::Status),
+            });
+            v.finish_column_drag(cx);
+            assert_eq!(v.columns[4].column, Column::Due);
+
+            v.toggle_column(Column::Assignee, cx);
+        })
+    });
+    ui(cx, window, |window, _| {
+        assert!(window.try_find(head(Column::Assignee)).is_none());
+        assert!(window.try_find(head(Column::Due)).is_some());
+        // 追加のボタンは、どの列を隠しても残る
+        assert!(window.try_find("quick-add-submit").is_some());
+    });
+    let saved = store(cx, |s| s.setting("table.columns").unwrap());
+    assert_eq!(
+        saved.as_deref(),
+        Some("updated:84,status:116,priority:84,-assignee:160,due:150")
+    );
+
+    // 新しく開いたウィンドウも同じ列で始まる
+    let (second, second_view) = open(cx, wide());
+    cx.update(|cx| {
+        let v = second_view.read(cx);
+        assert_eq!(v.columns[0].column, Column::Updated);
+        assert!(v.columns[3].hidden);
+    });
+    ui(cx, second, |window, cx| window.click("nav-all", cx));
+    ui(cx, second, |window, _| {
+        assert!(window.try_find(head(Column::Assignee)).is_none())
+    });
+
+    // 見出しのメニューの並べ替え。同じものをもう一度選ぶと、最初の並び順に戻る
+    cx.update(|cx| {
+        view.update(cx, |v, cx| {
+            v.sort_by(Sort::Title, true, cx);
+            assert_eq!((v.query.sort, v.query.descending), (Sort::Title, true));
+            v.sort_by(Sort::Title, true, cx);
+            assert_eq!((v.query.sort, v.query.descending), (Sort::Due, false));
+        })
+    });
+    // 見出しを押すとメニューが開き、もう一度押すと閉じる
+    ui(cx, window, |window, cx| window.click("col-title", cx));
+    cx.update(|cx| assert!(view.read(cx).column_menu.is_some()));
+    ui(cx, window, |window, cx| window.click("col-title", cx));
+    cx.update(|cx| assert!(view.read(cx).column_menu.is_none()));
+    ui(cx, window, |window, cx| {
+        window.click(("col-menu", Column::Due as usize), cx)
+    });
+    cx.update(|cx| {
+        let open = view.read(cx).column_menu.as_ref().map(|m| m.column);
+        assert_eq!(open, Some(Some(Column::Due)));
+    });
+}
+
+/// タスクのリンクをコピーできる。コメントに貼ったリンクはカードになり、押すとそのタスクが開く。
+#[gpui_kit::test]
+fn task_link_is_copied_and_opens_from_a_comment_card(cx: &mut TestAppContext) {
+    start(cx);
+    // コメントまで見える高さにする
+    let (window, view) = open(cx, win(1600., 2400.));
+    let (first, second) = cx.update(|cx| {
+        db::shared(cx).update(cx, |db, _| {
+            let s = &mut db.store;
+            let first = s.add_task_in(None, "会場を決める").unwrap();
+            let second = s.add_task_in(None, "機材を借りる").unwrap();
+            (first, second)
+        })
+    });
+
+    // 詳細の上のボタンで、リンクがクリップボードに入る
+    cx.update(|cx| view.update(cx, |v, cx| v.reload(cx)));
+    ui(cx, window, |window, cx| window.click("nav-all", cx));
+    cx.update(|cx| {
+        window
+            .update(cx, |_, window, cx| {
+                view.update(cx, |v, cx| v.open_panel(&first.id, window, cx))
+            })
+            .unwrap()
+    });
+    ui(cx, window, |window, cx| window.click("copy-link", cx));
+    let url = malakt_core::tasklink::url(&first.id);
+    let copied = cx.update(|cx| cx.read_from_clipboard().and_then(|item| item.text()));
+    assert_eq!(copied.as_deref(), Some(url.as_str()));
+    cx.update(|cx| assert!(view.read(cx).notice.is_some()));
+
+    // もう 1 つのタスクのコメントに貼ると、カードになる。消したタスクへのリンクもカードで知らせる
+    cx.update(|cx| {
+        db::shared(cx).update(cx, |db, _| {
+            let body = format!("先にこれを {url}");
+            db.store.add_comment(&second.id, None, &body).unwrap();
+            let gone = malakt_core::tasklink::url("01NOSUCHTASK");
+            db.store.add_comment(&second.id, None, &gone).unwrap();
+        });
+        window
+            .update(cx, |_, window, cx| {
+                view.update(cx, |v, cx| v.open_panel(&second.id, window, cx))
+            })
+            .unwrap()
+    });
+    cx.update(|cx| {
+        let v = view.read(cx);
+        let linked = &v.detail.as_ref().unwrap().linked;
+        assert_eq!(linked.len(), 1);
+        assert_eq!(linked[0].id, first.id);
+    });
+    ui(cx, window, |window, cx| {
+        assert!(window.try_find(("task-card", 16usize)).is_some());
+        window.click(("task-card", 0usize), cx)
+    });
+    cx.update(|cx| assert_eq!(view.read(cx).panel.as_deref(), Some(first.id.as_str())));
 }
