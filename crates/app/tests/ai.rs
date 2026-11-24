@@ -603,8 +603,13 @@ fn provider_model_and_effort_are_chosen_in_settings(cx: &mut TestAppContext) {
     });
 
     // Claude のモデルと effort を変える
+    // モデルは、開いた一覧から選ぶ。選ぶと一覧は閉じる
+    ui(cx, window, |window, cx| window.click("ai-model-open", cx));
     ui(cx, window, |window, cx| {
-        window.click(("ai-model", 2usize), cx);
+        window.click(("ai-model", 2usize), cx)
+    });
+    ui(cx, window, |window, cx| {
+        assert!(window.try_find("ai-model-list").is_none());
         window.click(("ai-effort", Effort::High as usize), cx);
     });
     assert_eq!(
@@ -620,10 +625,14 @@ fn provider_model_and_effort_are_chosen_in_settings(cx: &mut TestAppContext) {
 
     // モデルの ID を入力して選ぶ
     open_settings(cx, window, &pane);
+    ui(cx, window, |window, cx| window.click("ai-model-open", cx));
     ui(cx, window, |window, cx| {
         window.click("ai-model-input", cx);
-        window.press("secondary-a", cx);
-        window.input("claude-haiku-5-5", cx);
+        window.input("haiku", cx);
+    });
+    // 検索の言葉に合うものだけが残る
+    ui(cx, window, |window, cx| {
+        assert!(window.try_find(("ai-model", 1usize)).is_none());
         window.press("enter", cx);
     });
     assert_eq!(read(cx, |s| s.model().to_owned()), "claude-haiku-5-5");
@@ -656,9 +665,14 @@ fn provider_model_and_effort_are_chosen_in_settings(cx: &mut TestAppContext) {
         read(cx, |s| s.items.last().cloned()),
         Some(Item::Assistant("やあ".into()))
     );
+    // モデルの一覧を開いた 2 回は Claude の一覧を、送るときは OpenCode Go の一覧を読む
     assert_eq!(
         *world.fetched.lock().unwrap(),
-        ["https://opencode.ai/inference/go/v1/models"]
+        [
+            "https://api.anthropic.com/v1/models?limit=100",
+            "https://api.anthropic.com/v1/models?limit=100",
+            "https://opencode.ai/inference/go/v1/models"
+        ]
     );
 
     // このモデルで選べない effort は、送る前にエラーになる
@@ -1415,4 +1429,62 @@ fn old_tasks_are_left_alone(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert!(world.sent().is_empty());
     assert!(read(cx, |s| s.shell.is_empty() && !s.busy));
+}
+
+/// 入力欄の下のボタンから、その場でサービス・モデル・effort を選べる。
+#[gpui_kit::test]
+fn model_and_effort_are_picked_under_the_input(cx: &mut TestAppContext) {
+    let world = start(cx);
+    world.keys.set(Provider::Claude, "k").unwrap();
+    let (window, view) = open(cx, wide());
+    open_chat(cx, window, &view);
+    ui(cx, window, |window, _| {
+        for id in ["ai-pick-provider", "ai-pick-model", "ai-pick-effort"] {
+            assert!(window.find(id).visible(), "{id}");
+        }
+    });
+    let before = read(cx, |s| (s.effort, s.model().to_owned()));
+    ui(cx, window, |window, cx| window.click("ai-pick-effort", cx));
+    ui(cx, window, |window, cx| {
+        window.press("down", cx);
+        window.press("down", cx);
+        window.press("enter", cx);
+    });
+    assert_eq!(read(cx, |s| s.effort), malakt_ai::Effort::ALL[1]);
+    assert_ne!(read(cx, |s| s.effort), before.0);
+
+    ui(cx, window, |window, cx| window.click("ai-pick-model", cx));
+    ui(cx, window, |window, cx| {
+        window.press("down", cx);
+        window.press("down", cx);
+        window.press("enter", cx);
+    });
+    assert_eq!(
+        read(cx, |s| s.model().to_owned()),
+        Provider::Claude.models()[1]
+    );
+}
+
+/// 続けて実行したツールは 1 行にまとまり、押すと中身が開く。
+#[gpui_kit::test]
+fn tool_runs_fold_into_one_row(cx: &mut TestAppContext) {
+    let world = start(cx);
+    world.keys.set(Provider::Claude, "k").unwrap();
+    let (window, view) = open(cx, wide());
+    let pane = open_chat(cx, window, &view);
+    world.reply(json!({"stop_reason": "tool_use", "content": [
+        {"type": "tool_use", "id": "a", "name": "create_task", "input": {"title": "牛乳を買う"}},
+        {"type": "tool_use", "id": "b", "name": "create_task", "input": {"title": "卵を買う"}},
+    ]}));
+    world.reply(text_reply("2 つ作りました。"));
+    say(cx, window, &pane, "牛乳と卵");
+    ui(cx, window, |window, cx| {
+        assert!(window.find(("ai-tools", 1usize)).visible());
+        assert!(window.try_find(("ai-tool", 1usize)).is_none());
+        window.click(("ai-tools", 1usize), cx);
+    });
+    ui(cx, window, |window, _| {
+        assert!(window.find(("ai-tool", 1usize)).visible());
+        assert!(window.find(("ai-tool", 2usize)).visible());
+    });
 }

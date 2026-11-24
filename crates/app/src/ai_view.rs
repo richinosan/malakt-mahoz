@@ -8,6 +8,7 @@ use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{
     Copy as CopyText, Input, InputEvent, InputState, MoveDown, MoveUp, Textarea, TextareaState,
 };
+use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{ActiveTheme, Disableable, Selectable, Sizable};
@@ -89,6 +90,21 @@ fn appear() -> Animation {
     Animation::new(Duration::from_millis(160)).with_easing(ease_out_quint())
 }
 
+/// AI の発言の左に出す印。
+fn avatar(cx: &App) -> Div {
+    let theme = cx.theme();
+    div()
+        .flex_none()
+        .size_6()
+        .rounded_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(theme.primary)
+        .text_color(theme.primary_foreground)
+        .child(app_icon("sparkles").size_3())
+}
+
 /// アイコンだけのボタン。名前はホバーで出る。
 fn icon_button(id: &'static str, icon: &str, tip: &'static str) -> Button {
     Button::new(id)
@@ -144,8 +160,11 @@ pub struct AiPane {
     /// 定期チェックの指示。
     watch_input: Entity<TextareaState>,
     /// モデルの入力欄に出している値。
-    synced_model: String,
+    /// 設定で、モデルの一覧を開いている。
+    model_open: bool,
     pub settings_open: bool,
+    /// 開いて見せている、ツール実行のまとまり（最初の行の番号）。
+    open_tools: std::collections::HashSet<usize>,
     chat_scroll: ScrollHandle,
     shell_scroll: UniformListScrollHandle,
     /// シェルの入力行。
@@ -221,7 +240,8 @@ impl AiPane {
                 .masked(true)
                 .placeholder("API キー")
         });
-        let model_input = cx.new(|cx| InputState::new(window, cx).placeholder("モデル ID"));
+        let model_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("検索、またはモデル ID を入力"));
         let instruction = session.read(cx).watch.instruction.clone();
         let watch_input = cx.new(|cx| {
             let mut state = TextareaState::new(window, cx).placeholder("AI への指示");
@@ -229,13 +249,9 @@ impl AiPane {
             state
         });
         let shell_input = cx.new(|cx| InputState::new(window, cx));
-        let synced_model = session.read(cx).model().to_owned();
-        model_input.update(cx, |s, cx| s.set_value(synced_model.clone(), window, cx));
 
         let subscriptions = vec![
-            cx.observe_in(&session, window, |this, _, window, cx| {
-                this.sync(window, cx)
-            }),
+            cx.observe(&session, |this, _, cx| this.sync(cx)),
             cx.observe(&db, |_, _, cx| cx.notify()),
             cx.subscribe_in(&input, window, |this, _, event: &InputEvent, window, cx| {
                 if matches!(
@@ -260,12 +276,26 @@ impl AiPane {
             cx.subscribe_in(
                 &model_input,
                 window,
-                |this, input, event: &InputEvent, _, cx| {
-                    if matches!(event, InputEvent::PressEnter { .. }) {
-                        let model = input.read(cx).value().to_string();
-                        this.synced_model = model.trim().to_owned();
+                |this, input, event: &InputEvent, window, cx| match event {
+                    // 絞り込んだ先頭のモデルを選ぶ。一覧になければ、入力した ID をそのまま使う
+                    InputEvent::PressEnter { .. } => {
+                        let typed = input.read(cx).value().trim().to_owned();
+                        if typed.is_empty() {
+                            return;
+                        }
+                        let model = this
+                            .model_groups(cx)
+                            .into_iter()
+                            .flat_map(|(_, models)| models)
+                            .next()
+                            .map_or(typed, |m| m.to_string());
                         this.session.update(cx, |s, cx| s.set_model(&model, cx));
+                        input.update(cx, |s, cx| s.set_value("", window, cx));
+                        this.model_open = false;
+                        cx.notify();
                     }
+                    InputEvent::Change => cx.notify(),
+                    _ => {}
                 },
             ),
             cx.subscribe_in(
@@ -312,8 +342,9 @@ impl AiPane {
             key_input,
             model_input,
             watch_input,
-            synced_model,
+            model_open: false,
             settings_open: false,
+            open_tools: std::collections::HashSet::new(),
             chat_scroll: ScrollHandle::new(),
             shell_scroll: UniformListScrollHandle::new(),
             shell_input,
@@ -329,24 +360,20 @@ impl AiPane {
     }
 
     /// チャットの変化に合わせる。新しい行が出たら、いちばん下まで送る。
-    fn sync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let (items, model) = {
-            let s = self.session.read(cx);
-            (s.items.len(), s.model().to_owned())
-        };
+    fn sync(&mut self, cx: &mut Context<Self>) {
+        let items = self.session.read(cx).items.len();
         if items != self.seen {
             self.chat_scroll.scroll_to_bottom();
+        }
+        if items < self.seen {
+            // 新しいチャットでは、行の番号が最初からになる
+            self.open_tools.clear();
         }
         self.seen = items;
         // さかのぼって読んでいる間は、新しい出力が来ても動かさない
         let follow = self.shell_at_bottom();
         if self.refresh_rows(cx) && follow {
             self.shell_to_bottom();
-        }
-        if model != self.synced_model {
-            self.synced_model = model.clone();
-            self.model_input
-                .update(cx, |s, cx| s.set_value(model, window, cx));
         }
         cx.notify();
     }
@@ -577,28 +604,72 @@ impl AiPane {
             );
         }
 
-        let mut models = row().gap_1().flex_wrap();
-        let listed = session.listed.clone();
-        let presets = provider
-            .models()
-            .iter()
-            .map(|m| SharedString::from(*m))
-            .chain(listed.iter().cloned())
-            .fold(Vec::<SharedString>::new(), |mut all, m| {
-                if !all.contains(&m) {
-                    all.push(m);
-                }
-                all
-            });
-        for (ix, m) in presets.into_iter().enumerate() {
-            let active = m.as_ref() == model;
-            let chosen = m.clone();
+        let model_open = self.model_open;
+        let mut models = col()
+            .id("ai-model-list")
+            .max_h(px(260.))
+            .overflow_y_scroll()
+            .p_1();
+        let mut ix = 0usize;
+        let groups = if model_open {
+            self.model_groups(cx)
+        } else {
+            Vec::new()
+        };
+        let none = groups.is_empty();
+        for (group, names) in groups {
             models = models.child(
-                chip(("ai-model", ix), m, active, cx)
-                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                        this.session.update(cx, |s, cx| s.set_model(&chosen, cx));
-                    }))
-                    .test_support(),
+                div()
+                    .px_2()
+                    .pt_2()
+                    .pb_1()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(group),
+            );
+            for m in names {
+                let active = m.as_ref() == model;
+                let chosen = m.clone();
+                models = models.child(
+                    row()
+                        .id(("ai-model", ix))
+                        .gap_2()
+                        .px_2()
+                        .py_1()
+                        .rounded_md()
+                        .items_center()
+                        .text_sm()
+                        .cursor_pointer()
+                        .when(active, |d| d.bg(theme.accent))
+                        .hover(|s| s.bg(theme.muted))
+                        .active(|s| s.opacity(0.6))
+                        .child(
+                            div()
+                                .w_4()
+                                .flex_none()
+                                .when(active, |d| d.child(app_icon("check").size_4())),
+                        )
+                        .child(div().flex_1().min_w_0().truncate().child(m))
+                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                            this.session.update(cx, |s, cx| s.set_model(&chosen, cx));
+                            this.model_input
+                                .update(cx, |s, cx| s.set_value("", window, cx));
+                            this.model_open = false;
+                            cx.notify();
+                        }))
+                        .test_support(),
+                );
+                ix += 1;
+            }
+        }
+        if none {
+            models = models.child(
+                div()
+                    .px_2()
+                    .py_2()
+                    .text_sm()
+                    .text_color(theme.muted_foreground)
+                    .child("Enter で、入力した ID を使います"),
             );
         }
 
@@ -687,35 +758,80 @@ impl AiPane {
                     .child(label("サービス"))
                     .child(providers)
                     .child(label("モデル"))
-                    .child(models)
                     .child(
-                        row()
-                            .gap_1()
-                            .child(
-                                Input::new(&self.model_input)
-                                    .id("ai-model-input")
-                                    .aria_label("モデル ID")
-                                    .small()
-                                    .flex_1(),
-                            )
-                            .when(
-                                provider == Provider::Claude || provider.catalog_url().is_some(),
-                                |d| {
-                                    d.child(
-                                        icon_button(
-                                            "ai-fetch-models",
-                                            "refresh-cw",
-                                            "モデル一覧を更新",
-                                        )
-                                        .on_click(
-                                            cx.listener(|this, _, _, cx| {
-                                                this.session.update(cx, |s, cx| s.fetch_models(cx));
-                                            }),
-                                        ),
-                                    )
-                                },
-                            ),
+                        Button::new("ai-model-open")
+                            .outline()
+                            .small()
+                            .w_full()
+                            .justify_between()
+                            .label(if model.is_empty() {
+                                SharedString::from("標準のモデル")
+                            } else {
+                                SharedString::from(model.clone())
+                            })
+                            .dropdown_caret(true)
+                            .selected(model_open)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.model_open = !this.model_open;
+                                if this.model_open {
+                                    this.model_input
+                                        .update(cx, |s, cx| s.focus(window, cx));
+                                    // 一覧がまだなければ、開いたときに取ってくる
+                                    this.session.update(cx, |s, cx| {
+                                        if s.listed.is_empty()
+                                            && matches!(s.key, KeyState::Present { .. })
+                                        {
+                                            s.fetch_models(cx);
+                                        }
+                                    });
+                                }
+                                cx.notify();
+                            })),
                     )
+                    .when(model_open, |d| {
+                        d.child(
+                            col()
+                                .rounded_md()
+                                .border_1()
+                                .border_color(theme.border)
+                                .bg(theme.background)
+                                .child(
+                                    row()
+                                        .gap_1()
+                                        .p_1()
+                                        .border_b_1()
+                                        .border_color(theme.border)
+                                        .child(
+                                            Input::new(&self.model_input)
+                                                .id("ai-model-input")
+                                                .aria_label("モデルを検索")
+                                                .small()
+                                                .flex_1(),
+                                        )
+                                        .when(
+                                            provider == Provider::Claude
+                                                || provider.catalog_url().is_some(),
+                                            |d| {
+                                                d.child(
+                                                    icon_button(
+                                                        "ai-fetch-models",
+                                                        "refresh-cw",
+                                                        "モデル一覧を更新",
+                                                    )
+                                                    .on_click(cx.listener(|this, _, _, cx| {
+                                                        this.session
+                                                            .update(cx, |s, cx| s.fetch_models(cx));
+                                                    })),
+                                                )
+                                            },
+                                        ),
+                                )
+                                .child(models)
+                                .with_animation("ai-model-list-in", appear(), |el, delta| {
+                                    el.opacity(delta)
+                                }),
+                        )
+                    })
                     .when(provider.supports_effort(), |d| {
                         d.child(label("effort")).child(efforts)
                     }),
@@ -883,11 +999,23 @@ impl AiPane {
                         .test_support(),
                 )
                 .into_any_element(),
-            Item::Assistant(text) => div()
-                .id(("ai-assistant", ix))
-                .text_sm()
-                .child(text.clone())
-                .test_support()
+            Item::Assistant(text) => row()
+                .items_start()
+                .gap_2()
+                .child(avatar(cx))
+                .child(
+                    div()
+                        .id(("ai-assistant", ix))
+                        .flex_1()
+                        .min_w_0()
+                        .px_3()
+                        .py_2()
+                        .rounded_lg()
+                        .bg(theme.muted)
+                        .text_sm()
+                        .child(text.clone())
+                        .test_support(),
+                )
                 .into_any_element(),
             Item::Tool { summary, state } => {
                 let (mark, color, detail): (&str, Hsla, Option<SharedString>) = match state {
@@ -900,9 +1028,6 @@ impl AiPane {
                     .id(("ai-tool", ix))
                     .px_2()
                     .py_1()
-                    .rounded_md()
-                    .border_1()
-                    .border_color(theme.border)
                     .text_xs()
                     .child(
                         row()
@@ -916,12 +1041,23 @@ impl AiPane {
                     .test_support()
                     .into_any_element()
             }
-            Item::Notice(text) => div()
-                .id(("ai-notice", ix))
-                .text_xs()
-                .text_color(theme.muted_foreground)
-                .child(text.clone())
-                .test_support()
+            // アプリからの知らせは、真ん中に小さく
+            Item::Notice(text) => row()
+                .justify_center()
+                .child(
+                    div()
+                        .id(("ai-notice", ix))
+                        .max_w(relative(0.9))
+                        .px_3()
+                        .py_1()
+                        .rounded_lg()
+                        .border_1()
+                        .border_color(theme.border)
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(text.clone())
+                        .test_support(),
+                )
                 .into_any_element(),
             Item::Error(text) => div()
                 .id(("ai-error", ix))
@@ -937,6 +1073,279 @@ impl AiPane {
         }
     }
 
+    /// 続けて実行したツールのまとまり。押すと、1 つずつの中身が開く。
+    fn render_tools(
+        &self,
+        start: usize,
+        tools: &[Item],
+        pane: WeakEntity<Self>,
+        cx: &App,
+    ) -> AnyElement {
+        let theme = cx.theme().clone();
+        let open = self.open_tools.contains(&start);
+        let state_of = |item: &Item| match item {
+            Item::Tool { state, .. } => Some(state.clone()),
+            _ => None,
+        };
+        let failed = tools.iter().any(|item| {
+            matches!(
+                state_of(item),
+                Some(ToolState::Failed(_) | ToolState::Denied)
+            )
+        });
+        let running = tools
+            .iter()
+            .any(|item| state_of(item) == Some(ToolState::Running));
+        let last = match tools.last() {
+            Some(Item::Tool { summary, .. }) => summary.clone(),
+            _ => SharedString::default(),
+        };
+        let lines: Vec<AnyElement> = if open {
+            tools
+                .iter()
+                .enumerate()
+                .map(|(offset, item)| self.render_item(start + offset, item, cx))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        col()
+            .rounded_md()
+            .border_1()
+            .border_color(theme.border)
+            .child(
+                row()
+                    .id(("ai-tools", start))
+                    .gap_2()
+                    .px_2()
+                    .py_1()
+                    .items_center()
+                    .text_xs()
+                    .cursor_pointer()
+                    .rounded_md()
+                    .hover(|s| s.bg(theme.muted))
+                    .active(|s| s.opacity(0.6))
+                    .child(
+                        app_icon(if open {
+                            "chevron-down"
+                        } else {
+                            "chevron-right"
+                        })
+                        .size_3()
+                        .flex_none(),
+                    )
+                    .child(if running {
+                        Spinner::new().small().into_any_element()
+                    } else {
+                        app_icon("wrench")
+                            .size_3()
+                            .flex_none()
+                            .text_color(if failed {
+                                theme.danger
+                            } else {
+                                theme.muted_foreground
+                            })
+                            .into_any_element()
+                    })
+                    .child(
+                        div()
+                            .flex_none()
+                            .child(format!("ツール {} 件", tools.len())),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_color(theme.muted_foreground)
+                            .child(last),
+                    )
+                    .on_click(move |_: &ClickEvent, _, cx| {
+                        // チャットを閉じたあとなら、開く先がない
+                        let _ = pane.update(cx, |this, cx| {
+                            if !this.open_tools.remove(&start) {
+                                this.open_tools.insert(start);
+                            }
+                            cx.notify();
+                        });
+                    })
+                    .test_support(),
+            )
+            .when(open, |d| {
+                d.child(
+                    col()
+                        .border_t_1()
+                        .border_color(theme.border)
+                        .children(lines)
+                        .with_animation(("ai-tools-in", start), appear(), |el, delta| {
+                            el.opacity(delta)
+                        }),
+                )
+            })
+            .into_any_element()
+    }
+
+    /// 検索の言葉に合うモデル。おすすめを先に、残りは名前の頭でまとめる。
+    fn model_groups(&self, cx: &App) -> Vec<(SharedString, Vec<SharedString>)> {
+        let session = self.session.read(cx);
+        let query = self.model_input.read(cx).value().trim().to_lowercase();
+        let matches = |m: &str| query.is_empty() || m.to_lowercase().contains(&query);
+        let presets: Vec<SharedString> = session
+            .provider
+            .models()
+            .iter()
+            .filter(|m| matches(m))
+            .map(|m| SharedString::from(*m))
+            .collect();
+        let mut rest: Vec<SharedString> = Vec::new();
+        let current = SharedString::from(session.model().to_owned());
+        for m in session.listed.iter().chain(std::iter::once(&current)) {
+            if !m.is_empty() && matches(m) && !presets.contains(m) && !rest.contains(m) {
+                rest.push(m.clone());
+            }
+        }
+        rest.sort();
+        let mut groups: Vec<(SharedString, Vec<SharedString>)> = Vec::new();
+        if !presets.is_empty() {
+            groups.push(("おすすめ".into(), presets));
+        }
+        for m in rest {
+            // 「glm-5.3」なら「glm」。同じ頭のモデルを 1 つにまとめる
+            let family: SharedString = m
+                .chars()
+                .take_while(|c| c.is_ascii_alphabetic())
+                .collect::<String>()
+                .into();
+            match groups
+                .iter_mut()
+                .skip_while(|(g, _)| g == "おすすめ")
+                .find(|(g, _)| *g == family)
+            {
+                Some((_, names)) => names.push(m),
+                None => groups.push((family, vec![m])),
+            }
+        }
+        groups
+    }
+
+    /// サービス・モデル・effort を、押してその場で選ぶボタン。
+    fn render_pills(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let session = self.session.read(cx);
+        let provider = session.provider;
+        let model = session.model().to_owned();
+        let effort = session.effort;
+        let models: Vec<SharedString> = provider
+            .models()
+            .iter()
+            .map(|m| SharedString::from(*m))
+            .chain((!model.is_empty()).then(|| SharedString::from(model.clone())))
+            .fold(Vec::new(), |mut all, m| {
+                if !all.contains(&m) {
+                    all.push(m);
+                }
+                all
+            });
+        let pane = cx.entity().downgrade();
+        let pill = |id: &'static str, label: SharedString, tip: &'static str| {
+            Button::new(id)
+                .outline()
+                .small()
+                .rounded(px(999.))
+                .label(label)
+                .dropdown_caret(true)
+                .tooltip(tip)
+        };
+        let mut pills = Vec::new();
+        pills.push({
+            let pane = pane.clone();
+            pill("ai-pick-provider", provider.label().into(), "サービス")
+                .dropdown_menu_with_anchor(Anchor::BottomLeft, move |mut menu, _, _| {
+                    for p in Provider::ALL {
+                        let pane = pane.clone();
+                        menu = menu.item(
+                            PopupMenuItem::new(p.label())
+                                .checked(p == provider)
+                                .on_click(move |_, _, cx| {
+                                    // チャットを閉じたあとなら、反映する先がない
+                                    let _ = pane.update(cx, |this, cx| {
+                                        this.session.update(cx, |s, cx| s.set_provider(p, cx));
+                                    });
+                                }),
+                        );
+                    }
+                    menu
+                })
+                .into_any_element()
+        });
+        pills.push({
+            let pane = pane.clone();
+            let shown: SharedString = if model.is_empty() {
+                "標準のモデル".into()
+            } else {
+                model.clone().into()
+            };
+            div()
+                .min_w_0()
+                .overflow_hidden()
+                .child(
+                    pill("ai-pick-model", shown, "モデル").dropdown_menu_with_anchor(
+                        Anchor::BottomLeft,
+                        move |mut menu, _, _| {
+                            for m in models.iter() {
+                                let m = m.clone();
+                                let pane = pane.clone();
+                                let chosen = m.clone();
+                                menu = menu.item(
+                                    PopupMenuItem::new(m.clone())
+                                        .checked(m.as_ref() == model)
+                                        .on_click(move |_, _, cx| {
+                                            let _ = pane.update(cx, |this, cx| {
+                                                this.session
+                                                    .update(cx, |s, cx| s.set_model(&chosen, cx));
+                                            });
+                                        }),
+                                );
+                            }
+                            let pane = pane.clone();
+                            menu.separator()
+                                .item(PopupMenuItem::new("ほかのモデル…").on_click(
+                                    move |_, _, cx| {
+                                        let _ = pane.update(cx, |this, cx| {
+                                            this.settings_open = true;
+                                            this.model_open = true;
+                                            cx.notify();
+                                        });
+                                    },
+                                ))
+                        },
+                    ),
+                )
+                .into_any_element()
+        });
+        if provider.supports_effort() {
+            pills.push(
+                pill("ai-pick-effort", effort.label().into(), "effort")
+                    .dropdown_menu_with_anchor(Anchor::BottomLeft, move |mut menu, _, _| {
+                        for e in Effort::ALL {
+                            let pane = pane.clone();
+                            menu = menu.item(
+                                PopupMenuItem::new(e.label()).checked(e == effort).on_click(
+                                    move |_, _, cx| {
+                                        let _ = pane.update(cx, |this, cx| {
+                                            this.session.update(cx, |s, cx| s.set_effort(e, cx));
+                                        });
+                                    },
+                                ),
+                            );
+                        }
+                        menu
+                    })
+                    .into_any_element(),
+            );
+        }
+        pills
+    }
+
     fn render_chat(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let session = self.session.read(cx);
@@ -947,21 +1356,6 @@ impl AiPane {
             ShellPlace::Docked => ("シェルを閉じる", true),
             ShellPlace::Window(_) => ("シェルを表示", true),
         };
-        let title: SharedString = format!(
-            "{} ・ {}{}",
-            session.provider.label(),
-            if session.model().is_empty() {
-                "標準のモデル"
-            } else {
-                session.model()
-            },
-            match session.effort.wire() {
-                Some(effort) => format!(" ・ {effort}"),
-                None => String::new(),
-            }
-        )
-        .into();
-
         let header = row()
             .flex_none()
             .h_10()
@@ -970,15 +1364,14 @@ impl AiPane {
             .gap_0p5()
             .border_b_1()
             .border_color(theme.border)
+            .child(app_icon("sparkles").size_4())
             .child(
                 div()
-                    .id("ai-current")
                     .flex_1()
                     .min_w_0()
+                    .pl_1()
                     .text_sm()
-                    .truncate()
-                    .child(title)
-                    .test_support(),
+                    .child("AI チャット"),
             )
             .when(auto_run, |d| {
                 d.child(
@@ -1064,9 +1457,25 @@ impl AiPane {
                     .test_support(),
             );
         }
-        for (ix, item) in session.items.iter().enumerate() {
-            list = list.child(div().child(self.render_item(ix, item, cx)).with_animation(
-                ("ai-item-in", ix),
+        let items = &session.items;
+        let pane = cx.entity().downgrade();
+        let mut ix = 0;
+        while ix < items.len() {
+            // 続けて実行したツールは、1 つにまとめて畳む
+            let start = ix;
+            let mut end = ix;
+            while end < items.len() && matches!(items[end], Item::Tool { .. }) {
+                end += 1;
+            }
+            let element = if end - ix >= 2 {
+                ix = end;
+                self.render_tools(start, &items[start..end], pane.clone(), cx)
+            } else {
+                ix += 1;
+                self.render_item(start, &items[start], cx)
+            };
+            list = list.child(div().child(element).with_animation(
+                ("ai-item-in", start),
                 appear(),
                 |el, delta| el.opacity(delta),
             ));
@@ -1076,8 +1485,10 @@ impl AiPane {
                 row()
                     .id("ai-working")
                     .gap_2()
+                    .items_center()
                     .text_xs()
                     .text_color(theme.muted_foreground)
+                    .child(avatar(cx))
                     .child(Spinner::new().small())
                     .child(if session.command_running() {
                         "コマンドを実行中"
@@ -1136,6 +1547,7 @@ impl AiPane {
                     .test_support()
             });
         let error = session.error.clone();
+        let pills = self.render_pills(cx);
 
         col()
             .id("ai-chat")
@@ -1173,9 +1585,8 @@ impl AiPane {
             )
             .children(pending)
             .child(
-                row()
+                col()
                     .flex_none()
-                    .items_end()
                     .when(self.settings_open, |d| d.hidden())
                     .gap_2()
                     .p_3()
@@ -1184,27 +1595,33 @@ impl AiPane {
                     .child(
                         div()
                             .id("ai-input")
-                            .flex_1()
-                            .min_w_0()
+                            .w_full()
                             .child(Textarea::new(&self.input).h(px(84.)))
                             .test_support(),
                     )
-                    .when(busy, |d| {
-                        d.child(
-                            icon_button("ai-stop", "square", "停止（Ctrl+C）")
-                                .danger()
-                                .on_click(cx.listener(|this, _, _, cx| this.stop(cx))),
-                        )
-                    })
-                    .when(!busy, |d| {
-                        d.child(
-                            icon_button("ai-send", "arrow-up", "送信（Ctrl / ⌘ + Enter）")
-                                .primary()
-                                .on_click(
-                                    cx.listener(|this, _, window, cx| this.submit(window, cx)),
-                                ),
-                        )
-                    }),
+                    .child(
+                        // 入力欄の下で、サービス・モデル・effort をその場で選ぶ
+                        row()
+                            .gap_1()
+                            .items_center()
+                            .child(row().flex_1().min_w_0().gap_1().children(pills))
+                            .when(busy, |d| {
+                                d.child(
+                                    icon_button("ai-stop", "square", "停止（Ctrl+C）")
+                                        .danger()
+                                        .on_click(cx.listener(|this, _, _, cx| this.stop(cx))),
+                                )
+                            })
+                            .when(!busy, |d| {
+                                d.child(
+                                    icon_button("ai-send", "arrow-up", "送信（Ctrl / ⌘ + Enter）")
+                                        .primary()
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.submit(window, cx)
+                                        })),
+                                )
+                            }),
+                    ),
             )
             .test_support()
             .track_focus(&self.focus)
