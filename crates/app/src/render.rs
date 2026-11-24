@@ -4158,7 +4158,7 @@ impl Render for MainView {
                 })
                 .into_any_element()
         });
-        // 幅が足りないときは、AI チャットをウィンドウの全面に重ねる
+        // 幅が足りないときは、AI チャットを上のバーの下で、タスクの画面の右に重ねる
         let (ai_beside, ai_over) = if ai_width.is_some() {
             (ai, None)
         } else {
@@ -4188,6 +4188,7 @@ impl Render for MainView {
                         row()
                             .flex_1()
                             .min_h_0()
+                            .relative()
                             .items_stretch()
                             .child(
                                 // 画面を切り替えたときは、少し下から浮かび上がる
@@ -4203,10 +4204,10 @@ impl Render for MainView {
                                     ))
                                     .children(panel),
                             )
-                            .children(ai_beside),
+                            .children(ai_beside)
+                            .children(ai_over),
                     ),
             )
-            .children(ai_over)
             .children(self.render_modal(cx).map(|modal| {
                 if !self.motion {
                     return modal.into_any_element();
