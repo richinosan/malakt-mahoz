@@ -218,6 +218,8 @@ pub struct MainView {
     pub column_menu: Option<ColumnMenu>,
     /// 見出しをドラッグして動かしている列。
     pub column_drag: Option<ColumnDrag>,
+    /// ウィンドウの位置と大きさ（x, y, 幅, 高さ）と、最大化しているか。
+    pub window_place: Option<([f32; 4], bool)>,
     /// ドラッグして動かしているタスク。
     pub task_drag: Option<TaskDrag>,
     /// 詳細で、担当者と役を選ぶところを開いている。
@@ -427,6 +429,7 @@ impl MainView {
             due_scroll: UniformListScrollHandle::new(),
             column_drag: None,
             task_drag: None,
+            window_place: None,
             motion: true,
             today: view::today(),
             inputs,
