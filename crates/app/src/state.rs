@@ -4,6 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
+use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
 use gpui_kit::component::text::TextViewState;
 use gpui_kit::component::WindowExt;
 use gpui_kit::*;
@@ -206,6 +207,14 @@ pub struct MainView {
     pub sidebar_resizing: bool,
     /// 上のバーの空いているところを押している間だけ `true`（ウィンドウを動かし始めるため）。
     pub header_pressed: bool,
+    /// 表の列。並び順どおり。幅と、隠しているかを持つ。
+    pub columns: Vec<TableColumn>,
+    /// 幅を変えている列と、押し始めた位置・そのときの幅。
+    pub column_resize: Option<(Column, f32, f32)>,
+    /// 開いている見出しのメニュー。
+    pub column_menu: Option<ColumnMenu>,
+    /// 見出しをドラッグして動かしている列。
+    pub column_drag: Option<ColumnDrag>,
     /// 詳細で、担当者と役を選ぶところを開いている。
     pub assignee_picker: bool,
     /// 出入りの動きを付ける。テストでは止めて、すぐ最後の位置に出す
@@ -410,12 +419,17 @@ impl MainView {
             sidebar_resizing: false,
             header_pressed: false,
             assignee_picker: false,
+            columns: Column::ALL.map(TableColumn::new).to_vec(),
+            column_resize: None,
+            column_menu: None,
+            column_drag: None,
             motion: true,
             today: view::today(),
             inputs,
             _subscriptions: subs,
         };
         this.load_sidebar_width(cx);
+        this.load_columns(cx);
         this.reload(cx);
         // ウィンドウの準備が終わってから、たまっている通知を出す
         // 「システムに合わせる」のとき、OS の外観が変わったら塗り直す
@@ -1481,6 +1495,190 @@ impl MainView {
         self.finish_sidebar_drag(cx);
     }
 
+    // ---- 表の列 ----
+
+    /// 保存してある列の並び・幅・表示を読む。読めない項目は最初の形のままにする。
+    fn load_columns(&mut self, cx: &App) {
+        if let Ok(Some(saved)) = self.db.read(cx).store.setting(COLUMNS_SETTING) {
+            self.columns = parse_columns(&saved);
+        }
+    }
+
+    fn save_columns(&mut self, cx: &mut Context<Self>) {
+        let saved = format_columns(&self.columns);
+        self.write(cx, |s| s.set_setting(COLUMNS_SETTING, Some(&saved)));
+        cx.notify();
+    }
+
+    /// 今出している列。
+    pub fn shown_columns(&self) -> impl Iterator<Item = &TableColumn> {
+        self.columns.iter().filter(|c| !c.hidden)
+    }
+
+    /// 列の左の境界を押して、幅を変え始める。`x` はウィンドウの中の位置。
+    pub fn start_column_resize(&mut self, column: Column, x: f32, cx: &mut Context<Self>) {
+        if let Some(c) = self.columns.iter().find(|c| c.column == column) {
+            self.column_resize = Some((column, x, c.width));
+            cx.notify();
+        }
+    }
+
+    /// ドラッグ中の幅。境界は列の左にあるので、左へ動かすと広がる。
+    pub fn drag_column(&mut self, x: f32, cx: &mut Context<Self>) {
+        let Some((column, start_x, start_width)) = self.column_resize else {
+            return;
+        };
+        let width = (start_width - (x - start_x) / crate::UI_SCALE)
+            .clamp(COLUMN_MIN, COLUMN_MAX)
+            .round();
+        if let Some(c) = self.columns.iter_mut().find(|c| c.column == column) {
+            if c.width != width {
+                c.width = width;
+                cx.notify();
+            }
+        }
+    }
+
+    pub fn finish_column_resize(&mut self, cx: &mut Context<Self>) {
+        if self.column_resize.take().is_some() {
+            self.save_columns(cx);
+        }
+    }
+
+    /// 境界をダブルクリックして、最初の幅に戻す。
+    pub fn reset_column_width(&mut self, column: Column, cx: &mut Context<Self>) {
+        self.column_resize = None;
+        if let Some(c) = self.columns.iter_mut().find(|c| c.column == column) {
+            c.width = column.default_width();
+        }
+        self.save_columns(cx);
+    }
+
+    /// 列を出す・隠す。
+    pub fn toggle_column(&mut self, column: Column, cx: &mut Context<Self>) {
+        if let Some(c) = self.columns.iter_mut().find(|c| c.column == column) {
+            c.hidden = !c.hidden;
+        }
+        self.save_columns(cx);
+    }
+
+    /// 列を、`target` の列がある位置へ動かす。
+    pub fn move_column(&mut self, column: Column, target: Column, cx: &mut Context<Self>) {
+        let from = self.columns.iter().position(|c| c.column == column);
+        let to = self.columns.iter().position(|c| c.column == target);
+        if let (Some(from), Some(to)) = (from, to) {
+            if from != to {
+                let moved = self.columns.remove(from);
+                self.columns.insert(to, moved);
+                self.save_columns(cx);
+            }
+        }
+    }
+
+    /// 見出しのドラッグを終える。ほかの列の上で離したら、そこへ動かす。
+    pub fn finish_column_drag(&mut self, cx: &mut Context<Self>) {
+        if let Some(drag) = self.column_drag.take() {
+            if let Some(target) = drag.over.filter(|_| drag.moved) {
+                self.move_column(drag.column, target, cx);
+            }
+            cx.notify();
+        }
+    }
+
+    /// その見出しの列で並べ替えているときの向き（`true` は降順）。`column` が `None` はタイトル。
+    pub fn column_sorted(&self, column: Option<Column>) -> Option<bool> {
+        let sort = column_sort(column)?;
+        // 更新は新しい順がもとの向きなので、昇順（古い順）は逆にする
+        (sort == self.query.sort).then_some(self.query.descending != (sort == view::Sort::Updated))
+    }
+
+    /// 見出しのメニューを開く。開いている見出しをもう一度押すと閉じる。
+    pub fn toggle_column_menu(
+        &mut self,
+        column: Option<Column>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .column_menu
+            .take()
+            .is_some_and(|open| open.column == column)
+        {
+            cx.notify();
+            return;
+        }
+        let sort = column_sort(column);
+        let flip = sort == Some(view::Sort::Updated);
+        let current = self.column_sorted(column);
+        let columns: Vec<(Column, bool)> =
+            self.columns.iter().map(|c| (c.column, c.hidden)).collect();
+        let view = cx.entity().downgrade();
+        let menu = PopupMenu::build(window, cx, move |mut menu, _, _| {
+            if let Some(sort) = sort {
+                for (text, descending) in [("昇順で並べ替え", false), ("降順で並べ替え", true)]
+                {
+                    let view = view.clone();
+                    menu = menu.item(
+                        PopupMenuItem::new(text)
+                            .checked(current == Some(descending))
+                            .on_click(move |_, _, cx| {
+                                // ウィンドウを閉じたあとなら、反映する先がない
+                                let _ = view.update(cx, |this, cx| {
+                                    this.sort_by(sort, descending != flip, cx)
+                                });
+                            }),
+                    );
+                }
+                menu = menu.separator();
+            }
+            if let Some(column) = column {
+                let view = view.clone();
+                menu = menu
+                    .item(
+                        PopupMenuItem::new("この列を隠す").on_click(move |_, _, cx| {
+                            // ウィンドウを閉じたあとなら、反映する先がない
+                            let _ = view.update(cx, |this, cx| this.toggle_column(column, cx));
+                        }),
+                    )
+                    .separator();
+            }
+            for (other, hidden) in columns.iter().copied() {
+                let view = view.clone();
+                menu = menu.item(PopupMenuItem::new(other.label()).checked(!hidden).on_click(
+                    move |_, _, cx| {
+                        // ウィンドウを閉じたあとなら、反映する先がない
+                        let _ = view.update(cx, |this, cx| this.toggle_column(other, cx));
+                    },
+                ));
+            }
+            menu
+        });
+        let closed = cx.subscribe_in(&menu, window, |this, _, _: &DismissEvent, window, cx| {
+            this.column_menu = None;
+            this.focus.focus(window, cx);
+            cx.notify();
+        });
+        menu.focus_handle(cx).focus(window, cx);
+        self.column_menu = Some(ColumnMenu {
+            column,
+            menu,
+            _closed: closed,
+        });
+        cx.notify();
+    }
+
+    /// 見出しのメニューから並べ替える。同じ列で同じ向きをもう一度選ぶと、最初の並び順に戻る。
+    pub fn sort_by(&mut self, sort: view::Sort, descending: bool, cx: &mut Context<Self>) {
+        if self.query.sort == sort && self.query.descending == descending {
+            self.query.sort = view::Sort::default();
+            self.query.descending = false;
+        } else {
+            self.query.sort = sort;
+            self.query.descending = descending;
+        }
+        self.reload(cx);
+    }
+
     // ---- ロック ----
 
     pub fn lock_enabled(&self, cx: &App) -> bool {
@@ -2053,6 +2251,159 @@ pub const SIDEBAR_WIDTH: f32 = 256.;
 pub const SIDEBAR_MIN: f32 = 200.;
 pub const SIDEBAR_MAX: f32 = 480.;
 const SIDEBAR_WIDTH_SETTING: &str = "sidebar.width";
+
+/// 表の列（タイトルのほか）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Column {
+    Status,
+    Priority,
+    Assignee,
+    Due,
+    Updated,
+}
+
+impl Column {
+    pub const ALL: [Column; 5] = [
+        Column::Status,
+        Column::Priority,
+        Column::Assignee,
+        Column::Due,
+        Column::Updated,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Column::Status => "状態",
+            Column::Priority => "優先度",
+            Column::Assignee => "担当",
+            Column::Due => "期限",
+            Column::Updated => "更新",
+        }
+    }
+
+    fn key(self) -> &'static str {
+        match self {
+            Column::Status => "status",
+            Column::Priority => "priority",
+            Column::Assignee => "assignee",
+            Column::Due => "due",
+            Column::Updated => "updated",
+        }
+    }
+
+    /// 最初の幅（拡大率を掛ける前の値）。
+    pub fn default_width(self) -> f32 {
+        match self {
+            Column::Status => 96.,
+            Column::Priority => 84.,
+            Column::Assignee => 160.,
+            Column::Due => 150.,
+            Column::Updated => 84.,
+        }
+    }
+
+    /// この列で並べ替えるときの並び順。担当では並べ替えない。
+    pub fn sort(self) -> Option<view::Sort> {
+        match self {
+            Column::Status => Some(view::Sort::Status),
+            Column::Priority => Some(view::Sort::Priority),
+            Column::Assignee => None,
+            Column::Due => Some(view::Sort::Due),
+            Column::Updated => Some(view::Sort::Updated),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TableColumn {
+    pub column: Column,
+    pub width: f32,
+    pub hidden: bool,
+}
+
+impl TableColumn {
+    fn new(column: Column) -> Self {
+        TableColumn {
+            column,
+            width: column.default_width(),
+            hidden: false,
+        }
+    }
+}
+
+/// 見出しの列で並べ替えるときの並び順。`None` はタイトル。
+fn column_sort(column: Option<Column>) -> Option<view::Sort> {
+    match column {
+        Some(column) => column.sort(),
+        None => Some(view::Sort::Title),
+    }
+}
+
+/// 開いている見出しのメニュー。
+pub struct ColumnMenu {
+    /// `None` はタイトル。
+    pub column: Option<Column>,
+    pub menu: Entity<PopupMenu>,
+    _closed: Subscription,
+}
+
+/// 見出しのドラッグ。押し始めた位置から少し動くまでは、ただのクリックとして扱う。
+#[derive(Debug, Clone, PartialEq)]
+pub struct ColumnDrag {
+    pub column: Column,
+    pub start_x: f32,
+    pub moved: bool,
+    /// 今マウスが上にある列。
+    pub over: Option<Column>,
+}
+
+/// 列の幅を変えられる範囲（拡大率を掛ける前の値）。
+pub const COLUMN_MIN: f32 = 56.;
+pub const COLUMN_MAX: f32 = 480.;
+const COLUMNS_SETTING: &str = "table.columns";
+
+/// `status:96,-assignee:160` の形。頭の `-` は隠している列。
+fn format_columns(columns: &[TableColumn]) -> String {
+    columns
+        .iter()
+        .map(|c| {
+            let hidden = if c.hidden { "-" } else { "" };
+            format!("{hidden}{}:{}", c.column.key(), c.width)
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// 保存した列を読む。知らない名前や重複は飛ばし、保存になかった列は最後に足す。
+fn parse_columns(saved: &str) -> Vec<TableColumn> {
+    let mut columns: Vec<TableColumn> = Vec::new();
+    for part in saved.split(',') {
+        let (hidden, part) = match part.strip_prefix('-') {
+            Some(rest) => (true, rest),
+            None => (false, part),
+        };
+        let (key, width) = part.split_once(':').unwrap_or((part, ""));
+        let Some(column) = Column::ALL.into_iter().find(|c| c.key() == key) else {
+            continue;
+        };
+        if columns.iter().any(|c| c.column == column) {
+            continue;
+        }
+        columns.push(TableColumn {
+            column,
+            width: width
+                .parse::<f32>()
+                .map_or(column.default_width(), |w| w.clamp(COLUMN_MIN, COLUMN_MAX)),
+            hidden,
+        });
+    }
+    for column in Column::ALL {
+        if !columns.iter().any(|c| c.column == column) {
+            columns.push(TableColumn::new(column));
+        }
+    }
+    columns
+}
 
 /// 「、」や「,」で区切った入力を、空でない項目の並びにする。
 fn split_list(text: &str) -> Vec<String> {
