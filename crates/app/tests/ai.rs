@@ -791,21 +791,32 @@ fn the_shell_sits_right_of_the_chat_in_a_wide_window(cx: &mut TestAppContext) {
     });
 }
 
-/// 狭いウィンドウでは全面に重ね、閉じるとタスクの画面に戻る。
+/// 最初の大きさのウィンドウでは、上のバーとタスクの画面を残して右に重ねる。
+/// 上のバーのボタンでも、チャットの × でも閉じられる。
 #[gpui_kit::test]
-fn the_chat_covers_a_narrow_window_and_closes(cx: &mut TestAppContext) {
+fn the_chat_leaves_the_bar_and_tasks_in_a_small_window(cx: &mut TestAppContext) {
     start(cx);
-    let (window, view) = open(cx, size(px(1125.), px(875.)));
-    open_chat(cx, window, &view);
-    ui(cx, window, |window, cx| {
-        let chat = window.find("ai-chat").bounds();
-        assert_eq!(chat.size.width, px(1125.));
-        window.click("ai-close", cx);
-    });
-    cx.update(|cx| assert!(!view.read(cx).ai_open));
-    ui(cx, window, |window, _| {
-        assert!(window.try_find("ai-chat").is_none())
-    });
+    for width in [1280., 1125., 600.] {
+        let (window, view) = open(cx, size(px(width), px(720.)));
+        open_chat(cx, window, &view);
+        ui(cx, window, |window, cx| {
+            let chat = window.find("ai-chat").bounds();
+            let toggle = window.find("ai-toggle").bounds();
+            // 上のバー（ウィンドウを動かす・閉じる所）を隠さない
+            assert!(chat.origin.y >= toggle.origin.y + toggle.size.height);
+            assert_eq!(chat.origin.x + chat.size.width, px(width));
+            // タスクの画面が左に残る
+            assert!(chat.origin.x >= px(width) - px(475.));
+            window.click("ai-toggle", cx);
+        });
+        cx.update(|cx| assert!(!view.read(cx).ai_open));
+        open_chat(cx, window, &view);
+        ui(cx, window, |window, cx| window.click("ai-close", cx));
+        cx.update(|cx| assert!(!view.read(cx).ai_open));
+        ui(cx, window, |window, _| {
+            assert!(window.try_find("ai-chat").is_none())
+        });
+    }
 }
 
 /// ロック中は、チャットで送れない。

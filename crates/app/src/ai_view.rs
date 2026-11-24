@@ -104,7 +104,7 @@ pub const TASKS_MIN: Pixels = px(860.);
 /// 右に置くチャットの、いちばん狭い幅。
 const CHAT_MIN: Pixels = px(320.);
 
-/// メインのウィンドウの右に置くときの幅。`None` なら全面に重ねる。
+/// メインのウィンドウの右に置くときの幅。`None` ならタスクの画面の右に重ねる。
 ///
 /// タスクの画面に `TASKS_MIN` を残せる範囲で広げる。シェルは、チャットの右に
 /// 並べる幅があれば右に、なければチャットの下に置く。
@@ -1489,7 +1489,18 @@ impl Render for AiPane {
                     .when_some(docked, |d, w| {
                         d.w(w).border_l_1().border_color(theme.border)
                     })
-                    .when(docked.is_none(), |d| d.absolute().inset_0())
+                    .when(docked.is_none(), |d| {
+                        // 上のバーとタスクの画面を残して、右に重ねる
+                        d.absolute()
+                            .top_0()
+                            .bottom_0()
+                            .right_0()
+                            .w(CHAT_WIDTH)
+                            .max_w_full()
+                            .border_l_1()
+                            .border_color(theme.border)
+                            .shadow_lg()
+                    })
                     .when(side_by_side, |d| d.flex_row())
                     .when(!side_by_side, |d| d.flex_col())
                     .child(self.render_chat(cx))
@@ -1539,7 +1550,7 @@ mod tests {
 
     #[test]
     fn the_pane_fits_the_window() {
-        // 狭ければ全面に重ねる
+        // 狭ければタスクの画面の右に重ねる
         assert_eq!(docked_width(px(800.), true), None);
         assert_eq!(docked_width(px(1179.), false), None);
         // 最初のウィンドウの幅（1180）でも、タスクの画面に 860 が残る
