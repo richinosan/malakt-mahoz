@@ -281,5 +281,9 @@ fn apply(choice: Choice, window: Option<&mut Window>, cx: &mut App) {
     };
     Theme::change(mode, None, cx);
     // 配色を読み込むと文字の大きさが配色の値に戻るので、そのたびに拡大率を掛け直す
-    Theme::update(cx, |theme| theme.font_size *= crate::TEXT_SCALE);
+    Theme::update(cx, |theme| {
+        theme.font_size *= crate::TEXT_SCALE;
+        // スクロールできる場所が分かるように、スクロールバーはいつも出す
+        theme.scrollbar_mode = gpui_kit::component::scroll::ScrollbarMode::Always;
+    });
 }

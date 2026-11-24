@@ -34,15 +34,69 @@ pub const TEXT_SCALE: f32 = 1.1;
 pub const APP_ID: &str = "io.github.richinosan.malakt-mahoz";
 
 /// データベースの場所。`MALAKT_MAHOZ_DB` で変えられる。
+///
+/// この PC だけのデータを置く場所に置く（Windows は `%LOCALAPPDATA%`、macOS は
+/// `~/Library/Application Support`、Linux は `~/.local/share`）。タスクも添付も設定も、
+/// この 1 つのファイルに入る。
 pub fn database_path() -> PathBuf {
     if let Some(path) = std::env::var_os("MALAKT_MAHOZ_DB") {
         return PathBuf::from(path);
     }
-    let dir = dirs::data_dir()
+    let dir = dirs::data_local_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("malakt-mahoz");
+        .join(DATA_DIR);
+    // 失敗したら、このあとデータベースを開くところでエラーになる
     let _ = std::fs::create_dir_all(&dir);
-    dir.join("data.sqlite3")
+    // 前の版は、Windows ではほかの PC と同期される場所（%APPDATA%）に置いていた
+    if let Some(old) = dirs::data_dir().map(|old| old.join(DATA_DIR)) {
+        if let Err(error) = move_database(&old, &dir) {
+            eprintln!(
+                "データベースを {} から {} へ移せませんでした: {error}",
+                old.display(),
+                dir.display()
+            );
+            return old.join(DATA_FILE);
+        }
+    }
+    dir.join(DATA_FILE)
+}
+
+const DATA_DIR: &str = "malakt-mahoz";
+const DATA_FILE: &str = "data.sqlite3";
+
+/// 前の場所にあるデータベースを、新しい場所へ移す。新しい場所にもうあれば何もしない。
+/// 途中で失敗したら、移した分を戻して、前の場所のまま使えるようにする。
+pub fn move_database(old: &std::path::Path, new: &std::path::Path) -> std::io::Result<()> {
+    if old == new || !old.join(DATA_FILE).exists() || new.join(DATA_FILE).exists() {
+        return Ok(());
+    }
+    // 本体のほかに、書きかけの分（-wal）と、その目次（-shm）がある
+    let names = [
+        format!("{DATA_FILE}-wal"),
+        format!("{DATA_FILE}-shm"),
+        DATA_FILE.to_owned(),
+    ];
+    let mut moved: Vec<&String> = Vec::new();
+    for name in &names {
+        let from = old.join(name);
+        if !from.exists() {
+            continue;
+        }
+        // 別のドライブへは名前の付け替えができないので、写してから消す
+        let result = std::fs::rename(&from, new.join(name)).or_else(|_| {
+            std::fs::copy(&from, new.join(name)).and_then(|_| std::fs::remove_file(&from))
+        });
+        if let Err(error) = result {
+            for name in moved {
+                // 戻せなかった分は新しい場所に残り、次に開くときにもう一度試す
+                let _ = std::fs::rename(new.join(name), old.join(name));
+            }
+            let _ = std::fs::remove_file(new.join(name));
+            return Err(error);
+        }
+        moved.push(name);
+    }
+    Ok(())
 }
 
 /// アプリ全体の準備。ウィンドウを開く前に 1 回呼ぶ。
@@ -212,6 +266,34 @@ mod tests {
     // `super::*` は gpui の `test` マクロまで持ち込むので、使うものだけを書く
     use super::initial_window_size;
     use gpui_kit::{px, size};
+
+    #[test]
+    fn database_moves_to_the_new_place_once() {
+        let root = tempfile::tempdir().unwrap();
+        let (old, new) = (root.path().join("old"), root.path().join("new"));
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::create_dir_all(&new).unwrap();
+        // 前の場所に何もなければ、何もしない
+        super::move_database(&old, &new).unwrap();
+        assert!(!new.join("data.sqlite3").exists());
+
+        std::fs::write(old.join("data.sqlite3"), b"db").unwrap();
+        std::fs::write(old.join("data.sqlite3-wal"), b"wal").unwrap();
+        super::move_database(&old, &new).unwrap();
+        assert_eq!(std::fs::read(new.join("data.sqlite3")).unwrap(), b"db");
+        assert_eq!(std::fs::read(new.join("data.sqlite3-wal")).unwrap(), b"wal");
+        assert!(!old.join("data.sqlite3").exists());
+        assert!(!old.join("data.sqlite3-wal").exists());
+
+        // 新しい場所にもうあるときは、前の場所のものを上書きしない
+        std::fs::write(old.join("data.sqlite3"), b"stale").unwrap();
+        super::move_database(&old, &new).unwrap();
+        assert_eq!(std::fs::read(new.join("data.sqlite3")).unwrap(), b"db");
+        assert!(old.join("data.sqlite3").exists());
+        // 同じ場所なら何もしない（macOS と Linux）
+        super::move_database(&new, &new).unwrap();
+        assert_eq!(std::fs::read(new.join("data.sqlite3")).unwrap(), b"db");
+    }
 
     #[test]
     fn window_size_follows_the_screen() {
