@@ -1,5 +1,5 @@
 [tools]
-rust = { version = "1.97.0", components = "rustfmt,clippy" }
+rust = { version = "1.100.0", components = "rustfmt,clippy" }
 
 [tasks.dev]
 description = "開発用にアプリを起動する（デバッグビルド）"
