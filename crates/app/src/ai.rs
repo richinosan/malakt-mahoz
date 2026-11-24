@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use gpui_kit::*;
+use malakt_ai::ansi;
 use malakt_ai::github::{self, Link};
 use malakt_ai::keys::{self, KeyStore, Source};
 use malakt_ai::provider::{self, CatalogModel, Endpoint};
@@ -20,6 +21,8 @@ use crate::db::{self, Db};
 const MAX_ROUNDS: usize = 40;
 /// シェルの表示に残す行数。
 const MAX_SHELL_LINES: usize = 4000;
+/// 自分で入力したコマンドの履歴の数。
+const MAX_HISTORY: usize = 200;
 /// 定期確認で 1 回に見に行くリンクの数。
 const MAX_WATCH_LINKS: usize = 30;
 /// 定期確認で AI に渡す、リンク 1 つあたりの文字数。
@@ -169,7 +172,10 @@ pub enum LineKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShellLine {
     pub kind: LineKind,
+    /// エスケープを除いた文字。
     pub text: SharedString,
+    /// 色の付いた範囲。
+    pub spans: Vec<ansi::Span>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -218,6 +224,13 @@ pub struct Session {
     pub busy: bool,
     pub pending: Option<Pending>,
     pub shell: Vec<ShellLine>,
+    /// シェルの中身が変わるたびに増える。表示の折り返しを作り直す目印。
+    pub shell_rev: u64,
+    ansi: ansi::State,
+    /// シェルの今の場所。`cd` で変わる。
+    pub cwd: std::path::PathBuf,
+    /// 自分で入力したコマンドの履歴。新しいものが後ろ。
+    pub history: Vec<SharedString>,
     running: Option<shell::Handle>,
     /// シェルのコマンドを、確認なしで実行する（このチャットの間）。
     pub allow_shell: bool,
@@ -310,6 +323,12 @@ impl Session {
             busy: false,
             pending: None,
             shell: Vec::new(),
+            shell_rev: 0,
+            ansi: ansi::State::default(),
+            cwd: dirs::home_dir()
+                .or_else(|| std::env::current_dir().ok())
+                .unwrap_or_else(|| ".".into()),
+            history: Vec::new(),
             running: None,
             allow_shell: false,
             auto_run,
@@ -823,14 +842,104 @@ impl Session {
     }
 
     fn push_shell(&mut self, kind: LineKind, text: &str) {
+        // 色は出力の間だけ引き継ぐ。コマンドや知らせの行で元に戻す
+        if !matches!(kind, LineKind::Out | LineKind::Err) {
+            self.ansi = ansi::State::default();
+        }
+        let (text, spans) = ansi::parse(text, &mut self.ansi);
+        self.shell_rev += 1;
         self.shell.push(ShellLine {
             kind,
-            text: text.to_owned().into(),
+            text: text.into(),
+            spans,
         });
         if self.shell.len() > MAX_SHELL_LINES {
             let extra = self.shell.len() - MAX_SHELL_LINES;
             self.shell.drain(..extra);
         }
+    }
+
+    /// シェルの表示を消す（Ctrl+L）。実行中のコマンドはそのまま。
+    pub fn clear_shell(&mut self, cx: &mut Context<Self>) {
+        self.shell.clear();
+        self.shell_rev += 1;
+        cx.notify();
+    }
+
+    /// プロンプトに出す今の場所。ホームは `~` にする。
+    pub fn cwd_label(&self) -> String {
+        match dirs::home_dir() {
+            Some(home) => match self.cwd.strip_prefix(&home) {
+                Ok(rest) if rest.as_os_str().is_empty() => "~".to_owned(),
+                Ok(rest) => format!("~/{}", rest.display()).replace('\\', "/"),
+                Err(_) => self.cwd.display().to_string(),
+            },
+            None => self.cwd.display().to_string(),
+        }
+    }
+
+    /// シェルに自分で入力したコマンドを実行する。AI が動いている間は実行しない。
+    pub fn run_user_command(&mut self, command: &str, cx: &mut Context<Self>) -> bool {
+        let command = command.trim().to_owned();
+        if self.busy || command.is_empty() || !self.db.read(cx).unlocked {
+            return false;
+        }
+        if self.history.last().map(|h| h.as_ref()) != Some(command.as_str()) {
+            self.history.push(command.clone().into());
+            if self.history.len() > MAX_HISTORY {
+                self.history.remove(0);
+            }
+        }
+        self.busy = true;
+        self.task = Some(cx.spawn(async move |this, cx| {
+            // 起動できなかったことは、シェルに出ている
+            let _ = Self::shell_line(&this, &command, cx).await;
+            // チャットがなくなっていれば、知らせる先もない
+            let _ = this.update(cx, |this, cx| {
+                this.finish();
+                cx.notify();
+            });
+        }));
+        cx.notify();
+        true
+    }
+
+    /// シェルの 1 行を、今の場所で実行する。`cd` はシェルの場所を変える。
+    async fn shell_line(
+        this: &WeakEntity<Self>,
+        command: &str,
+        cx: &mut AsyncApp,
+    ) -> std::io::Result<Output> {
+        let dropped = || std::io::Error::other("チャットが閉じられました");
+        let cwd = this.read_with(cx, |s, _| s.cwd.clone()).map_err(|_| dropped())?;
+        if let Some(target) = cd_target(command) {
+            let next = resolve_dir(&cwd, target);
+            let moved = next.as_ref().is_ok_and(|dir| dir.is_dir());
+            let mut output = Output {
+                stdout: String::new(),
+                all: String::new(),
+                code: Some(if moved { 0 } else { 1 }),
+            };
+            this.update(cx, |s, cx| {
+                s.push_shell(LineKind::Command, &format!("$ {command}"));
+                match next {
+                    Ok(dir) if moved => {
+                        output.all = format!("今の場所: {}", dir.display());
+                        s.cwd = dir;
+                    }
+                    _ => {
+                        output.all = format!("cd: {target}: そのフォルダはありません");
+                        s.push_shell(LineKind::Err, &output.all.clone());
+                    }
+                }
+                cx.notify();
+            })
+            .map_err(|_| dropped())?;
+            return Ok(output);
+        }
+        let mut spec = Spec::shell(command);
+        spec.cwd = Some(cwd);
+        Self::run_command(this, spec, cx).await
     }
 
     // ---- 進行 ----
@@ -1101,7 +1210,7 @@ impl Session {
                 let Some(command) = call.args.get("command").and_then(Value::as_str) else {
                     return failed("command が要ります".into());
                 };
-                match Self::run_command(this, Spec::shell(command), cx).await {
+                match Self::shell_line(this, command, cx).await {
                     Ok(output) => Ok(Ok(format!(
                         "終了コード: {}\n{}",
                         output
@@ -1277,6 +1386,39 @@ enum ToolError {
 }
 
 /// チャットがなくなった（アプリの終了）。出す先がないので、文は空でよい。
+/// `cd` だけのコマンドなら、移る先（引数がなければホーム）。
+fn cd_target(command: &str) -> Option<&str> {
+    let rest = command.trim().strip_prefix("cd")?;
+    if rest.is_empty() {
+        return Some("~");
+    }
+    // `cd x && make` のように続きがあるものは、シェルに任せる
+    if !rest.starts_with(char::is_whitespace) || rest.contains(['&', ';', '|', '>', '<', '`', '$'])
+    {
+        return None;
+    }
+    let target = rest.trim();
+    Some(
+        target
+            .strip_prefix('"')
+            .and_then(|t| t.strip_suffix('"'))
+            .or_else(|| target.strip_prefix('\'').and_then(|t| t.strip_suffix('\'')))
+            .unwrap_or(target),
+    )
+}
+
+fn resolve_dir(cwd: &std::path::Path, target: &str) -> std::io::Result<std::path::PathBuf> {
+    let path = if target == "~" || target.starts_with("~/") || target.starts_with("~\\") {
+        let home = dirs::home_dir()
+            .ok_or_else(|| std::io::Error::other("ホームのフォルダが分かりません"))?;
+        home.join(target.get(2..).unwrap_or_default())
+    } else {
+        cwd.join(target)
+    };
+    // `..` をたどって、実際の場所にする
+    path.canonicalize()
+}
+
 /// 「11/24 13:05」のような、今の時刻。
 fn now_label() -> String {
     let ms = std::time::SystemTime::now()
