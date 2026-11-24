@@ -1,0 +1,57 @@
+name: ミューテーションテスト（週 1 回）
+
+on:
+  schedule:
+    # 毎週月曜 03:00（日本時間）
+    - cron: "0 18 * * 0"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  id-token: write
+
+jobs:
+  mutants:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-mutants
+      - name: ミューテーションテストを実行する
+        # 生き残りがあると 0 以外で終わるが、分析に進むために続ける
+        run: mise run mutants || true
+      - name: 結果をまとめる
+        id: result
+        shell: bash
+        run: |
+          missed=$(wc -l < mutants.out/missed.txt | tr -d ' ')
+          caught=$(wc -l < mutants.out/caught.txt | tr -d ' ')
+          echo "missed=$missed" >> "$GITHUB_OUTPUT"
+          {
+            echo "## ミューテーションテスト"
+            echo "- 検出: $caught"
+            echo "- 生き残り: $missed"
+            echo
+            echo '```'
+            cat mutants.out/missed.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mutants
+          path: mutants.out
+      - name: 生き残りを分析してテストを足す
+        if: steps.result.outputs.missed != '0' && env.ANTHROPIC_API_KEY != ''
+        uses: anthropics/claude-code-action@v1
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: ${{ format('{0}/.github/prompts/mutants.md の指示に従ってください。', github.workspace) }}
+          claude_args: --model claude-sonnet-5-5 --max-turns 60
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
