@@ -8,8 +8,8 @@ use gpui_kit::component::text::TextViewState;
 use gpui_kit::*;
 use malakt_core::view::{self, ListQuery};
 use malakt_core::{
-    archive, lock, mention, Anchor, Change, Comment, Id, NewComment, Person, Scope, Status, Store,
-    Task as Todo, TaskDraft, TaskFilter, Workspace,
+    archive, lock, mention, Anchor, Attachment, Change, Comment, Id, NewComment, Person, Scope,
+    Status, Store, Task as Todo, TaskDraft, TaskFilter, Workspace,
 };
 
 use crate::db::{self, Db};
@@ -70,6 +70,7 @@ pub enum CommentMode {
 pub struct Detail {
     pub task: Todo,
     pub comments: Vec<Comment>,
+    pub attachments: Vec<Attachment>,
     pub changes: Vec<Change>,
     pub subtasks: Vec<Todo>,
     pub parent: Option<Todo>,
@@ -339,6 +340,7 @@ impl MainView {
             Some(id) => match store.task(id) {
                 Ok(task) => Some(Detail {
                     comments: store.comments(id)?,
+                    attachments: store.attachments(id)?,
                     changes: store.changes(id)?,
                     subtasks: store.subtasks(id)?,
                     parent: task.parent_id.as_deref().and_then(|p| store.task(p).ok()),
@@ -1116,6 +1118,124 @@ impl MainView {
             self.modal = Modal::None;
             self.notice = Some("ロックを無効にしました。".into());
         }
+    }
+
+    // ---- 添付 ----
+
+    /// ファイルを選んで、開いているタスクに添付する。
+    pub fn attach(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let chosen = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: true,
+            prompt: Some("添付".into()),
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(paths))) = chosen.await else {
+                return;
+            };
+            let _ = this.update(cx, |this, cx| this.attach_paths(&paths, cx));
+        })
+        .detach();
+    }
+
+    pub fn attach_paths(&mut self, paths: &[std::path::PathBuf], cx: &mut Context<Self>) {
+        let Some(task_id) = self.detail.as_ref().map(|d| d.task.id.clone()) else {
+            return;
+        };
+        let author = self.self_id.clone();
+        let mut failed = Vec::new();
+        for path in paths {
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            // 大きすぎるファイルは、読む前に断る
+            let result = std::fs::metadata(path)
+                .map_err(malakt_core::Error::from)
+                .and_then(|meta| {
+                    if meta.len() > malakt_core::MAX_ATTACHMENT_BYTES {
+                        return Err(malakt_core::Error::Invalid(format!(
+                            "添付できるのは 1 ファイル {} までです",
+                            view::format_bytes(malakt_core::MAX_ATTACHMENT_BYTES)
+                        )));
+                    }
+                    Ok(std::fs::read(path)?)
+                })
+                .and_then(|bytes| {
+                    self.db.update(cx, |db, cx| {
+                        cx.notify();
+                        db.store
+                            .add_attachment(&task_id, author.as_deref(), &name, &bytes)
+                    })
+                });
+            if let Err(error) = result {
+                failed.push(format!("{name}: {error}"));
+            }
+        }
+        self.error = (!failed.is_empty()).then(|| failed.join("\n").into());
+        cx.notify();
+    }
+
+    /// 添付を一時ファイルに書き出す。外のアプリで開くためのもので、
+    /// 起動時・ロック時・終了時にまとめて消す。
+    pub fn opened_copy(&self, id: &str, cx: &App) -> malakt_core::Result<std::path::PathBuf> {
+        let db = self.db.read(cx);
+        let store = &db.store;
+        let attachment = store.attachment(id)?;
+        let dir = db.opened_dir.join(&attachment.id);
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join(&attachment.name);
+        std::fs::write(&path, store.attachment_data(id)?)?;
+        Ok(path)
+    }
+
+    /// 添付を OS の既定のアプリで開く。
+    pub fn open_attachment(&mut self, id: &str, cx: &mut Context<Self>) {
+        match self.opened_copy(id, cx) {
+            Ok(path) => {
+                self.error = None;
+                cx.open_with_system(&path);
+            }
+            Err(error) => self.error = Some(error.to_string().into()),
+        }
+        cx.notify();
+    }
+
+    /// 添付を、選んだ場所に保存する。
+    pub fn save_attachment(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Ok(attachment) = self.db.read(cx).store.attachment(id) else {
+            return;
+        };
+        let dir = dirs::download_dir()
+            .or_else(dirs::home_dir)
+            .unwrap_or_else(|| ".".into());
+        let chosen = cx.prompt_for_new_path(&dir, Some(&attachment.name));
+        let id = id.to_owned();
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(path))) = chosen.await else {
+                return;
+            };
+            let _ = this.update(cx, |this, cx| this.save_attachment_to(&id, &path, cx));
+        })
+        .detach();
+    }
+
+    pub fn save_attachment_to(&mut self, id: &str, path: &std::path::Path, cx: &mut Context<Self>) {
+        let result = self
+            .db
+            .read(cx)
+            .store
+            .attachment_data(id)
+            .and_then(|bytes| Ok(std::fs::write(path, bytes)?));
+        match result {
+            Ok(()) => {
+                self.error = None;
+                self.notice = Some(format!("{} に保存しました。", path.display()).into());
+            }
+            Err(error) => self.error = Some(error.to_string().into()),
+        }
+        cx.notify();
     }
 
     // ---- エクスポート / インポート ----

@@ -323,6 +323,7 @@ fn archive_layout_is_portable() {
     assert_eq!(
         names,
         [
+            "data/attachments.json",
             "data/changes.json",
             "data/comments.json",
             "data/people.json",

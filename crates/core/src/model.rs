@@ -323,6 +323,36 @@ pub struct NewComment {
     pub reply_to: Option<Id>,
 }
 
+/// タスクに添付したファイル。中身は別に持ち、ここは名前や大きさだけ。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Attachment {
+    pub id: Id,
+    pub task_id: Id,
+    pub author_id: Option<Id>,
+    /// ファイル名（フォルダーは含まない）。
+    pub name: String,
+    /// 元の大きさ（バイト）。
+    pub size: u64,
+    /// 中身の SHA-256（16 進）。同じ中身のファイルは 1 つだけ保存する。
+    pub hash: String,
+    pub created_at: i64,
+}
+
+impl Attachment {
+    /// 画面にそのまま出せる画像か。拡張子で決める。
+    pub fn is_image(&self) -> bool {
+        let lower = self.name.to_lowercase();
+        ["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg"]
+            .iter()
+            .any(|ext| lower.ends_with(&format!(".{ext}")))
+    }
+}
+
+/// 添付できるファイルの大きさ（10 MiB）。
+pub const MAX_ATTACHMENT_BYTES: u64 = 10 * 1024 * 1024;
+/// 1 つのタスクに添付できる数。
+pub const MAX_ATTACHMENTS_PER_TASK: usize = 500;
+
 /// 1 つのタスクにピン留めできるコメントの数。
 pub const MAX_PINNED_COMMENTS: usize = 10;
 /// 1 つのコメントでメンションできる人数。
