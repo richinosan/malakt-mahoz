@@ -20,4 +20,4 @@ pub mod view;
 
 pub use error::{Error, Result};
 pub use model::*;
-pub use store::Store;
+pub use store::{Store, Usage};

@@ -43,6 +43,8 @@ pub enum Modal {
     /// 状態の変更（コメントを添えられる）
     Status(Id, Status),
     Lock,
+    /// ディスクの使用量と整理
+    Usage,
 }
 
 /// 詳細パネルで編集中の項目。
@@ -1028,6 +1030,20 @@ impl MainView {
         };
         if self.write(cx, |s| s.delete_workspace(&id)).is_some() {
             self.modal = Modal::None;
+        }
+    }
+
+    /// ディスクの使用量。
+    pub fn usage(&self, cx: &App) -> malakt_core::Usage {
+        self.db.read(cx).store.usage().unwrap_or_default()
+    }
+
+    /// 消したデータの跡を整理して、ディスクに返す。
+    pub fn compact(&mut self, cx: &mut Context<Self>) {
+        let before = self.usage(cx);
+        if let Some(after) = self.write(cx, |s| s.compact()) {
+            let freed = before.database_bytes.saturating_sub(after.database_bytes);
+            self.notice = Some(format!("{} を空けました。", view::format_bytes(freed)).into());
         }
     }
 

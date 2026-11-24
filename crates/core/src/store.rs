@@ -16,6 +16,26 @@ pub struct Store {
     conn: Connection,
 }
 
+/// ディスクの使用量（バイト）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Usage {
+    /// データベースのファイルの大きさ。
+    pub database_bytes: u64,
+    /// そのうち、消したデータの跡で、整理すると返せる分。
+    pub reclaimable_bytes: u64,
+}
+
+const AUTO_VACUUM_INCREMENTAL: i64 = 2;
+/// WAL のファイルをこの大きさまで切り詰める。
+const WAL_SIZE_LIMIT: i64 = 4 * 1024 * 1024;
+
+impl Drop for Store {
+    /// 閉じるときに、消した分の領域を返し、WAL を空にする。
+    fn drop(&mut self) {
+        let _ = self.compact();
+    }
+}
+
 const TASK_COLUMNS: &str = "t.id, t.workspace_id, t.title, t.description, t.status, t.priority, \
      t.due, t.position, t.created_at, t.updated_at, t.completed_at, t.start, t.percent, t.parent_id";
 
@@ -23,10 +43,47 @@ impl Store {
     /// ファイルを開く。なければ作る。
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let conn = Connection::open(path)?;
+        // 消した分の領域をファイルから返せるようにする。途中から変えるには作り直しが要る
+        let auto_vacuum: i64 = conn.query_row("PRAGMA auto_vacuum", [], |r| r.get(0))?;
+        if auto_vacuum != AUTO_VACUUM_INCREMENTAL {
+            conn.pragma_update(None, "auto_vacuum", AUTO_VACUUM_INCREMENTAL)?;
+            conn.execute_batch("VACUUM")?;
+        }
         // WAL は読み書きが互いを止めず、fsync の回数も少ない。
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
+        // WAL のファイルが大きくなったまま残らないようにする
+        conn.pragma_update(None, "journal_size_limit", WAL_SIZE_LIMIT)?;
         Self::init(conn)
+    }
+
+    /// ディスクの使用量。
+    pub fn usage(&self) -> Result<Usage> {
+        let get = |name: &str| -> rusqlite::Result<u64> {
+            self.conn
+                .query_row(&format!("PRAGMA {name}"), [], |r| r.get::<_, i64>(0))
+                .map(|n| n as u64)
+        };
+        let page = get("page_size")?;
+        Ok(Usage {
+            database_bytes: get("page_count")? * page,
+            reclaimable_bytes: get("freelist_count")? * page,
+        })
+    }
+
+    /// 使っていない領域をファイルから返し、WAL を空にする。
+    pub fn compact(&mut self) -> Result<Usage> {
+        {
+            // 1 行進めるごとに 1 ページ返るので、最後まで進める
+            let mut stmt = self.conn.prepare("PRAGMA incremental_vacuum")?;
+            let mut rows = stmt.query([])?;
+            while rows.next()?.is_some() {}
+        }
+        // メモリ上のデータベースなど、WAL でないときは何も起きない
+        self.conn
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
+            .optional()?;
+        self.usage()
     }
 
     /// メモリ上に作る（テスト用）。
@@ -2680,5 +2737,112 @@ mod comment_tests {
         let mut other = Store::open_in_memory().unwrap();
         other.merge(&s.dump().unwrap()).unwrap();
         assert_eq!(other.comments(&task.id).unwrap(), expect);
+    }
+}
+
+#[cfg(test)]
+mod disk_tests {
+    use super::Store;
+    use crate::model::*;
+
+    fn size(path: &std::path::Path) -> u64 {
+        std::fs::metadata(path).map_or(0, |m| m.len())
+    }
+
+    #[test]
+    fn deleted_data_gives_the_space_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("data.sqlite3");
+        let wal = dir.path().join("data.sqlite3-wal");
+        let mut s = Store::open(&path).unwrap();
+        let ids: Vec<Id> = (0..200)
+            .map(|i| {
+                let draft = TaskDraft {
+                    title: format!("タスク {i}"),
+                    description: "長い説明。".repeat(400),
+                    ..Default::default()
+                };
+                s.create_task(None, &draft).unwrap().id
+            })
+            .collect();
+        let full = s.compact().unwrap();
+        assert_eq!(full.reclaimable_bytes, 0);
+        assert_eq!(size(&path), full.database_bytes);
+        assert!(full.database_bytes > 1_000_000);
+
+        for id in &ids {
+            s.delete_task(id).unwrap();
+        }
+        // 消した直後は、跡が返せる領域として残る
+        assert!(s.usage().unwrap().reclaimable_bytes > 500_000);
+        let after = s.compact().unwrap();
+        assert_eq!(after.reclaimable_bytes, 0);
+        assert!(after.database_bytes < full.database_bytes / 4);
+        assert_eq!(size(&path), after.database_bytes);
+        assert_eq!(size(&wal), 0);
+    }
+
+    #[test]
+    fn closing_compacts_and_empties_the_wal() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("data.sqlite3");
+        let full = {
+            let mut s = Store::open(&path).unwrap();
+            let ids: Vec<Id> = (0..100)
+                .map(|i| {
+                    let draft = TaskDraft {
+                        title: format!("タスク {i}"),
+                        description: "長い説明。".repeat(400),
+                        ..Default::default()
+                    };
+                    s.create_task(None, &draft).unwrap().id
+                })
+                .collect();
+            let full = s.compact().unwrap().database_bytes;
+            for id in &ids {
+                s.delete_task(id).unwrap();
+            }
+            full
+        };
+        assert!(size(&path) < full / 4);
+        assert_eq!(size(&dir.path().join("data.sqlite3-wal")), 0);
+        // 開き直しても中身は読める
+        let s = Store::open(&path).unwrap();
+        assert!(s
+            .tasks(Scope::All, &TaskFilter::default())
+            .unwrap()
+            .is_empty());
+        assert_eq!(s.usage().unwrap().reclaimable_bytes, 0);
+    }
+
+    #[test]
+    fn existing_databases_are_converted_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("old.sqlite3");
+        // 領域を返さない設定で作られた、古いデータベース
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "PRAGMA auto_vacuum = NONE; CREATE TABLE keep(x); INSERT INTO keep VALUES (1);",
+            )
+            .unwrap();
+        }
+        drop(Store::open(&path).unwrap());
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        let mode: i64 = conn
+            .query_row("PRAGMA auto_vacuum", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(mode, super::AUTO_VACUUM_INCREMENTAL);
+        let kept: i64 = conn
+            .query_row("SELECT x FROM keep", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(kept, 1);
+    }
+
+    #[test]
+    fn in_memory_store_reports_usage() {
+        let mut s = Store::open_in_memory().unwrap();
+        assert!(s.usage().unwrap().database_bytes > 0);
+        s.compact().unwrap();
     }
 }

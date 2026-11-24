@@ -256,6 +256,21 @@ pub fn format_datetime(at_ms: i64) -> String {
     }
 }
 
+/// バイト数を「1.2 MB」の形にする。
+pub fn format_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 4] = ["KB", "MB", "GB", "TB"];
+    if bytes < 1024 {
+        return format!("{bytes} B");
+    }
+    let mut value = bytes as f64 / 1024.0;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    format!("{value:.1} {}", UNITS[unit])
+}
+
 /// 変更履歴の項目名。
 pub fn field_label(field: &str) -> &str {
     match field {
@@ -535,6 +550,16 @@ mod tests {
         assert_eq!(pick(Role::C, Some("you")), ["a"]);
         // 自分が分からなければ 0 件
         assert!(pick(Role::R, None).is_empty());
+    }
+
+    #[test]
+    fn bytes_are_readable() {
+        assert_eq!(format_bytes(0), "0 B");
+        assert_eq!(format_bytes(1023), "1023 B");
+        assert_eq!(format_bytes(1024), "1.0 KB");
+        assert_eq!(format_bytes(1_572_864), "1.5 MB");
+        assert_eq!(format_bytes(3 * 1024 * 1024 * 1024), "3.0 GB");
+        assert_eq!(format_bytes(u64::MAX), "16777216.0 TB");
     }
 
     #[test]
