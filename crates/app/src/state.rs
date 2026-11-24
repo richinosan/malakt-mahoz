@@ -206,6 +206,8 @@ pub struct MainView {
     pub sidebar_resizing: bool,
     /// 上のバーの空いているところを押している間だけ `true`（ウィンドウを動かし始めるため）。
     pub header_pressed: bool,
+    /// 詳細で、担当者と役を選ぶところを開いている。
+    pub assignee_picker: bool,
     /// 出入りの動きを付ける。テストでは止めて、すぐ最後の位置に出す
     pub motion: bool,
     pub today: String,
@@ -407,6 +409,7 @@ impl MainView {
             sidebar_width: SIDEBAR_WIDTH,
             sidebar_resizing: false,
             header_pressed: false,
+            assignee_picker: false,
             motion: true,
             today: view::today(),
             inputs,
@@ -679,6 +682,7 @@ impl MainView {
         }
         self.panel = Some(id.to_owned());
         self.editing = None;
+        self.assignee_picker = false;
         self.reload(cx);
         if let Some(detail) = &self.detail {
             let start = detail.task.start.clone().unwrap_or_default();
@@ -696,6 +700,7 @@ impl MainView {
         self.panel = None;
         self.detail = None;
         self.editing = None;
+        self.assignee_picker = false;
         self.comment_mode = CommentMode::New;
         self.pending_anchor = None;
         cx.notify();
@@ -2028,6 +2033,8 @@ impl MainView {
             self.issued_ticket = None;
         } else if self.editing.is_some() {
             self.editing = None;
+        } else if self.assignee_picker {
+            self.assignee_picker = false;
         } else if self.panel.is_some() {
             self.close_panel(cx);
         } else if !self.selected.is_empty() {

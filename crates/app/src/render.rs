@@ -1067,10 +1067,11 @@ impl MainView {
                     let id = ws.id.clone();
                     row()
                         .id(("home-ws", ix))
-                        .w(px(370.))
-                        .p_4()
-                        .gap_3()
-                        .items_start()
+                        .w(px(248.))
+                        .p_2()
+                        .pr_3()
+                        .gap_2p5()
+                        .items_center()
                         .border_1()
                         .border_color(theme.border)
                         .rounded_lg()
@@ -1080,7 +1081,7 @@ impl MainView {
                         .active(|s| s.bg(theme.accent))
                         .child(
                             div()
-                                .size(px(56.))
+                                .size(px(44.))
                                 .flex_none()
                                 .flex()
                                 .items_center()
@@ -1096,7 +1097,6 @@ impl MainView {
                             col()
                                 .flex_1()
                                 .min_w_0()
-                                .gap_1()
                                 .child(
                                     div()
                                         .font_weight(FontWeight::BOLD)
@@ -1110,17 +1110,12 @@ impl MainView {
                                             .text_color(theme.muted_foreground)
                                             .child(view::format_date(&date, &self.today)),
                                     )
-                                })
-                                .child(
-                                    row()
-                                        .mt_2()
-                                        .gap_1()
-                                        .text_sm()
-                                        .font_weight(FontWeight::BOLD)
-                                        .text_color(theme.primary)
-                                        .child("タスクを開く")
-                                        .child(app_icon("arrow-right").small()),
-                                ),
+                                }),
+                        )
+                        .child(
+                            app_icon("chevron-right")
+                                .small()
+                                .text_color(theme.muted_foreground),
                         )
                         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                             this.go(Nav::Workspace(id.clone()), cx)
@@ -1720,28 +1715,34 @@ impl MainView {
             .child(div().w(COL_UPDATED).child("更新"))
     }
 
-    /// 担当の表示。頭文字の丸と名前。複数いるときは、終えた人数を先に出す。
-    fn assignee_cell(&self, ids: &[Id], done: Option<(usize, usize)>, cx: &App) -> Div {
+    /// 一覧での担当の表示。全員を頭文字の丸と名前で並べ、幅が足りなければ人ごとに折り返す。
+    fn assignee_cell(&self, ids: &[Id], cx: &App) -> Div {
         let theme = cx.theme();
-        let Some(first) = ids.first() else {
+        if ids.is_empty() {
             return row()
                 .text_sm()
                 .text_color(theme.muted_foreground)
-                .child("—");
-        };
-        let name = self.person_name(first);
-        row()
-            .gap_2()
+                .child("未割り当て");
+        }
+        let mut cell = row()
             .min_w_0()
-            .text_sm()
-            .child(avatar(name, cx))
-            .child(div().truncate().child(match (ids.len(), done) {
-                (1, _) => SharedString::from(name.to_owned()),
-                (n, Some((done, total))) => {
-                    SharedString::from(format!("{name} ほか {} 人（{done}/{total}）", n - 1))
-                }
-                (n, None) => SharedString::from(format!("{name} ほか {} 人", n - 1)),
-            }))
+            .max_h(px(52.))
+            .overflow_hidden()
+            .flex_wrap()
+            .gap_x_2p5()
+            .gap_y_1()
+            .text_sm();
+        for id in ids {
+            let name = self.person_name(id);
+            cell = cell.child(
+                row()
+                    .min_w_0()
+                    .gap_1p5()
+                    .child(avatar(name, cx))
+                    .child(div().truncate().child(name.to_owned())),
+            );
+        }
+        cell
     }
 
     /// 値を押して選ぶメニュー。表の中と追加行で使う。
@@ -1904,12 +1905,11 @@ impl MainView {
                 cx,
             )
         };
-        let (done, total) = task.done_count();
         let assignees = {
             let id = id.clone();
             self.value_menu(
                 ("assignee", ix),
-                self.assignee_cell(&task.assignee_ids, (total > 1).then_some((done, total)), cx),
+                self.assignee_cell(&task.assignee_ids, cx),
                 self.assignee_options(&task.assignee_ids),
                 move |this, person: Id, cx| {
                     this.edit_task_by_id(&id, cx, |d| {
@@ -2039,7 +2039,7 @@ impl MainView {
         );
         let assignees = self.value_menu(
             "quick-assignee",
-            self.assignee_cell(&quick.assignee_ids, None, cx),
+            self.assignee_cell(&quick.assignee_ids, cx),
             self.assignee_options(&quick.assignee_ids),
             |this, person: Id, cx| {
                 this.quick_touched = true;
@@ -2262,6 +2262,217 @@ impl MainView {
             )
     }
 
+    /// 詳細の「担当」。1 人ずつ、完了のチェック・頭文字の丸・名前・役（R・A など）を並べる。
+    /// 押すと、担当者と役を選ぶところが下に開く。
+    fn assignee_property(&self, task: &Todo, cx: &mut Context<Self>) -> Div {
+        let theme = cx.theme().clone();
+        let mut list = col().gap_1p5();
+        if task.assignee_ids.is_empty() {
+            list = list.child(
+                div()
+                    .text_sm()
+                    .text_color(theme.muted_foreground)
+                    .child("未割り当て"),
+            );
+        }
+        for (i, person_id) in task.assignee_ids.iter().enumerate() {
+            let roles = task.roles_of(person_id).unwrap_or_default();
+            let done = task.is_done_by(person_id);
+            let name = self.person_name(person_id);
+            let check = div()
+                .id(("p-done", i))
+                .size_5()
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_full()
+                .border_1()
+                .cursor_pointer()
+                .when(done, |d| {
+                    d.bg(theme.success)
+                        .border_color(theme.success)
+                        .text_color(theme.success_foreground)
+                        .child(app_icon("check").size_3p5())
+                })
+                .when(!done, |d| {
+                    d.bg(theme.background)
+                        .border_color(theme.muted_foreground.opacity(0.6))
+                        .hover(|s| s.border_color(theme.success))
+                })
+                .active(|s| s.opacity(0.7))
+                .tooltip({
+                    let text = if done {
+                        format!("{name} さんの分を未完了に戻す")
+                    } else {
+                        format!("{name} さんの分を完了にする")
+                    };
+                    move |window, cx| {
+                        gpui_kit::component::tooltip::Tooltip::new(text.clone()).build(window, cx)
+                    }
+                })
+                .on_click(cx.listener({
+                    let id = person_id.clone();
+                    move |this, _: &ClickEvent, _, cx| {
+                        // 行を押したことにしない（担当を選ぶところを開かない）
+                        cx.stop_propagation();
+                        this.toggle_assignee_done(&id, cx)
+                    }
+                }))
+                .test_support();
+            let badge = div()
+                .id(("p-roles", i))
+                .flex_none()
+                .px_1p5()
+                .py_0p5()
+                .rounded_sm()
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.muted)
+                .text_xs()
+                .font_weight(FontWeight::BOLD)
+                .text_color(theme.muted_foreground)
+                .hover(|s| s.bg(theme.accent))
+                .tooltip({
+                    let text = roles.labels();
+                    move |window, cx| {
+                        gpui_kit::component::tooltip::Tooltip::new(text.clone()).build(window, cx)
+                    }
+                })
+                .child(roles.iter().map(Raci::code).collect::<Vec<_>>().join("・"));
+            list = list.child(
+                row()
+                    .min_w_0()
+                    .gap_2()
+                    .child(check)
+                    .child(avatar(name, cx))
+                    .child(div().min_w_0().text_sm().child(name.to_owned()))
+                    .child(badge),
+            );
+        }
+        let value = div()
+            .id("p-assignees")
+            .mx(px(-8.))
+            .px_2()
+            .py_1()
+            .rounded_md()
+            .cursor_pointer()
+            .hover(|s| s.bg(theme.accent.opacity(0.4)))
+            .when(self.assignee_picker, |d| d.bg(theme.accent.opacity(0.4)))
+            .child(list)
+            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                this.assignee_picker = !this.assignee_picker;
+                cx.notify();
+            }))
+            .test_support();
+        let mut people = col().flex_1().min_w_0().gap_1().child(value);
+        if self.assignee_picker {
+            people = people.child(self.assignee_picker(task, cx));
+        }
+        people
+    }
+
+    /// 担当者を選ぶところ。選んだ人の下に、役（R・A・C・I）を選ぶチップが出る。
+    fn assignee_picker(&self, task: &Todo, cx: &mut Context<Self>) -> Div {
+        let theme = cx.theme().clone();
+        let mut list = col()
+            .rounded_md()
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.background);
+        for (i, p) in self.people.iter().enumerate() {
+            let row_ix = task.assignee_ids.iter().position(|a| a == &p.id);
+            let id = p.id.clone();
+            let mut item = col()
+                .when(i > 0, |d| d.border_t_1().border_color(theme.border))
+                .child(
+                    row()
+                        .id(("p-as", i))
+                        .gap_2()
+                        .px_3()
+                        .py_2()
+                        .cursor_pointer()
+                        .hover(|s| s.bg(theme.accent.opacity(0.4)))
+                        .active(|s| s.bg(theme.accent))
+                        .child(
+                            div()
+                                .size_5()
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded_sm()
+                                .border_1()
+                                .when(row_ix.is_some(), |d| {
+                                    d.bg(theme.primary)
+                                        .border_color(theme.primary)
+                                        .text_color(theme.primary_foreground)
+                                        .child(app_icon("check").size_3p5())
+                                })
+                                .when(row_ix.is_none(), |d| d.border_color(theme.input)),
+                        )
+                        .child(avatar(&p.name, cx))
+                        .child(div().min_w_0().truncate().text_sm().child(p.name.clone()))
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            this.toggle_assignee(&id, cx)
+                        }))
+                        .test_support(),
+                );
+            if let Some(row_ix) = row_ix {
+                let roles = task.roles_of(&p.id).unwrap_or_default();
+                let mut chips = row().flex_wrap().gap_1p5().pt_0p5().pr_3().pb_2().pl_10();
+                for role in Raci::ALL {
+                    let id = p.id.clone();
+                    let on = roles.contains(role);
+                    chips = chips.child(
+                        row()
+                            .id(("p-role", row_ix * 4 + role as usize))
+                            .gap_1()
+                            .px_2()
+                            .py_1()
+                            .rounded_md()
+                            .border_1()
+                            .text_xs()
+                            .cursor_pointer()
+                            .when(on, |d| {
+                                d.bg(theme.primary)
+                                    .border_color(theme.primary)
+                                    .text_color(theme.primary_foreground)
+                            })
+                            .when(!on, |d| {
+                                d.bg(theme.background)
+                                    .border_color(theme.border)
+                                    .hover(|s| s.bg(theme.accent))
+                            })
+                            .active(|s| s.opacity(0.7))
+                            .child(div().font_weight(FontWeight::BOLD).child(role.code()))
+                            .child(role.label())
+                            .tooltip(move |window, cx| {
+                                gpui_kit::component::tooltip::Tooltip::new(role.hint())
+                                    .build(window, cx)
+                            })
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                this.toggle_role(&id, role, cx)
+                            }))
+                            .test_support(),
+                    );
+                }
+                item = item.child(chips);
+            }
+            list = list.child(item);
+        }
+        col().gap_1().child(list).child(
+            row().child(
+                Button::new("p-add-person")
+                    .icon(app_icon("user-plus"))
+                    .label("担当者を登録")
+                    .ghost()
+                    .small()
+                    .on_click(cx.listener(|this, _, window, cx| this.open_people(window, cx))),
+            ),
+        )
+    }
+
     fn property(&self, label: &'static str, cx: &App) -> Div {
         row().gap_2().items_start().child(
             div()
@@ -2481,83 +2692,7 @@ impl MainView {
             cx,
         );
 
-        let mut people = row().gap_1().flex_wrap();
-        for (i, p) in self.people.iter().enumerate() {
-            let id = p.id.clone();
-            people = people.child(
-                chip(
-                    ("p-as", i),
-                    p.name.clone(),
-                    task.assignee_ids.contains(&p.id),
-                    cx,
-                )
-                .on_click(
-                    cx.listener(move |this, _: &ClickEvent, _, cx| this.toggle_assignee(&id, cx)),
-                )
-                .test_support(),
-            );
-        }
-        people = people.child(
-            Button::new("p-add-person")
-                .label(if self.people.is_empty() {
-                    "担当者を登録"
-                } else {
-                    "＋"
-                })
-                .ghost()
-                .xsmall()
-                .on_click(cx.listener(|this, _, window, cx| this.open_people(window, cx))),
-        );
-
-        // 担当者ごとの行: 自分の分の完了と、役（R・A・C・I）
-        let mut people = col().gap_1().child(people);
-        let (finished, total) = task.done_count();
-        if total > 1 {
-            people = people.child(
-                div()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .child(format!("{finished}/{total} 完了")),
-            );
-        }
-        for (i, person_id) in task.assignee_ids.iter().enumerate() {
-            let roles = task.roles_of(person_id).unwrap_or_default();
-            let mut line = row().gap_1().child(
-                Checkbox::new(("p-done", i))
-                    .checked(task.is_done_by(person_id))
-                    .on_click(cx.listener({
-                        let id = person_id.clone();
-                        move |this, _, _, cx| this.toggle_assignee_done(&id, cx)
-                    })),
-            );
-            line = line.child(
-                div()
-                    .w(px(132.))
-                    .flex_none()
-                    .truncate()
-                    .text_sm()
-                    .child(self.person_name(person_id).to_owned()),
-            );
-            for role in Raci::ALL {
-                let id = person_id.clone();
-                line = line.child(
-                    chip(
-                        ("p-role", i * 4 + role as usize),
-                        role.code(),
-                        roles.contains(role),
-                        cx,
-                    )
-                    .tooltip(move |window, cx| {
-                        gpui_kit::component::tooltip::Tooltip::new(role.label()).build(window, cx)
-                    })
-                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                        this.toggle_role(&id, role, cx)
-                    }))
-                    .test_support(),
-                );
-            }
-            people = people.child(line);
-        }
+        let people = self.assignee_property(task, cx);
 
         let due_buttons = [
             ("今日", Some(0)),
