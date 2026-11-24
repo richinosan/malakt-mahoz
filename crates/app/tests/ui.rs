@@ -153,7 +153,12 @@ fn nested_workspaces_and_filing_later(cx: &mut TestAppContext) {
     cx.update(|cx| assert_eq!(view.read(cx).nav, Nav::Workspace(parent.id.clone())));
 
     // その中に子を作る
-    ui(cx, window, |window, cx| window.click("ws-add-child", cx));
+    ui(cx, window, |window, cx| {
+        window.click(("ws-more", 0usize), cx)
+    });
+    for key in ["down", "down", "down", "enter"] {
+        ui(cx, window, |window, cx| window.press(key, cx));
+    }
     ui(cx, window, |window, cx| {
         window.click("name-input", cx);
         window.input("会場", cx);
@@ -427,7 +432,6 @@ fn every_screen_renders_at_any_size(cx: &mut TestAppContext) {
             Modal::History,
             Modal::Status(task.clone(), Status::Completed),
             Modal::Lock,
-            Modal::Usage,
             Modal::WorkspaceSettings(ws.clone()),
             Modal::LinkTask(task.clone()),
             Modal::BulkDue,
@@ -754,29 +758,6 @@ fn comments_edit_mention_review_and_report(cx: &mut TestAppContext) {
     ui(cx, window, |_, _| {});
 }
 
-/// 使用量を見て、その場で整理できる。
-#[gpui_kit::test]
-fn usage_dialog_shows_size_and_compacts(cx: &mut TestAppContext) {
-    start(cx);
-    let (window, view) = open(cx, wide());
-    ui(cx, window, |window, cx| window.click("open-usage", cx));
-    cx.update(|cx| {
-        let view = view.read(cx);
-        assert_eq!(view.modal, Modal::Usage);
-        assert!(view.usage(cx).database_bytes > 0);
-    });
-    ui(cx, window, |window, cx| window.click("usage-compact", cx));
-    cx.update(|cx| {
-        let view = view.read(cx);
-        assert!(view.error.is_none());
-        assert!(view
-            .notice
-            .as_ref()
-            .is_some_and(|n| n.contains("空けました")));
-        assert_eq!(view.usage(cx).reclaimable_bytes, 0);
-    });
-}
-
 /// ファイルを添付し、保存し、消せる。大きすぎるファイルは断る。
 #[gpui_kit::test]
 fn attachments_add_save_and_delete(cx: &mut TestAppContext) {
@@ -913,7 +894,7 @@ fn workspace_defaults_fill_new_tasks(cx: &mut TestAppContext) {
     set(cx, |v| &v.inputs.def_days, "－７");
     set(cx, |v| &v.inputs.def_time, "18:00");
     ui(cx, window, |window, cx| {
-        window.click(("def-as", 0usize), cx)
+        window.click(("def-as", 1usize), cx)
     });
     ui(cx, window, |window, cx| {
         window.click(("def-prio", 1usize), cx)
@@ -1093,7 +1074,7 @@ fn bulk_changes_and_full_new_task_form(cx: &mut TestAppContext) {
     // 担当者: 追加してから、置き換えで空にする
     ui(cx, window, |window, cx| window.click("bulk-assignees", cx));
     ui(cx, window, |window, cx| {
-        window.click(("bulk-person", 0usize), cx)
+        window.click(("bulk-person", 1usize), cx)
     });
     ui(cx, window, |window, cx| {
         window.click("bulk-assignees-submit", cx)
@@ -1152,7 +1133,7 @@ fn bulk_changes_and_full_new_task_form(cx: &mut TestAppContext) {
     ui(cx, window, |window, cx| {
         window.click(("nt-prio", 1usize), cx)
     });
-    ui(cx, window, |window, cx| window.click(("nt-as", 0usize), cx));
+    ui(cx, window, |window, cx| window.click(("nt-as", 1usize), cx));
     ui(cx, window, |window, cx| window.click("new-task-submit", cx));
     let made = all_tasks(cx)
         .into_iter()
@@ -1336,4 +1317,59 @@ fn completion_ticket_issued_here_and_redeemed_by_command(cx: &mut TestAppContext
         "佐藤 さんが「チラシを配る」の自分の分を完了にしました（1/2 人）"
     );
     assert_eq!(shown[0].body.as_ref(), "駅前で配り終えました");
+}
+
+/// 「自分」は最初からいて、担当者を足さなくても既定の担当に選べる。
+/// ワークスペースには、メニューからアイコンと色を付けられる。
+#[gpui_kit::test]
+fn self_is_always_there_and_workspaces_take_icons(cx: &mut TestAppContext) {
+    start(cx);
+    let (window, view) = open(cx, wide());
+    let me = store(cx, |s| s.people().unwrap());
+    assert_eq!(me.len(), 1);
+    assert!(me[0].is_self);
+
+    let ws = cx.update(|cx| {
+        db::shared(cx).update(cx, |db, cx| {
+            cx.notify();
+            db.store.create_workspace(None, "引っ越し").unwrap().id
+        })
+    });
+    cx.update(|cx| view.update(cx, |v, cx| v.go(Nav::Workspace(ws.clone()), cx)));
+    cx.run_until_parked();
+
+    // 設定の担当者に、自分が出ている
+    ui(cx, window, |window, cx| window.click("ws-settings", cx));
+    ui(cx, window, |window, cx| {
+        window.click(("def-as", 0usize), cx)
+    });
+    ui(cx, window, |window, cx| {
+        window.click("ws-settings-save", cx)
+    });
+    let saved = store(cx, |s| s.task_defaults(&ws).unwrap());
+    assert_eq!(saved.assignee_ids, [me[0].id.clone()]);
+
+    // 行の「…」からアイコンを変える
+    ui(cx, window, |window, cx| {
+        window.click(("ws-more", 0usize), cx)
+    });
+    ui(cx, window, |window, cx| window.press("down", cx));
+    ui(cx, window, |window, cx| window.press("enter", cx));
+    cx.update(|cx| assert_eq!(view.read(cx).modal, Modal::WorkspaceIcon(ws.clone())));
+    ui(cx, window, |window, cx| {
+        window.click(("ws-icon", 13usize), cx)
+    });
+    ui(cx, window, |window, cx| {
+        window.click(("ws-color", 2usize), cx)
+    });
+    let saved = store(cx, |s| s.workspace(&ws).unwrap());
+    assert_eq!(saved.icon.as_deref(), Some("rocket"));
+    assert_eq!(saved.color.as_deref(), Some("orange"));
+    // 色なしに戻しても、アイコンは残る
+    ui(cx, window, |window, cx| {
+        window.click(("ws-color", 0usize), cx)
+    });
+    let saved = store(cx, |s| s.workspace(&ws).unwrap());
+    assert_eq!(saved.icon.as_deref(), Some("rocket"));
+    assert_eq!(saved.color, None);
 }

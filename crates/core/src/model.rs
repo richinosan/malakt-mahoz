@@ -25,6 +25,11 @@ pub fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
+/// ワークスペースのアイコンに付けられる色。
+pub const WORKSPACE_COLORS: [&str; 8] = [
+    "red", "orange", "yellow", "green", "teal", "blue", "purple", "pink",
+];
+
 /// タスクをまとめる単位。`parent_id` で入れ子にする。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Workspace {
@@ -35,6 +40,12 @@ pub struct Workspace {
     /// タスク追加時の既定の期限を「この日の何日前」と決めるのに使う。
     #[serde(default)]
     pub date: Option<String>,
+    /// 一覧で名前の前に出すアイコンの名前（`folder` など）。`None` なら既定のアイコン。
+    #[serde(default)]
+    pub icon: Option<String>,
+    /// アイコンの色。[`WORKSPACE_COLORS`] のどれか。`None` なら文字と同じ色。
+    #[serde(default)]
+    pub color: Option<String>,
     pub position: i64,
     pub created_at: i64,
     pub updated_at: i64,

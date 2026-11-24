@@ -4301,7 +4301,9 @@ name = "malakt-mahoz"
 version = "0.1.0"
 dependencies = [
  "dirs 5.0.1",
+ "embed-resource",
  "gpui-kit",
+ "image",
  "malakt-core",
  "serde",
  "serde_json",
