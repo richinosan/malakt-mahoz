@@ -4,6 +4,7 @@ pub mod cli;
 pub mod db;
 mod render;
 pub mod state;
+pub mod theme;
 
 use std::path::PathBuf;
 
@@ -18,8 +19,6 @@ actions!(malakt, [NewWindow, Quit, LockNow, Dismiss]);
 pub const APP_NAME: &str = "Malakt Mahoz";
 /// OS がウィンドウや通知をこのアプリのものと見分けるための名前。
 pub const APP_ID: &str = "io.github.richinosan.malakt-mahoz";
-/// 同梱しているフォントの名前。
-pub const FONT_FAMILY: &str = "LINE Seed JP";
 
 /// データベースの場所。`MALAKT_MAHOZ_DB` で変えられる。
 pub fn database_path() -> PathBuf {
@@ -40,6 +39,7 @@ pub fn init(store: malakt_core::Store, cx: &mut App) {
     gpui_kit::init(cx);
     load_fonts(cx);
     db::init(store, cx);
+    theme::init(cx);
     cx.bind_keys([
         #[cfg(target_os = "macos")]
         KeyBinding::new("cmd-n", NewWindow, None),
@@ -79,16 +79,19 @@ pub fn open_main_window(cx: &mut App) -> Result<(AnyWindowHandle, Entity<MainVie
     // 2 枚目からは少しずらして重ならないようにする
     let offset = px(28.) * (cx.windows().len() % 8) as f32;
     bounds.origin += point(offset, offset);
+    // OS のタイトルバーは出さず、アプリの中の細いバーで代える
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
         window_min_size: Some(size(px(360.), px(420.))),
         titlebar: Some(TitlebarOptions {
             title: Some(APP_NAME.into()),
-            ..Default::default()
+            ..gpui_kit::component::TitleBar::title_bar_options()
         }),
+        #[cfg(target_os = "linux")]
+        window_decorations: Some(WindowDecorations::Client),
         app_id: Some(APP_ID.into()),
         icon: window_icon(),
-        ..Default::default()
+        ..gpui_kit::component::TitleBar::window_options()
     };
     gpui_kit::open_window(options, cx, |window, cx| {
         cx.new(|cx| MainView::new(window, cx))
@@ -97,14 +100,16 @@ pub fn open_main_window(cx: &mut App) -> Result<(AnyWindowHandle, Entity<MainVie
 
 /// 同梱のフォントを読み込んで、画面全体の書体にする。
 fn load_fonts(cx: &mut App) {
-    // 太さは Regular だけ。強調は文字の大きさと色でする
-    let fonts: Vec<std::borrow::Cow<'static, [u8]>> =
-        vec![include_bytes!("../assets/fonts/LINESeedJP-Regular.ttf")
+    let fonts: Vec<std::borrow::Cow<'static, [u8]>> = vec![
+        include_bytes!("../assets/fonts/LINESeedJP-Regular.ttf")
             .as_slice()
-            .into()];
-    if cx.text_system().add_fonts(fonts).is_ok() {
-        gpui_kit::component::Theme::global_mut(cx).font_family = FONT_FAMILY.into();
-    }
+            .into(),
+        include_bytes!("../assets/fonts/LINESeedJP-Bold.ttf")
+            .as_slice()
+            .into(),
+    ];
+    // 書体の名前は配色の設定（theme.rs）に書いてある
+    let _ = cx.text_system().add_fonts(fonts);
 }
 
 /// 最初のウィンドウの大きさ。画面の半分を目安に、1280×720 から 1920×1080 の間で決める。

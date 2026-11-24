@@ -6,9 +6,9 @@ use gpui_kit::base::TestSupportExt;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::{Input, Textarea};
-use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
+use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu, PopupMenu, PopupMenuItem};
 use gpui_kit::component::text::TextView;
-use gpui_kit::component::{ActiveTheme, Icon, Sizable};
+use gpui_kit::component::{ActiveTheme, Icon, Sizable, TitleBar};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use malakt_core::bulk::{BulkOp, ListMode};
@@ -19,10 +19,16 @@ use crate::state::{CommentMode, Detail, Editing, MainView, Modal, Nav};
 use crate::{Dismiss, LockNow, NewWindow};
 use malakt_core::Id;
 
-const SIDEBAR_WIDTH: Pixels = px(248.);
+const SIDEBAR_WIDTH: Pixels = px(256.);
+const HEADER_HEIGHT: Pixels = px(72.);
 const PANEL_WIDTH: Pixels = px(480.);
-const ROW_HEIGHT: Pixels = px(40.);
-const CARD_HEIGHT: Pixels = px(84.);
+const ROW_HEIGHT: Pixels = px(60.);
+const CARD_HEIGHT: Pixels = px(96.);
+const COL_STATUS: Pixels = px(96.);
+const COL_PRIORITY: Pixels = px(84.);
+const COL_ASSIGNEE: Pixels = px(160.);
+const COL_DUE: Pixels = px(150.);
+const COL_UPDATED: Pixels = px(84.);
 
 fn row() -> Div {
     div().flex().flex_row().items_center()
@@ -64,21 +70,89 @@ fn chip(
 fn status_color(status: Status, cx: &App) -> Hsla {
     let theme = cx.theme();
     match status {
-        Status::NeedsAction => theme.muted_foreground,
+        Status::NeedsAction => theme.foreground,
         Status::InProcess => theme.info,
         Status::Completed => theme.success,
         Status::Cancelled => theme.muted_foreground,
     }
 }
 
+fn status_icon(status: Status) -> &'static str {
+    match status {
+        Status::NeedsAction => "circle",
+        Status::InProcess => "circle-dot",
+        Status::Completed => "circle-check",
+        Status::Cancelled => "circle-x",
+    }
+}
+
+/// 状態の丸いラベル。
 fn status_badge(status: Status, cx: &App) -> Div {
-    let color = status_color(status, cx);
+    let theme = cx.theme();
     row()
         .gap_1()
         .flex_none()
-        .text_sm()
-        .child(div().size_2().rounded_full().bg(color))
+        .px_2()
+        .py_0p5()
+        .rounded_full()
+        .border_1()
+        .border_color(theme.border)
+        .bg(theme.background)
+        .text_xs()
+        .font_weight(FontWeight::BOLD)
+        .child(
+            app_icon(status_icon(status))
+                .xsmall()
+                .text_color(status_color(status, cx)),
+        )
         .child(status.label())
+}
+
+/// 優先度。棒の本数と色で見分ける。
+fn priority_label(priority: Prio, cx: &App) -> Div {
+    let theme = cx.theme();
+    let (icon, color) = match priority {
+        Prio::High => ("signal-high", rgb(0xb04e1c).into()),
+        Prio::Mid => ("signal-medium", rgb(0x80660d).into()),
+        Prio::Low => ("signal-low", theme.muted_foreground),
+        Prio::None => {
+            return row()
+                .text_sm()
+                .text_color(theme.muted_foreground)
+                .child("—");
+        }
+    };
+    row()
+        .gap_1p5()
+        .text_sm()
+        .when(priority == Prio::Low, |d| d.text_color(color))
+        .child(app_icon(icon).small().text_color(color))
+        .child(priority.label())
+}
+
+/// 名前の頭文字の丸。
+fn avatar(name: &str, cx: &App) -> Div {
+    let theme = cx.theme();
+    div()
+        .size_6()
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_full()
+        .bg(theme.secondary)
+        .text_xs()
+        .font_weight(FontWeight::BOLD)
+        .child(name.chars().next().map(String::from).unwrap_or_default())
+}
+
+/// 欄の上に付ける小さな見出し。
+fn field_label(text: &'static str, cx: &App) -> Div {
+    div()
+        .text_xs()
+        .font_weight(FontWeight::BOLD)
+        .text_color(cx.theme().muted_foreground)
+        .child(text)
 }
 
 /// ワークスペースのアイコンの色。`None` は文字と同じ色。
@@ -138,50 +212,66 @@ impl MainView {
 
     // ---- 左のメニュー ----
 
-    fn nav_item(
+    /// 左のメニューの 1 行。選んでいる行は色を付ける。
+    fn nav_link(
         &self,
         id: impl Into<ElementId>,
+        icon: Icon,
         label: impl Into<SharedString>,
-        nav: Nav,
-        count: Option<u32>,
-        icon: Option<Icon>,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+        active: bool,
+        cx: &App,
+    ) -> Stateful<Div> {
         let theme = cx.theme();
-        let active = self.nav == nav;
         row()
             .id(id)
             .flex_1()
             .min_w_0()
-            .h_8()
-            .px_2()
             .gap_2()
+            .px_3()
+            .py_2()
             .rounded_md()
-            .cursor_pointer()
             .text_sm()
+            .cursor_pointer()
             .when(active, |d| {
-                d.bg(theme.sidebar_accent)
-                    .text_color(theme.sidebar_accent_foreground)
+                d.bg(theme.accent).text_color(theme.accent_foreground)
             })
-            .when(!active, |d| d.hover(|s| s.bg(theme.sidebar_accent)))
-            .when_some(icon, |d, icon| d.child(icon.small().flex_none()))
+            .when(!active, |d| d.hover(|s| s.bg(theme.accent.opacity(0.6))))
+            .child(icon.small().flex_none())
             .child(div().flex_1().truncate().child(label.into()))
-            .when_some(count.filter(|&c| c > 0), |d, c| {
-                d.child(
-                    div()
-                        .text_xs()
-                        .text_color(theme.muted_foreground)
-                        .child(c.to_string()),
-                )
-            })
+    }
+
+    fn nav_item(
+        &self,
+        id: impl Into<ElementId>,
+        icon: Icon,
+        label: impl Into<SharedString>,
+        nav: Nav,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        self.nav_link(id, icon, label, self.nav == nav, cx)
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.go(nav.clone(), cx)))
             .test_support()
             .into_any_element()
     }
 
-    fn render_sidebar(&self, cx: &mut Context<Self>) -> Div {
+    /// 左のメニューを開く・閉じる。狭いウィンドウでは中身と入れ替えで出す。
+    fn toggle_sidebar(&mut self, wide: bool, cx: &mut Context<Self>) {
+        if wide {
+            self.sidebar_hidden = !self.sidebar_hidden;
+        } else {
+            self.sidebar_open = !self.sidebar_open;
+        }
+        cx.notify();
+    }
+
+    fn render_sidebar(&self, wide: bool, cx: &mut Context<Self>) -> Div {
         let theme = cx.theme().clone();
-        let mut tree = col().gap_0p5();
+        let mut tree = col()
+            .ml_5()
+            .pl_2()
+            .border_l_1()
+            .border_color(theme.sidebar_border)
+            .gap_0p5();
         for (ix, node) in self.tree.iter().enumerate() {
             let ws = &self.workspaces[node.index];
             let id = ws.id.clone();
@@ -195,9 +285,15 @@ impl MainView {
                     .w_4()
                     .flex_none()
                     .cursor_pointer()
-                    .text_xs()
                     .text_color(theme.muted_foreground)
-                    .child(if collapsed { "▸" } else { "▾" })
+                    .child(
+                        app_icon(if collapsed {
+                            "chevron-right"
+                        } else {
+                            "chevron-down"
+                        })
+                        .xsmall(),
+                    )
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                         cx.stop_propagation();
                         this.toggle_collapsed(&id, cx);
@@ -208,6 +304,34 @@ impl MainView {
             let active = self.nav == Nav::Workspace(id.clone());
             let view = cx.entity().downgrade();
             let menu_id = id.clone();
+            let menu = move |menu: PopupMenu| {
+                let item = |label: &'static str,
+                            run: fn(&mut MainView, Id, &mut Window, &mut Context<MainView>)| {
+                    let view = view.clone();
+                    let id = menu_id.clone();
+                    PopupMenuItem::new(label).on_click(move |_, window, cx| {
+                        let _ = view.update(cx, |this, cx| run(this, id.clone(), window, cx));
+                    })
+                };
+                menu.item(item("アイコンを変更", |this, id, _, cx| {
+                    this.modal = Modal::WorkspaceIcon(id);
+                    cx.notify();
+                }))
+                .item(item("名前を変更", |this, id, window, cx| {
+                    this.ask_workspace_name(None, Some(id), window, cx)
+                }))
+                .item(item("子を追加", |this, id, window, cx| {
+                    this.ask_workspace_name(Some(id), None, window, cx)
+                }))
+                .item(item("設定", |this, id, window, cx| {
+                    this.open_workspace_settings(&id, window, cx)
+                }))
+                .separator()
+                .item(item("削除", |this, id, _, cx| {
+                    this.modal = Modal::DeleteWorkspace(id);
+                    cx.notify();
+                }))
+            };
             // 「…」は、行に乗せたときと、開いているワークスペースでだけ見せる
             let more = Button::new(("ws-more", ix))
                 .icon(app_icon("ellipsis"))
@@ -216,218 +340,383 @@ impl MainView {
                 .when(!active, |b| {
                     b.opacity(0.).group_hover(group.clone(), |s| s.opacity(1.))
                 })
-                .dropdown_menu(move |menu, _, _| {
-                    let item = |label: &'static str,
-                                run: fn(&mut MainView, Id, &mut Window, &mut Context<MainView>)| {
-                        let view = view.clone();
-                        let id = menu_id.clone();
-                        PopupMenuItem::new(label).on_click(move |_, window, cx| {
-                            let _ = view.update(cx, |this, cx| run(this, id.clone(), window, cx));
-                        })
-                    };
-                    menu.item(item("アイコンを変更", |this, id, _, cx| {
-                        this.modal = Modal::WorkspaceIcon(id);
-                        cx.notify();
-                    }))
-                    .item(item("名前を変更", |this, id, window, cx| {
-                        this.ask_workspace_name(None, Some(id), window, cx)
-                    }))
-                    .item(item("子を追加", |this, id, window, cx| {
-                        this.ask_workspace_name(Some(id), None, window, cx)
-                    }))
-                    .item(item("設定", |this, id, window, cx| {
-                        this.open_workspace_settings(&id, window, cx)
-                    }))
-                    .separator()
-                    .item(item("削除", |this, id, _, cx| {
-                        this.modal = Modal::DeleteWorkspace(id);
-                        cx.notify();
-                    }))
+                .dropdown_menu({
+                    let menu = menu.clone();
+                    move |m, _, _| menu(m)
                 });
             tree = tree.child(
                 row()
+                    .id(("ws-row", ix))
                     .group(group)
                     .pl(px(12.) * node.depth as f32)
                     .child(caret)
                     .child(self.nav_item(
                         ("ws", ix),
+                        workspace_icon(ws.icon.as_deref(), ws.color.as_deref()),
                         ws.name.clone(),
                         Nav::Workspace(id),
-                        self.open_counts.get(&ws.id).copied(),
-                        Some(workspace_icon(ws.icon.as_deref(), ws.color.as_deref())),
                         cx,
                     ))
-                    .child(more),
+                    .child(more)
+                    // 右クリックでも同じメニューを出す
+                    .context_menu(move |m, _, _| menu(m)),
             );
         }
 
+        let unread = self.unread_notices;
         let view = cx.entity().downgrade();
-        let lock_enabled = self.lock_enabled(cx);
-        col()
-            .w(SIDEBAR_WIDTH)
-            .flex_none()
-            .h_full()
+        let inner = col()
+            .id("sidebar")
+            .size_full()
             .bg(theme.sidebar)
             .text_color(theme.sidebar_foreground)
             .border_r_1()
             .border_color(theme.sidebar_border)
-            .p_2()
-            .gap_1()
-            .child(div().px_2().py_1().child(crate::APP_NAME))
-            .child(row().child(self.nav_item("nav-home", "ホーム", Nav::Home, None, None, cx)))
-            .child(row().child(self.nav_item(
-                "nav-all",
-                "すべてのタスク",
-                Nav::All,
-                None,
-                None,
-                cx,
-            )))
-            .child(row().child(self.nav_item(
-                "nav-unfiled",
-                "未所属",
-                Nav::Unfiled,
-                None,
-                None,
-                cx,
-            )))
+            // macOS は左上に信号機ボタンが乗るので、その分を空ける
+            .when(cfg!(target_os = "macos"), |d| d.pt_6())
             .child(
                 row()
-                    .mt_2()
-                    .px_2()
+                    .h(HEADER_HEIGHT)
+                    .flex_none()
+                    .px_4()
+                    .gap_2()
+                    .border_b_1()
+                    .border_color(theme.sidebar_border)
                     .child(
-                        div()
+                        col()
                             .flex_1()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child("ワークスペース"),
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .text_xl()
+                                    .font_weight(FontWeight::BOLD)
+                                    .truncate()
+                                    .child(crate::APP_NAME.to_uppercase()),
+                            )
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(theme.muted_foreground)
+                                    .child("タスク管理"),
+                            ),
                     )
                     .child(
-                        Button::new("add-workspace")
-                            .icon(app_icon("plus"))
-                            .ghost()
-                            .xsmall()
-                            .tooltip("ワークスペースを追加")
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.ask_workspace_name(None, None, window, cx)
-                            })),
+                        Button::new("close-sidebar")
+                            .icon(app_icon("x"))
+                            .outline()
+                            .tooltip("メニューを閉じる")
+                            .on_click(
+                                cx.listener(move |this, _, _, cx| this.toggle_sidebar(wide, cx)),
+                            ),
                     ),
             )
             .child(
-                div()
-                    .id("workspace-tree")
+                col()
+                    .id("sidebar-nav")
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
-                    .child(tree)
-                    .when(self.workspaces.is_empty(), |d| {
-                        d.child(
-                            div()
-                                .px_2()
-                                .text_xs()
-                                .text_color(theme.muted_foreground)
-                                .child("まだありません"),
-                        )
-                    }),
-            )
-            .child(div().h_px().bg(theme.sidebar_border))
-            .child(
-                row()
+                    .p_3()
                     .gap_1()
+                    .child(row().child(self.nav_item(
+                        "nav-home",
+                        app_icon("house"),
+                        "ホーム",
+                        Nav::Home,
+                        cx,
+                    )))
                     .child(
-                        Button::new("open-menu")
-                            .icon(app_icon("settings"))
-                            .tooltip("設定")
-                            .ghost()
-                            .small()
-                            .dropdown_menu(move |menu, _, _| {
-                                let item = |label: &'static str,
-                                            run: fn(
-                                    &mut MainView,
-                                    &mut Window,
-                                    &mut Context<MainView>,
-                                )| {
-                                    let view = view.clone();
-                                    PopupMenuItem::new(label).on_click(move |_, window, cx| {
-                                        let _ = view.update(cx, |this, cx| run(this, window, cx));
-                                    })
-                                };
-                                let menu = menu
-                                    .item(item("担当者", |this, window, cx| {
-                                        this.open_people(window, cx)
-                                    }))
-                                    .separator()
-                                    .item(item("エクスポート", |this, window, cx| {
-                                        this.export(window, cx)
-                                    }))
-                                    .item(item("インポート", |this, window, cx| {
-                                        this.import(window, cx)
-                                    }))
-                                    .separator()
-                                    .item(item("ロックの設定", |this, window, cx| {
-                                        this.open_lock_settings(window, cx)
-                                    }));
-                                let menu = if lock_enabled {
-                                    menu.item(item("今すぐロック", |_, window, cx| {
-                                        window.dispatch_action(Box::new(LockNow), cx)
-                                    }))
-                                } else {
-                                    menu
-                                };
-                                menu.separator()
-                                    .item(item("新しいウィンドウ", |_, window, cx| {
-                                        window.dispatch_action(Box::new(NewWindow), cx)
-                                    }))
-                            }),
-                    )
-                    .child(div().flex_1())
-                    .when(self.unread_notices > 0, |d| {
-                        d.child(
-                            div()
-                                .text_xs()
-                                .text_color(theme.muted_foreground)
-                                .child(self.unread_notices.to_string()),
-                        )
-                    })
-                    .child(
-                        Button::new("open-notices")
-                            .icon(app_icon("bell"))
-                            .tooltip("通知")
-                            .ghost()
-                            .small()
-                            .on_click(cx.listener(|this, _, _, cx| {
+                        row().child(
+                            self.nav_link(
+                                "nav-notices",
+                                app_icon("bell"),
+                                "通知",
+                                self.modal == Modal::Notices,
+                                cx,
+                            )
+                            .when(unread > 0, |d| {
+                                d.child(
+                                    div()
+                                        .px_1p5()
+                                        .rounded_full()
+                                        .bg(theme.danger)
+                                        .text_color(theme.danger_foreground)
+                                        .text_xs()
+                                        .child(unread.to_string()),
+                                )
+                            })
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                                 this.modal = Modal::Notices;
                                 cx.notify();
-                            })),
-                    ),
+                            }))
+                            .test_support(),
+                        ),
+                    )
+                    .child(row().child(self.nav_item(
+                        "nav-all",
+                        app_icon("list-todo"),
+                        "すべてのタスク",
+                        Nav::All,
+                        cx,
+                    )))
+                    .child(row().child(self.nav_item(
+                        "nav-unfiled",
+                        app_icon("inbox"),
+                        "未所属",
+                        Nav::Unfiled,
+                        cx,
+                    )))
+                    .child(
+                        row()
+                            .mt_3()
+                            .px_3()
+                            .gap_2()
+                            .text_color(theme.muted_foreground)
+                            .child(app_icon("layers").xsmall().flex_none())
+                            .child(div().flex_1().text_xs().child("ワークスペース"))
+                            .child(
+                                Button::new("add-workspace")
+                                    .icon(app_icon("plus"))
+                                    .ghost()
+                                    .xsmall()
+                                    .tooltip("ワークスペースを追加")
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.ask_workspace_name(None, None, window, cx)
+                                    })),
+                            ),
+                    )
+                    .when(!self.workspaces.is_empty(), |d| d.child(tree)),
             )
+            // 何もないところの右クリックで、ワークスペースを足せる
+            .context_menu(move |menu, _, _| {
+                let view = view.clone();
+                menu.item(PopupMenuItem::new("ワークスペースを追加").on_click(
+                    move |_, window, cx| {
+                        let _ = view.update(cx, |this, cx| {
+                            this.ask_workspace_name(None, None, window, cx)
+                        });
+                    },
+                ))
+            });
+        div().w(SIDEBAR_WIDTH).flex_none().h_full().child(inner)
+    }
+
+    // ---- 上のバー ----
+
+    /// 今の画面の名前と、その下に出す一言、名前の左に出すアイコン。
+    fn header_title(&self) -> (SharedString, Option<&'static str>, Option<Icon>) {
+        match &self.nav {
+            Nav::Home => ("ホーム".into(), None, None),
+            Nav::All => ("すべてのタスク".into(), Some("タスク一覧"), None),
+            Nav::Unfiled => ("未所属のタスク".into(), Some("タスク一覧"), None),
+            Nav::Workspace(id) => {
+                let ws = self.workspaces.iter().find(|w| &w.id == id);
+                (
+                    self.list_title(),
+                    Some("タスク一覧"),
+                    ws.map(|w| workspace_icon(w.icon.as_deref(), w.color.as_deref())),
+                )
+            }
+        }
+    }
+
+    fn theme_toggle(&self, cx: &mut Context<Self>) -> Div {
+        use crate::theme::Choice;
+        let theme = cx.theme();
+        let current = crate::theme::choice(cx);
+        let mut toggle = row()
+            .flex_none()
+            .p_0p5()
+            .gap_0p5()
+            .rounded_md()
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.muted);
+        for (ix, (choice, icon)) in [
+            (Choice::Light, "sun"),
+            (Choice::Dark, "moon"),
+            (Choice::System, "monitor"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let active = choice == current;
+            toggle = toggle.child(
+                div()
+                    .rounded_md()
+                    .when(active, |d| d.bg(theme.background).shadow_sm())
+                    .child(
+                        Button::new(("theme", ix))
+                            .icon(app_icon(icon))
+                            .ghost()
+                            .small()
+                            .tooltip(choice.label())
+                            .on_click(move |_, window, cx| crate::theme::set(choice, window, cx)),
+                    ),
+            );
+        }
+        toggle
+    }
+
+    fn render_header(&self, unlocked: bool, wide: bool, cx: &mut Context<Self>) -> TitleBar {
+        let theme = cx.theme().clone();
+        let bar = TitleBar::new().h(HEADER_HEIGHT).bg(theme.background);
+        if !unlocked {
+            return bar.child(
+                div()
+                    .px_4()
+                    .text_sm()
+                    .text_color(theme.muted_foreground)
+                    .child(crate::APP_NAME),
+            );
+        }
+        let sidebar_shown = if wide {
+            !self.sidebar_hidden
+        } else {
+            self.sidebar_open
+        };
+        let (title, subtitle, icon) = self.header_title();
+        let unread = self.unread_notices;
+        let lock_enabled = self.lock_enabled(cx);
+        let view = cx.entity().downgrade();
+        bar.child(
+            row()
+                .flex_1()
+                .min_w_0()
+                .gap_3()
+                .pl_4()
+                // macOS でメニューを閉じているときは、信号機ボタンの分を空ける
+                .when(cfg!(target_os = "macos") && !sidebar_shown, |d| {
+                    d.pl(px(84.))
+                })
+                .child(
+                    Button::new("toggle-sidebar")
+                        .icon(app_icon("menu"))
+                        .outline()
+                        .tooltip("メニュー")
+                        .on_click(cx.listener(move |this, _, _, cx| this.toggle_sidebar(wide, cx))),
+                )
+                .when_some(icon, |d, icon| {
+                    d.child(
+                        div()
+                            .size_10()
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_md()
+                            .bg(theme.muted)
+                            .child(icon),
+                    )
+                })
+                .child(
+                    col()
+                        .flex_1()
+                        .min_w_0()
+                        .child(
+                            div()
+                                .text_xl()
+                                .font_weight(FontWeight::BOLD)
+                                .truncate()
+                                .child(title),
+                        )
+                        .when_some(subtitle, |d, subtitle| {
+                            d.child(
+                                div()
+                                    .text_sm()
+                                    .text_color(theme.muted_foreground)
+                                    .child(subtitle),
+                            )
+                        }),
+                ),
+        )
+        .child(
+            row()
+                .flex_none()
+                .gap_2()
+                .pr_3()
+                .child(self.theme_toggle(cx))
+                .child(
+                    div()
+                        .relative()
+                        .child(
+                            Button::new("open-notices")
+                                .icon(app_icon("bell"))
+                                .outline()
+                                .rounded(px(999.))
+                                .tooltip("通知")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.modal = Modal::Notices;
+                                    cx.notify();
+                                })),
+                        )
+                        .when(unread > 0, |d| {
+                            d.child(
+                                div()
+                                    .absolute()
+                                    .top(px(-4.))
+                                    .right(px(-4.))
+                                    .px_1()
+                                    .rounded_full()
+                                    .bg(theme.danger)
+                                    .text_color(theme.danger_foreground)
+                                    .text_xs()
+                                    .child(unread.to_string()),
+                            )
+                        }),
+                )
+                .child(
+                    Button::new("open-menu")
+                        .icon(app_icon("settings"))
+                        .outline()
+                        .rounded(px(999.))
+                        .tooltip("設定")
+                        .dropdown_menu(move |menu, _, _| {
+                            let item = |label: &'static str,
+                                        run: fn(
+                                &mut MainView,
+                                &mut Window,
+                                &mut Context<MainView>,
+                            )| {
+                                let view = view.clone();
+                                PopupMenuItem::new(label).on_click(move |_, window, cx| {
+                                    let _ = view.update(cx, |this, cx| run(this, window, cx));
+                                })
+                            };
+                            let menu = menu
+                                .item(item("担当者", |this, window, cx| {
+                                    this.open_people(window, cx)
+                                }))
+                                .separator()
+                                .item(item("エクスポート", |this, window, cx| {
+                                    this.export(window, cx)
+                                }))
+                                .item(item("インポート", |this, window, cx| {
+                                    this.import(window, cx)
+                                }))
+                                .separator()
+                                .item(item("ロックの設定", |this, window, cx| {
+                                    this.open_lock_settings(window, cx)
+                                }));
+                            let menu = if lock_enabled {
+                                menu.item(item("今すぐロック", |_, window, cx| {
+                                    window.dispatch_action(Box::new(LockNow), cx)
+                                }))
+                            } else {
+                                menu
+                            };
+                            menu.separator()
+                                .item(item("新しいウィンドウ", |_, window, cx| {
+                                    window.dispatch_action(Box::new(NewWindow), cx)
+                                }))
+                        }),
+                ),
+        )
     }
 
     // ---- ホーム ----
 
-    fn quick_add(&self, cx: &mut Context<Self>) -> Div {
-        row()
-            .gap_2()
-            .child(
-                Input::new(&self.inputs.quick_add)
-                    .id("quick-add")
-                    .aria_label("タスクを追加")
-                    .flex_1(),
-            )
-            .child(
-                Button::new("quick-add-submit")
-                    .label("追加")
-                    .primary()
-                    .on_click(cx.listener(|this, _, window, cx| this.submit_quick_add(window, cx))),
-            )
-            .child(
-                Button::new("new-task-open")
-                    .label("詳しく入力")
-                    .on_click(cx.listener(|this, _, window, cx| this.open_new_task(window, cx))),
-            )
-    }
-
-    fn render_home(&self, roomy: bool, cx: &mut Context<Self>) -> Div {
+    fn render_home(&self, roomy: bool, cx: &mut Context<Self>) -> Stateful<Div> {
         let theme = cx.theme().clone();
         let due = self.due.clone();
         let count = due.len();
@@ -437,16 +726,18 @@ impl MainView {
             .filter(|w| w.parent_id.is_none())
             .cloned()
             .collect();
+        let heading =
+            |text: &'static str| div().text_lg().font_weight(FontWeight::BOLD).child(text);
         col()
-            .flex_1()
-            .min_h_0()
-            .p_4()
+            .id("home")
+            .size_full()
+            .overflow_y_scroll()
+            .p_6()
             .gap_3()
-            .child(self.quick_add(cx))
             .child(
                 row()
                     .gap_3()
-                    .child(div().text_lg().child("期限が近いタスク"))
+                    .child(heading("期限が近いタスク"))
                     .child(div().flex_1())
                     .child(
                         Checkbox::new("due-mine")
@@ -460,7 +751,12 @@ impl MainView {
             )
             .child(if count == 0 {
                 div()
-                    .py_4()
+                    .p_4()
+                    .rounded_lg()
+                    .border_1()
+                    .border_dashed()
+                    .border_color(theme.border)
+                    .text_sm()
                     .text_color(theme.muted_foreground)
                     .child(if self.due_mine {
                         "自分が担当の、期限が近いタスクはありません。"
@@ -469,11 +765,13 @@ impl MainView {
                     })
             } else {
                 col()
-                    .flex_1()
-                    .min_h(px(120.))
+                    .h(ROW_HEIGHT * count.min(8) as f32 + px(2.))
+                    .flex_none()
                     .border_1()
                     .border_color(theme.border)
-                    .rounded_md()
+                    .rounded_lg()
+                    .bg(theme.popover)
+                    .overflow_hidden()
                     .child(
                         uniform_list(
                             "due-list",
@@ -487,53 +785,68 @@ impl MainView {
                         .size_full(),
                     )
             })
-            .child(div().text_lg().child("ワークスペース"))
-            .child(
-                row()
-                    .flex_wrap()
-                    .gap_2()
-                    .children(roots.into_iter().enumerate().map(|(ix, ws)| {
-                        let open = self.open_counts.get(&ws.id).copied().unwrap_or(0);
-                        let id = ws.id.clone();
-                        col()
-                            .id(("home-ws", ix))
-                            .w(px(200.))
-                            .p_3()
-                            .gap_1()
-                            .border_1()
-                            .border_color(theme.border)
-                            .rounded_md()
-                            .cursor_pointer()
-                            .hover(|s| s.bg(theme.secondary_hover))
-                            .child(
-                                row()
-                                    .gap_2()
-                                    .child(
-                                        workspace_icon(ws.icon.as_deref(), ws.color.as_deref())
-                                            .small()
-                                            .flex_none(),
+            .child(div().mt_6().child(heading("ワークスペースのタスク")))
+            .child(row().flex_wrap().items_start().gap_3().children(
+                roots.into_iter().enumerate().map(|(ix, ws)| {
+                    let id = ws.id.clone();
+                    row()
+                        .id(("home-ws", ix))
+                        .w(px(370.))
+                        .p_4()
+                        .gap_3()
+                        .items_start()
+                        .border_1()
+                        .border_color(theme.border)
+                        .rounded_lg()
+                        .bg(theme.popover)
+                        .cursor_pointer()
+                        .hover(|s| s.border_color(theme.primary))
+                        .child(
+                            div()
+                                .size(px(56.))
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded_md()
+                                .bg(theme.muted)
+                                .child(workspace_icon(ws.icon.as_deref(), ws.color.as_deref())),
+                        )
+                        .child(
+                            col()
+                                .flex_1()
+                                .min_w_0()
+                                .gap_1()
+                                .child(
+                                    div()
+                                        .font_weight(FontWeight::BOLD)
+                                        .truncate()
+                                        .child(ws.name.clone()),
+                                )
+                                .when_some(ws.date.clone(), |d, date| {
+                                    d.child(
+                                        div()
+                                            .text_sm()
+                                            .text_color(theme.muted_foreground)
+                                            .child(view::format_date(&date, &self.today)),
                                     )
-                                    .child(div().flex_1().truncate().child(ws.name)),
-                            )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(theme.muted_foreground)
-                                    .child(format!("未完了 {open} 件")),
-                            )
-                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                this.go(Nav::Workspace(id.clone()), cx)
-                            }))
-                    }))
-                    .child(
-                        Button::new("home-add-workspace")
-                            .label("ワークスペースを追加")
-                            .outline()
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.ask_workspace_name(None, None, window, cx)
-                            })),
-                    ),
-            )
+                                })
+                                .child(
+                                    row()
+                                        .mt_2()
+                                        .gap_1()
+                                        .text_sm()
+                                        .font_weight(FontWeight::BOLD)
+                                        .text_color(theme.primary)
+                                        .child("タスクを開く")
+                                        .child(app_icon("arrow-right").small()),
+                                ),
+                        )
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            this.go(Nav::Workspace(id.clone()), cx)
+                        }))
+                }),
+            ))
     }
 
     fn render_due_row(
@@ -619,166 +932,166 @@ impl MainView {
         }
     }
 
+    /// 選択肢から 1 つを選ぶ欄。押すとメニューが開く。
+    fn select<T: Clone + 'static>(
+        &self,
+        id: &'static str,
+        label: &'static str,
+        options: Vec<(SharedString, bool, T)>,
+        apply: fn(&mut MainView, T),
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let current = options
+            .iter()
+            .find(|o| o.1)
+            .map(|o| o.0.clone())
+            .unwrap_or_default();
+        let view = cx.entity().downgrade();
+        col()
+            .flex_1()
+            .min_w(px(110.))
+            .gap_1()
+            .child(field_label(label, cx))
+            .child(
+                Button::new(id)
+                    .outline()
+                    .w_full()
+                    .child(
+                        row()
+                            .w_full()
+                            .gap_1()
+                            .child(div().flex_1().min_w_0().truncate().child(current))
+                            .child(app_icon("chevron-down").xsmall().flex_none()),
+                    )
+                    .dropdown_menu(move |mut menu, _, _| {
+                        for (label, checked, value) in options.iter().cloned() {
+                            let view = view.clone();
+                            menu = menu.item(PopupMenuItem::new(label).checked(checked).on_click(
+                                move |_, _, cx| {
+                                    // ウィンドウを閉じたあとなら、反映する先がない
+                                    let _ = view.update(cx, |this, cx| {
+                                        apply(this, value.clone());
+                                        this.refilter();
+                                        cx.notify();
+                                    });
+                                },
+                            ));
+                        }
+                        menu
+                    }),
+            )
+    }
+
     fn render_filters(&self, cx: &mut Context<Self>) -> Div {
         let theme = cx.theme().clone();
-        let group = |label: &'static str, chips: Vec<Stateful<Div>>| {
-            row()
-                .gap_1()
-                .flex_wrap()
-                .child(
-                    div()
-                        .w(px(64.))
-                        .flex_none()
-                        .text_sm()
-                        .text_color(theme.muted_foreground)
-                        .child(label),
-                )
-                .children(chips)
-        };
-        macro_rules! pick {
-            ($id:expr, $label:expr, $active:expr, |$this:ident| $body:expr) => {
-                chip($id, $label, $active, cx).on_click(cx.listener(
-                    move |$this, _: &ClickEvent, _, cx| {
-                        $body;
-                        $this.refilter();
-                        cx.notify();
-                    },
-                ))
-            };
-        }
         let q = &self.query;
-        let mut status = vec![pick!(
-            "f-status-all",
-            "すべて",
-            q.status.is_none(),
-            |this| this.query.status = None
-        )];
-        for (i, s) in Status::ALL.into_iter().enumerate() {
-            status.push(pick!(
-                ("f-status", i),
-                s.label(),
-                q.status == Some(s),
-                |this| this.query.status = Some(s)
-            ));
+        let mut status = vec![("すべて".into(), q.status.is_none(), None)];
+        for s in Status::ALL {
+            status.push((s.label().into(), q.status == Some(s), Some(s)));
         }
         let mut assignee = vec![
-            pick!(
-                "f-as-all",
-                "すべて",
+            (
+                SharedString::from("すべて"),
                 q.assignee == AssigneeFilter::All,
-                |this| this.query.assignee = AssigneeFilter::All
+                AssigneeFilter::All,
             ),
-            pick!(
-                "f-as-me",
-                "自分",
+            (
+                "自分".into(),
                 q.assignee == AssigneeFilter::Me,
-                |this| this.query.assignee = AssigneeFilter::Me
+                AssigneeFilter::Me,
             ),
-            pick!(
-                "f-as-none",
-                "未割り当て",
+            (
+                "未割り当て".into(),
                 q.assignee == AssigneeFilter::Unassigned,
-                |this| this.query.assignee = AssigneeFilter::Unassigned
+                AssigneeFilter::Unassigned,
             ),
         ];
-        for (i, p) in self.people.iter().enumerate() {
-            let id = p.id.clone();
-            assignee.push(pick!(
-                ("f-as", i),
-                p.name.clone(),
-                q.assignee == AssigneeFilter::Person(p.id.clone()),
-                |this| this.query.assignee = AssigneeFilter::Person(id.clone())
-            ));
+        for p in &self.people {
+            let value = AssigneeFilter::Person(p.id.clone());
+            assignee.push((p.name.clone().into(), q.assignee == value, value));
         }
-        let mut my_role = vec![pick!(
-            "f-role-all",
-            "すべて",
-            q.my_role.is_none(),
-            |this| this.query.my_role = None
-        )];
-        for (i, role) in Raci::ALL.into_iter().enumerate() {
-            my_role.push(pick!(
-                ("f-role", i),
-                format!("{}（{}）", role.code(), role.label()),
+        let mut my_role = vec![(SharedString::from("すべて"), q.my_role.is_none(), None)];
+        for role in Raci::ALL {
+            my_role.push((
+                format!("{}（{}）", role.code(), role.label()).into(),
                 q.my_role == Some(role),
-                |this| this.query.my_role = Some(role)
+                Some(role),
             ));
         }
-        let mut priority = vec![pick!(
-            "f-pr-all",
-            "すべて",
-            q.priority.is_none(),
-            |this| this.query.priority = None
-        )];
-        for (i, p) in [Prio::High, Prio::Mid, Prio::Low, Prio::None]
-            .into_iter()
-            .enumerate()
-        {
-            priority.push(pick!(
-                ("f-pr", i),
-                p.label(),
-                q.priority == Some(p),
-                |this| this.query.priority = Some(p)
-            ));
+        let mut priority = vec![(SharedString::from("すべて"), q.priority.is_none(), None)];
+        for p in [Prio::High, Prio::Mid, Prio::Low, Prio::None] {
+            priority.push((p.label().into(), q.priority == Some(p), Some(p)));
         }
-        let mut category = vec![pick!(
-            "f-cat-all",
-            "すべて",
-            q.category.is_none(),
-            |this| this.query.category = None
-        )];
-        for (i, c) in self.categories.iter().enumerate() {
-            let value = c.clone();
-            category.push(pick!(
-                ("f-cat", i),
-                c.clone(),
+        let mut category = vec![(SharedString::from("すべて"), q.category.is_none(), None)];
+        for c in &self.categories {
+            category.push((
+                c.clone().into(),
                 q.category.as_ref() == Some(c),
-                |this| this.query.category = Some(value.clone())
+                Some(c.clone()),
             ));
         }
         let sort = Sort::ALL
             .into_iter()
-            .enumerate()
-            .map(|(i, s)| {
-                pick!(("f-sort", i), s.label(), q.sort == s, |this| this
-                    .query
-                    .sort = s)
-            })
+            .map(|s| (SharedString::from(s.label()), q.sort == s, s))
             .collect();
-        col()
-            .gap_2()
+        row()
+            .flex_none()
+            .flex_wrap()
+            .items_end()
+            .gap_3()
             .p_3()
-            .border_1()
+            .border_b_1()
             .border_color(theme.border)
-            .rounded_md()
             .child(
-                row()
+                col()
+                    .flex_1()
+                    .min_w(px(180.))
                     .gap_1()
-                    .child(
-                        div()
-                            .w(px(64.))
-                            .flex_none()
-                            .text_sm()
-                            .text_color(theme.muted_foreground)
-                            .child("検索"),
-                    )
+                    .child(field_label("検索", cx))
                     .child(
                         Input::new(&self.inputs.search)
                             .id("task-search")
                             .aria_label("検索")
-                            .cleanable(true)
-                            .small()
-                            .w(px(280.)),
+                            .prefix(app_icon("search").small())
+                            .cleanable(true),
                     ),
             )
-            .child(group("状態", status))
-            .child(group("担当", assignee))
-            .child(group("自分の役", my_role))
-            .child(group("優先度", priority))
-            .when(!self.categories.is_empty(), |d| {
-                d.child(group("カテゴリ", category))
-            })
-            .child(group("並び順", sort))
+            .child(self.select(
+                "f-status",
+                "状態",
+                status,
+                |this, v| this.query.status = v,
+                cx,
+            ))
+            .child(self.select(
+                "f-assignee",
+                "担当",
+                assignee,
+                |this, v| this.query.assignee = v,
+                cx,
+            ))
+            .child(self.select(
+                "f-role",
+                "自分の役",
+                my_role,
+                |this, v| this.query.my_role = v,
+                cx,
+            ))
+            .child(self.select(
+                "f-priority",
+                "優先度",
+                priority,
+                |this, v| this.query.priority = v,
+                cx,
+            ))
+            .child(self.select(
+                "f-category",
+                "カテゴリ",
+                category,
+                |this, v| this.query.category = v,
+                cx,
+            ))
+            .child(self.select("f-sort", "並び順", sort, |this, v| this.query.sort = v, cx))
     }
 
     fn render_bulk_bar(&self, cx: &mut Context<Self>) -> Div {
@@ -866,13 +1179,34 @@ impl MainView {
         let theme = cx.theme().clone();
         let active = self.query.active_count();
         let visible = self.visible.len();
-        let tab =
-            |id: &'static str, label: String, tab: Tab, this: &Self, cx: &mut Context<Self>| {
-                chip(
-                    id,
-                    label,
-                    this.query.tab == tab && this.query.status.is_none(),
-                    cx,
+        let tab = |id: &'static str,
+                   icon: &'static str,
+                   label: &'static str,
+                   count: usize,
+                   tab: Tab,
+                   this: &Self,
+                   cx: &mut Context<Self>| {
+            let on = this.query.tab == tab;
+            row()
+                .id(id)
+                .gap_1p5()
+                .px_3()
+                .py_1p5()
+                .rounded_md()
+                .text_sm()
+                .cursor_pointer()
+                .when(on, |d| d.bg(theme.background).font_weight(FontWeight::BOLD))
+                .when(!on, |d| {
+                    d.text_color(theme.muted_foreground)
+                        .hover(|s| s.text_color(theme.foreground))
+                })
+                .child(app_icon(icon).small())
+                .child(label)
+                .child(
+                    div()
+                        .font_weight(FontWeight::NORMAL)
+                        .text_color(theme.muted_foreground)
+                        .child(count.to_string()),
                 )
                 .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                     this.query.tab = tab;
@@ -881,7 +1215,7 @@ impl MainView {
                     cx.notify();
                 }))
                 .test_support()
-            };
+        };
         let workspace_id = self.current_workspace().map(str::to_owned);
         let has_children = workspace_id.as_ref().is_some_and(|id| {
             self.workspaces
@@ -889,68 +1223,92 @@ impl MainView {
                 .any(|w| w.parent_id.as_ref() == Some(id))
         });
 
-        let mut header = row().gap_2().flex_wrap().child(
-            div()
+        let mut header = row().flex_none().gap_2().flex_wrap();
+        let date = workspace_id.as_ref().and_then(|id| {
+            self.workspaces
+                .iter()
+                .find(|w| &w.id == id)
+                .and_then(|w| w.date.clone())
+        });
+        header = header.child(
+            row()
                 .flex_1()
                 .min_w(px(120.))
-                .text_lg()
-                .truncate()
-                .child(self.list_title()),
+                .gap_2()
+                .text_sm()
+                .when_some(date, |d, date| {
+                    d.child(div().text_color(theme.muted_foreground).child("基準日"))
+                        .child(view::format_date(&date, &self.today))
+                })
+                .when(has_children, |d| {
+                    d.child(
+                        Checkbox::new("include-descendants")
+                            .label("子のワークスペースも含める")
+                            .checked(self.include_descendants)
+                            .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                                this.include_descendants = *checked;
+                                this.reload(cx);
+                            })),
+                    )
+                }),
         );
         if let Some(id) = workspace_id.clone() {
             let (c, d) = (id.clone(), id.clone());
-            if let Some(date) = self
-                .workspaces
-                .iter()
-                .find(|w| w.id == id)
-                .and_then(|w| w.date.as_deref())
-            {
-                header = header.child(
-                    div()
-                        .text_sm()
-                        .text_color(theme.muted_foreground)
-                        .child(format!("基準日 {}", view::format_date(date, &self.today))),
-                );
-            }
             header = header
                 .child(
                     Button::new("ws-settings")
-                        .icon(app_icon("settings"))
-                        .tooltip("設定")
-                        .small()
-                        .ghost()
+                        .icon(app_icon("sliders-horizontal"))
+                        .tooltip("タスク追加時の既定値")
+                        .outline()
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.open_workspace_settings(&d, window, cx)
                         })),
                 )
                 .child(
+                    Button::new("ws-export")
+                        .icon(app_icon("download"))
+                        .tooltip("エクスポート")
+                        .outline()
+                        .on_click(cx.listener(|this, _, window, cx| this.export(window, cx))),
+                )
+                .child(
+                    Button::new("ws-import")
+                        .icon(app_icon("upload"))
+                        .tooltip("インポート")
+                        .outline()
+                        .on_click(cx.listener(|this, _, window, cx| this.import(window, cx))),
+                )
+                .child(
                     Button::new("ws-delete")
                         .icon(app_icon("trash"))
                         .tooltip("削除")
-                        .small()
-                        .ghost()
+                        .outline()
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.modal = Modal::DeleteWorkspace(c.clone());
                             cx.notify();
                         })),
                 );
         }
+        header = header.child(
+            Button::new("new-task-open")
+                .icon(app_icon("plus"))
+                .label("新しいタスク")
+                .primary()
+                .on_click(cx.listener(|this, _, window, cx| this.open_new_task(window, cx))),
+        );
 
-        let body = if self.tasks.is_empty() {
-            col()
-                .flex_1()
-                .items_center()
-                .justify_center()
-                .gap_1()
-                .child(div().child("まだタスクがありません"))
-        } else if visible == 0 {
+        let rows = if visible == 0 {
             col()
                 .flex_1()
                 .items_center()
                 .justify_center()
                 .gap_2()
+                .py_8()
+                .text_sm()
                 .text_color(theme.muted_foreground)
-                .child(if active > 0 {
+                .child(if self.tasks.is_empty() {
+                    "まだタスクがありません"
+                } else if active > 0 {
                     "条件に合うタスクはありません。"
                 } else if self.query.tab == Tab::Open {
                     "未完了のタスクはありません。"
@@ -973,111 +1331,99 @@ impl MainView {
                     )
                 })
         } else {
-            col()
-                .flex_1()
-                .min_h_0()
-                .border_1()
-                .border_color(theme.border)
-                .rounded_md()
-                .when(table, |d| d.child(self.render_table_head(cx)))
-                .child(
-                    uniform_list(
-                        "task-list",
-                        visible,
-                        cx.processor(move |this, range: Range<usize>, _, cx| {
-                            range
-                                .map(|ix| this.render_task_row(ix, table, cx))
-                                .collect::<Vec<_>>()
-                        }),
-                    )
-                    .flex_1(),
+            // 件数が少ないときは、表を中身の高さで終える
+            col().h(ROW_HEIGHT * visible as f32).min_h_0().child(
+                uniform_list(
+                    "task-list",
+                    visible,
+                    cx.processor(move |this, range: Range<usize>, _, cx| {
+                        range
+                            .map(|ix| this.render_task_row(ix, table, cx))
+                            .collect::<Vec<_>>()
+                    }),
                 )
+                .flex_1(),
+            )
         };
 
-        col()
-            .flex_1()
+        let card = col()
             .min_h_0()
-            .p_4()
-            .gap_3()
-            .child(header)
+            .border_1()
+            .border_color(theme.border)
+            .rounded_lg()
+            .bg(theme.popover)
+            .overflow_hidden()
             .child(
                 row()
-                    .gap_2()
-                    .flex_wrap()
+                    .flex_none()
+                    .gap_1()
+                    .p_2()
+                    .bg(theme.muted.opacity(0.5))
+                    .border_b_1()
+                    .border_color(theme.border)
                     .child(tab(
                         "tab-open",
-                        format!("未完了 {}", self.counts.0),
+                        "circle-dot",
+                        "未完了",
+                        self.counts.0,
                         Tab::Open,
                         self,
                         cx,
                     ))
                     .child(tab(
                         "tab-closed",
-                        format!("完了 {}", self.counts.1),
+                        "circle-check",
+                        "完了",
+                        self.counts.1,
                         Tab::Closed,
                         self,
                         cx,
-                    ))
-                    .child(
-                        chip(
-                            "toggle-filters",
-                            if active > 0 {
-                                format!("絞り込み・並べ替え（{active}）")
-                            } else {
-                                "絞り込み・並べ替え".to_owned()
-                            },
-                            self.filters_open,
-                            cx,
-                        )
-                        .on_click(cx.listener(
-                            |this, _: &ClickEvent, _, cx| {
-                                this.filters_open = !this.filters_open;
-                                cx.notify();
-                            },
-                        )),
-                    )
-                    .when(has_children, |d| {
-                        d.child(
-                            Checkbox::new("include-descendants")
-                                .label("子のワークスペースも含める")
-                                .checked(self.include_descendants)
-                                .on_click(cx.listener(|this, checked: &bool, _, cx| {
-                                    this.include_descendants = *checked;
-                                    this.reload(cx);
-                                })),
-                        )
-                    })
-                    .child(div().flex_1())
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(theme.muted_foreground)
-                            .child(format!("{visible} 件")),
-                    ),
+                    )),
             )
-            .when(self.filters_open, |d| d.child(self.render_filters(cx)))
+            .child(self.render_filters(cx))
             .when(!self.selected.is_empty(), |d| {
-                d.child(self.render_bulk_bar(cx))
+                d.child(div().p_2().child(self.render_bulk_bar(cx)))
             })
-            .child(body)
-            .child(self.quick_add(cx))
+            .when(table, |d| d.child(self.render_table_head(cx)))
+            .child(rows)
+            .child(self.render_quick_add_row(table, cx));
+
+        div()
+            .size_full()
+            .relative()
+            .child(col().size_full().p_6().gap_3().child(header).child(card))
+            // 右下の「＋」。どこまでスクロールしていても、新しいタスクを始められる
+            .child(
+                div().absolute().right_6().bottom_24().child(
+                    Button::new("fab-new-task")
+                        .icon(app_icon("plus"))
+                        .primary()
+                        .large()
+                        .rounded(px(999.))
+                        .tooltip("新しいタスク")
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.open_new_task(window, cx)),
+                        ),
+                ),
+            )
     }
 
     fn render_table_head(&self, cx: &mut Context<Self>) -> Div {
         let theme = cx.theme();
         let all = !self.visible.is_empty() && self.selected.len() == self.visible.len();
         row()
-            .h_8()
+            .h_9()
             .px_3()
             .gap_3()
             .flex_none()
-            .bg(theme.table_head)
+            .bg(theme.muted.opacity(0.4))
             .border_b_1()
             .border_color(theme.border)
             .text_xs()
-            .text_color(theme.table_head_foreground)
+            .font_weight(FontWeight::BOLD)
+            .text_color(theme.muted_foreground)
             .child(
-                div().w_5().flex_none().child(
+                div().w_6().flex_none().child(
                     Checkbox::new("select-all")
                         .accessibility_label("表示中のタスクをすべて選択")
                         .checked(all)
@@ -1086,11 +1432,93 @@ impl MainView {
                 ),
             )
             .child(div().flex_1().child("タイトル"))
-            .child(div().w(px(84.)).child("状態"))
-            .child(div().w(px(56.)).child("優先度"))
-            .child(div().w(px(130.)).child("担当"))
-            .child(div().w(px(130.)).child("期限"))
-            .child(div().w(px(80.)).child("更新"))
+            .child(div().w(COL_STATUS).child("状態"))
+            .child(div().w(COL_PRIORITY).child("優先度"))
+            .child(div().w(COL_ASSIGNEE).child("担当"))
+            .child(div().w(COL_DUE).child("期限"))
+            .child(div().w(COL_UPDATED).child("更新"))
+    }
+
+    /// 担当の表示。頭文字の丸と名前。複数いるときは、終えた人数を先に出す。
+    fn assignee_cell(&self, ids: &[Id], done: Option<(usize, usize)>, cx: &App) -> Div {
+        let theme = cx.theme();
+        let Some(first) = ids.first() else {
+            return row()
+                .text_sm()
+                .text_color(theme.muted_foreground)
+                .child("—");
+        };
+        let name = self.person_name(first);
+        row()
+            .gap_2()
+            .min_w_0()
+            .text_sm()
+            .child(avatar(name, cx))
+            .child(div().truncate().child(match (ids.len(), done) {
+                (1, _) => SharedString::from(name.to_owned()),
+                (n, Some((done, total))) => {
+                    SharedString::from(format!("{name} ほか {} 人（{done}/{total}）", n - 1))
+                }
+                (n, None) => SharedString::from(format!("{name} ほか {} 人", n - 1)),
+            }))
+    }
+
+    /// 値を押して選ぶメニュー。表の中と追加行で使う。
+    fn value_menu<T: Clone + 'static>(
+        &self,
+        id: impl Into<ElementId>,
+        shown: Div,
+        options: Vec<(SharedString, bool, T)>,
+        apply: impl Fn(&mut MainView, T, &mut Context<MainView>) + Clone + 'static,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let view = cx.entity().downgrade();
+        Button::new(id)
+            .ghost()
+            .small()
+            .justify_start()
+            .child(shown)
+            .dropdown_menu(move |mut menu, _, _| {
+                for (label, checked, value) in options.iter().cloned() {
+                    let view = view.clone();
+                    let apply = apply.clone();
+                    menu = menu.item(PopupMenuItem::new(label).checked(checked).on_click(
+                        move |_, _, cx| {
+                            // ウィンドウを閉じたあとなら、反映する先がない
+                            let _ = view.update(cx, |this, cx| apply(this, value.clone(), cx));
+                        },
+                    ));
+                }
+                menu
+            })
+    }
+
+    fn priority_options(current: Prio) -> Vec<(SharedString, bool, u8)> {
+        [Prio::High, Prio::Mid, Prio::Low, Prio::None]
+            .into_iter()
+            .map(|p| (p.label().into(), p == current, p.value()))
+            .collect()
+    }
+
+    fn assignee_options(&self, ids: &[Id]) -> Vec<(SharedString, bool, Id)> {
+        self.people
+            .iter()
+            .map(|p| (p.name.clone().into(), ids.contains(&p.id), p.id.clone()))
+            .collect()
+    }
+
+    /// 期限の選択肢。今日からの日数で決める。
+    fn due_options(&self, current: Option<&str>) -> Vec<(SharedString, bool, Option<String>)> {
+        let mut options: Vec<(SharedString, bool, Option<String>)> =
+            [("今日", 0), ("明日", 1), ("1 週間後", 7), ("1 か月後", 30)]
+                .into_iter()
+                .map(|(label, days)| {
+                    let date = view::add_days(&self.today, days);
+                    (label.into(), current == Some(date.as_str()), Some(date))
+                })
+                .collect();
+        options.push(("なし".into(), current.is_none(), None));
+        options
     }
 
     fn render_task_row(&self, ix: usize, table: bool, cx: &mut Context<Self>) -> AnyElement {
@@ -1103,7 +1531,7 @@ impl MainView {
 
         let select = {
             let id = id.clone();
-            div().w_5().flex_none().child(
+            div().w_6().flex_none().child(
                 Checkbox::new(("select", ix))
                     .accessibility_label(format!("「{}」を選択", task.title))
                     .checked(self.selected.contains(&task.id))
@@ -1115,94 +1543,128 @@ impl MainView {
                     ),
             )
         };
+        let mut chips = row().gap_1().overflow_hidden();
+        let mut has_chips = false;
+        for category in &task.categories {
+            has_chips = true;
+            chips = chips.child(
+                div()
+                    .flex_none()
+                    .px_2()
+                    .rounded_full()
+                    .border_1()
+                    .border_color(theme.foreground.opacity(0.2))
+                    .bg(theme.secondary)
+                    .text_xs()
+                    .child(category.clone()),
+            );
+        }
+        if !task.linked_workspace_ids.is_empty() {
+            has_chips = true;
+            // ほかのワークスペースにも出しているタスクには、か所の数を添える
+            chips = chips.child(
+                row()
+                    .flex_none()
+                    .gap_1()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(app_icon("link").xsmall())
+                    .child(format!("{} か所", task.linked_workspace_ids.len() + 1)),
+            );
+        }
         let title = {
             let id = id.clone();
-            div()
-                .id(("title", ix))
+            col()
                 .flex_1()
                 .min_w_0()
-                .truncate()
-                .cursor_pointer()
-                .hover(|s| s.text_color(theme.link))
-                .when(closed, |d| {
-                    d.text_color(theme.muted_foreground).line_through()
-                })
+                .gap_1()
                 .when(task.parent_id.is_some(), |d| d.pl_4())
-                .child(if task.linked_workspace_ids.is_empty() {
-                    task.title.clone()
-                } else {
-                    // ほかのワークスペースにも出しているタスクには、か所の数を添える
-                    format!(
-                        "{}（{} か所に表示）",
-                        task.title,
-                        task.linked_workspace_ids.len() + 1
-                    )
-                })
-                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                    this.open_panel(&id, window, cx)
-                }))
-                .test_support()
+                .child(
+                    div()
+                        .id(("title", ix))
+                        .truncate()
+                        .text_sm()
+                        .font_weight(FontWeight::BOLD)
+                        .cursor_pointer()
+                        .hover(|s| s.text_color(theme.primary))
+                        .when(closed, |d| {
+                            d.text_color(theme.muted_foreground).line_through()
+                        })
+                        .child(task.title.clone())
+                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                            this.open_panel(&id, window, cx)
+                        }))
+                        .test_support(),
+                )
+                .when(has_chips, |d| d.child(chips))
         };
         let status = {
             let id = id.clone();
-            status_badge(task.status, cx)
-                .id(("status", ix))
-                .cursor_pointer()
-                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                    this.ask_status(&id, window, cx)
-                }))
+            div().flex().child(
+                status_badge(task.status, cx)
+                    .id(("status", ix))
+                    .cursor_pointer()
+                    .hover(|s| s.border_color(theme.primary))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        this.ask_status(&id, window, cx)
+                    })),
+            )
         };
+        let current = Prio::of(task.priority);
         let priority = {
             let id = id.clone();
-            let current = Prio::of(task.priority);
-            // 押すたびに なし → 高 → 中 → 低 と回す
-            let next = match current {
-                Prio::None => Prio::High,
-                Prio::High => Prio::Mid,
-                Prio::Mid => Prio::Low,
-                Prio::Low => Prio::None,
-            };
-            div()
-                .id(("prio", ix))
-                .cursor_pointer()
-                .text_sm()
-                .when(current == Prio::None, |d| {
-                    d.text_color(theme.muted_foreground)
-                })
-                .when(current == Prio::High, |d| d.text_color(theme.danger))
-                .child(if current == Prio::None {
-                    "—"
-                } else {
-                    current.label()
-                })
-                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                    this.edit_task_by_id(&id, cx, |d| d.priority = next.value())
-                }))
+            self.value_menu(
+                ("prio", ix),
+                priority_label(current, cx),
+                Self::priority_options(current),
+                move |this, value, cx| this.edit_task_by_id(&id, cx, |d| d.priority = value),
+                cx,
+            )
         };
-        let assignees = div().truncate().text_sm().child({
-            // 担当者が複数いるときは、何人が自分の分を終えたかを先に出す
-            let (done, total) = task.done_count();
-            let names = self.assignee_label(&task.assignee_ids);
-            if total > 1 {
-                SharedString::from(format!("{done}/{total} {names}"))
-            } else {
-                names
-            }
-        });
-        let due = self.due_label(task, cx).text_sm();
+        let (done, total) = task.done_count();
+        let assignees = {
+            let id = id.clone();
+            self.value_menu(
+                ("assignee", ix),
+                self.assignee_cell(&task.assignee_ids, (total > 1).then_some((done, total)), cx),
+                self.assignee_options(&task.assignee_ids),
+                move |this, person: Id, cx| {
+                    this.edit_task_by_id(&id, cx, |d| {
+                        if let Some(i) = d.assignee_ids.iter().position(|a| a == &person) {
+                            d.assignee_ids.remove(i);
+                        } else {
+                            d.assignee_ids.push(person);
+                        }
+                    })
+                },
+                cx,
+            )
+        };
+        let due = {
+            let id = id.clone();
+            self.value_menu(
+                ("due", ix),
+                self.due_label(task, cx).text_sm(),
+                self.due_options(task.due.as_deref()),
+                move |this, value, cx| this.edit_task_by_id(&id, cx, |d| d.due = value),
+                cx,
+            )
+        };
         let updated = div()
-            .text_xs()
+            .text_sm()
             .text_color(theme.muted_foreground)
             .child(view::format_relative(task.updated_at, now));
 
+        let view = cx.entity().downgrade();
+        let menu_id = id.clone();
         let base = div()
             .id(("row", ix))
             .w_full()
             .border_b_1()
             .border_color(theme.border)
-            .when(active, |d| d.bg(theme.list_active))
-            .when(!active, |d| d.hover(|s| s.bg(theme.list_hover)));
-        if table {
+            .when(active, |d| d.bg(theme.accent.opacity(0.4)))
+            .when(!active, |d| d.hover(|s| s.bg(theme.muted.opacity(0.4))));
+        let row_el = if table {
             base.h(ROW_HEIGHT)
                 .flex()
                 .flex_row()
@@ -1211,12 +1673,11 @@ impl MainView {
                 .gap_3()
                 .child(select)
                 .child(title)
-                .child(status.w(px(84.)))
-                .child(priority.w(px(56.)))
-                .child(assignees.w(px(130.)))
-                .child(due.w(px(130.)))
-                .child(updated.w(px(80.)))
-                .into_any_element()
+                .child(status.w(COL_STATUS))
+                .child(div().w(COL_PRIORITY).child(priority))
+                .child(div().w(COL_ASSIGNEE).child(assignees))
+                .child(div().w(COL_DUE).child(due))
+                .child(updated.w(COL_UPDATED))
         } else {
             // 狭い画面では 1 件を 2 段のカードにする
             base.h(CARD_HEIGHT)
@@ -1228,14 +1689,145 @@ impl MainView {
                 .child(row().gap_3().child(select).child(title))
                 .child(
                     row()
-                        .gap_3()
+                        .gap_1()
                         .pl_8()
                         .child(status)
                         .child(priority)
                         .child(due)
-                        .child(assignees.flex_1().min_w_0()),
+                        .child(assignees),
                 )
-                .into_any_element()
+        };
+        // 右クリックで、その行の操作を出す
+        row_el
+            .context_menu(move |menu, _, _| {
+                let item = |label: &'static str,
+                            run: fn(&mut MainView, Id, &mut Window, &mut Context<MainView>)| {
+                    let view = view.clone();
+                    let id = menu_id.clone();
+                    PopupMenuItem::new(label).on_click(move |_, window, cx| {
+                        // ウィンドウを閉じたあとなら、反映する先がない
+                        let _ = view.update(cx, |this, cx| run(this, id.clone(), window, cx));
+                    })
+                };
+                menu.item(item("開く", |this, id, window, cx| {
+                    this.open_panel(&id, window, cx)
+                }))
+                .item(item("状態を変える", |this, id, window, cx| {
+                    this.ask_status(&id, window, cx)
+                }))
+                .separator()
+                .item(item("削除", |this, id, _, cx| {
+                    this.modal = Modal::DeleteTasks(vec![id]);
+                    cx.notify();
+                }))
+            })
+            .into_any_element()
+    }
+
+    /// 表の最後の追加行。タイトルと、状態・優先度・担当・期限を決めて足す。
+    fn render_quick_add_row(&self, table: bool, cx: &mut Context<Self>) -> Div {
+        let theme = cx.theme().clone();
+        let quick = &self.quick;
+        let status = self.value_menu(
+            "quick-status",
+            status_badge(quick.status, cx),
+            Status::ALL
+                .into_iter()
+                .map(|s| (s.label().into(), s == quick.status, s))
+                .collect(),
+            |this, value, cx| {
+                this.quick.status = value;
+                this.quick_touched = true;
+                cx.notify();
+            },
+            cx,
+        );
+        let current = Prio::of(quick.priority);
+        let priority = self.value_menu(
+            "quick-priority",
+            priority_label(current, cx),
+            Self::priority_options(current),
+            |this, value, cx| {
+                this.quick.priority = value;
+                this.quick_touched = true;
+                cx.notify();
+            },
+            cx,
+        );
+        let assignees = self.value_menu(
+            "quick-assignee",
+            self.assignee_cell(&quick.assignee_ids, None, cx),
+            self.assignee_options(&quick.assignee_ids),
+            |this, person: Id, cx| {
+                this.quick_touched = true;
+                if let Some(i) = this.quick.assignee_ids.iter().position(|a| a == &person) {
+                    this.quick.assignee_ids.remove(i);
+                } else {
+                    this.quick.assignee_ids.push(person);
+                }
+                cx.notify();
+            },
+            cx,
+        );
+        let due = self.value_menu(
+            "quick-due",
+            match &quick.due {
+                Some(due) => div().text_sm().child(view::format_date(due, &self.today)),
+                None => div()
+                    .text_sm()
+                    .text_color(theme.muted_foreground)
+                    .child("—"),
+            },
+            self.due_options(quick.due.as_deref()),
+            |this, value, cx| {
+                this.quick.due = value;
+                this.quick_touched = true;
+                cx.notify();
+            },
+            cx,
+        );
+        let input = Input::new(&self.inputs.quick_add)
+            .id("quick-add")
+            .aria_label("タスクを追加")
+            .prefix(app_icon("plus").small())
+            .flex_1();
+        let submit = Button::new("quick-add-submit")
+            .label("追加")
+            .primary()
+            .on_click(cx.listener(|this, _, window, cx| this.submit_quick_add(window, cx)));
+        let base = div()
+            .flex_none()
+            .border_t_1()
+            .border_color(theme.border)
+            .bg(theme.muted.opacity(0.3))
+            .px_3()
+            .py_2();
+        if table {
+            base.flex()
+                .flex_row()
+                .items_center()
+                .gap_3()
+                .child(div().w_6().flex_none())
+                .child(input)
+                .child(div().w(COL_STATUS).child(status))
+                .child(div().w(COL_PRIORITY).child(priority))
+                .child(div().w(COL_ASSIGNEE).child(assignees))
+                .child(div().w(COL_DUE).child(due))
+                .child(div().w(COL_UPDATED).child(submit))
+        } else {
+            base.flex()
+                .flex_col()
+                .gap_2()
+                .child(row().gap_2().child(input).child(submit))
+                .child(
+                    row()
+                        .gap_1()
+                        .flex_wrap()
+                        .child(status)
+                        .child(priority)
+                        .child(assignees)
+                        .child(due),
+                )
         }
     }
 
@@ -3369,29 +3961,48 @@ impl MainView {
 
 impl Render for MainView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if !self.unlocked(cx) {
-            return self.render_lock_screen(cx).into_any_element();
-        }
         let theme = cx.theme().clone();
         let width = window.viewport_size().width;
+        let unlocked = self.unlocked(cx);
         // 狭いウィンドウでは左のメニューをたたみ、詳細は全面のシートにする
         let wide = width >= px(860.);
-        let sidebar = wide || self.sidebar_open && self.panel.is_none();
-        let main_width = if wide { width - SIDEBAR_WIDTH } else { width };
+        let sidebar = if wide {
+            !self.sidebar_hidden
+        } else {
+            self.sidebar_open && self.panel.is_none()
+        };
+        if !unlocked {
+            return col()
+                .size_full()
+                .bg(theme.background)
+                .text_color(theme.foreground)
+                .child(self.render_header(false, wide, cx))
+                .child(div().flex_1().min_h_0().child(self.render_lock_screen(cx)))
+                .into_any_element();
+        }
+        let main_width = if wide && sidebar {
+            width - SIDEBAR_WIDTH
+        } else {
+            width
+        };
         let table = main_width >= px(720.);
         let sheet = width < px(1000.);
 
         let main = if !wide && sidebar {
             // 狭い画面でメニューを開いているあいだは、メニューだけを見せる
-            self.render_sidebar(cx).w_full().flex_1().min_h_0()
+            self.render_sidebar(wide, cx)
+                .w_full()
+                .flex_1()
+                .min_h_0()
+                .into_any_element()
         } else {
             match self.nav {
-                Nav::Home => self.render_home(table, cx),
-                _ => self.render_list(table, cx),
+                Nav::Home => self.render_home(table, cx).into_any_element(),
+                _ => self.render_list(table, cx).into_any_element(),
             }
         };
 
-        div()
+        let body = div()
             .id("main-view")
             .key_context("MainView")
             .track_focus(&self.focus)
@@ -3402,27 +4013,14 @@ impl Render for MainView {
             .flex_row()
             .bg(theme.background)
             .text_color(theme.foreground)
-            .when(wide, |d| d.child(self.render_sidebar(cx)))
+            .when(wide && sidebar, |d| d.child(self.render_sidebar(wide, cx)))
             .child(
                 col()
                     .flex_1()
                     .min_w_0()
                     .h_full()
-                    .when(!wide, |d| {
-                        d.child(
-                            row().px_4().pt_2().child(
-                                Button::new("toggle-sidebar")
-                                    .label(if sidebar { "閉じる" } else { "メニュー" })
-                                    .ghost()
-                                    .small()
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.sidebar_open = !this.sidebar_open;
-                                        cx.notify();
-                                    })),
-                            ),
-                        )
-                    })
-                    .child(main),
+                    .child(self.render_header(true, wide, cx))
+                    .child(div().flex_1().min_h_0().child(main)),
             )
             .children(self.render_panel(sheet, cx))
             .children(self.render_modal(cx))
@@ -3467,6 +4065,7 @@ impl Render for MainView {
                     )
                 },
             )
-            .into_any_element()
+            .into_any_element();
+        body
     }
 }
