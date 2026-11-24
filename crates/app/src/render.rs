@@ -2370,6 +2370,7 @@ impl MainView {
             .to_owned();
         // スレッドの中では枠を重ねない
         let boxed = !c.review && c.reply_to.is_none();
+        let links = malakt_core::tasklink::find(&c.body);
         col()
             .gap_1()
             .when(boxed, |d| {
@@ -2419,11 +2420,78 @@ impl MainView {
                             })),
                     ),
             )
-            .child(
-                div()
-                    .text_sm()
-                    .child(TextView::markdown(("comment-body", ix), c.body.clone())),
+            .child({
+                let body = if links.is_empty() {
+                    c.body.clone()
+                } else {
+                    malakt_core::tasklink::strip(&c.body)
+                };
+                div().text_sm().when(!body.is_empty(), |d| {
+                    d.child(TextView::markdown(("comment-body", ix), body))
+                })
+            })
+            .children(
+                links
+                    .into_iter()
+                    .enumerate()
+                    .map(|(n, id)| self.task_card(("task-card", ix * 16 + n), id, cx)),
             )
+    }
+
+    /// リンクが指すタスクのカード。状態とタイトルを出し、押すとそのタスクを開く。
+    fn task_card(&self, id: impl Into<ElementId>, task_id: &str, cx: &mut Context<Self>) -> Div {
+        let theme = cx.theme().clone();
+        let task = self
+            .detail
+            .as_ref()
+            .and_then(|d| d.linked.iter().find(|t| t.id == task_id));
+        let card = row()
+            .id(id)
+            .gap_2()
+            .px_2()
+            .py_1p5()
+            .rounded_md()
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.popover)
+            .text_sm();
+        let card = match task {
+            Some(task) => {
+                let open = task.id.clone();
+                card.cursor_pointer()
+                    .hover(|s| s.border_color(theme.primary))
+                    .active(|s| s.bg(theme.accent))
+                    .child(status_badge(task.status, cx).flex_none())
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .font_weight(FontWeight::BOLD)
+                            .child(task.title.clone()),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(self.workspace_name(task.workspace_id.as_deref())),
+                    )
+                    .child(
+                        app_icon("arrow-right")
+                            .small()
+                            .text_color(theme.muted_foreground),
+                    )
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        this.open_panel(&open, window, cx)
+                    }))
+            }
+            None => card
+                .text_color(theme.muted_foreground)
+                .child(app_icon("link").small())
+                .child("リンク先のタスクが見つかりません"),
+        };
+        div().child(card.test_support())
     }
 
     /// 詳細の「担当」。1 人ずつ、完了のチェック・頭文字の丸・名前・役（R・A など）を並べる。
@@ -3161,6 +3229,17 @@ impl MainView {
                         .font_weight(FontWeight::BOLD)
                         .child("タスクの詳細"),
                 )
+                .child({
+                    let link_task = task.id.clone();
+                    Button::new("copy-link")
+                        .icon(app_icon("link"))
+                        .tooltip("リンクをコピー")
+                        .framed(cx)
+                        .small()
+                        .on_click(
+                            cx.listener(move |this, _, _, cx| this.copy_task_link(&link_task, cx)),
+                        )
+                })
                 .child({
                     let ticket_task = task.id.clone();
                     Button::new("ticket-open")
