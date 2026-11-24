@@ -24,7 +24,12 @@ fn open(cx: &mut TestAppContext, window_size: Size<Pixels>) -> (AnyWindowHandle,
             ..Default::default()
         };
         gpui_kit::open_window(options, cx, |window, cx| {
-            cx.new(|cx| MainView::new(window, cx))
+            cx.new(|cx| {
+                let mut view = MainView::new(window, cx);
+                // 出入りの動きを待たずに、すぐ最後の位置で確かめる
+                view.motion = false;
+                view
+            })
         })
         .expect("ウィンドウを開く")
     })
@@ -65,6 +70,7 @@ fn works_right_after_first_launch(cx: &mut TestAppContext) {
     let (window, view) = open(cx, wide());
 
     ui(cx, window, |window, cx| {
+        window.click("nav-all", cx);
         window.click("quick-add", cx);
         window.input("牛乳を買う", cx);
         window.press("enter", cx);
@@ -135,6 +141,7 @@ fn nested_workspaces_and_filing_later(cx: &mut TestAppContext) {
 
     // 先に、どこにも入れないタスクを作る
     ui(cx, window, |window, cx| {
+        window.click("nav-all", cx);
         window.click("quick-add", cx);
         window.input("会場を探す", cx);
         window.press("enter", cx);
@@ -323,6 +330,7 @@ fn export_then_import(cx: &mut TestAppContext) {
     start(cx);
     let (window, view) = open(cx, wide());
     ui(cx, window, |window, cx| {
+        window.click("nav-all", cx);
         window.click("quick-add", cx);
         window.input("持ち出すタスク", cx);
         window.press("enter", cx);
@@ -470,7 +478,10 @@ fn narrow_window_menu_opens_and_closes(cx: &mut TestAppContext) {
     start(cx);
     let (window, view) = open(cx, size(px(520.), px(800.)));
 
-    // 最初はメニューが閉じていて、すぐタスクを足せる
+    // 最初はメニューが閉じている。メニューから一覧へ移ると、すぐタスクを足せる
+    assert!(!cx.update(|cx| view.read(cx).sidebar_open));
+    ui(cx, window, |window, cx| window.click("toggle-sidebar", cx));
+    ui(cx, window, |window, cx| window.click("nav-all", cx));
     ui(cx, window, |window, cx| {
         window.click("quick-add", cx);
         window.input("牛乳を買う", cx);
@@ -514,6 +525,7 @@ fn assignee_roles_and_per_person_completion(cx: &mut TestAppContext) {
         })
     });
     ui(cx, window, |window, cx| {
+        window.click("nav-all", cx);
         window.click("quick-add", cx);
         window.input("会場を決める", cx);
         window.press("enter", cx);
@@ -1372,4 +1384,79 @@ fn self_is_always_there_and_workspaces_take_icons(cx: &mut TestAppContext) {
     let saved = store(cx, |s| s.workspace(&ws).unwrap());
     assert_eq!(saved.icon.as_deref(), Some("rocket"));
     assert_eq!(saved.color, None);
+}
+
+/// 一覧の最後の追加行で、状態と優先度を選んでからタスクを足す。
+#[gpui_kit::test]
+fn quick_add_row_takes_status_and_priority(cx: &mut TestAppContext) {
+    start(cx);
+    let (window, view) = open(cx, size(px(1280.), px(800.)));
+    ui(cx, window, |window, cx| window.click("nav-all", cx));
+
+    // 優先度のメニューの 1 つ目は「高」
+    ui(cx, window, |window, cx| window.click("quick-priority", cx));
+    ui(cx, window, |window, cx| {
+        window.press("down", cx);
+        window.press("enter", cx);
+    });
+    // 状態のメニューの 2 つ目は「進行中」
+    ui(cx, window, |window, cx| window.click("quick-status", cx));
+    ui(cx, window, |window, cx| {
+        window.press("down", cx);
+        window.press("down", cx);
+        window.press("enter", cx);
+    });
+    cx.update(|cx| {
+        let view = view.read(cx);
+        assert_eq!(view.quick.priority, 1);
+        assert_eq!(view.quick.status, Status::InProcess);
+    });
+
+    ui(cx, window, |window, cx| {
+        window.click("quick-add", cx);
+        window.input("見積もりを取る", cx);
+        window.press("enter", cx);
+    });
+    let task = all_tasks(cx).remove(0);
+    assert_eq!(task.title, "見積もりを取る");
+    assert_eq!(task.priority, 1);
+    assert_eq!(task.status, Status::InProcess);
+    // 足したあとは、次の 1 件のために最初の値へ戻る
+    cx.update(|cx| {
+        let view = view.read(cx);
+        assert_eq!(view.quick.priority, 0);
+        assert_eq!(view.quick.status, Status::NeedsAction);
+    });
+}
+
+/// 詳細のタイトルは、押すとその場で書き直せる。Enter で保存し、Esc で元に戻る。
+#[gpui_kit::test]
+fn title_is_edited_in_place(cx: &mut TestAppContext) {
+    start(cx);
+    let (window, view) = open(cx, wide());
+    ui(cx, window, |window, cx| {
+        window.click("nav-all", cx);
+        window.click("quick-add", cx);
+        window.input("牛乳を買う", cx);
+        window.press("enter", cx);
+    });
+    ui(cx, window, |window, cx| window.click(("title", 0usize), cx));
+
+    ui(cx, window, |window, cx| window.click("detail-title", cx));
+    ui(cx, window, |window, cx| {
+        assert_eq!(window.find("title-input").value(), Some("牛乳を買う"));
+        window.input("と卵", cx);
+        window.press("enter", cx);
+    });
+    assert_eq!(all_tasks(cx)[0].title, "牛乳を買うと卵");
+    assert!(cx.update(|cx| view.read(cx).editing.is_none()));
+
+    // Esc は書きかけを捨てて、読むときの表示に戻す
+    ui(cx, window, |window, cx| window.click("detail-title", cx));
+    ui(cx, window, |window, cx| {
+        window.input("も", cx);
+        window.press("escape", cx);
+    });
+    assert_eq!(all_tasks(cx)[0].title, "牛乳を買うと卵");
+    assert!(cx.update(|cx| view.read(cx).editing.is_none()));
 }
