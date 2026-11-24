@@ -13,4 +13,7 @@ runs:
           libwayland-dev libvulkan-dev libfontconfig-dev libfreetype-dev \
           libssl-dev libasound2-dev libzstd-dev
     - uses: jdx/mise-action@v2
+    - name: rustfmt と clippy を入れる
+      shell: bash
+      run: mise exec -- rustup component add rustfmt clippy
     - uses: Swatinem/rust-cache@v2
