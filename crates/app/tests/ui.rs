@@ -449,3 +449,36 @@ fn every_screen_renders_at_any_size(cx: &mut TestAppContext) {
         ui(cx, window, |_, _| {});
     }
 }
+
+/// 狭いウィンドウでは、メニューを開いて行き先を選ぶと、メニューが閉じて中身が出る。
+#[gpui_kit::test]
+fn narrow_window_menu_opens_and_closes(cx: &mut TestAppContext) {
+    start(cx);
+    let (window, view) = open(cx, size(px(520.), px(800.)));
+
+    // 最初はメニューが閉じていて、すぐタスクを足せる
+    ui(cx, window, |window, cx| {
+        window.click("quick-add", cx);
+        window.input("牛乳を買う", cx);
+        window.press("enter", cx);
+    });
+    assert_eq!(all_tasks(cx).len(), 1);
+
+    ui(cx, window, |window, cx| window.click("toggle-sidebar", cx));
+    assert!(cx.update(|cx| view.read(cx).sidebar_open));
+
+    // メニューを開いていても「閉じる」は押せる
+    ui(cx, window, |window, cx| window.click("toggle-sidebar", cx));
+    assert!(!cx.update(|cx| view.read(cx).sidebar_open));
+
+    ui(cx, window, |window, cx| window.click("toggle-sidebar", cx));
+    ui(cx, window, |window, cx| window.click("nav-all", cx));
+    cx.update(|cx| {
+        let view = view.read(cx);
+        assert!(!view.sidebar_open);
+        assert_eq!(view.nav, Nav::All);
+    });
+    // 中身が出ているので、一覧のタスクを開ける
+    ui(cx, window, |window, cx| window.click(("title", 0usize), cx));
+    assert!(cx.update(|cx| view.read(cx).panel.is_some()));
+}

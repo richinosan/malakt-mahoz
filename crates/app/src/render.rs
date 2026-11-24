@@ -2064,7 +2064,7 @@ impl Render for MainView {
 
         let main = if !wide && sidebar {
             // 狭い画面でメニューを開いているあいだは、メニューだけを見せる
-            div()
+            self.render_sidebar(cx).w_full().flex_1().min_h_0()
         } else {
             match self.nav {
                 Nav::Home => self.render_home(cx),
@@ -2083,9 +2083,7 @@ impl Render for MainView {
             .flex_row()
             .bg(theme.background)
             .text_color(theme.foreground)
-            .when(sidebar, |d| {
-                d.child(self.render_sidebar(cx).when(!wide, |s| s.w_full()))
-            })
+            .when(wide, |d| d.child(self.render_sidebar(cx)))
             .child(
                 col()
                     .flex_1()
