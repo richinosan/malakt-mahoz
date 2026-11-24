@@ -751,7 +751,7 @@ fn the_task_screen_stays_usable_beside_the_chat(cx: &mut TestAppContext) {
         assert_eq!(shell.origin.x, chat.origin.x);
         assert!(shell.origin.y > chat.origin.y);
         // メニューをたたむ表示にはならない
-        assert!(window.try_find("toggle-sidebar").is_none());
+        assert!(window.find("nav-home").visible());
         assert!(window.find("ai-toggle").visible());
     });
 }
@@ -769,7 +769,7 @@ fn the_shell_sits_right_of_the_chat_in_a_wide_window(cx: &mut TestAppContext) {
         assert_eq!(shell.origin.x + shell.size.width, px(1600.));
         assert_eq!(shell.size.width, px(359.));
         assert_eq!(shell.origin.y, chat.origin.y);
-        assert!(window.try_find("toggle-sidebar").is_none());
+        assert!(window.find("nav-home").visible());
     });
 }
 
