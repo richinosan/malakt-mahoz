@@ -78,7 +78,7 @@ pub fn unlock(store: &Store, device: &dyn DeviceAuth, passphrase: Option<&str>) 
     if !is_enabled(store)? {
         return Ok(true);
     }
-    if device.is_available() && device.authenticate("malakt-mahoz のロックを解除します") {
+    if device.is_available() && device.authenticate("Malakt Mahoz のロックを解除します") {
         return Ok(true);
     }
     match passphrase {

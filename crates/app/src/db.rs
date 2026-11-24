@@ -73,7 +73,9 @@ impl Drop for Db {
     }
 }
 
-pub fn init(store: Store, cx: &mut App) {
+pub fn init(mut store: Store, cx: &mut App) {
+    // 自分はいつでも担当に選べるようにしておく
+    let _ = store.ensure_self();
     let unlocked = !lock::is_enabled(&store).unwrap_or(false);
     let db = cx.new(|_| Db::new(store, unlocked));
     cx.set_global(Shared(db));
