@@ -92,6 +92,133 @@ impl Status {
     }
 }
 
+/// 担当者の役（RACI）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Role {
+    /// 実行責任者
+    R,
+    /// 説明責任者。1 つのタスクに 1 人まで。
+    A,
+    /// 相談先
+    C,
+    /// 報告先
+    I,
+}
+
+impl Role {
+    /// 並び順。複数の役を見せるときもこの順にする。
+    pub const ALL: [Role; 4] = [Role::R, Role::A, Role::C, Role::I];
+
+    pub fn code(self) -> &'static str {
+        match self {
+            Role::R => "R",
+            Role::A => "A",
+            Role::C => "C",
+            Role::I => "I",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|v| v.code() == s)
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Role::R => "実行責任者",
+            Role::A => "説明責任者",
+            Role::C => "相談先",
+            Role::I => "報告先",
+        }
+    }
+
+    fn bit(self) -> u8 {
+        1 << self as u8
+    }
+}
+
+/// 担当者 1 人が持つ役の集まり。担当者は必ず 1 つ以上の役を持つ。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Roles(u8);
+
+impl Default for Roles {
+    /// 担当者を足したときの役は R。
+    fn default() -> Self {
+        Roles::R
+    }
+}
+
+impl Roles {
+    pub const R: Roles = Roles(1);
+    pub const NONE: Roles = Roles(0);
+
+    pub fn of(roles: &[Role]) -> Self {
+        Roles(roles.iter().fold(0, |bits, role| bits | role.bit()))
+    }
+
+    pub fn contains(self, role: Role) -> bool {
+        self.0 & role.bit() != 0
+    }
+
+    pub fn with(self, role: Role) -> Self {
+        Roles(self.0 | role.bit())
+    }
+
+    pub fn without(self, role: Role) -> Self {
+        Roles(self.0 & !role.bit())
+    }
+
+    pub fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    pub fn iter(self) -> impl Iterator<Item = Role> {
+        Role::ALL.into_iter().filter(move |r| self.contains(*r))
+    }
+
+    /// `R,A` の形を読む。読めない・空のときは R。
+    pub fn parse(s: &str) -> Self {
+        let roles = Roles(
+            s.split(',')
+                .filter_map(|code| Role::parse(code.trim()))
+                .fold(0, |bits, role| bits | role.bit()),
+        );
+        if roles.is_empty() {
+            Roles::R
+        } else {
+            roles
+        }
+    }
+
+    /// 「実行責任者・説明責任者」の形。
+    pub fn labels(self) -> String {
+        self.iter().map(Role::label).collect::<Vec<_>>().join("・")
+    }
+}
+
+impl std::fmt::Display for Roles {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for (i, role) in self.iter().enumerate() {
+            if i > 0 {
+                f.write_str(",")?;
+            }
+            f.write_str(role.code())?;
+        }
+        Ok(())
+    }
+}
+
+impl Serialize for Roles {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        s.collect_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for Roles {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        Ok(Roles::parse(&String::deserialize(d)?))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Task {
     pub id: Id,
@@ -114,6 +241,12 @@ pub struct Task {
     #[serde(default)]
     pub parent_id: Option<Id>,
     pub assignee_ids: Vec<Id>,
+    /// 担当者ごとの役。`assignee_ids` と同じ並び。
+    #[serde(default)]
+    pub assignee_roles: Vec<Roles>,
+    /// 担当者ごとの「自分の分」を完了にした時刻。`assignee_ids` と同じ並び。
+    #[serde(default)]
+    pub assignee_done: Vec<Option<i64>>,
     #[serde(default)]
     pub categories: Vec<String>,
     pub position: i64,
@@ -142,6 +275,33 @@ pub struct Change {
     pub old_value: String,
     pub new_value: String,
     pub created_at: i64,
+}
+
+impl Task {
+    fn assignee_index(&self, person_id: &str) -> Option<usize> {
+        self.assignee_ids.iter().position(|id| id == person_id)
+    }
+
+    /// その担当者の役。担当者でなければ `None`。
+    pub fn roles_of(&self, person_id: &str) -> Option<Roles> {
+        let i = self.assignee_index(person_id)?;
+        Some(self.assignee_roles.get(i).copied().unwrap_or_default())
+    }
+
+    /// その担当者が自分の分を完了にしているか。
+    pub fn is_done_by(&self, person_id: &str) -> bool {
+        self.assignee_index(person_id)
+            .and_then(|i| self.assignee_done.get(i).copied().flatten())
+            .is_some()
+    }
+
+    /// 自分の分を完了にした人数と、担当者の人数。
+    pub fn done_count(&self) -> (usize, usize) {
+        let done = (0..self.assignee_ids.len())
+            .filter(|&i| self.assignee_done.get(i).copied().flatten().is_some())
+            .count();
+        (done, self.assignee_ids.len())
+    }
 }
 
 /// タスクの新規作成・更新で渡す内容。
@@ -266,6 +426,27 @@ mod tests {
         assert_eq!(a.len(), 26);
         assert_eq!(a, a.to_lowercase());
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn roles_parse_and_print_in_fixed_order() {
+        let roles = Roles::parse("A, R");
+        assert_eq!(roles.to_string(), "R,A");
+        assert_eq!(roles.labels(), "実行責任者・説明責任者");
+        assert!(roles.contains(Role::A) && !roles.contains(Role::C));
+        assert_eq!(roles.without(Role::R).to_string(), "A");
+        assert_eq!(Roles::NONE.with(Role::I), Roles::of(&[Role::I]));
+        // 読めない・空のときは R
+        assert_eq!(Roles::parse(""), Roles::R);
+        assert_eq!(Roles::parse("X"), Roles::default());
+        // JSON では文字列
+        assert_eq!(serde_json::to_string(&roles).unwrap(), "\"R,A\"");
+        assert_eq!(
+            serde_json::from_str::<Roles>("\"C,I\"")
+                .unwrap()
+                .to_string(),
+            "C,I"
+        );
     }
 
     #[test]
