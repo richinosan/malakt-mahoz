@@ -3,8 +3,18 @@ use serde::{Deserialize, Serialize};
 /// 小文字の ULID。
 pub type Id = String;
 
+/// 新しい ID。同じミリ秒の中で続けて作っても、作った順に大きくなる。
+/// 変更履歴などを「時刻、ID」の順に並べたとき、作った順が保たれる。
 pub fn new_id() -> Id {
-    ulid::Ulid::new().to_string().to_lowercase()
+    use std::sync::Mutex;
+    static GENERATOR: Mutex<ulid::Generator> = Mutex::new(ulid::Generator::new());
+    let mut generator = GENERATOR.lock().unwrap_or_else(|e| e.into_inner());
+    generator
+        .generate()
+        // 同じミリ秒で乱数部分があふれたとき（まず起きない）は、順序を保てない普通の ID にする
+        .unwrap_or_else(|_| ulid::Ulid::new())
+        .to_string()
+        .to_lowercase()
 }
 
 /// UNIX 時刻（ミリ秒）。
@@ -256,6 +266,13 @@ mod tests {
         assert_eq!(a.len(), 26);
         assert_eq!(a, a.to_lowercase());
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn ids_grow_in_creation_order() {
+        // 時計が粗い OS では、同じミリ秒の中でいくつも作られる
+        let ids: Vec<Id> = (0..2000).map(|_| new_id()).collect();
+        assert!(ids.windows(2).all(|pair| pair[0] < pair[1]));
     }
 
     #[test]
