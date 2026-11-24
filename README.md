@@ -84,14 +84,9 @@ mise run mutants    # ミューテーションテスト（cargo-mutants が必�
 
 ## リリース
 
-1. Actions の「リリース PR を作る」を、新しいバージョン（例 `0.2.0`）を指定して手動で実行します
-2. バージョンを上げるプルリクエストが作られ、CI が通ると自動でマージされます
-3. main に入ると「リリース」が動き、3 つの OS でビルドして GitHub Releases に公開します
-
-準備として、次の 2 つが要ります。
-
-- リポジトリの設定で「Allow auto-merge」を有効にする
-- シークレット `RELEASE_TOKEN` に、contents と pull requests を書ける Personal Access Token（または GitHub App のトークン）を入れる。標準の `GITHUB_TOKEN` で作ったプルリクエストでは CI が起動しないためです
+1. `Cargo.toml` の `[workspace.package]` の `version` を上げ（`Cargo.lock` も更新）、そのプルリクエストを作ります
+2. CI が通ったらマージします
+3. main に入ると「リリース」が動き、3 つの OS でビルドして GitHub Releases に公開します。同じバージョンのリリースがすでにあれば何もしません
 
 ## Android と iOS
 
