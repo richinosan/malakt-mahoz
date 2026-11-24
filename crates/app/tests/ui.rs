@@ -961,3 +961,68 @@ fn workspace_defaults_fill_new_tasks(cx: &mut TestAppContext) {
         .unwrap();
     assert!(memo.due.is_none() && memo.assignee_ids.is_empty());
 }
+
+/// 1 つのタスクをほかのワークスペースにも表示し、片方から外せる。
+#[gpui_kit::test]
+fn task_shown_in_two_workspaces(cx: &mut TestAppContext) {
+    start(cx);
+    let (window, view) = open(cx, size(px(1280.), px(2400.)));
+    let (event, press) = cx.update(|cx| {
+        view.update(cx, |v, cx| {
+            v.write(cx, |s| {
+                let event = s.create_workspace(None, "冬のイベント")?.id;
+                let press = s.create_workspace(None, "広報")?.id;
+                s.add_task_in(Some(&event), "告知を出す")?;
+                Ok((event, press))
+            })
+            .unwrap()
+        })
+    });
+    let go = |cx: &mut TestAppContext, ws: &str| {
+        cx.update(|cx| view.update(cx, |v, cx| v.go(Nav::Workspace(ws.to_owned()), cx)));
+        cx.run_until_parked();
+    };
+    let shown = |cx: &mut TestAppContext| cx.update(|cx| view.read(cx).tasks.len());
+    let id = all_tasks(cx).remove(0).id;
+
+    go(cx, &event);
+    ui(cx, window, |window, cx| window.click(("title", 0usize), cx));
+    ui(cx, window, |window, cx| window.click("link-add", cx));
+    cx.update(|cx| assert_eq!(view.read(cx).modal, Modal::LinkTask(id.clone())));
+    // 候補は「広報」だけ（いまの場所は出ない）
+    ui(cx, window, |window, cx| {
+        window.click(("link-to", 1usize), cx)
+    });
+    let task = store(cx, |s| s.task(&id).unwrap());
+    assert_eq!(task.linked_workspace_ids, std::slice::from_ref(&press));
+    cx.update(|cx| assert_eq!(view.read(cx).modal, Modal::None));
+
+    // どちらの一覧にも出て、全体では 1 件
+    go(cx, &press);
+    assert_eq!(shown(cx), 1);
+    assert_eq!(all_tasks(cx).len(), 1);
+
+    // 削除のダイアログから「ここから外すだけ」を選ぶと、タスクは残る
+    ui(cx, window, |window, cx| window.click(("title", 0usize), cx));
+    cx.update(|cx| {
+        view.update(cx, |v, cx| {
+            v.modal = Modal::DeleteTasks(vec![id.clone()]);
+            cx.notify();
+        })
+    });
+    ui(cx, window, |window, cx| window.click("unlink-here", cx));
+    assert_eq!(shown(cx), 0);
+    let task = store(cx, |s| s.task(&id).unwrap());
+    assert_eq!(task.workspace_id.as_deref(), Some(event.as_str()));
+    assert!(task.linked_workspace_ids.is_empty());
+
+    // 詳細の「外す」でも外せる。入っている場所を外すと、表示先に入れ直す
+    go(cx, &event);
+    cx.update(|cx| view.update(cx, |v, cx| v.write(cx, |s| s.link_task(&id, &press))));
+    ui(cx, window, |window, cx| window.click(("title", 0usize), cx));
+    ui(cx, window, |window, cx| window.click("unlink-home", cx));
+    let task = store(cx, |s| s.task(&id).unwrap());
+    assert_eq!(task.workspace_id.as_deref(), Some(press.as_str()));
+    assert!(task.linked_workspace_ids.is_empty());
+    assert_eq!(shown(cx), 0);
+}

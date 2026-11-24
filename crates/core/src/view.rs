@@ -300,6 +300,7 @@ pub fn field_label(field: &str) -> &str {
         "assignee_done" => "担当者ごとの完了",
         "categories" => "カテゴリ",
         "workspace" => "ワークスペース",
+        "link" => "表示するワークスペース",
         other => other,
     }
 }
@@ -327,6 +328,7 @@ mod tests {
             position: 0,
             created_at: 0,
             updated_at: 0,
+            linked_workspace_ids: Vec::new(),
             completed_at: None,
         }
     }

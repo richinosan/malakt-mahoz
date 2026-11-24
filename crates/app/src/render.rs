@@ -1039,7 +1039,16 @@ impl MainView {
                     d.text_color(theme.muted_foreground).line_through()
                 })
                 .when(task.parent_id.is_some(), |d| d.pl_4())
-                .child(task.title.clone())
+                .child(if task.linked_workspace_ids.is_empty() {
+                    task.title.clone()
+                } else {
+                    // ほかのワークスペースにも出しているタスクには、か所の数を添える
+                    format!(
+                        "{}（{} か所に表示）",
+                        task.title,
+                        task.linked_workspace_ids.len() + 1
+                    )
+                })
                 .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                     this.open_panel(&id, window, cx)
                 }))
@@ -1669,22 +1678,70 @@ impl MainView {
 
         let workspace = {
             let id = task.id.clone();
-            row()
-                .gap_2()
-                .child(
-                    div()
-                        .text_sm()
-                        .child(self.workspace_name(task.workspace_id.as_deref())),
+            let link_id = task.id.clone();
+            let shared = !task.linked_workspace_ids.is_empty();
+            let mut places =
+                col().gap_1().child(
+                    row()
+                        .gap_2()
+                        .items_center()
+                        .child(
+                            div()
+                                .text_sm()
+                                .child(self.workspace_name(task.workspace_id.as_deref())),
+                        )
+                        .child(Button::new("move-task").label("移動").xsmall().on_click(
+                            cx.listener(move |this, _, _, cx| {
+                                this.modal = Modal::MoveTasks(vec![id.clone()]);
+                                cx.notify();
+                            }),
+                        ))
+                        .when_some(task.workspace_id.clone().filter(|_| shared), |d, home| {
+                            let task_id = task.id.clone();
+                            d.child(
+                                Button::new("unlink-home")
+                                    .label("外す")
+                                    .ghost()
+                                    .xsmall()
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.unlink_task_from(&task_id, &home, cx)
+                                    })),
+                            )
+                        }),
+                );
+            for (ix, linked) in task.linked_workspace_ids.iter().enumerate() {
+                let (task_id, linked_id) = (task.id.clone(), linked.clone());
+                places = places.child(
+                    row()
+                        .gap_2()
+                        .items_center()
+                        .child(div().text_sm().child(self.workspace_name(Some(linked))))
+                        .child(
+                            Button::new(("unlink", ix))
+                                .label("外す")
+                                .ghost()
+                                .xsmall()
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.unlink_task_from(&task_id, &linked_id, cx)
+                                })),
+                        ),
+                );
+            }
+            // どこにも入っていないタスクは「移動」で入れる
+            places.when(task.workspace_id.is_some(), |d| {
+                d.child(
+                    row().child(
+                        Button::new("link-add")
+                            .label("ほかのワークスペースにも表示")
+                            .ghost()
+                            .xsmall()
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.modal = Modal::LinkTask(link_id.clone());
+                                cx.notify();
+                            })),
+                    ),
                 )
-                .child(
-                    Button::new("move-task")
-                        .label("移動")
-                        .xsmall()
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.modal = Modal::MoveTasks(vec![id.clone()]);
-                            cx.notify();
-                        })),
-                )
+            })
         };
 
         // 返信はルートの下にまとめる。完了報告は上に固定して出すので、ここには出さない
@@ -2222,14 +2279,36 @@ impl MainView {
                 self.dialog("ワークスペースを削除", body, cx)
             }
             Modal::DeleteTasks(ids) => {
+                // ほかのワークスペースにも出しているタスクは、ここから外すだけにもできる
+                let here = self.current_workspace();
+                let shared = here.is_some()
+                    && self
+                        .tasks
+                        .iter()
+                        .chain(self.detail.as_ref().map(|d| &d.task))
+                        .any(|t| ids.contains(&t.id) && !t.linked_workspace_ids.is_empty());
                 let body = col()
                     .gap_3()
                     .child(muted(format!(
                         "{} 件のタスクを削除します。元に戻せません。",
                         ids.len()
                     )))
+                    .when(shared, |d| {
+                        d.child(muted(
+                            "ほかのワークスペースにも表示しているタスクがあります。削除すると、すべてのワークスペースから消えます。"
+                                .to_owned(),
+                        ))
+                    })
                     .child(
-                        row().gap_2().justify_end().child(cancel(cx)).child(
+                        row().gap_2().justify_end().child(cancel(cx)).when(shared, |d| {
+                            d.child(
+                                Button::new("unlink-here")
+                                    .label("ここから外すだけ")
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| this.unlink_selected_here(cx)),
+                                    ),
+                            )
+                        }).child(
                             Button::new("confirm-delete-tasks")
                                 .label("削除する")
                                 .danger()
@@ -2329,6 +2408,9 @@ impl MainView {
                             "workspace" => self
                                 .workspace_name((!value.is_empty()).then_some(value))
                                 .to_string(),
+                            "link" if !value.is_empty() => {
+                                self.workspace_name(Some(value)).to_string()
+                            }
                             "parent" if !value.is_empty() => "（タスク）".to_owned(),
                             _ => value.to_owned(),
                         }
@@ -2413,6 +2495,69 @@ impl MainView {
                             ),
                     );
                 self.dialog("状態を変更", body, cx)
+            }
+            Modal::LinkTask(id) => {
+                let task = self
+                    .detail
+                    .as_ref()
+                    .map(|d| &d.task)
+                    .filter(|t| &t.id == id);
+                // 基準日が同じワークスペースを先に出す（同じ日の催しに出すことが多い）
+                let date_of = |ws: Option<&str>| {
+                    self.workspaces
+                        .iter()
+                        .find(|w| Some(w.id.as_str()) == ws)
+                        .and_then(|w| w.date.clone())
+                };
+                let home_date = date_of(task.and_then(|t| t.workspace_id.as_deref()));
+                let mut same = col().gap_1();
+                let mut others = col().gap_1();
+                let (mut any_same, mut any_other) = (false, false);
+                for (ix, ws) in self.workspaces.iter().enumerate() {
+                    if task.is_none_or(|t| t.is_in(&ws.id)) {
+                        continue;
+                    }
+                    let target = ws.id.clone();
+                    let item = chip(("link-to", ix), ws.name.clone(), false, cx)
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            this.link_task_to(&target, cx)
+                        }))
+                        .test_support();
+                    if home_date.is_some() && ws.date == home_date {
+                        any_same = true;
+                        same = same.child(item);
+                    } else {
+                        any_other = true;
+                        others = others.child(item);
+                    }
+                }
+                let body = col()
+                    .gap_3()
+                    .child(muted(
+                        "選んだワークスペースの一覧にも、このタスクが出ます。どこから開いても同じタスクです。"
+                            .to_owned(),
+                    ))
+                    .when(!any_same && !any_other, |d| {
+                        d.child(muted("表示できるワークスペースは、ほかにありません。".to_owned()))
+                    })
+                    .child(
+                        div()
+                            .id("link-options")
+                            .max_h(px(320.))
+                            .overflow_y_scroll()
+                            .child(
+                                col()
+                                    .gap_2()
+                                    .when(any_same, |d| {
+                                        d.child(muted("基準日が同じ".to_owned())).child(same)
+                                    })
+                                    .when(any_same && any_other, |d| {
+                                        d.child(muted("そのほか".to_owned()))
+                                    })
+                                    .child(others),
+                            ),
+                    );
+                self.dialog("ほかのワークスペースにも表示", body, cx)
             }
             Modal::WorkspaceSettings(id) => {
                 let theme = cx.theme().clone();
