@@ -10,6 +10,7 @@
 //! - `keys`: API キーの保存（OS のキーチェーン）
 //! - `http`: HTTPS の呼び出し
 
+pub mod ansi;
 pub mod github;
 pub mod http;
 pub mod keys;
