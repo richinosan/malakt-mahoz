@@ -59,6 +59,13 @@ impl Store {
         Self::init(conn)
     }
 
+    /// ほかのプロセス（コマンドなど）がデータベースを書き換えるたびに変わる番号。
+    pub fn data_version(&self) -> Result<i64> {
+        Ok(self
+            .conn
+            .query_row("PRAGMA data_version", [], |r| r.get(0))?)
+    }
+
     /// ディスクの使用量。
     pub fn usage(&self) -> Result<Usage> {
         let get = |name: &str| -> rusqlite::Result<u64> {

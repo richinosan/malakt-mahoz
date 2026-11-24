@@ -219,9 +219,15 @@ pub fn export_to_path(store: &Store, path: impl AsRef<Path>) -> Result<Manifest>
 pub fn import<R: Read + Seek>(store: &mut Store, input: R) -> Result<Manifest> {
     let mut zip = ZipArchive::new(input)?;
     let (manifest, data) = read_zip(&mut zip)?;
+    // 「自分」がまだいないところへの取り込みは復元なので、割り当ての通知は作らない
+    let had_self = store.people()?.iter().any(|p| p.is_self);
+    let before = store.open_tasks_of_self()?;
     store.merge(&data, &mut |hash| {
         read_entry(&mut zip, &file_entry(hash), MAX_ATTACHMENT_BYTES)
     })?;
+    if had_self {
+        store.notify_newly_assigned(&before)?;
+    }
     Ok(manifest)
 }
 

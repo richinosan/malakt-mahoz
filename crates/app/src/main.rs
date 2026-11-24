@@ -21,6 +21,7 @@ fn main() {
         .run(move |cx| {
             malakt_mahoz::db::clear_stale_opened();
             malakt_mahoz::init(store, cx);
+            malakt_mahoz::db::watch(cx);
             // 最後のウィンドウを閉じたら終了する
             cx.on_window_closed(|cx, _| {
                 if cx.windows().is_empty() {
