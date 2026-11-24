@@ -4504,7 +4504,9 @@ version = "0.1.0"
 dependencies = [
  "async-channel",
  "dirs 5.0.1",
+ "embed-resource",
  "gpui-kit",
+ "image",
  "malakt-ai",
  "malakt-core",
  "serde",

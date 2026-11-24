@@ -244,7 +244,7 @@ fn read_zip<R: Read + Seek>(zip: &mut ZipArchive<R>) -> Result<(Manifest, Data)>
     let manifest: Manifest = read_json(zip, "manifest.json")?;
     if manifest.format != FORMAT {
         return Err(Error::Invalid(
-            "malakt-mahoz のエクスポートではありません".into(),
+            "Malakt Mahoz のエクスポートではありません".into(),
         ));
     }
     if manifest.format_version != FORMAT_VERSION {

@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Malakt Mahoz
+Comment=オフラインのタスク管理ツール
+Exec=malakt-mahoz
+Icon=io.github.richinosan.malakt-mahoz
+Terminal=false
+Categories=Office;ProjectManagement;
+StartupWMClass=io.github.richinosan.malakt-mahoz
