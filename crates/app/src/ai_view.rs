@@ -100,6 +100,7 @@ fn avatar(cx: &App) -> Div {
         .justify_center()
         .bg(theme.primary)
         .text_color(theme.primary_foreground)
+        .shadow_sm()
         .child(app_icon("sparkles").size_3())
 }
 
@@ -831,6 +832,7 @@ impl AiPane {
                 .border_1()
                 .border_color(theme.border)
                 .bg(theme.background)
+                .shadow_sm()
         };
 
         col()
@@ -882,6 +884,7 @@ impl AiPane {
                                 .border_1()
                                 .border_color(theme.border)
                                 .bg(theme.background)
+                                .shadow_md()
                                 .child(
                                     row()
                                         .gap_1()
@@ -1081,6 +1084,7 @@ impl AiPane {
                         .rounded_lg()
                         .bg(theme.primary)
                         .text_color(theme.primary_foreground)
+                        .shadow_sm()
                         .text_sm()
                         .child(text.clone())
                         .test_support(),
@@ -1099,6 +1103,7 @@ impl AiPane {
                         .py_2()
                         .rounded_lg()
                         .bg(theme.muted)
+                        .shadow_sm()
                         .text_sm()
                         .child(text.clone())
                         .test_support(),
@@ -1200,6 +1205,8 @@ impl AiPane {
             .rounded_md()
             .border_1()
             .border_color(theme.border)
+            .bg(theme.background)
+            .shadow_sm()
             .child(
                 row()
                     .id(("ai-tools", start))
@@ -1598,6 +1605,8 @@ impl AiPane {
                     .rounded_md()
                     .border_1()
                     .border_color(theme.primary)
+                    .bg(theme.background)
+                    .shadow_md()
                     .child(div().text_sm().child(pending.text.clone()))
                     .child(
                         row()
@@ -2047,7 +2056,8 @@ impl Render for AiPane {
                     .flex_none()
                     .occlude()
                     .when_some(docked, |d, w| {
-                        d.w(w).border_l_1().border_color(theme.border)
+                        // タスクの画面の上に乗って見えるように、左に影を落とす
+                        d.w(w).border_l_1().border_color(theme.border).shadow_lg()
                     })
                     .when(docked.is_none(), |d| {
                         // 上のバーとタスクの画面を残して、右に重ねる
