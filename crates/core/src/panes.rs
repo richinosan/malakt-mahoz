@@ -202,6 +202,20 @@ impl Layout {
         resize(&mut self.root, focus, dir, amount);
     }
 
+    /// 今のペインを広げる（`amount` が負なら縮める）。右か下の境界を動かし、なければ左か上の境界を動かす。
+    pub fn grow(&mut self, horizontal: bool, amount: f32) {
+        let (near, far) = if horizontal {
+            (Dir::Right, Dir::Left)
+        } else {
+            (Dir::Down, Dir::Up)
+        };
+        let before = self.root.clone();
+        self.resize(near, amount);
+        if self.root == before {
+            self.resize(far, amount);
+        }
+    }
+
     /// 境界をドラッグした。`path` は `borders` が返した境界の道順。
     pub fn set_ratio(&mut self, path: &[bool], ratio: f32) {
         let mut node = &mut self.root;
@@ -293,6 +307,166 @@ impl Layout {
         })
     }
 }
+
+/// ペインのキー（Ctrl+B のあとに押すキー）でできること。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Action {
+    Split(Dir),
+    Focus(Dir),
+    FocusNext,
+    FocusPrev,
+    Swap(Dir),
+    Zoom,
+    Close,
+    Duplicate,
+    ResizeMode,
+    Presets,
+    PopOut,
+    Help,
+}
+
+/// キーの割り当て。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Keys {
+    #[default]
+    Herdr,
+    Tmux,
+}
+
+impl Keys {
+    pub const ALL: [Keys; 2] = [Keys::Herdr, Keys::Tmux];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Keys::Herdr => "herdr 風",
+            Keys::Tmux => "tmux 風",
+        }
+    }
+
+    pub fn code(self) -> &'static str {
+        match self {
+            Keys::Herdr => "herdr",
+            Keys::Tmux => "tmux",
+        }
+    }
+
+    pub fn from_code(code: &str) -> Self {
+        if code == "tmux" {
+            Keys::Tmux
+        } else {
+            Keys::Herdr
+        }
+    }
+
+    /// キー、できること、一覧に出す説明。一覧に出す順。
+    pub fn bindings(self) -> Vec<(&'static str, Action, &'static str)> {
+        use Action::*;
+        let mut keys = match self {
+            Keys::Herdr => vec![
+                ("v", Split(Dir::Right), "右に分割"),
+                ("-", Split(Dir::Down), "下に分割"),
+                ("h", Focus(Dir::Left), "左のペインへ"),
+                ("j", Focus(Dir::Down), "下のペインへ"),
+                ("k", Focus(Dir::Up), "上のペインへ"),
+                ("l", Focus(Dir::Right), "右のペインへ"),
+                ("Tab", FocusNext, "次のペインへ"),
+                ("Shift+Tab", FocusPrev, "前のペインへ"),
+                ("H", Swap(Dir::Left), "左のペインと入れ替え"),
+                ("J", Swap(Dir::Down), "下のペインと入れ替え"),
+                ("K", Swap(Dir::Up), "上のペインと入れ替え"),
+                ("L", Swap(Dir::Right), "右のペインと入れ替え"),
+                ("z", Zoom, "ペインを拡大表示 / 戻す（Esc でも戻る）"),
+                ("x", Close, "ペインを閉じる"),
+                ("d", Duplicate, "ペインを複製（右に）"),
+                (
+                    "r",
+                    ResizeMode,
+                    "リサイズモード（hjkl・矢印、Esc / Enter で終了）",
+                ),
+                ("b", Presets, "配置のプリセット"),
+                ("w", PopOut, "ペインを別ウィンドウに出す"),
+                ("?", Help, "この一覧"),
+            ],
+            Keys::Tmux => vec![
+                ("%", Split(Dir::Right), "右に分割"),
+                ("\"", Split(Dir::Down), "下に分割"),
+                ("o", FocusNext, "次のペインへ"),
+                (";", FocusPrev, "前のペインへ"),
+                ("{", Swap(Dir::Left), "前のペインと入れ替え"),
+                ("}", Swap(Dir::Right), "次のペインと入れ替え"),
+                ("z", Zoom, "ペインを拡大表示 / 戻す（Esc でも戻る）"),
+                ("x", Close, "ペインを閉じる"),
+                ("d", Duplicate, "ペインを複製（右に）"),
+                (
+                    "r",
+                    ResizeMode,
+                    "リサイズモード（矢印・hjkl、Esc / Enter で終了）",
+                ),
+                ("b", Presets, "配置のプリセット"),
+                ("!", PopOut, "ペインを別ウィンドウに出す"),
+                ("?", Help, "この一覧"),
+            ],
+        };
+        keys.extend([
+            ("←", Focus(Dir::Left), "左のペインへ"),
+            ("↓", Focus(Dir::Down), "下のペインへ"),
+            ("↑", Focus(Dir::Up), "上のペインへ"),
+            ("→", Focus(Dir::Right), "右のペインへ"),
+        ]);
+        keys
+    }
+
+    /// Ctrl+B のあとに押したキーでできること。`key` は打った文字か、`Tab`・`←` などのキーの名前。
+    pub fn action(self, key: &str, shift: bool) -> Option<Action> {
+        let key = if key == "Tab" && shift {
+            "Shift+Tab"
+        } else {
+            key
+        };
+        self.bindings()
+            .into_iter()
+            .find(|(k, _, _)| *k == key)
+            .map(|(_, action, _)| action)
+    }
+
+    /// 一覧に出す行。同じことをするキーは 1 行にまとめる（`h / ←`）。
+    pub fn help(self) -> Vec<(String, &'static str)> {
+        let mut out: Vec<(String, Action, &'static str)> = Vec::new();
+        for (key, action, about) in self.bindings() {
+            match out.iter_mut().find(|(_, a, _)| *a == action) {
+                Some((keys, _, _)) => {
+                    keys.push_str(" / ");
+                    keys.push_str(key);
+                }
+                None => out.push((key.to_owned(), action, about)),
+            }
+        }
+        out.into_iter()
+            .map(|(keys, _, about)| (keys, about))
+            .collect()
+    }
+}
+
+/// リサイズモードのキー。広げる向き（右か下）と、動かす量（px）。Shift で大きく動く。
+pub fn resize_step(key: &str, shift: bool) -> Option<(bool, f32)> {
+    let step = if shift { 80. } else { 20. };
+    match key {
+        "l" | "L" | "→" => Some((true, step)),
+        "h" | "H" | "←" => Some((true, -step)),
+        "j" | "J" | "↓" => Some((false, step)),
+        "k" | "K" | "↑" => Some((false, -step)),
+        _ => None,
+    }
+}
+
+/// 最初から入っている配置。名前と、保存する形。
+pub const PRESETS: [(&str, &str); 5] = [
+    ("1 画面", "0@0"),
+    ("左右に 2 つ", "h(0.5000,0,1)@0"),
+    ("上下に 2 つ", "v(0.5000,0,1)@0"),
+    ("左に 1 つ、右に 2 つ", "h(0.5000,0,v(0.5000,1,2))@0"),
+    ("4 つ", "h(0.5000,v(0.5000,0,2),v(0.5000,1,3))@0"),
+];
 
 fn leaves(node: &Node, out: &mut Vec<PaneId>) {
     match node {
@@ -660,6 +834,55 @@ mod tests {
         let mut one = Layout::default();
         one.toggle_zoom();
         assert!(!one.zoomed());
+    }
+
+    #[test]
+    fn keys_map_to_actions_in_both_schemes() {
+        use Action::*;
+        let h = Keys::Herdr;
+        assert_eq!(h.action("v", false), Some(Split(Dir::Right)));
+        assert_eq!(h.action("-", false), Some(Split(Dir::Down)));
+        assert_eq!(h.action("?", true), Some(Help));
+        assert_eq!(h.action("r", false), Some(ResizeMode));
+        assert_eq!(h.action("←", false), Some(Focus(Dir::Left)));
+        assert_eq!(h.action("Tab", true), Some(FocusPrev));
+        assert_eq!(h.action("Tab", false), Some(FocusNext));
+        assert_eq!(h.action("L", true), Some(Swap(Dir::Right)));
+        assert_eq!(h.action("q", false), None);
+        let t = Keys::Tmux;
+        assert_eq!(t.action("%", true), Some(Split(Dir::Right)));
+        assert_eq!(t.action("\"", true), Some(Split(Dir::Down)));
+        assert_eq!(t.action("o", false), Some(FocusNext));
+        assert_eq!(t.action("!", true), Some(PopOut));
+        assert_eq!(t.action("v", false), None);
+        // 一覧は、同じことをするキーを 1 行にまとめる
+        let help = h.help();
+        assert_eq!(help[2], ("h / ←".to_owned(), "左のペインへ"));
+        assert_eq!(help.len(), h.bindings().len() - 4);
+        assert_eq!(Keys::from_code(Keys::Tmux.code()), Keys::Tmux);
+        assert_eq!(Keys::from_code("?"), Keys::Herdr);
+        // リサイズモード
+        assert_eq!(resize_step("j", false), Some((false, 20.)));
+        assert_eq!(resize_step("←", true), Some((true, -80.)));
+        assert_eq!(resize_step("x", false), None);
+        // プリセットはどれも読める
+        for (name, text) in PRESETS {
+            assert!(Layout::decode(text).is_some(), "{name}");
+        }
+    }
+
+    #[test]
+    fn grow_uses_the_border_the_pane_has() {
+        let mut l = three();
+        // 2 は右にも下にも境界がないので、左と上の境界が動く
+        l.grow(true, 0.1);
+        assert!((l.rects()[2].1.w - 0.6).abs() < 1e-6);
+        l.grow(false, -0.1);
+        assert!((l.rects()[2].1.h - 0.4).abs() < 1e-6);
+        // 0 は右の境界が動く
+        l.set_focus(0);
+        l.grow(true, 0.1);
+        assert!((l.rects()[0].1.w - 0.5).abs() < 1e-6);
     }
 
     #[test]

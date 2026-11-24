@@ -5,6 +5,7 @@ pub mod ai_view;
 pub mod cli;
 pub mod db;
 pub mod icons;
+pub mod panes;
 pub mod passkey;
 mod render;
 pub mod session;
@@ -23,7 +24,7 @@ pub use state::{anchor_at, Assets, CommentMode, MainView, Modal, Nav};
 
 actions!(
     malakt,
-    [NewWindow, Quit, LockNow, Dismiss, ToggleAi, StopAi, ClearShell]
+    [NewWindow, Quit, LockNow, Dismiss, ToggleAi, StopAi, ClearShell, PanePrefix]
 );
 
 /// 画面に出すアプリの名前。
@@ -141,6 +142,7 @@ pub fn init_with(store: malakt_core::Store, ai: AiConfig, cx: &mut App) {
         KeyBinding::new("ctrl-l", ClearShell, Some("AiShell")),
         KeyBinding::new("ctrl-l", ClearShell, Some("AiShell > Input")),
         KeyBinding::new("escape", Dismiss, Some("MainView")),
+        KeyBinding::new("ctrl-b", PanePrefix, Some("MainView")),
     ]);
     cx.on_action(|_: &NewWindow, cx| {
         let _ = open_main_window(cx);
@@ -181,7 +183,7 @@ pub fn open_main_window(cx: &mut App) -> Result<(AnyWindowHandle, Entity<MainVie
     open_window_with(None, cx)
 }
 
-fn open_window_with(
+pub(crate) fn open_window_with(
     saved: Option<session::WindowState>,
     cx: &mut App,
 ) -> Result<(AnyWindowHandle, Entity<MainView>)> {

@@ -18,6 +18,11 @@ use malakt_mahoz::{db, MainView, Nav};
 
 /// 押せるものではない入れ物や入力欄。押しても何も変わらないのが正しい。
 const NOT_BUTTONS: &[&str] = &[
+    "pane",
+    "pane-bar",
+    "pane-border",
+    "pane-mode",
+    "pane-view",
     "main-view",
     "sidebar",
     "sidebar-nav",
@@ -31,6 +36,7 @@ const NOT_BUTTONS: &[&str] = &[
     "input",
     "task-search",
     "quick-add",
+    "list-page",
     "icon-list",
     "icon-search",
     "history-list",
@@ -254,6 +260,15 @@ fn targets(cx: &mut TestAppContext, world: &World) -> Vec<ElementId> {
             .iter()
             .find(|e| e.path().last().is_some_and(|id| name_of(id) == "quick-add"))
             .map(|e| e.bounds().top() - px(12.));
+        // 低い画面では一覧が画面ごとスクロールする。その下の端より下の行も、スクロールしないと押せない
+        let page_bottom = elements
+            .iter()
+            .find(|e| e.path().last().is_some_and(|id| name_of(id) == "list-page"))
+            .map(|e| e.bounds().bottom());
+        let list_bottom = match (list_bottom, page_bottom) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
         let mut found: Vec<ElementId> = Vec::new();
         for element in &elements {
             if list_bottom.is_some_and(|bottom| {

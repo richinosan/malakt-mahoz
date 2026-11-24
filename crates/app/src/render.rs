@@ -21,7 +21,7 @@ use crate::ai::ShellPlace;
 use crate::ai_view::{docked_width, TASKS_MIN};
 use crate::shadow::{Elevate, Elevation};
 use crate::state::{Column, CommentMode, Detail, DropTarget, Editing, MainView, Modal, Nav};
-use crate::{Dismiss, LockNow, NewWindow, ToggleAi};
+use crate::{Dismiss, LockNow, NewWindow, PanePrefix, ToggleAi};
 use malakt_core::Id;
 
 /// 参照する寸法（CSS の px）を、画面全体の拡大率に合わせる。
@@ -300,7 +300,7 @@ impl MainView {
         nav: Nav,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        self.nav_link(id, icon, label, self.nav == nav, cx)
+        self.nav_link(id, icon, label, self.shown_nav(cx) == nav, cx)
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.go(nav.clone(), cx)))
             .test_support()
             .into_any_element()
@@ -860,7 +860,11 @@ impl MainView {
         } else {
             self.sidebar_open
         };
-        let (title, subtitle, icon) = self.header_title();
+        // 分けているときは、今のペインの場所を出す
+        let (title, subtitle, icon) = match self.focused_child() {
+            Some(child) => child.read(cx).header_title(),
+            None => self.header_title(),
+        };
         let unread = self.unread_notices;
         let lock_enabled = self.lock_enabled(cx);
         let view = cx.entity().downgrade();
@@ -929,6 +933,19 @@ impl MainView {
                 // これがないと、Windows ではボタンを離したときのクリックがウィンドウの移動に取られる
                 .occlude()
                 .child(self.theme_toggle(cx))
+                .child(
+                    Button::new("pane-split")
+                        .icon(app_icon("columns-2"))
+                        .tooltip("右に分割（Ctrl+B → v）")
+                        .framed(cx)
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.pane_action(
+                                malakt_core::panes::Action::Split(malakt_core::panes::Dir::Right),
+                                window,
+                                cx,
+                            )
+                        })),
+                )
                 .child(
                     Button::new("ai-toggle")
                         .icon(app_icon("sparkles"))
@@ -1221,7 +1238,7 @@ impl MainView {
 
     // ---- 一覧 ----
 
-    fn list_title(&self) -> SharedString {
+    pub(crate) fn list_title(&self) -> SharedString {
         match &self.nav {
             Nav::Home => "ホーム".into(),
             Nav::All => "すべてのタスク".into(),
@@ -1651,7 +1668,8 @@ impl MainView {
             col()
                 .relative()
                 .h(if table { ROW_HEIGHT } else { CARD_HEIGHT } * visible as f32)
-                .min_h_0()
+                // 低いペインでも、1 行は見えるようにする。入りきらない分は画面ごとスクロールする
+                .min_h(if table { ROW_HEIGHT } else { CARD_HEIGHT })
                 .child(
                     uniform_list(
                         "task-list",
@@ -1716,14 +1734,24 @@ impl MainView {
             .relative()
             // 下は、右下の「＋」が表に重ならないだけ空ける
             .child(
-                col()
+                div()
+                    .id("list-page")
                     .size_full()
-                    .p_6()
-                    .pb(px(72.))
-                    .gap_3()
-                    .child(header)
-                    .child(card),
+                    .track_scroll(&self.page_scroll)
+                    .overflow_y_scroll()
+                    .child(
+                        col()
+                            .size_full()
+                            // 絞り込みと 1 行と追加欄が入る高さ。ペインがこれより低いときは画面ごとスクロールする
+                            .min_h(px(if table { 380. } else { 520. }))
+                            .p_6()
+                            .pb(px(72.))
+                            .gap_3()
+                            .child(header)
+                            .child(card),
+                    ),
             )
+            .vertical_scrollbar(&self.page_scroll)
             // 右下の「＋」。どこまでスクロールしていても、新しいタスクを始められる
             .child(
                 div().absolute().right_6().bottom(px(16.)).child(
@@ -3645,7 +3673,12 @@ impl MainView {
 
     // ---- ダイアログ ----
 
-    fn dialog(&self, title: impl Into<SharedString>, body: Div, cx: &mut Context<Self>) -> Div {
+    pub(crate) fn dialog(
+        &self,
+        title: impl Into<SharedString>,
+        body: Div,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let theme = cx.theme().clone();
         div()
             .absolute()
@@ -4756,8 +4789,174 @@ impl MainView {
     }
 }
 
+impl MainView {
+    /// ドラッグの途中は、どこにマウスがあっても追えるように、いちばん外の要素で受ける。
+    fn with_drags(&self, d: Stateful<Div>, cx: &mut Context<Self>) -> Stateful<Div> {
+        d.when(self.border_drag.is_some(), |d| {
+            d.on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
+                if event.pressed_button == Some(MouseButton::Left) {
+                    this.drag_pane_border(event.position, cx);
+                } else {
+                    this.border_drag = None;
+                    cx.notify();
+                }
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.border_drag = None;
+                    cx.notify();
+                }),
+            )
+        })
+        // 左のメニューの境界をドラッグしている間は、どこにマウスがあっても幅を追う
+        .when(self.sidebar_resizing, |d| {
+            d.on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
+                if event.pressed_button == Some(MouseButton::Left) {
+                    this.drag_sidebar(f32::from(event.position.x) / crate::UI_SCALE, cx);
+                } else {
+                    this.finish_sidebar_drag(cx);
+                }
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| this.finish_sidebar_drag(cx)),
+            )
+        })
+        // 表の列の幅を変えている間と、見出しを動かしている間も、どこにマウスがあっても追う
+        .when(self.column_resize.is_some(), |d| {
+            d.on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
+                if event.pressed_button == Some(MouseButton::Left) {
+                    this.drag_column(f32::from(event.position.x), cx);
+                } else {
+                    this.finish_column_resize(cx);
+                }
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| this.finish_column_resize(cx)),
+            )
+        })
+        // タスクをドラッグしている間も同じ
+        .when(self.task_drag.is_some(), |d| {
+            d.on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
+                if event.pressed_button == Some(MouseButton::Left) {
+                    this.drag_task(event.position, cx);
+                } else {
+                    this.finish_task_drag(cx);
+                }
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| this.finish_task_drag(cx)),
+            )
+        })
+        .when(self.column_drag.is_some(), |d| {
+            d.on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
+                if event.pressed_button != Some(MouseButton::Left) {
+                    this.finish_column_drag(cx);
+                } else if let Some(drag) = &mut this.column_drag {
+                    if !drag.moved && (f32::from(event.position.x) - drag.start_x).abs() > 6. {
+                        drag.moved = true;
+                        cx.notify();
+                    }
+                }
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| this.finish_column_drag(cx)),
+            )
+        })
+    }
+
+    /// ほかのウィンドウの中のペインとして出す。左のメニューと上のバーは出さない。
+    fn render_embedded(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let bounds = self.pane_bounds.unwrap_or_default();
+        let width = bounds.size.width;
+        let table = width >= px(880.);
+        let sheet = width < px(1000.);
+        let main = match self.nav {
+            Nav::Home => self.render_home(table, cx).into_any_element(),
+            _ => self.render_list(table, cx).into_any_element(),
+        };
+        div()
+            .id("pane-view")
+            .track_focus(&self.focus)
+            .map(|d| self.with_drags(d, cx))
+            .size_full()
+            .relative()
+            .bg(theme.background)
+            .text_color(theme.foreground)
+            .child(div().absolute().inset_0().child(main))
+            .children(self.render_panel(sheet, cx))
+            // ドラッグ中のタスクは、マウスに付いて動く
+            .children(self.task_drag.as_ref().filter(|d| d.moved).map(|drag| {
+                div()
+                    .absolute()
+                    .left(drag.at.x - bounds.origin.x + px(10.))
+                    .top(drag.at.y - bounds.origin.y + px(10.))
+                    .max_w(px(320.))
+                    .px_3()
+                    .py_2()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(theme.primary)
+                    .bg(theme.popover)
+                    .elevate(Elevation::High, cx)
+                    .text_sm()
+                    .truncate()
+                    .child(drag.title.clone())
+            }))
+            .children(self.render_modal(cx))
+            .when_some(
+                self.error
+                    .clone()
+                    .map(|e| (e, true))
+                    .or(self.notice.clone().map(|n| (n, false))),
+                |d, (text, is_error)| {
+                    d.child(
+                        div()
+                            .absolute()
+                            .bottom_4()
+                            .left_0()
+                            .right_0()
+                            .flex()
+                            .justify_center()
+                            .child(
+                                div()
+                                    .id("pane-notice")
+                                    .px_3()
+                                    .py_2()
+                                    .rounded_md()
+                                    .elevate(Elevation::High, cx)
+                                    .text_sm()
+                                    .cursor_pointer()
+                                    .when(is_error, |d| {
+                                        d.bg(theme.danger).text_color(theme.danger_foreground)
+                                    })
+                                    .when(!is_error, |d| {
+                                        d.bg(theme.primary).text_color(theme.primary_foreground)
+                                    })
+                                    .child(text)
+                                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                        this.error = None;
+                                        this.notice = None;
+                                        cx.notify();
+                                    })),
+                            ),
+                    )
+                },
+            )
+            .into_any_element()
+    }
+}
+
 impl Render for MainView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.embedded {
+            return self.render_embedded(cx);
+        }
         let theme = cx.theme().clone();
         let window_width = window.viewport_size().width;
         // 右に AI チャットを置いた分、タスクの画面は狭くなる
@@ -4790,9 +4989,29 @@ impl Render for MainView {
         } else {
             width
         };
+        // ペインを並べる場所。上のバーの下で、左のメニューの右
+        let area = Bounds::new(
+            point(width - main_width, HEADER_HEIGHT),
+            size(
+                main_width,
+                (window.viewport_size().height - HEADER_HEIGHT).max(px(0.)),
+            ),
+        );
+        // 分けているときは、このウィンドウが兼ねているペインの幅で決める
+        let own_width = self
+            .layout
+            .visible()
+            .into_iter()
+            .find(|(id, _)| *id == self.primary)
+            .map_or(main_width, |(_, rect)| main_width * rect.w);
+        let split = self.layout.panes().len() > 1;
         // 表は、タイトルの列に読める幅が残るときだけ
-        let table = main_width >= px(880.);
-        let sheet = width < px(1000.);
+        let table = own_width >= px(880.);
+        let sheet = if split {
+            own_width < px(1000.)
+        } else {
+            width < px(1000.)
+        };
 
         let main = if !wide && sidebar {
             // 狭い画面でメニューを開いているあいだは、メニューだけを見せる
@@ -4831,64 +5050,19 @@ impl Render for MainView {
             .track_focus(&self.focus)
             .on_action(cx.listener(|this, _: &Dismiss, _, cx| this.dismiss(cx)))
             .on_action(cx.listener(|this, _: &ToggleAi, window, cx| this.toggle_ai(window, cx)))
-            // 左のメニューの境界をドラッグしている間は、どこにマウスがあっても幅を追う
-            .when(self.sidebar_resizing, |d| {
-                d.on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
-                    if event.pressed_button == Some(MouseButton::Left) {
-                        this.drag_sidebar(f32::from(event.position.x) / crate::UI_SCALE, cx);
-                    } else {
-                        this.finish_sidebar_drag(cx);
+            .on_action(cx.listener(|this, _: &PanePrefix, _, cx| {
+                this.pane_prefix = true;
+                cx.notify();
+            }))
+            // Ctrl+B のあとのキーとリサイズモードのキーは、入力欄より先に受ける
+            .when(self.pane_prefix || self.pane_resize, |d| {
+                d.capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                    if this.pane_key(&event.keystroke, window, cx) {
+                        cx.stop_propagation();
                     }
                 }))
-                .on_mouse_up(
-                    MouseButton::Left,
-                    cx.listener(|this, _, _, cx| this.finish_sidebar_drag(cx)),
-                )
             })
-            // 表の列の幅を変えている間と、見出しを動かしている間も、どこにマウスがあっても追う
-            .when(self.column_resize.is_some(), |d| {
-                d.on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
-                    if event.pressed_button == Some(MouseButton::Left) {
-                        this.drag_column(f32::from(event.position.x), cx);
-                    } else {
-                        this.finish_column_resize(cx);
-                    }
-                }))
-                .on_mouse_up(
-                    MouseButton::Left,
-                    cx.listener(|this, _, _, cx| this.finish_column_resize(cx)),
-                )
-            })
-            // タスクをドラッグしている間も同じ
-            .when(self.task_drag.is_some(), |d| {
-                d.on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
-                    if event.pressed_button == Some(MouseButton::Left) {
-                        this.drag_task(event.position, cx);
-                    } else {
-                        this.finish_task_drag(cx);
-                    }
-                }))
-                .on_mouse_up(
-                    MouseButton::Left,
-                    cx.listener(|this, _, _, cx| this.finish_task_drag(cx)),
-                )
-            })
-            .when(self.column_drag.is_some(), |d| {
-                d.on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
-                    if event.pressed_button != Some(MouseButton::Left) {
-                        this.finish_column_drag(cx);
-                    } else if let Some(drag) = &mut this.column_drag {
-                        if !drag.moved && (f32::from(event.position.x) - drag.start_x).abs() > 6. {
-                            drag.moved = true;
-                            cx.notify();
-                        }
-                    }
-                }))
-                .on_mouse_up(
-                    MouseButton::Left,
-                    cx.listener(|this, _, _, cx| this.finish_column_drag(cx)),
-                )
-            })
+            .map(|d| self.with_drags(d, cx))
             .size_full()
             .relative()
             .flex()
@@ -4911,17 +5085,23 @@ impl Render for MainView {
                             .items_stretch()
                             .child(
                                 // 画面を切り替えたときは、少し下から浮かび上がる
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .h_full()
-                                    .relative()
-                                    .child(div().absolute().inset_0().child(main).with_animation(
-                                        ElementId::Name(format!("page-{:?}", self.nav).into()),
-                                        appear(160),
-                                        |page, t| page.top(px(8.) * (1. - t)).opacity(t),
-                                    ))
-                                    .children(panel),
+                                div().flex_1().min_w_0().h_full().relative().child({
+                                    let own = div()
+                                        .size_full()
+                                        .relative()
+                                        .child(
+                                            div().absolute().inset_0().child(main).with_animation(
+                                                ElementId::Name(
+                                                    format!("page-{:?}", self.nav).into(),
+                                                ),
+                                                appear(160),
+                                                |page, t| page.top(px(8.) * (1. - t)).opacity(t),
+                                            ),
+                                        )
+                                        .children(panel)
+                                        .into_any_element();
+                                    self.render_panes(own, area, cx)
+                                }),
                             )
                             .children(ai_beside)
                             .children(ai_over),
@@ -4945,6 +5125,7 @@ impl Render for MainView {
                     .truncate()
                     .child(drag.title.clone())
             }))
+            .children(self.render_pane_overlay(cx))
             .children(self.render_modal(cx).map(|modal| {
                 if !self.motion {
                     return modal.into_any_element();

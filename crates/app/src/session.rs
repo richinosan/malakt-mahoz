@@ -33,6 +33,12 @@ pub struct WindowState {
     /// 位置と大きさ（x, y, 幅, 高さ）。
     pub bounds: Option<[f32; 4]>,
     pub maximized: bool,
+    /// ペインの配置（`malakt_core::panes::Layout::encode`）。分けていなければ `None`。
+    pub layout: Option<String>,
+    /// このウィンドウが中身を兼ねているペインの番号。
+    pub primary: u32,
+    /// 分けて増えたペインの番号と中身。
+    pub panes: Vec<(u32, WindowState)>,
 }
 
 impl WindowState {
@@ -108,8 +114,58 @@ fn named<T: std::fmt::Debug + Copy>(all: &[T], saved: &str) -> Option<T> {
 const PRIORITIES: [Priority; 4] = [Priority::None, Priority::High, Priority::Mid, Priority::Low];
 
 impl MainView {
-    /// 今の画面を、保存する形にする。
-    pub fn session_state(&self) -> WindowState {
+    /// 今の画面を、保存する形にする。分けて増えたペインの中身も入る。
+    pub fn session_state(&self, cx: &App) -> WindowState {
+        let mut state = self.own_state();
+        if self.layout.panes().len() > 1 {
+            state.layout = Some(self.layout.encode());
+            state.primary = self.primary;
+            let mut panes: Vec<_> = self
+                .children
+                .iter()
+                .map(|(id, child)| (*id, child.read(cx).own_state()))
+                .collect();
+            panes.sort_by_key(|(id, _)| *id);
+            state.panes = panes;
+        }
+        state
+    }
+
+    /// 保存した画面に戻す。ペインの配置と、それぞれのペインの中身も戻す。
+    pub fn restore_session(
+        &mut self,
+        state: &WindowState,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.restore_own(state, window, cx);
+        let layout = state
+            .layout
+            .as_deref()
+            .and_then(malakt_core::panes::Layout::decode);
+        let Some(layout) = layout else {
+            return;
+        };
+        // 配置にあるペインが、保存した中身とちょうど合うときだけ戻す
+        let mut wanted = layout.panes();
+        wanted.sort_unstable();
+        let mut saved: Vec<u32> = state.panes.iter().map(|(id, _)| *id).collect();
+        saved.push(state.primary);
+        saved.sort_unstable();
+        if wanted != saved {
+            return;
+        }
+        self.children.clear();
+        self.layout = layout;
+        self.primary = state.primary;
+        for (id, pane) in &state.panes {
+            let child = self.new_child_for_session(*id, window, cx);
+            child.update(cx, |c, cx| c.restore_own(pane, window, cx));
+        }
+    }
+
+    /// このペインだけの状態を、保存する形にする。
+    pub fn own_state(&self) -> WindowState {
         let q = &self.query;
         WindowState {
             nav: match &self.nav {
@@ -143,11 +199,12 @@ impl MainView {
             sidebar_hidden: self.sidebar_hidden,
             bounds: self.window_place.map(|(bounds, _)| bounds),
             maximized: self.window_place.is_some_and(|(_, maximized)| maximized),
+            ..WindowState::default()
         }
     }
 
-    /// 保存した画面に戻す。なくなったワークスペースやタスクは、開かずに飛ばす。
-    pub fn restore_session(
+    /// このペインを保存した画面に戻す。なくなったワークスペースやタスクは、開かずに飛ばす。
+    pub fn restore_own(
         &mut self,
         state: &WindowState,
         window: &mut Window,
@@ -194,7 +251,7 @@ impl MainView {
                 _ => Nav::Home,
             },
         };
-        self.go(nav, cx);
+        self.go_here(nav, cx);
         if let Some(id) = &state.panel {
             let exists = self.db.read(cx).store.task(id).is_ok();
             if exists {
@@ -218,6 +275,8 @@ impl MainView {
             )
         };
         self.window_place = Some(place(window));
+        // 開いてすぐ、キーで操作できるようにする
+        self.focus.focus(window, cx);
         cx.observe_window_bounds(window, move |this, window, cx| {
             let now = Some(place(window));
             if this.window_place != now {
@@ -243,7 +302,7 @@ impl MainView {
     }
 
     fn remember_session(&mut self, cx: &mut Context<Self>) {
-        let state = self.session_state();
+        let state = self.session_state(cx);
         let id = cx.entity_id();
         let sessions = cx.default_global::<Sessions>();
         match sessions

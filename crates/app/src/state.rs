@@ -214,12 +214,33 @@ pub struct MainView {
     /// タスクの一覧と、期限が近いタスクの一覧のスクロール位置。
     pub list_scroll: UniformListScrollHandle,
     pub due_scroll: UniformListScrollHandle,
+    /// 低いペインで、一覧を画面ごとスクロールする位置
+    pub page_scroll: gpui_kit::ScrollHandle,
     /// 開いている見出しのメニュー。
     pub column_menu: Option<ColumnMenu>,
     /// 見出しをドラッグして動かしている列。
     pub column_drag: Option<ColumnDrag>,
     /// ウィンドウの位置と大きさ（x, y, 幅, 高さ）と、最大化しているか。
     pub window_place: Option<([f32; 4], bool)>,
+    /// ペインの配置と、今のペイン。
+    pub layout: malakt_core::panes::Layout,
+    /// このウィンドウが中身を兼ねているペイン。
+    pub primary: malakt_core::panes::PaneId,
+    /// 分けて増えたペインの中身。
+    pub children: HashMap<malakt_core::panes::PaneId, Entity<MainView>>,
+    /// ほかのウィンドウの中にペインとして置かれている。
+    pub embedded: bool,
+    /// ペインとして置かれている場所（ウィンドウの中の位置と大きさ）。
+    pub pane_bounds: Option<Bounds<Pixels>>,
+    /// ペインを並べる場所（ウィンドウの中の位置と大きさ）。
+    pub pane_area: Bounds<Pixels>,
+    /// Ctrl+B を押して、次のキーを待っている。
+    pub pane_prefix: bool,
+    /// リサイズモード。
+    pub pane_resize: bool,
+    pub pane_keys: malakt_core::panes::Keys,
+    pub pane_overlay: Option<crate::panes::PaneOverlay>,
+    pub border_drag: Option<crate::panes::BorderDrag>,
     /// ドラッグして動かしているタスク。
     pub task_drag: Option<TaskDrag>,
     /// 詳細で、担当者と役を選ぶところを開いている。
@@ -427,8 +448,20 @@ impl MainView {
             column_menu: None,
             list_scroll: UniformListScrollHandle::new(),
             due_scroll: UniformListScrollHandle::new(),
+            page_scroll: gpui_kit::ScrollHandle::new(),
             column_drag: None,
             task_drag: None,
+            layout: Default::default(),
+            primary: 0,
+            children: HashMap::new(),
+            embedded: false,
+            pane_bounds: None,
+            pane_area: Bounds::default(),
+            pane_prefix: false,
+            pane_resize: false,
+            pane_keys: Default::default(),
+            pane_overlay: None,
+            border_drag: None,
             window_place: None,
             motion: true,
             today: view::today(),
@@ -437,6 +470,7 @@ impl MainView {
         };
         this.load_sidebar_width(cx);
         this.load_columns(cx);
+        this.load_pane_keys(cx);
         this.reload(cx);
         // ウィンドウの準備が終わってから、たまっている通知を出す
         // 「システムに合わせる」のとき、OS の外観が変わったら塗り直す
@@ -636,7 +670,19 @@ impl MainView {
 
     // ---- 移動 ----
 
+    /// 今のペインを、その場所にする。
     pub fn go(&mut self, nav: Nav, cx: &mut Context<Self>) {
+        if let Some(child) = self.focused_child() {
+            self.sidebar_open = false;
+            child.update(cx, |c, cx| c.go_here(nav, cx));
+            cx.notify();
+            return;
+        }
+        self.go_here(nav, cx);
+    }
+
+    /// このビューが持つ画面を、その場所にする。
+    pub fn go_here(&mut self, nav: Nav, cx: &mut Context<Self>) {
         // 狭いウィンドウでは、行き先を選んだらメニューを閉じて中身を見せる
         self.sidebar_open = false;
         if self.nav != nav {
@@ -2449,7 +2495,34 @@ impl MainView {
     }
 
     /// Esc。いちばん手前のものから閉じる。
+    /// Esc。今開いているものを 1 つだけ閉じる。
     pub fn dismiss(&mut self, cx: &mut Context<Self>) {
+        self.error = None;
+        cx.notify();
+        if self.pane_overlay.is_some() {
+            self.pane_overlay = None;
+        } else if self.pane_prefix || self.pane_resize {
+            self.pane_prefix = false;
+            self.pane_resize = false;
+        } else if self.modal != Modal::None {
+            self.modal = Modal::None;
+            self.issued_ticket = None;
+        } else {
+            // 今のペインで開いているものを閉じ、何もなければ拡大表示を戻す
+            let closed = match self.focused_child() {
+                Some(child) => child.update(cx, |c, cx| c.dismiss_own(cx)),
+                None => self.dismiss_own(cx),
+            };
+            if !closed && self.layout.zoomed() {
+                self.layout.toggle_zoom();
+            }
+        }
+    }
+
+    /// このビューで開いているものを 1 つ閉じる。閉じたら `true`。
+    pub fn dismiss_own(&mut self, cx: &mut Context<Self>) -> bool {
+        self.error = None;
+        cx.notify();
         if self.modal != Modal::None {
             self.modal = Modal::None;
             self.issued_ticket = None;
@@ -2461,9 +2534,10 @@ impl MainView {
             self.close_panel(cx);
         } else if !self.selected.is_empty() {
             self.selected.clear();
+        } else {
+            return false;
         }
-        self.error = None;
-        cx.notify();
+        true
     }
 }
 
