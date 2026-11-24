@@ -24,6 +24,7 @@ pub mod lock;
 pub mod mention;
 pub mod model;
 pub mod notice;
+pub mod panes;
 mod schema;
 pub mod store;
 pub mod tasklink;
