@@ -111,7 +111,7 @@ fn app_icon(name: &str) -> Icon {
 }
 
 fn section_title(text: &'static str) -> Div {
-    div().text_sm().font_weight(FontWeight::BOLD).child(text)
+    div().text_sm().child(text)
 }
 
 impl MainView {
@@ -127,16 +127,11 @@ impl MainView {
         match view::due_state(due, &view::now()) {
             DueState::Overdue => div()
                 .text_color(theme.danger)
-                .font_weight(FontWeight::BOLD)
                 .child(format!("{text}（期限切れ）")),
             DueState::Today => div()
                 .text_color(theme.primary)
-                .font_weight(FontWeight::BOLD)
                 .child(format!("{text}（今日）")),
-            DueState::Soon => div()
-                .text_color(theme.primary)
-                .font_weight(FontWeight::BOLD)
-                .child(text),
+            DueState::Soon => div().text_color(theme.primary).child(text),
             DueState::Later => div().child(text),
         }
     }
@@ -167,7 +162,6 @@ impl MainView {
             .when(active, |d| {
                 d.bg(theme.sidebar_accent)
                     .text_color(theme.sidebar_accent_foreground)
-                    .font_weight(FontWeight::BOLD)
             })
             .when(!active, |d| d.hover(|s| s.bg(theme.sidebar_accent)))
             .when_some(icon, |d, icon| d.child(icon.small().flex_none()))
@@ -279,13 +273,7 @@ impl MainView {
             .border_color(theme.sidebar_border)
             .p_2()
             .gap_1()
-            .child(
-                div()
-                    .px_2()
-                    .py_1()
-                    .font_weight(FontWeight::BOLD)
-                    .child(crate::APP_NAME),
-            )
+            .child(div().px_2().py_1().child(crate::APP_NAME))
             .child(row().child(self.nav_item("nav-home", "ホーム", Nav::Home, None, None, cx)))
             .child(row().child(self.nav_item(
                 "nav-all",
@@ -458,12 +446,7 @@ impl MainView {
             .child(
                 row()
                     .gap_3()
-                    .child(
-                        div()
-                            .text_lg()
-                            .font_weight(FontWeight::BOLD)
-                            .child("期限が近いタスク"),
-                    )
+                    .child(div().text_lg().child("期限が近いタスク"))
                     .child(div().flex_1())
                     .child(
                         Checkbox::new("due-mine")
@@ -504,12 +487,7 @@ impl MainView {
                         .size_full(),
                     )
             })
-            .child(
-                div()
-                    .text_lg()
-                    .font_weight(FontWeight::BOLD)
-                    .child("ワークスペース"),
-            )
+            .child(div().text_lg().child("ワークスペース"))
             .child(
                 row()
                     .flex_wrap()
@@ -535,13 +513,7 @@ impl MainView {
                                             .small()
                                             .flex_none(),
                                     )
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .font_weight(FontWeight::BOLD)
-                                            .truncate()
-                                            .child(ws.name),
-                                    ),
+                                    .child(div().flex_1().truncate().child(ws.name)),
                             )
                             .child(
                                 div()
@@ -922,7 +894,6 @@ impl MainView {
                 .flex_1()
                 .min_w(px(120.))
                 .text_lg()
-                .font_weight(FontWeight::BOLD)
                 .truncate()
                 .child(self.list_title()),
         );
@@ -971,11 +942,7 @@ impl MainView {
                 .items_center()
                 .justify_center()
                 .gap_1()
-                .child(
-                    div()
-                        .font_weight(FontWeight::BOLD)
-                        .child("まだタスクがありません"),
-                )
+                .child(div().child("まだタスクがありません"))
         } else if visible == 0 {
             col()
                 .flex_1()
@@ -1202,9 +1169,7 @@ impl MainView {
                 .when(current == Prio::None, |d| {
                     d.text_color(theme.muted_foreground)
                 })
-                .when(current == Prio::High, |d| {
-                    d.text_color(theme.danger).font_weight(FontWeight::BOLD)
-                })
+                .when(current == Prio::High, |d| d.text_color(theme.danger))
                 .child(if current == Prio::None {
                     "—"
                 } else {
@@ -1476,7 +1441,6 @@ impl MainView {
                 div()
                     .id("detail-title")
                     .text_xl()
-                    .font_weight(FontWeight::BOLD)
                     .cursor_pointer()
                     .child(task.title.clone())
                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
@@ -2288,13 +2252,7 @@ impl MainView {
                     .shadow_lg()
                     .child(
                         row()
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .text_lg()
-                                    .font_weight(FontWeight::BOLD)
-                                    .child(title.into()),
-                            )
+                            .child(div().flex_1().text_lg().child(title.into()))
                             .child(
                                 Button::new("dialog-close")
                                     .label("閉じる")
@@ -2724,7 +2682,7 @@ impl MainView {
                     .child(
                         col()
                             .gap_1()
-                            .child(div().text_sm().font_weight(FontWeight::BOLD).child("だれの分として"))
+                            .child(div().text_sm().child("だれの分として"))
                             .child(who),
                     )
                     .when_some(self.issued_ticket.as_ref(), |d, ticket| {
@@ -2737,7 +2695,6 @@ impl MainView {
                                 .child(
                                     div()
                                         .text_sm()
-                                        .font_weight(FontWeight::BOLD)
                                         .child("発行しました。この文字列は、いましか表示されません。"),
                                 )
                                 .child(
@@ -2807,7 +2764,7 @@ impl MainView {
                             .child(
                                 div()
                                     .text_sm()
-                                    .when(n.is_unread(), |d| d.font_weight(FontWeight::BOLD))
+                                    .when(n.is_unread(), |d| d)
                                     .child(n.headline()),
                             )
                             .when(!n.excerpt.is_empty(), |d| {
@@ -2986,8 +2943,7 @@ impl MainView {
             }
             Modal::NewTask => {
                 let theme = cx.theme().clone();
-                let label =
-                    |text: &'static str| div().text_sm().font_weight(FontWeight::BOLD).child(text);
+                let label = |text: &'static str| div().text_sm().child(text);
                 let mut priority = row().gap_1().flex_wrap();
                 for (ix, p) in Prio::ALL.into_iter().enumerate() {
                     priority = priority.child(
@@ -3150,8 +3106,7 @@ impl MainView {
             Modal::WorkspaceSettings(id) => {
                 let theme = cx.theme().clone();
                 let draft = &self.defaults_draft;
-                let label =
-                    |text: &'static str| div().text_sm().font_weight(FontWeight::BOLD).child(text);
+                let label = |text: &'static str| div().text_sm().child(text);
                 let mut assignees = row().gap_1().flex_wrap();
                 for (ix, p) in self.people.iter().enumerate() {
                     let pid = p.id.clone();
@@ -3393,12 +3348,7 @@ impl MainView {
             .gap_3()
             .bg(theme.background)
             .text_color(theme.foreground)
-            .child(
-                div()
-                    .text_xl()
-                    .font_weight(FontWeight::BOLD)
-                    .child("ロックされています"),
-            )
+            .child(div().text_xl().child("ロックされています"))
             .child(
                 Input::new(&self.inputs.passphrase)
                     .id("unlock-input")

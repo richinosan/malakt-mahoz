@@ -97,14 +97,11 @@ pub fn open_main_window(cx: &mut App) -> Result<(AnyWindowHandle, Entity<MainVie
 
 /// 同梱のフォントを読み込んで、画面全体の書体にする。
 fn load_fonts(cx: &mut App) {
-    let fonts: Vec<std::borrow::Cow<'static, [u8]>> = vec![
-        include_bytes!("../assets/fonts/LINESeedJP-Regular.ttf")
+    // 太さは Regular だけ。強調は文字の大きさと色でする
+    let fonts: Vec<std::borrow::Cow<'static, [u8]>> =
+        vec![include_bytes!("../assets/fonts/LINESeedJP-Regular.ttf")
             .as_slice()
-            .into(),
-        include_bytes!("../assets/fonts/LINESeedJP-Bold.ttf")
-            .as_slice()
-            .into(),
-    ];
+            .into()];
     if cx.text_system().add_fonts(fonts).is_ok() {
         gpui_kit::component::Theme::global_mut(cx).font_family = FONT_FAMILY.into();
     }
