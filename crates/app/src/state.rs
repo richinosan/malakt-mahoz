@@ -218,6 +218,8 @@ pub struct MainView {
     pub column_menu: Option<ColumnMenu>,
     /// 見出しをドラッグして動かしている列。
     pub column_drag: Option<ColumnDrag>,
+    /// ドラッグして動かしているタスク。
+    pub task_drag: Option<TaskDrag>,
     /// 詳細で、担当者と役を選ぶところを開いている。
     pub assignee_picker: bool,
     /// 出入りの動きを付ける。テストでは止めて、すぐ最後の位置に出す
@@ -424,6 +426,7 @@ impl MainView {
             list_scroll: UniformListScrollHandle::new(),
             due_scroll: UniformListScrollHandle::new(),
             column_drag: None,
+            task_drag: None,
             motion: true,
             today: view::today(),
             inputs,
@@ -1214,6 +1217,106 @@ impl MainView {
             self.selected.clear();
             let name = self.workspace_name(workspace.as_deref());
             self.notice = Some(format!("{} 件を「{name}」に移しました。", ids.len()).into());
+        }
+    }
+
+    // ---- タスクのドラッグ ----
+
+    /// タスクの行を押した。少し動かすまでは、ただのクリックとして扱う。
+    pub fn start_task_drag(&mut self, id: &str, at: Point<Pixels>, cx: &mut Context<Self>) {
+        let Some(task) = self.tasks.iter().find(|t| t.id == id) else {
+            return;
+        };
+        self.task_drag = Some(TaskDrag {
+            id: task.id.clone(),
+            title: task.title.clone().into(),
+            start: at,
+            at,
+            moved: false,
+            over: None,
+        });
+        cx.notify();
+    }
+
+    /// ドラッグ中のマウスの位置。行やワークスペースの上にいるときは、先に `drag_task_over` が呼ばれている。
+    pub fn drag_task(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
+        let Some(drag) = &mut self.task_drag else {
+            return;
+        };
+        let (dx, dy) = (
+            f32::from(at.x - drag.start.x),
+            f32::from(at.y - drag.start.y),
+        );
+        if !drag.moved && dx.abs().max(dy.abs()) <= 6. {
+            return;
+        }
+        drag.moved = true;
+        // 落とせる場所から出たら、落とし先を消す
+        if drag.over.as_ref().is_some_and(|(_, seen)| *seen != at) {
+            drag.over = None;
+        }
+        drag.at = at;
+        cx.notify();
+    }
+
+    /// ドラッグ中に、落とせる場所の上にマウスが来た。
+    pub fn drag_task_over(
+        &mut self,
+        target: DropTarget,
+        at: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(drag) = self.task_drag.as_mut().filter(|d| d.moved) {
+            if drag.over.as_ref().map(|(t, _)| t) != Some(&target) {
+                cx.notify();
+            }
+            drag.over = Some((target, at));
+        }
+    }
+
+    /// ドラッグ中のタスクを、今の落とし先に落とす。
+    pub fn finish_task_drag(&mut self, cx: &mut Context<Self>) {
+        let Some(drag) = self.task_drag.take() else {
+            return;
+        };
+        cx.notify();
+        let Some((target, _)) = drag.over.filter(|_| drag.moved) else {
+            return;
+        };
+        match target {
+            DropTarget::Workspace(workspace) => {
+                let old = self.tasks.iter().find(|t| t.id == drag.id);
+                if old.is_none_or(|t| t.workspace_id == workspace) {
+                    return;
+                }
+                let done = self.write(cx, |s| s.move_task(&drag.id, workspace.as_deref()));
+                if done.is_some() {
+                    let name = self.workspace_name(workspace.as_deref());
+                    self.notice =
+                        Some(format!("「{}」を「{name}」に移しました。", drag.title).into());
+                }
+            }
+            DropTarget::Row(to) => {
+                let mut order: Vec<Id> = self
+                    .visible
+                    .iter()
+                    .map(|&i| self.tasks[i].id.clone())
+                    .collect();
+                let Some(from) = order.iter().position(|id| *id == drag.id) else {
+                    return;
+                };
+                if from == to || to >= order.len() {
+                    return;
+                }
+                let moved = order.remove(from);
+                order.insert(to, moved);
+                // 並べ替えた結果が見えるように、手動の順で出す
+                if self.write(cx, |s| s.set_task_order(&order)).is_some() {
+                    self.query.sort = view::Sort::Manual;
+                    self.query.descending = false;
+                    self.reload(cx);
+                }
+            }
         }
     }
 
@@ -2468,6 +2571,27 @@ pub struct ColumnMenu {
     pub column: Option<Column>,
     pub menu: Entity<PopupMenu>,
     _closed: Subscription,
+}
+
+/// タスクのドラッグ。押し始めた位置から少し動くまでは、ただのクリックとして扱う。
+#[derive(Debug, Clone, PartialEq)]
+pub struct TaskDrag {
+    pub id: Id,
+    pub title: SharedString,
+    pub start: Point<Pixels>,
+    pub at: Point<Pixels>,
+    pub moved: bool,
+    /// 今の落とし先と、それを見たときのマウスの位置。
+    pub over: Option<(DropTarget, Point<Pixels>)>,
+}
+
+/// ドラッグしたタスクを落とせる場所。
+#[derive(Debug, Clone, PartialEq)]
+pub enum DropTarget {
+    /// 一覧のこの行の位置へ並べ替える。
+    Row(usize),
+    /// このワークスペースへ移す。`None` は未所属。
+    Workspace(Option<Id>),
 }
 
 /// 見出しのドラッグ。押し始めた位置から少し動くまでは、ただのクリックとして扱う。

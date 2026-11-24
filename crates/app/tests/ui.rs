@@ -1822,3 +1822,111 @@ fn task_link_is_copied_and_opens_from_a_comment_card(cx: &mut TestAppContext) {
     });
     cx.update(|cx| assert_eq!(view.read(cx).panel.as_deref(), Some(first.id.as_str())));
 }
+
+/// タスクの行をドラッグすると並べ替えられ、左のワークスペースに落とすと移る。
+#[gpui_kit::test]
+fn task_rows_are_dragged_to_reorder_and_to_another_workspace(cx: &mut TestAppContext) {
+    use gpui_kit::{Modifiers, MouseButton, VisualTestContext};
+    start(cx);
+    let (window, view) = open(cx, win(1600., 1000.));
+    let (ws, _ids) = cx.update(|cx| {
+        db::shared(cx).update(cx, |db, _| {
+            let s = &mut db.store;
+            let ws = s.create_workspace(None, "文化祭").unwrap();
+            let ids: Vec<_> = ["会場を決める", "機材を借りる", "受付を決める"]
+                .iter()
+                .map(|title| s.add_task_in(None, title).unwrap().id)
+                .collect();
+            (ws, ids)
+        })
+    });
+    cx.update(|cx| {
+        view.update(cx, |v, cx| {
+            v.reload(cx);
+            v.go(Nav::All, cx)
+        })
+    });
+    let order = |cx: &mut TestAppContext| {
+        cx.update(|cx| {
+            let v = view.read(cx);
+            v.visible
+                .iter()
+                .map(|&i| v.tasks[i].id.clone())
+                .collect::<Vec<_>>()
+        })
+    };
+    let center = |cx: &mut TestAppContext, id: gpui_kit::ElementId| {
+        let mut at = Point::default();
+        ui(cx, window, |window, _| {
+            at = window.find(id).bounds().center()
+        });
+        at
+    };
+    // 押して、少しずつ動かして、離す
+    let drag = |cx: &mut TestAppContext, from: Point<Pixels>, to: Point<Pixels>, drop: bool| {
+        let mut v = VisualTestContext::from_window(window, cx);
+        v.simulate_mouse_down(from, MouseButton::Left, Modifiers::default());
+        for step in 1..=4 {
+            let t = step as f32 / 4.;
+            let at = Point::new(from.x + (to.x - from.x) * t, from.y + (to.y - from.y) * t);
+            v.simulate_mouse_move(at, MouseButton::Left, Modifiers::default());
+            v.update(|window, cx| window.render_frame(cx));
+        }
+        if drop {
+            v.simulate_mouse_up(to, MouseButton::Left, Modifiers::default());
+        }
+        v.run_until_parked();
+    };
+    let before = order(cx);
+    assert_eq!(before.len(), 3);
+
+    // 少し動かしただけでは、ドラッグにならない
+    let first = center(cx, ("title", 0usize).into());
+    drag(cx, first, Point::new(first.x + px(3.), first.y), true);
+    assert_eq!(order(cx), before);
+
+    // 動かしている間は、マウスに付いてタイトルが出て、落とし先が決まる
+    cx.update(|cx| view.update(cx, |v, cx| v.close_panel(cx)));
+    let (first, third) = (
+        center(cx, ("title", 0usize).into()),
+        center(cx, ("title", 2usize).into()),
+    );
+    drag(cx, first, third, false);
+    cx.update(|cx| {
+        let d = view.read(cx).task_drag.clone().unwrap();
+        assert!(d.moved);
+        assert_eq!(
+            d.over.map(|(t, _)| t),
+            Some(malakt_mahoz::state::DropTarget::Row(2))
+        );
+    });
+    // 離すと、その行の位置に入り、並び順が手動になる
+    let mut v = VisualTestContext::from_window(window, cx);
+    v.simulate_mouse_up(third, MouseButton::Left, Modifiers::default());
+    v.run_until_parked();
+    assert_eq!(
+        order(cx),
+        [before[1].clone(), before[2].clone(), before[0].clone()]
+    );
+    cx.update(|cx| {
+        let v = view.read(cx);
+        assert_eq!(v.query.sort, malakt_core::view::Sort::Manual);
+        assert!(v.task_drag.is_none());
+        assert!(v.panel.is_none());
+    });
+
+    // 左のワークスペースに落とすと、そこへ移る
+    let from = center(cx, ("title", 0usize).into());
+    let to = center(cx, ("ws", 0usize).into());
+    drag(cx, from, to, true);
+    let moved = store(cx, |s| s.task(&before[1]).unwrap());
+    assert_eq!(moved.workspace_id.as_deref(), Some(ws.id.as_str()));
+    cx.update(|cx| assert!(view.read(cx).notice.is_some()));
+    // 「未所属」に落とすと戻る
+    let ix = order(cx).iter().position(|id| *id == before[1]).unwrap();
+    let from = center(cx, ("title", ix).into());
+    let to = center(cx, "nav-unfiled".into());
+    drag(cx, from, to, true);
+    let back = store(cx, |s| s.task(&before[1]).unwrap());
+    assert_eq!(back.workspace_id, None);
+}
