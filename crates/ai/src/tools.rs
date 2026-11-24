@@ -164,7 +164,7 @@ pub fn confirmation_text(store: &Store, name: &str, args: &Value) -> String {
 fn required<'a>(args: &'a Value, key: &str) -> Result<&'a str, String> {
     args.get(key)
         .and_then(Value::as_str)
-        .ok_or_else(|| format!("{key} が要ります"))
+        .ok_or_else(|| format!("{key} が必要です"))
 }
 
 fn optional<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
@@ -379,22 +379,22 @@ pub fn execute(
 pub fn summary(name: &str, args: &Value) -> String {
     let arg = |key: &str| optional(args, key).unwrap_or_default().to_owned();
     match name {
-        "list_workspaces" => "ワークスペースの一覧を読む".into(),
-        "list_people" => "担当者の一覧を読む".into(),
+        "list_workspaces" => "ワークスペース一覧を取得".into(),
+        "list_people" => "担当者一覧を取得".into(),
         "list_tasks" => match optional(args, "query") {
-            Some(q) if !q.is_empty() => format!("タスクを探す: {q}"),
-            _ => "タスクの一覧を読む".into(),
+            Some(q) if !q.is_empty() => format!("タスクを検索: {q}"),
+            _ => "タスク一覧を取得".into(),
         },
-        "get_task" => "タスクを読む".into(),
-        "create_task" => format!("タスクを作る: {}", arg("title")),
-        "update_task" => "タスクを書き換える".into(),
-        "move_task" => "タスクを移す".into(),
-        "delete_task" => "タスクを削除する".into(),
-        "add_comment" => "コメントを書く".into(),
-        "create_workspace" => format!("ワークスペースを作る: {}", arg("name")),
-        "create_person" => format!("担当者を登録する: {}", arg("name")),
-        GITHUB_FETCH => format!("GitHub から取ってくる: {}", arg("url")),
-        RUN_SHELL => format!("コマンドを実行する: {}", arg("command")),
+        "get_task" => "タスクを取得".into(),
+        "create_task" => format!("タスクを作成: {}", arg("title")),
+        "update_task" => "タスクを更新".into(),
+        "move_task" => "タスクを移動".into(),
+        "delete_task" => "タスクを削除".into(),
+        "add_comment" => "コメントを追加".into(),
+        "create_workspace" => format!("ワークスペースを作成: {}", arg("name")),
+        "create_person" => format!("担当者を追加: {}", arg("name")),
+        GITHUB_FETCH => format!("GitHub から取得: {}", arg("url")),
+        RUN_SHELL => format!("コマンドを実行: {}", arg("command")),
         other => other.to_owned(),
     }
 }

@@ -253,7 +253,7 @@ pub fn opencode_endpoint(
     session: &str,
 ) -> Result<Endpoint, String> {
     let entry = catalog.iter().find(|m| m.id == model).ok_or_else(|| {
-        format!("{model} というモデルは、OpenCode のモデルの一覧にありません。モデルの名前を確かめてください")
+        format!("{model} というモデルは、OpenCode のモデルの一覧にありません。モデルの名前を確認してください")
     })?;
     let (wire, base) = entry.api.clone().ok_or_else(|| {
         format!("{model} は、このアプリから呼び出せる形式の API がありません。ほかのモデルを選んでください")

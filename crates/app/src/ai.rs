@@ -23,17 +23,17 @@ const MAX_ROUNDS: usize = 40;
 const MAX_SHELL_LINES: usize = 4000;
 /// 自分で入力したコマンドの履歴の数。
 const MAX_HISTORY: usize = 200;
-/// 定期確認で 1 回に見に行くリンクの数。
+/// 定期チェックで 1 回に見に行くリンクの数。
 const MAX_WATCH_LINKS: usize = 30;
-/// 定期確認で AI に渡す、リンク 1 つあたりの文字数。
+/// 定期チェックで AI に渡す、リンク 1 つあたりの文字数。
 const MAX_WATCH_CHARS: usize = 4000;
-/// 定期確認の間隔として選べる分数。
+/// 定期チェックの間隔として選べる分数。
 pub const WATCH_MINUTES: [u32; 4] = [15, 30, 60, 180];
-/// 定期確認で変化を見つけたときに AI に渡す、最初の指示。
+/// 定期チェックで変化を見つけたときに AI に渡す、最初の指示。
 pub const DEFAULT_WATCH_INSTRUCTION: &str = "GitHub の状態に合わせて、関連するタスクを更新してください。\
 クローズまたはマージされていたらタスクを完了にし、新しい動きがあればタスクにコメントで要点を書いてください。";
 
-/// GitHub の定期確認の設定。標準はオフ。
+/// GitHub の定期チェックの設定。標準はオフ。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Watch {
     pub enabled: bool,
@@ -52,7 +52,7 @@ impl Default for Watch {
     }
 }
 
-/// 定期確認で見に行くリンクと、それが書かれているタスク（ID とタイトル）。
+/// 定期チェックで見に行くリンクと、それが書かれているタスク（ID とタイトル）。
 type WatchTarget = (Link, Vec<(String, String)>);
 
 /// 中身が変わったかを見分けるための値（FNV-1a）。Rust の版が変わっても同じ値になる。
@@ -232,6 +232,8 @@ pub struct Session {
     /// 自分で入力したコマンドの履歴。新しいものが後ろ。
     pub history: Vec<SharedString>,
     running: Option<shell::Handle>,
+    /// 今動いているのは、シェルに自分で打ったコマンド。
+    pub own_command: bool,
     /// シェルのコマンドを、確認なしで実行する（このチャットの間）。
     pub allow_shell: bool,
     /// オート実行。オンの間、コマンドの実行とタスクの削除を確認なしで行う。標準はオフ。
@@ -245,10 +247,10 @@ pub struct Session {
     /// 設定の変更などの失敗。チャットの上に出す。
     pub error: Option<SharedString>,
     pub watch: Watch,
-    /// 定期確認の、いちばん新しい結果。
+    /// 定期チェックの、いちばん新しい結果。
     pub watch_status: Option<SharedString>,
     watch_timer: Option<Task<()>>,
-    /// 今の進行が、定期確認から始まったものか。確認が要る操作は実行しない。
+    /// 今の進行が、定期チェックから始まったものか。確認が要る操作は実行しない。
     auto: bool,
 }
 
@@ -330,6 +332,7 @@ impl Session {
                 .unwrap_or_else(|| ".".into()),
             history: Vec::new(),
             running: None,
+            own_command: false,
             allow_shell: false,
             auto_run,
             chat_window: None,
@@ -359,12 +362,12 @@ impl Session {
         cx.notify();
     }
 
-    // ---- GitHub の定期確認 ----
+    // ---- GitHub の定期チェック ----
 
-    /// 定期確認の設定を保存し、間隔を数え直す。
+    /// 定期チェックの設定を保存し、間隔を数え直す。
     pub fn set_watch(&mut self, watch: Watch, cx: &mut Context<Self>) {
         if !WATCH_MINUTES.contains(&watch.minutes) || watch.instruction.trim().is_empty() {
-            self.error = Some("定期確認の間隔と指示を入れてください".into());
+            self.error = Some("定期チェックの間隔と指示を入れてください".into());
             cx.notify();
             return;
         }
@@ -417,10 +420,12 @@ impl Session {
                 match result {
                     Ok(status) => this.watch_status = Some(status.into()),
                     Err(error) => {
-                        this.watch_status =
-                            Some(format!("{} の確認は失敗しました: {error}", now_label()).into());
-                        this.items
-                            .push(Item::Error(format!("GitHub の定期確認: {error}").into()));
+                        this.watch_status = Some(
+                            format!("{} のチェックに失敗しました: {error}", now_label()).into(),
+                        );
+                        this.items.push(Item::Error(
+                            format!("GitHub の定期チェック: {error}").into(),
+                        ));
                     }
                 }
                 this.finish();
@@ -435,6 +440,7 @@ impl Session {
     fn finish(&mut self) {
         self.settle();
         self.busy = false;
+        self.own_command = false;
         self.auto = false;
         self.pending = None;
     }
@@ -455,7 +461,7 @@ impl Session {
         };
         if !has_key {
             return Ok(format!(
-                "{} の API キーが設定されていないので、{} の確認は行いませんでした。",
+                "{} の API キーが設定されていないので、{} のチェックをスキップしました。",
                 provider.label(),
                 now_label()
             ));
@@ -501,12 +507,12 @@ impl Session {
             s.db.update(cx, |db, _| {
                 db.store.set_setting("ai.watch.seen", Some(&json))
             })
-            .map_err(|e| format!("確認の結果を保存できませんでした: {e}"))
+            .map_err(|e| format!("チェック結果を保存できませんでした: {e}"))
         })
         .map_err(gone)??;
 
         let mut status = format!(
-            "{} に確認しました。リンク {} 件のうち、変化は {} 件です。",
+            "{} をチェックしました。リンク {} 件中、更新 {} 件。",
             now_label(),
             targets.len(),
             changed.len()
@@ -519,7 +525,7 @@ impl Session {
         }
 
         let mut message = format!(
-            "（アプリの定期確認からの自動のメッセージです）\n\
+            "（アプリの定期チェックからの自動のメッセージです）\n\
              タスクに書かれている GitHub のリンクに変化がありました。\n\n指示: {instruction}\n"
         );
         for (url, tasks, content) in &changed {
@@ -537,7 +543,7 @@ impl Session {
             s.watch_status = Some(status.clone().into());
             s.items.push(Item::Notice(
                 format!(
-                    "GitHub の定期確認: {} に変化がありました。AI がタスクに反映します。",
+                    "GitHub の定期チェック: {} に更新がありました。AI がタスクに反映します。",
                     urls.join("、")
                 )
                 .into(),
@@ -549,7 +555,7 @@ impl Session {
         Self::converse(
             this,
             &config,
-            "定期確認（ユーザーは画面を見ていないことがあります）",
+            "定期チェック（ユーザーは画面を見ていないことがあります）",
             cx,
         )
         .await?;
@@ -768,7 +774,8 @@ impl Session {
     /// 止める。実行中のコマンドも強制終了する。
     pub fn stop(&mut self, cx: &mut Context<Self>) {
         let killed = self.kill_command();
-        if !self.busy {
+        // 自分で打ったコマンドは、止まればそのまま終わる。チャットには何も書かない
+        if !self.busy || self.own_command {
             if killed {
                 cx.notify();
             }
@@ -891,6 +898,7 @@ impl Session {
             }
         }
         self.busy = true;
+        self.own_command = true;
         self.task = Some(cx.spawn(async move |this, cx| {
             // 起動できなかったことは、シェルに出ている
             let _ = Self::shell_line(&this, &command, cx).await;
@@ -930,7 +938,7 @@ impl Session {
                         s.cwd = dir;
                     }
                     _ => {
-                        output.all = format!("cd: {target}: そのフォルダはありません");
+                        output.all = format!("cd: {target}: フォルダが見つかりません");
                         s.push_shell(LineKind::Err, &output.all.clone());
                     }
                 }
@@ -1048,10 +1056,9 @@ impl Session {
             for (offset, call) in calls.iter().enumerate() {
                 let (state, output) = match Self::call_tool(this, config, call, cx).await? {
                     Ok(output) => (ToolState::Done, Ok(output)),
-                    Err(ToolError::Denied) => (
-                        ToolState::Denied,
-                        Err("ユーザーが許可しませんでした".to_owned()),
-                    ),
+                    Err(ToolError::Denied) => {
+                        (ToolState::Denied, Err("ユーザーが拒否しました".to_owned()))
+                    }
                     Err(ToolError::Failed(e)) => (ToolState::Failed(e.clone().into()), Err(e)),
                 };
                 this.update(cx, |s, cx| {
@@ -1179,9 +1186,9 @@ impl Session {
         let name = call.name.as_str();
         let auto = this.read_with(cx, |s, _| s.auto).map_err(gone)?;
         if auto && tools::needs_confirmation(name) {
-            // 確認に答える人がいないので、定期確認からは実行しない
+            // 確認に答える人がいないので、定期チェックからは実行しない
             return Ok(Err(ToolError::Failed(
-                "定期確認からは、タスクの削除とコマンドの実行はできません".into(),
+                "定期チェックからは、タスクの削除とコマンドの実行はできません".into(),
             )));
         }
         if tools::needs_confirmation(name) {
@@ -1210,7 +1217,7 @@ impl Session {
         match name {
             tools::RUN_SHELL => {
                 let Some(command) = call.args.get("command").and_then(Value::as_str) else {
-                    return failed("command が要ります".into());
+                    return failed("command が必要です".into());
                 };
                 match Self::shell_line(this, command, cx).await {
                     Ok(output) => Ok(Ok(format!(
