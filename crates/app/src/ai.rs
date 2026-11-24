@@ -20,6 +20,77 @@ use crate::db::{self, Db};
 const MAX_ROUNDS: usize = 40;
 /// シェルの表示に残す行数。
 const MAX_SHELL_LINES: usize = 4000;
+/// 定期確認で 1 回に見に行くリンクの数。
+const MAX_WATCH_LINKS: usize = 30;
+/// 定期確認で AI に渡す、リンク 1 つあたりの文字数。
+const MAX_WATCH_CHARS: usize = 4000;
+/// 定期確認の間隔として選べる分数。
+pub const WATCH_MINUTES: [u32; 4] = [15, 30, 60, 180];
+/// 定期確認で変化を見つけたときに AI に渡す、最初の指示。
+pub const DEFAULT_WATCH_INSTRUCTION: &str = "GitHub の状態に合わせて、関連するタスクを更新してください。\
+クローズまたはマージされていたらタスクを完了にし、新しい動きがあればタスクにコメントで要点を書いてください。";
+
+/// GitHub の定期確認の設定。標準はオフ。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Watch {
+    pub enabled: bool,
+    pub minutes: u32,
+    /// 変化を見つけたときに AI に渡す指示。
+    pub instruction: String,
+}
+
+impl Default for Watch {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            minutes: 30,
+            instruction: DEFAULT_WATCH_INSTRUCTION.to_owned(),
+        }
+    }
+}
+
+/// 定期確認で見に行くリンクと、それが書かれているタスク（ID とタイトル）。
+type WatchTarget = (Link, Vec<(String, String)>);
+
+/// 中身が変わったかを見分けるための値（FNV-1a）。Rust の版が変わっても同じ値になる。
+fn fingerprint(text: &str) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in text.bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{hash:016x}")
+}
+
+/// 未完了のタスクに書かれている issue とプルリクエストのリンクを集める。
+fn watch_targets(store: &malakt_core::Store) -> Result<Vec<WatchTarget>, String> {
+    let filter = malakt_core::TaskFilter {
+        open_only: true,
+        ..Default::default()
+    };
+    let tasks = store
+        .tasks(malakt_core::Scope::All, &filter)
+        .map_err(|e| format!("タスクを読めませんでした: {e}"))?;
+    let mut targets: Vec<WatchTarget> = Vec::new();
+    for task in tasks {
+        for link in github::find_links(&format!("{}\n{}", task.title, task.description)) {
+            if !matches!(link.kind, github::Kind::Issue(_) | github::Kind::Pull(_)) {
+                continue;
+            }
+            let entry = (task.id.clone(), task.title.clone());
+            match targets.iter().position(|(l, _)| *l == link) {
+                Some(ix) => {
+                    if !targets[ix].1.contains(&entry) {
+                        targets[ix].1.push(entry);
+                    }
+                }
+                None if targets.len() < MAX_WATCH_LINKS => targets.push((link, vec![entry])),
+                None => {}
+            }
+        }
+    }
+    Ok(targets)
+}
 
 type Headers = [(&'static str, String)];
 /// 環境変数を読む。
@@ -158,6 +229,12 @@ pub struct Session {
     task: Option<Task<()>>,
     /// 設定の変更などの失敗。チャットの上に出す。
     pub error: Option<SharedString>,
+    pub watch: Watch,
+    /// 定期確認の、いちばん新しい結果。
+    pub watch_status: Option<SharedString>,
+    watch_timer: Option<Task<()>>,
+    /// 今の進行が、定期確認から始まったものか。確認が要る操作は実行しない。
+    auto: bool,
 }
 
 /// すべてのウィンドウで共有するチャット。
@@ -182,6 +259,7 @@ fn setting_key(provider: Provider) -> String {
 impl Session {
     fn new(db: Entity<Db>, config: AiConfig, cx: &mut Context<Self>) -> Self {
         let mut error = None;
+        let watch;
         let (provider, effort, models) = {
             let store = &db.read(cx).store;
             let mut read = |key: &str| match store.setting(key) {
@@ -201,9 +279,20 @@ impl Session {
                 .into_iter()
                 .filter_map(|p| read(&setting_key(p)).map(|m| (p, m)))
                 .collect();
+            let defaults = Watch::default();
+            watch = Watch {
+                enabled: read("ai.watch.enabled").as_deref() == Some("1"),
+                minutes: read("ai.watch.minutes")
+                    .and_then(|v| v.parse().ok())
+                    .filter(|m| WATCH_MINUTES.contains(m))
+                    .unwrap_or(defaults.minutes),
+                instruction: read("ai.watch.instruction")
+                    .filter(|v| !v.trim().is_empty())
+                    .unwrap_or(defaults.instruction),
+            };
             (provider, effort, models)
         };
-        Self {
+        let mut this = Self {
             db,
             config,
             provider,
@@ -224,7 +313,210 @@ impl Session {
             conversation: malakt_core::new_id(),
             task: None,
             error,
+            watch,
+            watch_status: None,
+            watch_timer: None,
+            auto: false,
+        };
+        this.restart_watch(cx);
+        this
+    }
+
+    // ---- GitHub の定期確認 ----
+
+    /// 定期確認の設定を保存し、間隔を数え直す。
+    pub fn set_watch(&mut self, watch: Watch, cx: &mut Context<Self>) {
+        if !WATCH_MINUTES.contains(&watch.minutes) || watch.instruction.trim().is_empty() {
+            self.error = Some("定期確認の間隔と指示を入れてください".into());
+            cx.notify();
+            return;
         }
+        if watch == self.watch {
+            return;
+        }
+        let saved = self.save_setting(
+            "ai.watch.enabled",
+            if watch.enabled { "1" } else { "0" },
+            cx,
+        ) && self.save_setting("ai.watch.minutes", &watch.minutes.to_string(), cx)
+            && self.save_setting("ai.watch.instruction", watch.instruction.trim(), cx);
+        if !saved {
+            return;
+        }
+        self.watch = Watch {
+            instruction: watch.instruction.trim().to_owned(),
+            ..watch
+        };
+        self.restart_watch(cx);
+        cx.notify();
+    }
+
+    fn restart_watch(&mut self, cx: &mut Context<Self>) {
+        self.watch_timer = None;
+        if !self.watch.enabled {
+            return;
+        }
+        let every = std::time::Duration::from_secs(u64::from(self.watch.minutes) * 60);
+        self.watch_timer = Some(cx.spawn(async move |this, cx| loop {
+            cx.background_executor().timer(every).await;
+            if this.update(cx, |s, cx| s.check_github(cx)).is_err() {
+                break;
+            }
+        }));
+    }
+
+    /// タスクに書かれている GitHub のリンクを見に行き、変化があれば AI に渡す。
+    /// チャットが動いている間とロック中は、何もしない（次の回に見る）。
+    pub fn check_github(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.busy || !self.db.read(cx).unlocked {
+            return false;
+        }
+        self.busy = true;
+        self.auto = true;
+        self.task = Some(cx.spawn(async move |this, cx| {
+            let result = Self::watch_run(&this, cx).await;
+            // チャットがなくなっていれば、知らせる先もない
+            let _ = this.update(cx, |this, cx| {
+                match result {
+                    Ok(status) => this.watch_status = Some(status.into()),
+                    Err(error) => {
+                        this.watch_status =
+                            Some(format!("{} の確認は失敗しました: {error}", now_label()).into());
+                        this.items
+                            .push(Item::Error(format!("GitHub の定期確認: {error}").into()));
+                    }
+                }
+                this.finish();
+                cx.notify();
+            });
+        }));
+        cx.notify();
+        true
+    }
+
+    /// 進行の後始末。
+    fn finish(&mut self) {
+        self.settle();
+        self.busy = false;
+        self.auto = false;
+        self.pending = None;
+    }
+
+    async fn watch_run(this: &WeakEntity<Self>, cx: &mut AsyncApp) -> Result<String, String> {
+        let (config, provider, instruction) = this
+            .read_with(cx, |s, _| {
+                (s.config.clone(), s.provider, s.watch.instruction.clone())
+            })
+            .map_err(gone)?;
+        // キーがなければ、GitHub にも AI にも通信しない
+        let has_key = {
+            let config = config.clone();
+            cx.background_executor()
+                .spawn(async move { keys::lookup(&*config.keys, provider, |n| (config.env)(n)) })
+                .await?
+                .is_some()
+        };
+        if !has_key {
+            return Ok(format!(
+                "{} の API キーが設定されていないので、{} の確認は行いませんでした。",
+                provider.label(),
+                now_label()
+            ));
+        }
+        let (targets, mut seen) = this
+            .read_with(cx, |s, cx| {
+                let store = &s.db.read(cx).store;
+                let seen: HashMap<String, String> = store
+                    .setting("ai.watch.seen")
+                    .map_err(|e| format!("前回の結果を読めませんでした: {e}"))?
+                    .and_then(|v| serde_json::from_str(&v).ok())
+                    .unwrap_or_default();
+                Ok::<_, String>((watch_targets(store)?, seen))
+            })
+            .map_err(gone)??;
+
+        let mut changed = Vec::new();
+        let mut failed = Vec::new();
+        let mut now: HashMap<String, String> = HashMap::new();
+        for (link, tasks) in &targets {
+            let url = link.url();
+            match Self::fetch_github(this, &config, link, cx).await {
+                Ok(content) => {
+                    let print = fingerprint(&content);
+                    // 初めて見るリンクは、次からの比べる元にするだけ
+                    if seen.get(&url).is_some_and(|old| *old != print) {
+                        changed.push((url.clone(), tasks.clone(), content));
+                    }
+                    now.insert(url, print);
+                }
+                Err(error) => {
+                    // 取れなかったものは、前の値のまま次に比べる
+                    if let Some(old) = seen.remove(&url) {
+                        now.insert(url.clone(), old);
+                    }
+                    failed.push(format!("{url}: {error}"));
+                }
+            }
+        }
+        // 今あるリンクの分だけを残すので、増え続けない
+        let json = serde_json::to_string(&now).map_err(|e| e.to_string())?;
+        this.update(cx, |s, cx| {
+            s.db.update(cx, |db, _| {
+                db.store.set_setting("ai.watch.seen", Some(&json))
+            })
+            .map_err(|e| format!("確認の結果を保存できませんでした: {e}"))
+        })
+        .map_err(gone)??;
+
+        let mut status = format!(
+            "{} に確認しました。リンク {} 件のうち、変化は {} 件です。",
+            now_label(),
+            targets.len(),
+            changed.len()
+        );
+        if !failed.is_empty() {
+            status.push_str(&format!(" 取得できなかったもの: {}", failed.join(" / ")));
+        }
+        if changed.is_empty() {
+            return Ok(status);
+        }
+
+        let mut message = format!(
+            "（アプリの定期確認からの自動のメッセージです）\n\
+             タスクに書かれている GitHub のリンクに変化がありました。\n\n指示: {instruction}\n"
+        );
+        for (url, tasks, content) in &changed {
+            message.push_str(&format!("\n## {url}\n関連するタスク:\n"));
+            for (id, title) in tasks {
+                message.push_str(&format!("- {title}（id: {id}）\n"));
+            }
+            message.push_str(&format!(
+                "今の中身:\n{}\n",
+                clip_tail(content, MAX_WATCH_CHARS)
+            ));
+        }
+        let urls: Vec<&str> = changed.iter().map(|(url, _, _)| url.as_str()).collect();
+        this.update(cx, |s, cx| {
+            s.watch_status = Some(status.clone().into());
+            s.items.push(Item::Notice(
+                format!(
+                    "GitHub の定期確認: {} に変化がありました。AI がタスクに反映します。",
+                    urls.join("、")
+                )
+                .into(),
+            ));
+            s.turns.push(Turn::User(message));
+            cx.notify();
+        })
+        .map_err(gone)?;
+        Self::converse(
+            this,
+            &config,
+            "定期確認（ユーザーは画面を見ていないことがあります）",
+            cx,
+        )
+        .await?;
+        Ok(status)
     }
 
     pub fn model(&self) -> &str {
@@ -428,9 +720,7 @@ impl Session {
                 if let Err(error) = result {
                     this.items.push(Item::Error(error.into()));
                 }
-                this.settle();
-                this.busy = false;
-                this.pending = None;
+                this.finish();
                 cx.notify();
             });
         }));
@@ -449,9 +739,7 @@ impl Session {
         }
         // タスクを捨てると、待っているところで止まる
         self.task = None;
-        self.busy = false;
-        self.pending = None;
-        self.settle();
+        self.finish();
         for item in &mut self.items {
             if let Item::Tool { state, .. } = item {
                 if *state == ToolState::Running {
@@ -535,10 +823,39 @@ impl Session {
         place: String,
         cx: &mut AsyncApp,
     ) -> Result<(), String> {
-        let (config, provider, model, effort, conversation) = this
+        let config = this.read_with(cx, |s, _| s.config.clone()).map_err(gone)?;
+
+        // メッセージに GitHub のリンクがあれば、先に中身を取ってきて添える
+        let mut message = text.clone();
+        for link in github::find_links(&text) {
+            match Self::fetch_github(this, &config, &link, cx).await {
+                Ok(content) => message.push_str(&format!("\n\n[{} の中身]\n{content}", link.url())),
+                Err(error) => {
+                    let note = format!("{} を取得できませんでした: {error}", link.url());
+                    message.push_str(&format!("\n\n[{note}]"));
+                    this.update(cx, |s, cx| {
+                        s.items.push(Item::Error(note.into()));
+                        cx.notify();
+                    })
+                    .map_err(gone)?;
+                }
+            }
+        }
+        this.update(cx, |s, _| s.turns.push(Turn::User(message)))
+            .map_err(gone)?;
+        Self::converse(this, &config, &place, cx).await
+    }
+
+    /// 最後のメッセージに AI が答え終わるまで、ツールの実行を挟みながら進める。
+    async fn converse(
+        this: &WeakEntity<Self>,
+        config: &AiConfig,
+        place: &str,
+        cx: &mut AsyncApp,
+    ) -> Result<(), String> {
+        let (provider, model, effort, conversation) = this
             .read_with(cx, |s, _| {
                 (
-                    s.config.clone(),
                     s.provider,
                     s.model().to_owned(),
                     s.effort,
@@ -560,30 +877,11 @@ impl Session {
         })?
         .0;
 
-        // メッセージに GitHub のリンクがあれば、先に中身を取ってきて添える
-        let mut message = text.clone();
-        for link in github::find_links(&text) {
-            match Self::fetch_github(this, &config, &link, cx).await {
-                Ok(content) => message.push_str(&format!("\n\n[{} の中身]\n{content}", link.url())),
-                Err(error) => {
-                    let note = format!("{} を取得できませんでした: {error}", link.url());
-                    message.push_str(&format!("\n\n[{note}]"));
-                    this.update(cx, |s, cx| {
-                        s.items.push(Item::Error(note.into()));
-                        cx.notify();
-                    })
-                    .map_err(gone)?;
-                }
-            }
-        }
-        this.update(cx, |s, _| s.turns.push(Turn::User(message)))
-            .map_err(gone)?;
-
-        let system = tools::system_prompt(&malakt_core::view::today(), &place);
+        let system = tools::system_prompt(&malakt_core::view::today(), place);
         for _ in 0..MAX_ROUNDS {
             let (wire, reply) = Self::complete(
                 this,
-                &config,
+                config,
                 provider,
                 &model,
                 effort,
@@ -619,7 +917,7 @@ impl Session {
                 return Ok(());
             }
             for (offset, call) in calls.iter().enumerate() {
-                let (state, output) = match Self::call_tool(this, &config, call, cx).await? {
+                let (state, output) = match Self::call_tool(this, config, call, cx).await? {
                     Ok(output) => (ToolState::Done, Ok(output)),
                     Err(ToolError::Denied) => (
                         ToolState::Denied,
@@ -750,6 +1048,13 @@ impl Session {
         cx: &mut AsyncApp,
     ) -> Result<Result<String, ToolError>, String> {
         let name = call.name.as_str();
+        let auto = this.read_with(cx, |s, _| s.auto).map_err(gone)?;
+        if auto && tools::needs_confirmation(name) {
+            // 確認に答える人がいないので、定期確認からは実行しない
+            return Ok(Err(ToolError::Failed(
+                "定期確認からは、タスクの削除とコマンドの実行はできません".into(),
+            )));
+        }
         if tools::needs_confirmation(name) {
             let (tx, rx) = async_channel::bounded(1);
             let asked = this
@@ -954,6 +1259,17 @@ enum ToolError {
 }
 
 /// チャットがなくなった（アプリの終了）。出す先がないので、文は空でよい。
+/// 「11/24 13:05」のような、今の時刻。
+fn now_label() -> String {
+    let ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as i64);
+    malakt_core::view::format_datetime(ms)
+        .chars()
+        .skip(5)
+        .collect()
+}
+
 fn gone<E>(_: E) -> String {
     String::new()
 }
