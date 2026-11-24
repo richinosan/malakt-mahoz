@@ -11,7 +11,9 @@ use gpui_kit::*;
 use malakt_ai::keys::Source;
 use malakt_ai::{Effort, Provider};
 
-use crate::ai::{self, Decision, Item, KeyState, LineKind, Session, ShellPlace, ToolState};
+use crate::ai::{
+    self, Decision, Item, KeyState, LineKind, Session, ShellPlace, ToolState, Watch, WATCH_MINUTES,
+};
 use crate::db::{self, Db};
 use crate::state::MainView;
 use crate::StopAi;
@@ -63,6 +65,8 @@ pub struct AiPane {
     input: Entity<TextareaState>,
     key_input: Entity<InputState>,
     model_input: Entity<InputState>,
+    /// 定期確認の指示。
+    watch_input: Entity<TextareaState>,
     /// モデルの入力欄に出している値。
     synced_model: String,
     pub settings_open: bool,
@@ -127,6 +131,12 @@ impl AiPane {
                 .placeholder("API キー")
         });
         let model_input = cx.new(|cx| InputState::new(window, cx).placeholder("モデルの ID"));
+        let instruction = session.read(cx).watch.instruction.clone();
+        let watch_input = cx.new(|cx| {
+            let mut state = TextareaState::new(window, cx).placeholder("AI への指示");
+            state.set_value(instruction, window, cx);
+            state
+        });
         let synced_model = session.read(cx).model().to_owned();
         model_input.update(cx, |s, cx| s.set_value(synced_model.clone(), window, cx));
 
@@ -203,6 +213,7 @@ impl AiPane {
             input,
             key_input,
             model_input,
+            watch_input,
             synced_model,
             settings_open: false,
             chat_scroll: ScrollHandle::new(),
@@ -249,6 +260,14 @@ impl AiPane {
         if sent {
             self.input.update(cx, |s, cx| s.set_value("", window, cx));
         }
+    }
+
+    /// 定期確認の設定を、入力欄の指示と一緒に保存する。
+    fn set_watch(&mut self, change: impl FnOnce(&mut Watch), cx: &mut Context<Self>) {
+        let mut watch = self.session.read(cx).watch.clone();
+        watch.instruction = self.watch_input.read(cx).value().to_string();
+        change(&mut watch);
+        self.session.update(cx, |s, cx| s.set_watch(watch, cx));
     }
 
     fn save_key(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -393,6 +412,39 @@ impl AiPane {
             KeyState::Failed(e) => (e.clone(), theme.danger, false),
         };
 
+        let watch = session.watch.clone();
+        let watch_status = session.watch_status.clone();
+        let busy = session.busy;
+        let mut watch_row = row().gap_1().flex_wrap();
+        for (ix, (text, on)) in [("オフ", false), ("オン", true)].into_iter().enumerate() {
+            watch_row = watch_row.child(
+                chip(("ai-watch", ix), text, watch.enabled == on, cx)
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.set_watch(|w| w.enabled = on, cx);
+                    }))
+                    .test_support(),
+            );
+        }
+        for minutes in WATCH_MINUTES {
+            let text = if minutes < 60 {
+                format!("{minutes} 分ごと")
+            } else {
+                format!("{} 時間ごと", minutes / 60)
+            };
+            watch_row = watch_row.child(
+                chip(
+                    ("ai-watch-minutes", minutes as usize),
+                    text,
+                    watch.minutes == minutes,
+                    cx,
+                )
+                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                    this.set_watch(|w| w.minutes = minutes, cx);
+                }))
+                .test_support(),
+            );
+        }
+
         col()
             .id("ai-settings")
             .gap_2()
@@ -482,6 +534,53 @@ impl AiPane {
             .child(label(
                 "API キーは OS のキーチェーンに保存します。エクスポートの zip には入りません。",
             ))
+            .child(label("GitHub の定期確認"))
+            .child(watch_row)
+            .when_some(watch_status, |d, status| {
+                d.child(
+                    div()
+                        .id("ai-watch-status")
+                        .text_xs()
+                        .child(status)
+                        .test_support(),
+                )
+            })
+            .child(label("変化があったときの AI への指示"))
+            .child(
+                div()
+                    .id("ai-watch-instruction")
+                    .child(Textarea::new(&self.watch_input).h(px(72.)))
+                    .test_support(),
+            )
+            .child(
+                row()
+                    .gap_2()
+                    .child(
+                        Button::new("ai-watch-save")
+                            .label("指示を保存")
+                            .outline()
+                            .xsmall()
+                            .on_click(cx.listener(|this, _, _, cx| this.set_watch(|_| {}, cx))),
+                    )
+                    .child(
+                        Button::new("ai-watch-now")
+                            .label("今すぐ確認")
+                            .outline()
+                            .xsmall()
+                            .disabled(busy)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.session.update(cx, |s, cx| {
+                                    s.check_github(cx);
+                                });
+                            })),
+                    ),
+            )
+            .child(label(
+                "オンの間、未完了のタスクに書かれた issue とプルリクエストのリンクを、選んだ間隔で見に行きます。変化があったときだけ AI がタスクを更新します。タスクの削除とコマンドの実行は行いません。",
+            ))
+            .overflow_y_scroll()
+            .flex_shrink(1.)
+            .min_h_0()
     }
 
     // ---- チャット ----
