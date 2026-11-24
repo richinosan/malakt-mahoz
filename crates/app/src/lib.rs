@@ -18,7 +18,7 @@ pub use state::{anchor_at, Assets, CommentMode, MainView, Modal, Nav};
 
 actions!(
     malakt,
-    [NewWindow, Quit, LockNow, Dismiss, ToggleAi, StopAi]
+    [NewWindow, Quit, LockNow, Dismiss, ToggleAi, StopAi, ClearShell]
 );
 
 /// 画面に出すアプリの名前。
@@ -73,6 +73,10 @@ pub fn init_with(store: malakt_core::Store, ai: AiConfig, cx: &mut App) {
         KeyBinding::new("cmd-l", LockNow, None),
         #[cfg(not(target_os = "macos"))]
         KeyBinding::new("ctrl-l", LockNow, None),
+        // シェルの中では、Ctrl+L は画面を消す。場所を決めていない割り当て（ロック）は
+        // いちばん深い場所と同じ強さなので、入力行の中の分も、ロックより後に置く
+        KeyBinding::new("ctrl-l", ClearShell, Some("AiShell")),
+        KeyBinding::new("ctrl-l", ClearShell, Some("AiShell > Input")),
         KeyBinding::new("escape", Dismiss, Some("MainView")),
     ]);
     cx.on_action(|_: &NewWindow, cx| {

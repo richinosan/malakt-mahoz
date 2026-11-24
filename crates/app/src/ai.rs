@@ -911,7 +911,9 @@ impl Session {
         cx: &mut AsyncApp,
     ) -> std::io::Result<Output> {
         let dropped = || std::io::Error::other("チャットが閉じられました");
-        let cwd = this.read_with(cx, |s, _| s.cwd.clone()).map_err(|_| dropped())?;
+        let cwd = this
+            .read_with(cx, |s, _| s.cwd.clone())
+            .map_err(|_| dropped())?;
         if let Some(target) = cd_target(command) {
             let next = resolve_dir(&cwd, target);
             let moved = next.as_ref().is_ok_and(|dir| dir.is_dir());

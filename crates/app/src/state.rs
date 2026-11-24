@@ -2069,7 +2069,25 @@ bundled_icons! {
         "graduation-cap",
         "shopping-cart",
     ],
-    other: ["settings", "trash", "ellipsis", "plus", "download", "upload"],
+    other: [
+        "settings",
+        "trash",
+        "ellipsis",
+        "plus",
+        "download",
+        "upload",
+        "x",
+        "message-square-plus",
+        "picture-in-picture-2",
+        "panel-right",
+        "copy",
+        "eraser",
+        "square",
+        "arrow-up",
+        "refresh-cw",
+        "check",
+        "play",
+    ],
 }
 
 /// アイコンのファイルの場所。[`Assets`] が読む。
