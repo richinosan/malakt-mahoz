@@ -1,6 +1,6 @@
 # malakt-mahoz
 
-オフラインで使うタスク管理ツールです。Rust と [gpui](https://www.gpui.rs/) で書かれていて、macOS・Windows・Linux で動きます。データはすべて手元の SQLite に保存し、通信はしません。
+オフラインで使うタスク管理ツールです。Rust と [gpui](https://www.gpui.rs/) で書かれていて、macOS・Windows・Linux で動きます。データはすべて手元の SQLite に保存します。通信するのは、AI チャットに API キーを入れて使うときだけです。
 
 ## できること
 
@@ -33,12 +33,26 @@ sudo apt-get install clang pkg-config libxcb1-dev libxkbcommon-dev libxkbcommon-
 ```
 
 データベースは OS のデータ用フォルダの `malakt-mahoz/data.sqlite3` に作ります。環境変数 `MALAKT_MAHOZ_DB` で場所を変えられます。
+- **AI チャット**（任意）: 右に開くチャットで、AI にタスクの追加や整理を頼めます（`Ctrl/⌘ + J`）。下の「AI チャット」を参照
+
+## AI チャット
+
+API キーを入れたときだけ動きます。キーがなければ、どこにも通信しません。
+
+- **対応するサービス**: Claude（Anthropic API）、ChatGPT（OpenAI API）、OpenCode、OpenCode Go、Cursor（Cursor の CLI `agent` を使います）。モデルと effort（考える深さ）はチャットの「設定」で選べます
+- **API キー**: OS のキーチェーン（macOS のキーチェーン、Windows の資格情報マネージャー、Linux の Secret Service）に保存します。データベースにもエクスポートの zip にも入りません。環境変数（`ANTHROPIC_API_KEY`・`OPENAI_API_KEY`・`OPENCODE_API_KEY`・`CURSOR_API_KEY`）でも渡せます
+- **タスクの操作**: AI は、タスク・ワークスペース・担当者の一覧と作成、タスクの書き換え・移動・コメントができます。タスクの削除は、実行の前に確認が出ます
+- **GitHub のリンク**: メッセージに GitHub のリンク（issue、プルリクエスト、ファイル、コミット、リポジトリ）を書くと、`gh` コマンドで中身を取ってきて AI に渡します。`gh` がなければ、公開されているものを GitHub の API から取ります
+- **シェル**: AI がコマンドを実行するときは、先に確認が出ます。コマンドと出力はチャットの右の「AI のシェル」に出ます。`Ctrl + C` か「強制終了」で、実行中のコマンドを子プロセスごと止めます
+- **ウィンドウ**: チャットもシェルも「別ウィンドウ」で切り離せ、「右に戻す」で戻せます
+- **ディスク**: 会話とシェルの出力はメモリの中だけに置き、ディスクには書きません。シェルの表示は 4,000 行まで、AI に渡す出力は 20,000 文字までです
 
 ## 構成
 
 | クレート | 役割 |
 | --- | --- |
 | `crates/core`（`malakt-core`） | データとロジック。SQLite への保存、zip の読み書き、ロック、絞り込みと並べ替え。画面に依存しません |
+| `crates/ai`（`malakt-ai`） | AI とのやり取り。各サービスへのリクエスト、キーの保存、AI に渡すタスク操作、GitHub の取得、コマンドの実行。画面に依存しません |
 | `crates/app`（`malakt-mahoz`） | gpui の画面。状態は `state.rs`、描画は `render.rs` |
 
 画面に依存する部分を `app` に閉じ込めているので、`core` はそのままほかの画面からも使えます。
@@ -77,7 +91,7 @@ mise run mutants    # ミューテーションテスト（cargo-mutants が必�
 ```
 
 - **ユニットテスト**: 各モジュールの中にあります
-- **シナリオテスト**: `crates/core/tests/scenario.rs` は、作成からエクスポート・インポートまでの流れを通します。`crates/app/tests/ui.rs` は、ヘッドレスのウィンドウを実際に開き、クリックと入力で操作して確かめます
+- **シナリオテスト**: `crates/core/tests/scenario.rs` は、作成からエクスポート・インポートまでの流れを通します。`crates/app/tests/ui.rs` は、ヘッドレスのウィンドウを実際に開き、クリックと入力で操作して確かめます。`crates/app/tests/ai.rs` は、AI の返事だけを差し替えて、チャット・確認・シェル・別ウィンドウを同じように操作して確かめます
 - **CI**: プルリクエストごとに、Linux・macOS・Windows で全部のテストを実行します
 - **ミューテーションテスト**: 週 1 回、cargo-mutants を実行し、生き残ったミュータントを分析してテストを足すプルリクエストを作ります（GitHub Actions の外で、定期実行のタスクとして動かしています）
 - **AI シナリオテスト**: 週 1 回、まだ確かめられていない使い方を AI が探し、シナリオテストを足します。不具合を見つけたら issue にします（同じく定期実行のタスクです）

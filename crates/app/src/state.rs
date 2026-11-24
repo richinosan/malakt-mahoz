@@ -11,6 +11,8 @@ use malakt_core::{
     TaskFilter, Workspace,
 };
 
+use crate::ai::{self, Session};
+use crate::ai_view::{AiPane, PaneMode};
 use crate::db::{self, Db};
 
 /// 左のメニューで選んでいる場所。
@@ -111,6 +113,10 @@ pub struct MainView {
     pub error: Option<SharedString>,
     pub notice: Option<SharedString>,
     pub sidebar_open: bool,
+    /// このウィンドウの右に AI チャットを出しているか。
+    pub ai_open: bool,
+    pub ai_pane: Option<Entity<AiPane>>,
+    pub ai_session: Entity<Session>,
     pub today: String,
     pub inputs: Inputs,
     _subscriptions: Vec<Subscription>,
@@ -149,7 +155,12 @@ impl MainView {
             status_comment: area(window, cx, "コメントを書く"),
         };
 
-        let mut subs = vec![cx.observe(&db, |this, _, cx| this.reload(cx))];
+        let ai_session = ai::shared(cx);
+        let mut subs = vec![
+            cx.observe(&db, |this, _, cx| this.reload(cx)),
+            // チャットを別ウィンドウに出した・戻したときに、右の表示を合わせる
+            cx.observe(&ai_session, |_, _, cx| cx.notify()),
+        ];
         macro_rules! on_enter {
             ($field:ident, $method:ident) => {
                 subs.push(cx.subscribe_in(
@@ -233,6 +244,9 @@ impl MainView {
             error: None,
             notice: None,
             sidebar_open: true,
+            ai_open: false,
+            ai_pane: None,
+            ai_session,
             today: view::today(),
             inputs,
             _subscriptions: subs,
@@ -932,6 +946,61 @@ impl MainView {
         if let Some(manifest) = self.write(cx, |s| archive::import_from_path(s, path)) {
             self.notice =
                 Some(format!("{} 件のタスクを取り込みました。", manifest.counts.tasks).into());
+        }
+    }
+
+    // ---- AI チャット ----
+
+    /// AI チャットを開く・閉じる。別ウィンドウに出しているときは、そのウィンドウを手前に出す。
+    pub fn toggle_ai(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(handle) = self.ai_session.read(cx).chat_window {
+            if handle
+                .update(cx, |_, window, _| window.activate_window())
+                .is_ok()
+            {
+                return;
+            }
+            // そのウィンドウはもうない
+            self.ai_session.update(cx, |s, _| s.chat_window = None);
+        }
+        self.ai_open = !self.ai_open;
+        if self.ai_open {
+            let pane = match &self.ai_pane {
+                Some(pane) => pane.clone(),
+                None => {
+                    let main = cx.weak_entity();
+                    let pane = cx.new(|cx| AiPane::new(PaneMode::Docked, Some(main), window, cx));
+                    self.ai_pane = Some(pane.clone());
+                    pane
+                }
+            };
+            pane.update(cx, |pane, cx| pane.focus_input(window, cx));
+        }
+        cx.notify();
+    }
+
+    /// このウィンドウの右に、チャットを出すか。
+    pub fn ai_docked(&self, cx: &App) -> bool {
+        self.ai_open && self.ai_session.read(cx).chat_window.is_none()
+    }
+
+    /// AI に伝える、ユーザーが今開いている場所。
+    pub fn ai_place(&self) -> String {
+        let place = match &self.nav {
+            Nav::Home => "ユーザーはホームを開いています。".to_owned(),
+            Nav::All => "ユーザーは「すべてのタスク」を開いています。".to_owned(),
+            Nav::Unfiled => "ユーザーは「未所属」のタスクの一覧を開いています。".to_owned(),
+            Nav::Workspace(id) => format!(
+                "ユーザーはワークスペース「{}」（ID: {id}）を開いています。場所を言わずにタスクを作るよう頼まれたら、ここに作ってください。",
+                self.workspace_name(Some(id))
+            ),
+        };
+        match &self.detail {
+            Some(detail) => format!(
+                "{place}詳細を開いているタスクは「{}」（ID: {}）です。",
+                detail.task.title, detail.task.id
+            ),
+            None => place,
         }
     }
 

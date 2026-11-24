@@ -12,8 +12,10 @@ use gpui_kit::*;
 use malakt_core::view::{self, AssigneeFilter, DueState, Priority as Prio, Sort, Tab};
 use malakt_core::{Status, Task as Todo};
 
+use crate::ai::ShellPlace;
+use crate::ai_view::{docked_width, TASKS_MIN};
 use crate::state::{Editing, MainView, Modal, Nav};
-use crate::{Dismiss, LockNow, NewWindow};
+use crate::{Dismiss, LockNow, NewWindow, ToggleAi};
 
 const SIDEBAR_WIDTH: Pixels = px(248.);
 const PANEL_WIDTH: Pixels = px(480.);
@@ -249,6 +251,10 @@ impl MainView {
                     }),
             )
             .child(div().h_px().bg(theme.sidebar_border))
+            .child(
+                action("ai-toggle", "AI チャット")
+                    .on_click(cx.listener(|this, _, window, cx| this.toggle_ai(window, cx))),
+            )
             .child(
                 action("open-people", "担当者")
                     .on_click(cx.listener(|this, _, window, cx| this.open_people(window, cx))),
@@ -2054,9 +2060,16 @@ impl Render for MainView {
             return self.render_lock_screen(cx).into_any_element();
         }
         let theme = cx.theme().clone();
-        let width = window.viewport_size().width;
+        let window_width = window.viewport_size().width;
+        // 右に AI チャットを置いた分、タスクの画面は狭くなる
+        let ai = self.ai_docked(cx).then(|| self.ai_pane.clone()).flatten();
+        let ai_width = ai.as_ref().and_then(|_| {
+            let shell = self.ai_session.read(cx).shell_place == ShellPlace::Docked;
+            docked_width(window_width, shell)
+        });
+        let width = window_width - ai_width.unwrap_or(px(0.));
         // 狭いウィンドウでは左のメニューをたたみ、詳細は全面のシートにする
-        let wide = width >= px(860.);
+        let wide = width >= TASKS_MIN;
         let sidebar = wide || self.sidebar_open && self.panel.is_none();
         let main_width = if wide { width - SIDEBAR_WIDTH } else { width };
         let table = main_width >= px(720.);
@@ -2072,17 +2085,13 @@ impl Render for MainView {
             }
         };
 
-        div()
-            .id("main-view")
-            .key_context("MainView")
-            .track_focus(&self.focus)
-            .on_action(cx.listener(|this, _: &Dismiss, _, cx| this.dismiss(cx)))
-            .size_full()
+        let tasks = div()
+            .flex_1()
+            .min_w_0()
+            .h_full()
             .relative()
             .flex()
             .flex_row()
-            .bg(theme.background)
-            .text_color(theme.foreground)
             .when(sidebar, |d| {
                 d.child(self.render_sidebar(cx).when(!wide, |s| s.w_full()))
             })
@@ -2107,7 +2116,22 @@ impl Render for MainView {
                     })
                     .child(main),
             )
-            .children(self.render_panel(sheet, cx))
+            .children(self.render_panel(sheet, cx));
+
+        div()
+            .id("main-view")
+            .key_context("MainView")
+            .track_focus(&self.focus)
+            .on_action(cx.listener(|this, _: &Dismiss, _, cx| this.dismiss(cx)))
+            .on_action(cx.listener(|this, _: &ToggleAi, window, cx| this.toggle_ai(window, cx)))
+            .size_full()
+            .relative()
+            .flex()
+            .flex_row()
+            .bg(theme.background)
+            .text_color(theme.foreground)
+            .child(tasks)
+            .children(ai)
             .children(self.render_modal(cx))
             .when_some(
                 self.error

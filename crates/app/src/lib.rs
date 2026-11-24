@@ -1,5 +1,7 @@
 //! malakt-mahoz の画面。gpui で描く。
 
+pub mod ai;
+pub mod ai_view;
 pub mod db;
 mod render;
 pub mod state;
@@ -8,10 +10,15 @@ use std::path::PathBuf;
 
 use gpui_kit::*;
 
+pub use ai::AiConfig;
+pub use ai_view::{AiPane, PaneMode};
 pub use db::{Db, Shared};
 pub use state::{MainView, Modal, Nav};
 
-actions!(malakt, [NewWindow, Quit, LockNow, Dismiss]);
+actions!(
+    malakt,
+    [NewWindow, Quit, LockNow, Dismiss, ToggleAi, StopAi]
+);
 
 /// データベースの場所。`MALAKT_MAHOZ_DB` で変えられる。
 pub fn database_path() -> PathBuf {
@@ -27,9 +34,22 @@ pub fn database_path() -> PathBuf {
 
 /// アプリ全体の準備。ウィンドウを開く前に 1 回呼ぶ。
 pub fn init(store: malakt_core::Store, cx: &mut App) {
+    init_with(store, AiConfig::default(), cx);
+}
+
+/// AI の外とのやり取り（API、キーチェーン、gh）を差し替えて準備する。テスト用。
+pub fn init_with(store: malakt_core::Store, ai: AiConfig, cx: &mut App) {
     gpui_kit::init(cx);
     db::init(store, cx);
+    ai::init(ai, cx);
     cx.bind_keys([
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-j", ToggleAi, Some("MainView")),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-j", ToggleAi, Some("MainView")),
+        // 入力欄の中では、Ctrl+C はコピーのまま
+        KeyBinding::new("ctrl-c", StopAi, Some("AiChat")),
+        KeyBinding::new("ctrl-c", StopAi, Some("AiShell")),
         #[cfg(target_os = "macos")]
         KeyBinding::new("cmd-n", NewWindow, None),
         #[cfg(not(target_os = "macos"))]
@@ -53,6 +73,7 @@ pub fn init(store: malakt_core::Store, cx: &mut App) {
         name: "malakt-mahoz".into(),
         items: vec![
             MenuItem::action("新しいウィンドウ", NewWindow),
+            MenuItem::action("AI チャット", ToggleAi),
             MenuItem::action("今すぐロック", LockNow),
             MenuItem::separator(),
             MenuItem::action("終了", Quit),
@@ -81,4 +102,29 @@ pub fn open_main_window(cx: &mut App) -> Result<(AnyWindowHandle, Entity<MainVie
     gpui_kit::open_window(options, cx, |window, cx| {
         cx.new(|cx| MainView::new(window, cx))
     })
+}
+
+/// AI チャット、またはシェルだけのウィンドウを開く。
+pub fn open_ai_window(mode: PaneMode, cx: &mut App) -> Result<AnyWindowHandle> {
+    let (title, window_size) = match mode {
+        PaneMode::ShellWindow => ("AI のシェル - malakt-mahoz", size(px(640.), px(480.))),
+        _ => ("AI チャット - malakt-mahoz", size(px(860.), px(720.))),
+    };
+    let offset = px(28.) * (cx.windows().len() % 8) as f32;
+    let options = WindowOptions {
+        window_bounds: Some(WindowBounds::Windowed(Bounds {
+            origin: point(px(160.) + offset, px(100.) + offset),
+            size: window_size,
+        })),
+        window_min_size: Some(size(px(320.), px(280.))),
+        titlebar: Some(TitlebarOptions {
+            title: Some(title.into()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    gpui_kit::open_window(options, cx, |window, cx| {
+        cx.new(|cx| AiPane::new(mode, None, window, cx))
+    })
+    .map(|(handle, _)| handle)
 }
