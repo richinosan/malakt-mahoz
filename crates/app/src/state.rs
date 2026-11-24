@@ -232,7 +232,7 @@ impl MainView {
             modal: Modal::None,
             error: None,
             notice: None,
-            sidebar_open: true,
+            sidebar_open: false,
             today: view::today(),
             inputs,
             _subscriptions: subs,
@@ -352,6 +352,8 @@ impl MainView {
     // ---- 移動 ----
 
     pub fn go(&mut self, nav: Nav, cx: &mut Context<Self>) {
+        // 狭いウィンドウでは、行き先を選んだらメニューを閉じて中身を見せる
+        self.sidebar_open = false;
         if self.nav != nav {
             self.nav = nav;
             self.selected.clear();
