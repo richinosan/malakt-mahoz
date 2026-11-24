@@ -35,8 +35,14 @@ fn open(cx: &mut TestAppContext, window_size: Size<Pixels>) -> (AnyWindowHandle,
     })
 }
 
+/// ウィンドウの大きさ。画面の拡大率に合わせて、同じ見え方になる大きさにする。
+fn win(width: f32, height: f32) -> Size<Pixels> {
+    let scale = malakt_mahoz::UI_SCALE;
+    size(px(width * scale), px(height * scale))
+}
+
 fn wide() -> Size<Pixels> {
-    size(px(1280.), px(800.))
+    win(1280., 800.)
 }
 
 /// 画面を操作する。
@@ -232,7 +238,7 @@ fn nested_workspaces_and_filing_later(cx: &mut TestAppContext) {
 fn windows_share_changes(cx: &mut TestAppContext) {
     start(cx);
     let (first, first_view) = open(cx, wide());
-    let (second, second_view) = open(cx, size(px(900.), px(700.)));
+    let (second, second_view) = open(cx, win(900., 700.));
     cx.update(|cx| {
         first_view.update(cx, |v, cx| v.go(Nav::All, cx));
         second_view.update(cx, |v, cx| v.go(Nav::All, cx));
@@ -389,11 +395,7 @@ fn every_screen_renders_at_any_size(cx: &mut TestAppContext) {
             s.set_task_status(&t.id, Status::InProcess).unwrap();
         })
     });
-    for window_size in [
-        size(px(380.), px(520.)),
-        size(px(900.), px(600.)),
-        size(px(1600.), px(1000.)),
-    ] {
+    for window_size in [win(380., 520.), win(900., 600.), win(1600., 1000.)] {
         let (window, view) = open(cx, window_size);
         let (ws, task) = store(cx, |s| {
             (
@@ -476,7 +478,7 @@ fn every_screen_renders_at_any_size(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn narrow_window_menu_opens_and_closes(cx: &mut TestAppContext) {
     start(cx);
-    let (window, view) = open(cx, size(px(520.), px(800.)));
+    let (window, view) = open(cx, win(520., 800.));
 
     // 最初はメニューが閉じている。メニューから一覧へ移ると、すぐタスクを足せる
     assert!(!cx.update(|cx| view.read(cx).sidebar_open));
@@ -613,7 +615,7 @@ fn assignee_roles_and_per_person_completion(cx: &mut TestAppContext) {
 fn comments_edit_mention_review_and_report(cx: &mut TestAppContext) {
     start(cx);
     // コメント欄は詳細の下のほうにあるので、縦に長いウィンドウで開く
-    let (window, view) = open(cx, size(px(1280.), px(2400.)));
+    let (window, view) = open(cx, win(1280., 2400.));
     let sato = cx.update(|cx| {
         view.update(cx, |v, cx| {
             v.write(cx, |s| {
@@ -774,7 +776,7 @@ fn comments_edit_mention_review_and_report(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn attachments_add_save_and_delete(cx: &mut TestAppContext) {
     start(cx);
-    let (window, view) = open(cx, size(px(1280.), px(2400.)));
+    let (window, view) = open(cx, win(1280., 2400.));
     cx.update(|cx| {
         view.update(cx, |v, cx| {
             v.write(cx, |s| {
@@ -863,7 +865,7 @@ fn attachments_add_save_and_delete(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn workspace_defaults_fill_new_tasks(cx: &mut TestAppContext) {
     start(cx);
-    let (window, view) = open(cx, size(px(1280.), px(2400.)));
+    let (window, view) = open(cx, win(1280., 2400.));
     let (ws, sato) = cx.update(|cx| {
         view.update(cx, |v, cx| {
             v.write(cx, |s| {
@@ -967,7 +969,7 @@ fn workspace_defaults_fill_new_tasks(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn task_shown_in_two_workspaces(cx: &mut TestAppContext) {
     start(cx);
-    let (window, view) = open(cx, size(px(1280.), px(2400.)));
+    let (window, view) = open(cx, win(1280., 2400.));
     let (event, press) = cx.update(|cx| {
         view.update(cx, |v, cx| {
             v.write(cx, |s| {
@@ -1032,7 +1034,7 @@ fn task_shown_in_two_workspaces(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn bulk_changes_and_full_new_task_form(cx: &mut TestAppContext) {
     start(cx);
-    let (window, view) = open(cx, size(px(1280.), px(2400.)));
+    let (window, view) = open(cx, win(1280., 2400.));
     let sato = cx.update(|cx| {
         view.update(cx, |v, cx| {
             v.write(cx, |s| {
@@ -1258,7 +1260,7 @@ fn completion_ticket_issued_here_and_redeemed_by_command(cx: &mut TestAppContext
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("data.sqlite3");
     cx.update(|cx| malakt_mahoz::init(Store::open(&path).unwrap(), cx));
-    let (window, view) = open(cx, size(px(1280.), px(2400.)));
+    let (window, view) = open(cx, win(1280., 2400.));
     let id = cx.update(|cx| {
         view.update(cx, |v, cx| {
             v.write(cx, |s| {
@@ -1390,7 +1392,7 @@ fn self_is_always_there_and_workspaces_take_icons(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn quick_add_row_takes_status_and_priority(cx: &mut TestAppContext) {
     start(cx);
-    let (window, view) = open(cx, size(px(1280.), px(800.)));
+    let (window, view) = open(cx, win(1280., 800.));
     ui(cx, window, |window, cx| window.click("nav-all", cx));
 
     // 優先度のメニューの 1 つ目は「高」
@@ -1459,4 +1461,33 @@ fn title_is_edited_in_place(cx: &mut TestAppContext) {
     });
     assert_eq!(all_tasks(cx)[0].title, "牛乳を買うと卵");
     assert!(cx.update(|cx| view.read(cx).editing.is_none()));
+}
+
+/// 上のバーの配色のボタンで、画面の色がその場で変わり、選択が保存される。
+#[gpui_kit::test]
+fn theme_buttons_switch_the_colors(cx: &mut TestAppContext) {
+    use gpui_kit::component::{ActiveTheme, Theme};
+    start(cx);
+    let (window, _view) = open(cx, wide());
+    let look = |cx: &mut TestAppContext| {
+        cx.update(|cx| (Theme::global(cx).mode.is_dark(), cx.theme().background))
+    };
+    let saved = |cx: &mut TestAppContext| store(cx, |s| s.setting("theme").unwrap());
+
+    ui(cx, window, |window, cx| window.click(("theme", 1usize), cx));
+    let (dark, dark_bg) = look(cx);
+    assert!(dark);
+    assert_eq!(saved(cx).as_deref(), Some("dark"));
+
+    ui(cx, window, |window, cx| window.click(("theme", 0usize), cx));
+    let (dark, light_bg) = look(cx);
+    assert!(!dark);
+    assert_ne!(dark_bg, light_bg);
+    assert_eq!(saved(cx).as_deref(), Some("light"));
+
+    // 行き来しても毎回変わる
+    ui(cx, window, |window, cx| window.click(("theme", 1usize), cx));
+    assert_eq!(look(cx), (true, dark_bg));
+    ui(cx, window, |window, cx| window.click(("theme", 2usize), cx));
+    assert_eq!(saved(cx).as_deref(), Some("system"));
 }

@@ -3,7 +3,7 @@
 use std::ops::Range;
 
 use gpui_kit::base::TestSupportExt;
-use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::{Input, Textarea};
 use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu, PopupMenu, PopupMenuItem};
@@ -19,8 +19,13 @@ use crate::state::{CommentMode, Detail, Editing, MainView, Modal, Nav};
 use crate::{Dismiss, LockNow, NewWindow};
 use malakt_core::Id;
 
+/// 参照する寸法（CSS の px）を、画面全体の拡大率に合わせる。
+const fn px(value: f32) -> Pixels {
+    gpui_kit::px(value * crate::UI_SCALE)
+}
+
 const SIDEBAR_WIDTH: Pixels = px(256.);
-const HEADER_HEIGHT: Pixels = px(72.);
+const HEADER_HEIGHT: Pixels = px(84.);
 const PANEL_WIDTH: Pixels = px(544.);
 const ROW_HEIGHT: Pixels = px(60.);
 const CARD_HEIGHT: Pixels = px(96.);
@@ -29,6 +34,26 @@ const COL_PRIORITY: Pixels = px(84.);
 const COL_ASSIGNEE: Pixels = px(160.);
 const COL_DUE: Pixels = px(150.);
 const COL_UPDATED: Pixels = px(84.);
+
+/// 枠つきのボタン。乗せると淡い金、押している間ははっきり濃くなる。
+trait Framed {
+    fn framed(self, cx: &App) -> Self;
+}
+
+impl Framed for Button {
+    fn framed(self, cx: &App) -> Self {
+        let theme = cx.theme();
+        self.custom(
+            ButtonCustomVariant::new(cx)
+                .color(theme.background)
+                .foreground(theme.foreground)
+                .hover(theme.accent)
+                .active(theme.primary.opacity(0.4)),
+        )
+        .border_1()
+        .border_color(theme.border)
+    }
+}
 
 fn row() -> Div {
     div().flex().flex_row().items_center()
@@ -338,9 +363,10 @@ impl MainView {
                 .item(item("名前を変更", |this, id, window, cx| {
                     this.ask_workspace_name(None, Some(id), window, cx)
                 }))
-                .item(item("子を追加", |this, id, window, cx| {
-                    this.ask_workspace_name(Some(id), None, window, cx)
-                }))
+                .item(item(
+                    "サブワークスペースを追加",
+                    |this, id, window, cx| this.ask_workspace_name(Some(id), None, window, cx),
+                ))
                 .item(item("設定", |this, id, window, cx| {
                     this.open_workspace_settings(&id, window, cx)
                 }))
@@ -406,7 +432,7 @@ impl MainView {
                             .min_w_0()
                             .child(
                                 div()
-                                    .text_xl()
+                                    .text_lg()
                                     .font_weight(FontWeight::BOLD)
                                     .truncate()
                                     .child(crate::APP_NAME.to_uppercase()),
@@ -421,7 +447,7 @@ impl MainView {
                     .child(
                         Button::new("close-sidebar")
                             .icon(app_icon("x"))
-                            .outline()
+                            .framed(cx)
                             .tooltip("メニューを閉じる")
                             .on_click(
                                 cx.listener(move |this, _, _, cx| this.toggle_sidebar(wide, cx)),
@@ -569,7 +595,14 @@ impl MainView {
                             .ghost()
                             .small()
                             .tooltip(choice.label())
-                            .on_click(move |_, window, cx| crate::theme::set(choice, window, cx)),
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                if let Err(error) = crate::theme::set(choice, window, cx) {
+                                    this.error = Some(
+                                        format!("配色の選択を保存できませんでした。{error}").into(),
+                                    );
+                                }
+                                cx.notify();
+                            })),
                     ),
             );
         }
@@ -610,7 +643,7 @@ impl MainView {
                 .child(
                     Button::new("toggle-sidebar")
                         .icon(app_icon("menu"))
-                        .outline()
+                        .framed(cx)
                         .tooltip("メニュー")
                         .on_click(cx.listener(move |this, _, _, cx| this.toggle_sidebar(wide, cx))),
                 )
@@ -660,7 +693,7 @@ impl MainView {
                         .child(
                             Button::new("open-notices")
                                 .icon(app_icon("bell"))
-                                .outline()
+                                .framed(cx)
                                 .rounded(px(999.))
                                 .tooltip("通知")
                                 .on_click(cx.listener(|this, _, _, cx| {
@@ -686,7 +719,7 @@ impl MainView {
                 .child(
                     Button::new("open-menu")
                         .icon(app_icon("settings"))
-                        .outline()
+                        .framed(cx)
                         .rounded(px(999.))
                         .tooltip("設定")
                         .dropdown_menu(move |menu, _, _| {
@@ -803,7 +836,7 @@ impl MainView {
                         .size_full(),
                     )
             })
-            .child(div().mt_6().child(heading("ワークスペースのタスク")))
+            .child(div().mt_6().child(heading("ワークスペース")))
             .child(row().flex_wrap().items_start().gap_3().children(
                 roots.into_iter().enumerate().map(|(ix, ws)| {
                     let id = ws.id.clone();
@@ -973,7 +1006,7 @@ impl MainView {
             .child(field_label(label, cx))
             .child(
                 Button::new(id)
-                    .outline()
+                    .framed(cx)
                     .w_full()
                     .child(
                         row()
@@ -1263,7 +1296,7 @@ impl MainView {
                 .when(has_children, |d| {
                     d.child(
                         Checkbox::new("include-descendants")
-                            .label("子のワークスペースも含める")
+                            .label("サブワークスペースも含める")
                             .checked(self.include_descendants)
                             .on_click(cx.listener(|this, checked: &bool, _, cx| {
                                 this.include_descendants = *checked;
@@ -1279,7 +1312,7 @@ impl MainView {
                     Button::new("ws-settings")
                         .icon(app_icon("sliders-horizontal"))
                         .tooltip("タスク追加時の既定値")
-                        .outline()
+                        .framed(cx)
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.open_workspace_settings(&d, window, cx)
                         })),
@@ -1288,21 +1321,21 @@ impl MainView {
                     Button::new("ws-export")
                         .icon(app_icon("download"))
                         .tooltip("エクスポート")
-                        .outline()
+                        .framed(cx)
                         .on_click(cx.listener(|this, _, window, cx| this.export(window, cx))),
                 )
                 .child(
                     Button::new("ws-import")
                         .icon(app_icon("upload"))
                         .tooltip("インポート")
-                        .outline()
+                        .framed(cx)
                         .on_click(cx.listener(|this, _, window, cx| this.import(window, cx))),
                 )
                 .child(
                     Button::new("ws-delete")
                         .icon(app_icon("trash"))
                         .tooltip("削除")
-                        .outline()
+                        .framed(cx)
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.modal = Modal::DeleteWorkspace(c.clone());
                             cx.notify();
@@ -1589,7 +1622,7 @@ impl MainView {
                     .text_xs()
                     .text_color(theme.muted_foreground)
                     .child(app_icon("link").xsmall())
-                    .child(format!("{} か所", task.linked_workspace_ids.len() + 1)),
+                    .child(format!("同期 {}", task.linked_workspace_ids.len() + 1)),
             );
         }
         let title = {
@@ -1734,7 +1767,7 @@ impl MainView {
                 menu.item(item("開く", |this, id, window, cx| {
                     this.open_panel(&id, window, cx)
                 }))
-                .item(item("状態を変える", |this, id, window, cx| {
+                .item(item("状態を変更", |this, id, window, cx| {
                     this.ask_status(&id, window, cx)
                 }))
                 .separator()
@@ -2077,7 +2110,7 @@ impl MainView {
                 let button = if primary {
                     button.primary()
                 } else {
-                    button.outline()
+                    button.framed(cx)
                 };
                 button.on_click(cx.listener(move |this, _, window, cx| {
                     this.ask_status(&id, window, cx);
@@ -2124,7 +2157,7 @@ impl MainView {
                             div()
                                 .text_xs()
                                 .text_color(theme.muted_foreground)
-                                .child("Ctrl/⌘+Enter で保存、Esc でやめます"),
+                                .child("Ctrl / ⌘ + Enter で保存、Esc でキャンセル"),
                         ),
                 )
         } else if task.description.is_empty() {
@@ -2431,7 +2464,7 @@ impl MainView {
                 d.child(
                     row().child(
                         Button::new("link-add")
-                            .label("ほかのワークスペースにも表示")
+                            .label("ほかのワークスペースと同期")
                             .ghost()
                             .xsmall()
                             .on_click(cx.listener(move |this, _, _, cx| {
@@ -2489,7 +2522,7 @@ impl MainView {
                             .when(resolved, |d| {
                                 d.child(
                                     Button::new(("thread-toggle", ix))
-                                        .label(if open { "たたむ" } else { "開く" })
+                                        .label(if open { "折りたたむ" } else { "開く" })
                                         .ghost()
                                         .xsmall()
                                         .on_click(cx.listener(move |this, _, _, cx| {
@@ -2606,7 +2639,7 @@ impl MainView {
                     Button::new("ticket-open")
                         .icon(app_icon("bookmark"))
                         .tooltip("完了チケット")
-                        .outline()
+                        .framed(cx)
                         .small()
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.open_ticket_dialog(&ticket_task, cx)
@@ -2616,7 +2649,7 @@ impl MainView {
                     Button::new("close-panel")
                         .icon(app_icon("x"))
                         .tooltip("閉じる")
-                        .outline()
+                        .framed(cx)
                         .small()
                         .on_click(cx.listener(|this, _, _, cx| this.close_panel(cx))),
                 );
@@ -2636,7 +2669,7 @@ impl MainView {
                             Button::new("history")
                                 .icon(app_icon("rotate-ccw-clock"))
                                 .label("変更履歴")
-                                .outline()
+                                .framed(cx)
                                 .small()
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.modal = Modal::History;
@@ -2677,7 +2710,7 @@ impl MainView {
                         .child(self.property("進捗", cx).child(percent))
                         .child(self.property("カテゴリ", cx).child(categories))
                         .child(self.property("親タスク", cx).child(parent))
-                        .child(self.property("場所", cx).child(workspace))
+                        .child(self.property("ワークスペース", cx).child(workspace))
                         .when_some(task.completed_at, |d, at| {
                             d.child(
                                 self.property("完了日時", cx)
@@ -2756,7 +2789,7 @@ impl MainView {
                                     .child(div().flex_1().min_w_0().truncate().child(text))
                                     .child(
                                         Button::new("comment-cancel")
-                                            .label("やめる")
+                                            .label("キャンセル")
                                             .ghost()
                                             .xsmall()
                                             .on_click(cx.listener(|this, _, window, cx| {
@@ -2890,7 +2923,7 @@ impl MainView {
 
     fn workspace_options(&self, cx: &mut Context<Self>) -> Div {
         let mut list = col().gap_1().child(
-            chip("move-unfiled", "未所属（どこにも入れない）", false, cx)
+            chip("move-unfiled", "未所属", false, cx)
                 .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.move_tasks_to(None, cx))),
         );
         let all = crate::state::build_tree(&self.workspaces, &Default::default());
@@ -2936,7 +2969,7 @@ impl MainView {
                     "ワークスペースの名前を変更".to_owned()
                 } else if let Some(parent) = parent {
                     format!(
-                        "「{}」の中にワークスペースを追加",
+                        "「{}」にサブワークスペースを追加",
                         self.workspace_name(Some(parent))
                     )
                 } else {
@@ -3044,7 +3077,7 @@ impl MainView {
                 let body = col()
                     .gap_3()
                     .child(muted(format!(
-                        "「{name}」と、その中のワークスペース・タスクをすべて削除します。元に戻せません。"
+                        "「{name}」と、そのサブワークスペースとタスクをすべて削除します。元に戻せません。"
                     )))
                     .child(
                         row().gap_2().justify_end().child(cancel(cx)).child(
@@ -3075,7 +3108,7 @@ impl MainView {
                     )))
                     .when(shared, |d| {
                         d.child(muted(
-                            "ほかのワークスペースにも表示しているタスクがあります。削除すると、すべてのワークスペースから消えます。"
+                            "ほかのワークスペースと同期しているタスクがあります。削除すると、すべてのワークスペースから消えます。"
                                 .to_owned(),
                         ))
                     })
@@ -3083,7 +3116,7 @@ impl MainView {
                         row().gap_2().justify_end().child(cancel(cx)).when(shared, |d| {
                             d.child(
                                 Button::new("unlink-here")
-                                    .label("ここから外すだけ")
+                                    .label("このワークスペースから外す")
                                     .on_click(
                                         cx.listener(|this, _, _, cx| this.unlink_selected_here(cx)),
                                     ),
@@ -3301,7 +3334,7 @@ impl MainView {
                     .child(
                         col()
                             .gap_1()
-                            .child(div().text_sm().child("だれの分として"))
+                            .child(div().text_sm().child("完了にする担当者"))
                             .child(who),
                     )
                     .when_some(self.issued_ticket.as_ref(), |d, ticket| {
@@ -3314,7 +3347,7 @@ impl MainView {
                                 .child(
                                     div()
                                         .text_sm()
-                                        .child("発行しました。この文字列は、いましか表示されません。"),
+                                        .child("発行しました。チケットは今だけ表示されます。"),
                                 )
                                 .child(
                                     div()
@@ -3344,7 +3377,7 @@ impl MainView {
                         row()
                             .gap_2()
                             .items_center()
-                            .child(muted(format!("引き換えていないチケット: {active} 枚")))
+                            .child(muted(format!("未使用のチケット: {active} 枚")))
                             .child(div().flex_1())
                             .when(active > 0, |d| {
                                 d.child(
@@ -3456,14 +3489,14 @@ impl MainView {
                                 .child(cancel(cx))
                                 .child(
                                     Button::new("bulk-due-clear")
-                                        .label("期限をなくす")
+                                        .label("期限なしにする")
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             this.submit_bulk_due(true, cx)
                                         })),
                                 )
                                 .child(
                                     Button::new("bulk-due-submit")
-                                        .label("決める")
+                                        .label("変更する")
                                         .primary()
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             this.submit_bulk_due(false, cx)
@@ -3616,10 +3649,10 @@ impl MainView {
                         d.child(col().gap_1().child(label("担当者")).child(assignees))
                     })
                     .child(field(
-                        "開始",
+                        "開始日",
                         Input::new(&self.inputs.nt_start)
                             .id("nt-start")
-                            .aria_label("開始"),
+                            .aria_label("開始日"),
                     ))
                     .child(field(
                         "期限",
@@ -3699,9 +3732,7 @@ impl MainView {
                 let body = col()
                     .gap_3()
                     .when(!any_same && !any_other, |d| {
-                        d.child(muted(
-                            "表示できるワークスペースは、ほかにありません。".to_owned(),
-                        ))
+                        d.child(muted("同期できるワークスペースがありません。".to_owned()))
                     })
                     .child(
                         div()
@@ -3715,12 +3746,12 @@ impl MainView {
                                         d.child(muted("基準日が同じ".to_owned())).child(same)
                                     })
                                     .when(any_same && any_other, |d| {
-                                        d.child(muted("そのほか".to_owned()))
+                                        d.child(muted("その他".to_owned()))
                                     })
                                     .child(others),
                             ),
                     );
-                self.dialog("ほかのワークスペースにも表示", body, cx)
+                self.dialog("ほかのワークスペースと同期", body, cx)
             }
             Modal::WorkspaceSettings(id) => {
                 let theme = cx.theme().clone();
@@ -3746,15 +3777,15 @@ impl MainView {
                     assignees = assignees.child(muted("担当者はまだいません。".to_owned()));
                 }
                 let due_kinds = [
-                    ("def-due-none", "入れない", DueRule::None),
+                    ("def-due-none", "なし", DueRule::None),
                     (
                         "def-due-relative",
-                        "基準日から",
+                        "基準日からの日数",
                         DueRule::Relative { days: 0 },
                     ),
                     (
                         "def-due-fixed",
-                        "決まった日",
+                        "日付を指定",
                         DueRule::Fixed {
                             date: String::new(),
                         },
@@ -3776,7 +3807,7 @@ impl MainView {
                     DueRule::None => col(),
                     DueRule::Relative { .. } => col()
                         .gap_1()
-                        .child(muted("基準日からの日数（前は -7）と時刻".to_owned()))
+                        .child(muted("基準日からの日数と時刻".to_owned()))
                         .child(
                             Input::new(&self.inputs.def_days)
                                 .id("def-days")
@@ -3842,7 +3873,7 @@ impl MainView {
                 let form = col()
                     .gap_3()
                     .child(
-                        col().gap_1().child(label("基準日（開催日など）")).child(
+                        col().gap_1().child(label("基準日")).child(
                             Input::new(&self.inputs.ws_date)
                                 .id("ws-date")
                                 .aria_label("基準日"),
@@ -3875,7 +3906,7 @@ impl MainView {
                         d.child(
                             col()
                                 .gap_1()
-                                .child(label("一緒に表示するワークスペース"))
+                                .child(label("同期するワークスペース"))
                                 .child(links),
                         )
                     });
@@ -4012,7 +4043,8 @@ impl Render for MainView {
         } else {
             width
         };
-        let table = main_width >= px(720.);
+        // 表は、タイトルの列に読める幅が残るときだけ
+        let table = main_width >= px(880.);
         let sheet = width < px(1000.);
 
         let main = if !wide && sidebar {

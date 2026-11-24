@@ -56,7 +56,7 @@ const THEMES: &str = r##"{
       "name": "Malakt Mahoz Light",
       "mode": "light",
       "font.family": "LINE Seed JP",
-      "font.size": 14,
+      "font.size": 16,
       "radius": 8,
       "radius.lg": 12,
       "colors": {
@@ -75,6 +75,8 @@ const THEMES: &str = r##"{
         "secondary.foreground": "#3a3445",
         "secondary.hover.background": "#e4e1ea",
         "secondary.active.background": "#d9d5e1",
+        "button.hover.background": "#f7ead0",
+        "button.active.background": "#e6cf9c",
         "muted.background": "#ececed",
         "muted.foreground": "#5d5868",
         "accent.background": "#f7ead0",
@@ -138,7 +140,7 @@ const THEMES: &str = r##"{
       "name": "Malakt Mahoz Dark",
       "mode": "dark",
       "font.family": "LINE Seed JP",
-      "font.size": 14,
+      "font.size": 16,
       "radius": 8,
       "radius.lg": 12,
       "colors": {
@@ -157,6 +159,8 @@ const THEMES: &str = r##"{
         "secondary.foreground": "#e6e1ec",
         "secondary.hover.background": "#2b2733",
         "secondary.active.background": "#36313e",
+        "button.hover.background": "#3b3121",
+        "button.active.background": "#6a5630",
         "muted.background": "#262528",
         "muted.foreground": "#b1abba",
         "accent.background": "#3b3121",
@@ -245,14 +249,12 @@ pub fn init(cx: &mut App) {
     apply(choice(cx), None, cx);
 }
 
-/// 選択を保存して、すべてのウィンドウを塗り直す。
-pub fn set(choice: Choice, window: &mut Window, cx: &mut App) {
-    let saved = db::shared(cx).update(cx, |db, _| {
+/// すべてのウィンドウを塗り直して、選択を保存する。保存に失敗しても画面の色は変える。
+pub fn set(choice: Choice, window: &mut Window, cx: &mut App) -> malakt_core::Result<()> {
+    apply(choice, Some(window), cx);
+    db::shared(cx).update(cx, |db, _| {
         db.store.set_setting(SETTING, Some(choice.key()))
-    });
-    if saved.is_ok() {
-        apply(choice, Some(window), cx);
-    }
+    })
 }
 
 /// システムの外観が変わったとき。「システムに合わせる」のときだけ塗り直す。
@@ -278,4 +280,6 @@ fn apply(choice: Choice, window: Option<&mut Window>, cx: &mut App) {
         }
     };
     Theme::change(mode, None, cx);
+    // 配色を読み込むと文字の大きさが配色の値に戻るので、そのたびに拡大率を掛け直す
+    Theme::update(cx, |theme| theme.font_size *= crate::UI_SCALE);
 }
