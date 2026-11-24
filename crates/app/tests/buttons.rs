@@ -45,7 +45,14 @@ const NOT_BUTTONS: &[&str] = &[
 const PANEL_BAR: &[&str] = &["copy-link", "ticket-open", "close-panel"];
 
 /// 押さないもの。外のアプリで開く操作は、テストの土台では動かせない。
-const NEVER: &[&str] = &["att-open"];
+/// ウィンドウの最小化・最大化・閉じる（Windows のタイトルバー）は OS が受けるので、押しても画面は変わらない。
+const NEVER: &[&str] = &[
+    "att-open",
+    "window-minimize",
+    "window-maximize",
+    "window-restore",
+    "window-close",
+];
 
 /// ロックを設定したときだけ出るもの。ロックは tests/ui.rs で確かめる。
 const LOCK: &[&str] = &["lock-disable", "lock-save", "unlock"];
