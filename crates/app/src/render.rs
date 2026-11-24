@@ -19,7 +19,7 @@ use malakt_core::{Comment, DueRule, Role as Raci, Roles, Status, Task as Todo, W
 
 use crate::ai::ShellPlace;
 use crate::ai_view::{docked_width, TASKS_MIN};
-use crate::state::{Column, CommentMode, Detail, Editing, MainView, Modal, Nav};
+use crate::state::{Column, CommentMode, Detail, DropTarget, Editing, MainView, Modal, Nav};
 use crate::{Dismiss, LockNow, NewWindow, ToggleAi};
 use malakt_core::Id;
 
@@ -303,6 +303,25 @@ impl MainView {
             .into_any_element()
     }
 
+    /// ドラッグ中のタスクを落とせる場所にする。マウスが上にある間は色を付ける。
+    fn drop_zone(
+        &self,
+        el: Stateful<Div>,
+        target: DropTarget,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let Some(drag) = self.task_drag.as_ref().filter(|d| d.moved) else {
+            return el;
+        };
+        let theme = cx.theme();
+        let over = drag.over.as_ref().is_some_and(|(t, _)| *t == target);
+        el.rounded_md()
+            .when(over, |d| d.bg(theme.primary.opacity(0.25)))
+            .on_mouse_move(cx.listener(move |this, event: &MouseMoveEvent, _, cx| {
+                this.drag_task_over(target.clone(), event.position, cx)
+            }))
+    }
+
     /// 左のメニューを開く・閉じる。狭いウィンドウでは中身と入れ替えで出す。
     fn toggle_sidebar(&mut self, wide: bool, cx: &mut Context<Self>) {
         if wide {
@@ -400,21 +419,23 @@ impl MainView {
                     move |m, _, _| menu(m)
                 });
             tree = tree.child(
-                row()
-                    .id(("ws-row", ix))
-                    .group(group)
-                    .pl(px(12.) * node.depth as f32)
-                    .child(caret)
-                    .child(self.nav_item(
-                        ("ws", ix),
-                        workspace_icon(ws.icon.as_deref(), ws.color.as_deref()),
-                        ws.name.clone(),
-                        Nav::Workspace(id),
-                        cx,
-                    ))
-                    .child(more)
-                    // 右クリックでも同じメニューを出す
-                    .context_menu(move |m, _, _| menu(m)),
+                self.drop_zone(
+                    row().id(("ws-row", ix)).group(group),
+                    DropTarget::Workspace(Some(ws.id.clone())),
+                    cx,
+                )
+                .pl(px(12.) * node.depth as f32)
+                .child(caret)
+                .child(self.nav_item(
+                    ("ws", ix),
+                    workspace_icon(ws.icon.as_deref(), ws.color.as_deref()),
+                    ws.name.clone(),
+                    Nav::Workspace(id),
+                    cx,
+                ))
+                .child(more)
+                // 右クリックでも同じメニューを出す
+                .context_menu(move |m, _, _| menu(m)),
             );
         }
 
@@ -514,13 +535,16 @@ impl MainView {
                         Nav::All,
                         cx,
                     )))
-                    .child(row().child(self.nav_item(
-                        "nav-unfiled",
-                        app_icon("inbox"),
-                        "未所属",
-                        Nav::Unfiled,
-                        cx,
-                    )))
+                    .child(
+                        self.drop_zone(row().id("drop-unfiled"), DropTarget::Workspace(None), cx)
+                            .child(self.nav_item(
+                                "nav-unfiled",
+                                app_icon("inbox"),
+                                "未所属",
+                                Nav::Unfiled,
+                                cx,
+                            )),
+                    )
                     .child(
                         row()
                             .mt_3()
@@ -2069,6 +2093,10 @@ impl MainView {
                         })
                         .child(task.title.clone())
                         .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                            // ドラッグの終わりは、クリックにしない
+                            if this.task_drag.as_ref().is_some_and(|d| d.moved) {
+                                return;
+                            }
                             this.open_panel(&id, window, cx)
                         }))
                         .test_support(),
@@ -2134,11 +2162,51 @@ impl MainView {
 
         let view = cx.entity().downgrade();
         let menu_id = id.clone();
+        let drag = self.task_drag.as_ref().filter(|d| d.moved);
+        let dragged = drag.is_some_and(|d| d.id == id);
+        // 落とすと入る側の縁に線を出す
+        let drop_edge = drag.and_then(|d| {
+            let from = self
+                .visible
+                .iter()
+                .position(|&i| self.tasks[i].id == d.id)?;
+            let over = d
+                .over
+                .as_ref()
+                .is_some_and(|(t, _)| *t == DropTarget::Row(ix));
+            (over && from != ix).then_some(from > ix)
+        });
+        let drag_id = id.clone();
         let base = div()
             .id(("row", ix))
             .w_full()
+            .relative()
             .border_b_1()
             .border_color(theme.border)
+            .when(dragged, |d| d.opacity(0.4))
+            .when_some(drop_edge, |d, above| {
+                d.child(
+                    div()
+                        .absolute()
+                        .left_0()
+                        .right_0()
+                        .h(px(3.))
+                        .when(above, |d| d.top_0())
+                        .when(!above, |d| d.bottom_0())
+                        .bg(theme.primary),
+                )
+            })
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                    this.start_task_drag(&drag_id, event.position, cx)
+                }),
+            )
+            .when(drag.is_some(), |d| {
+                d.on_mouse_move(cx.listener(move |this, event: &MouseMoveEvent, _, cx| {
+                    this.drag_task_over(DropTarget::Row(ix), event.position, cx)
+                }))
+            })
             .when(active, |d| d.bg(theme.accent.opacity(0.4)))
             .when(!active, |d| d.hover(|s| s.bg(theme.muted.opacity(0.4))));
         let row_el = if table {
@@ -4783,6 +4851,20 @@ impl Render for MainView {
                     cx.listener(|this, _, _, cx| this.finish_column_resize(cx)),
                 )
             })
+            // タスクをドラッグしている間も同じ
+            .when(self.task_drag.is_some(), |d| {
+                d.on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
+                    if event.pressed_button == Some(MouseButton::Left) {
+                        this.drag_task(event.position, cx);
+                    } else {
+                        this.finish_task_drag(cx);
+                    }
+                }))
+                .on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, cx| this.finish_task_drag(cx)),
+                )
+            })
             .when(self.column_drag.is_some(), |d| {
                 d.on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
                     if event.pressed_button != Some(MouseButton::Left) {
@@ -4837,6 +4919,24 @@ impl Render for MainView {
                             .children(ai_over),
                     ),
             )
+            // ドラッグ中のタスクは、マウスに付いて動く
+            .children(self.task_drag.as_ref().filter(|d| d.moved).map(|drag| {
+                div()
+                    .absolute()
+                    .left(drag.at.x + px(10.))
+                    .top(drag.at.y + px(10.))
+                    .max_w(px(320.))
+                    .px_3()
+                    .py_2()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(theme.primary)
+                    .bg(theme.popover)
+                    .shadow_lg()
+                    .text_sm()
+                    .truncate()
+                    .child(drag.title.clone())
+            }))
             .children(self.render_modal(cx).map(|modal| {
                 if !self.motion {
                     return modal.into_any_element();

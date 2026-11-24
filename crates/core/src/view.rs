@@ -21,16 +21,19 @@ pub enum Sort {
     Created,
     Title,
     Status,
+    /// ドラッグで決めた順。
+    Manual,
 }
 
 impl Sort {
-    pub const ALL: [Sort; 6] = [
+    pub const ALL: [Sort; 7] = [
         Sort::Due,
         Sort::Priority,
         Sort::Updated,
         Sort::Created,
         Sort::Title,
         Sort::Status,
+        Sort::Manual,
     ];
 
     pub fn label(self) -> &'static str {
@@ -41,6 +44,7 @@ impl Sort {
             Sort::Created => "作成が新しい順",
             Sort::Title => "タイトル順",
             Sort::Status => "状態順",
+            Sort::Manual => "手動の順",
         }
     }
 }
@@ -190,6 +194,7 @@ pub fn apply(tasks: &[Task], query: &ListQuery, self_id: Option<&str>) -> Vec<us
             Sort::Created => b.created_at.cmp(&a.created_at),
             Sort::Title => a.title.to_lowercase().cmp(&b.title.to_lowercase()),
             Sort::Status => (a.status as u8).cmp(&(b.status as u8)),
+            Sort::Manual => a.position.cmp(&b.position),
         };
         if query.descending {
             order.reverse()
@@ -524,7 +529,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(ids(&tasks, &reversed, None), ["e", "a", "b", "c", "d"]);
-        assert_eq!(Sort::ALL.map(Sort::label).len(), 6);
+        assert_eq!(Sort::ALL.map(Sort::label).len(), 7);
         assert_eq!(Sort::Due.label(), "期限が近い順");
     }
 

@@ -874,6 +874,19 @@ impl Store {
         self.task(id)
     }
 
+    /// タスクを渡した順に並べ直す。手動の順は、この順で決まる。
+    pub fn set_task_order(&mut self, ids: &[Id]) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        for (position, id) in ids.iter().enumerate() {
+            tx.execute(
+                "UPDATE tasks SET position = ?2 WHERE id = ?1",
+                params![id, position as i64],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     /// 別のワークスペースの末尾に移す。`None` ならどこにも入れない状態に戻す。
     pub fn move_task(&mut self, id: &str, workspace_id: Option<&str>) -> Result<()> {
         let old = self.task(id)?;
