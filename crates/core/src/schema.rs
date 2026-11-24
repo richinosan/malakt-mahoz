@@ -131,6 +131,16 @@ const MIGRATIONS: &[&str] = &[
         data TEXT NOT NULL
     ) STRICT;
     "#,
+    // 6: 1 つのタスクを、ほかのワークスペースにも表示する
+    r#"
+    CREATE TABLE task_links (
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (task_id, workspace_id)
+    ) STRICT, WITHOUT ROWID;
+    CREATE INDEX task_links_workspace ON task_links(workspace_id);
+    "#,
 ];
 
 pub(crate) fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {

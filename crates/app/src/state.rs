@@ -47,6 +47,8 @@ pub enum Modal {
     Usage,
     /// ワークスペースの基準日と、タスク追加時の既定値
     WorkspaceSettings(Id),
+    /// タスクをほかのワークスペースにも表示する（表示先を選ぶ）
+    LinkTask(Id),
 }
 
 /// 詳細パネルで編集中の項目。
@@ -497,10 +499,7 @@ impl MainView {
         let workspace = self.current_workspace().map(str::to_owned);
         // ワークスペースの既定値（担当・期限・優先度・カテゴリ・説明の雛形）を入れてから作る
         if self
-            .write(cx, |s| {
-                let draft = s.draft_for(workspace.as_deref(), &title)?;
-                s.create_task(workspace.as_deref(), &draft)
-            })
+            .write(cx, |s| s.add_task_in(workspace.as_deref(), &title))
             .is_some()
         {
             Self::take(&self.inputs.quick_add.clone(), window, cx);
@@ -917,6 +916,56 @@ impl MainView {
             self.selected.clear();
             self.notice = Some(format!("{} 件のタスクを削除しました。", ids.len()).into());
         }
+    }
+
+    /// 選んだタスクを、いま見ているワークスペースから外す（タスクは消さない）。
+    /// ほかに出ている場所がないタスクは、そのまま残す。
+    pub fn unlink_selected_here(&mut self, cx: &mut Context<Self>) {
+        let Modal::DeleteTasks(ids) = self.modal.clone() else {
+            return;
+        };
+        let Some(here) = self.current_workspace().map(str::to_owned) else {
+            return;
+        };
+        let done = self.write(cx, |s| {
+            let mut removed = 0;
+            for id in &ids {
+                if s.task(id)?.places().count() > 1 {
+                    s.unlink_task(id, &here)?;
+                    removed += 1;
+                }
+            }
+            Ok(removed)
+        });
+        if let Some(removed) = done {
+            self.modal = Modal::None;
+            self.selected.clear();
+            let kept = ids.len() - removed;
+            self.notice = Some(if kept == 0 {
+                format!("{removed} 件をこのワークスペースから外しました。").into()
+            } else {
+                format!(
+                    "{removed} 件をこのワークスペースから外しました。ここにしかない {kept} 件は残しています。"
+                )
+                .into()
+            });
+        }
+    }
+
+    /// 開いているタスクを、ほかのワークスペースにも表示する。
+    pub fn link_task_to(&mut self, workspace: &str, cx: &mut Context<Self>) {
+        let Modal::LinkTask(id) = self.modal.clone() else {
+            return;
+        };
+        if self.write(cx, |s| s.link_task(&id, workspace)).is_some() {
+            self.modal = Modal::None;
+            let name = self.workspace_name(Some(workspace));
+            self.notice = Some(format!("「{name}」にも表示しました。").into());
+        }
+    }
+
+    pub fn unlink_task_from(&mut self, id: &str, workspace: &str, cx: &mut Context<Self>) {
+        self.write(cx, |s| s.unlink_task(id, workspace));
     }
 
     pub fn move_tasks_to(&mut self, workspace: Option<Id>, cx: &mut Context<Self>) {

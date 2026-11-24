@@ -180,11 +180,14 @@ impl Store {
     }
 
     /// 子孫のワークスペースと、その中のタスクもすべて消す。
+    /// ほかのワークスペースにも表示しているタスクは消さず、そちらに残す。
     pub fn delete_workspace(&mut self, id: &str) -> Result<()> {
-        let n = self
-            .conn
-            .execute("DELETE FROM workspaces WHERE id = ?1", params![id])?;
-        found(n, "ワークスペース", id)
+        let tx = self.conn.transaction()?;
+        crate::links::rehome_before_delete(&tx, id)?;
+        let n = tx.execute("DELETE FROM workspaces WHERE id = ?1", params![id])?;
+        found(n, "ワークスペース", id)?;
+        tx.commit()?;
+        Ok(())
     }
 
     /// 自分自身と、すべての子孫の ID。
@@ -224,9 +227,13 @@ impl Store {
     /// ワークスペースごとの、未完了のタスクの数（子孫は含めない）。
     pub fn open_task_counts(&self) -> Result<HashMap<Id, u32>> {
         let mut stmt = self.conn.prepare_cached(
-            "SELECT workspace_id, COUNT(*) FROM tasks \
-             WHERE status IN ('needs_action', 'in_process') AND workspace_id IS NOT NULL \
-             GROUP BY workspace_id",
+            "SELECT place, COUNT(*) FROM ( \
+                 SELECT workspace_id AS place FROM tasks \
+                 WHERE status IN ('needs_action', 'in_process') AND workspace_id IS NOT NULL \
+                 UNION ALL \
+                 SELECT l.workspace_id FROM task_links l JOIN tasks t ON t.id = l.task_id \
+                 WHERE t.status IN ('needs_action', 'in_process')) \
+             GROUP BY place",
         )?;
         let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -317,6 +324,7 @@ impl Store {
             ],
             assignee_ids: draft.assignee_ids,
             categories: draft.categories,
+            linked_workspace_ids: Vec::new(),
             position,
             created_at: now,
             updated_at: now,
@@ -351,6 +359,13 @@ impl Store {
             "SELECT category FROM task_categories WHERE task_id = ?1 ORDER BY category",
         )?;
         task.categories = stmt
+            .query_map(params![id], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT workspace_id FROM task_links WHERE task_id = ?1 \
+             ORDER BY created_at, workspace_id",
+        )?;
+        task.linked_workspace_ids = stmt
             .query_map(params![id], |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?;
         Ok(task)
@@ -421,8 +436,15 @@ impl Store {
         sql.push_str(match scope {
             Scope::All => "?1 IS NULL",
             Scope::Unfiled => "?1 IS NULL AND t.workspace_id IS NULL",
-            Scope::Workspace(_) if descendants => "t.workspace_id IN (SELECT id FROM sub)",
-            Scope::Workspace(_) => "t.workspace_id = ?1",
+            Scope::Workspace(_) if descendants => {
+                "(t.workspace_id IN (SELECT id FROM sub) OR EXISTS ( \
+                 SELECT 1 FROM task_links l WHERE l.task_id = t.id \
+                 AND l.workspace_id IN (SELECT id FROM sub)))"
+            }
+            Scope::Workspace(_) => {
+                "(t.workspace_id = ?1 OR EXISTS (SELECT 1 FROM task_links l \
+                 WHERE l.task_id = t.id AND l.workspace_id = ?1))"
+            }
         });
         if filter.open_only {
             sql.push_str(" AND t.status IN ('needs_action', 'in_process')");
@@ -489,7 +511,24 @@ impl Store {
                 }
             }
         }
+        let mut links: Vec<(usize, Id)> = Vec::new();
+        {
+            let mut stmt = self.conn.prepare_cached(
+                "SELECT task_id, workspace_id FROM task_links \
+                 ORDER BY task_id, created_at, workspace_id",
+            )?;
+            let mut rows = stmt.query([])?;
+            while let Some(row) = rows.next()? {
+                let task_id = row.get_ref(0)?.as_str().map_err(rusqlite::Error::from)?;
+                if let Some(&i) = index.get(task_id) {
+                    links.push((i, row.get(1)?));
+                }
+            }
+        }
         drop(index);
+        for (i, workspace_id) in links {
+            tasks[i].linked_workspace_ids.push(workspace_id);
+        }
         for (i, person_id, roles, done) in found {
             tasks[i].assignee_ids.push(person_id);
             tasks[i].assignee_roles.push(roles);
@@ -796,6 +835,12 @@ impl Store {
         tx.execute(
             "UPDATE tasks SET workspace_id = ?2, position = ?3, updated_at = ?4 WHERE id = ?1",
             params![id, workspace_id, position, now],
+        )?;
+        // 移した先にすでに表示していたなら、二重にならないよう表示のほうを外す。
+        // どこにも入れない状態に戻すなら、表示先もすべて外す
+        tx.execute(
+            "DELETE FROM task_links WHERE task_id = ?1 AND (?2 IS NULL OR workspace_id = ?2)",
+            params![id, workspace_id],
         )?;
         insert_change(
             &tx,
@@ -1115,6 +1160,7 @@ impl Store {
                 "DELETE FROM task_categories WHERE task_id = ?1",
                 params![t.id],
             )?;
+            tx.execute("DELETE FROM task_links WHERE task_id = ?1", params![t.id])?;
             insert_task(&tx, t)?;
         }
         for c in &data.comments {
@@ -1314,6 +1360,11 @@ fn insert_task(conn: &Connection, t: &Task) -> rusqlite::Result<()> {
         &t.assignee_roles,
         &t.assignee_done,
     )?;
+    for workspace_id in &t.linked_workspace_ids {
+        if t.workspace_id.as_ref() != Some(workspace_id) {
+            crate::links::insert(conn, &t.id, workspace_id, t.updated_at)?;
+        }
+    }
     insert_categories(conn, &t.id, &t.categories)
 }
 
@@ -1385,7 +1436,7 @@ fn insert_comment(conn: &Connection, c: &Comment) -> rusqlite::Result<usize> {
     ])
 }
 
-fn insert_change(
+pub(crate) fn insert_change(
     conn: &Connection,
     task_id: &str,
     field: &str,
@@ -1440,6 +1491,7 @@ fn task_from_row(r: &Row<'_>) -> rusqlite::Result<Task> {
         assignee_roles: Vec::new(),
         assignee_done: Vec::new(),
         categories: Vec::new(),
+        linked_workspace_ids: Vec::new(),
         position: r.get(7)?,
         created_at: r.get(8)?,
         updated_at: r.get(9)?,

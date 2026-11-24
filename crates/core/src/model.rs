@@ -307,6 +307,9 @@ pub struct Task {
     pub assignee_done: Vec<Option<i64>>,
     #[serde(default)]
     pub categories: Vec<String>,
+    /// 入っているワークスペースのほかに、このタスクを表示するワークスペース。足した順。
+    #[serde(default)]
+    pub linked_workspace_ids: Vec<Id>,
     pub position: i64,
     pub created_at: i64,
     pub updated_at: i64,
@@ -428,6 +431,16 @@ pub struct Change {
 }
 
 impl Task {
+    /// このタスクが出ているワークスペースすべて。入っている場所が先頭。
+    pub fn places(&self) -> impl Iterator<Item = &Id> {
+        self.workspace_id.iter().chain(&self.linked_workspace_ids)
+    }
+
+    /// そのワークスペースに出ているか。
+    pub fn is_in(&self, workspace_id: &str) -> bool {
+        self.places().any(|id| id == workspace_id)
+    }
+
     fn assignee_index(&self, person_id: &str) -> Option<usize> {
         self.assignee_ids.iter().position(|id| id == person_id)
     }
