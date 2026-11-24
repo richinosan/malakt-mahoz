@@ -20,14 +20,15 @@ pub struct Spec {
 impl Spec {
     /// OS のシェルに 1 行のコマンドを渡す。
     pub fn shell(command: &str) -> Self {
-        let (program, flag) = if cfg!(windows) {
-            ("cmd", "/C")
+        let (program, flag, line) = if cfg!(windows) {
+            // cmd の出力を UTF-8 にする。そのままだと、日本語が端末の文字コードで出て読めない
+            ("cmd", "/C", format!("chcp 65001>nul & {command}"))
         } else {
-            ("sh", "-c")
+            ("sh", "-c", command.to_owned())
         };
         Self {
             program: program.into(),
-            args: vec![flag.into(), command.into()],
+            args: vec![flag.into(), line],
             display: command.into(),
             ..Default::default()
         }
