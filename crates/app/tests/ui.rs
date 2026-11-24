@@ -1930,3 +1930,109 @@ fn task_rows_are_dragged_to_reorder_and_to_another_workspace(cx: &mut TestAppCon
     let back = store(cx, |s| s.task(&before[1]).unwrap());
     assert_eq!(back.workspace_id, None);
 }
+
+/// 見ていた場所・絞り込み・開いていた詳細・ウィンドウの位置は設定に残り、次に開いたウィンドウに戻る。
+#[gpui_kit::test]
+fn the_last_screen_comes_back_after_a_restart(cx: &mut TestAppContext) {
+    use malakt_mahoz::session;
+    start(cx);
+    let (ws, sub, task) = cx.update(|cx| {
+        db::shared(cx).update(cx, |db, _| {
+            let s = &mut db.store;
+            let ws = s.create_workspace(None, "文化祭").unwrap();
+            let sub = s.create_workspace(Some(&ws.id), "会場").unwrap();
+            let task = s.add_task_in(Some(&ws.id), "機材を借りる").unwrap();
+            (ws, sub, task)
+        })
+    });
+    let (window, view) = open(cx, win(1600., 1000.));
+    cx.update(|cx| {
+        window
+            .update(cx, |_, window, cx| {
+                view.update(cx, |v, cx| {
+                    v.track_session(window, cx);
+                    v.reload(cx);
+                    v.go(Nav::Workspace(ws.id.clone()), cx);
+                    v.query.tab = Tab::Open;
+                    v.query.q = "機材".into();
+                    v.query.status = Some(Status::NeedsAction);
+                    v.query.sort = malakt_core::view::Sort::Title;
+                    v.query.descending = true;
+                    v.toggle_collapsed(&ws.id, cx);
+                    v.sidebar_hidden = true;
+                    v.reload(cx);
+                    v.open_panel(&task.id, window, cx);
+                    cx.notify();
+                })
+            })
+            .unwrap()
+    });
+    cx.run_until_parked();
+    let before = cx.update(|cx| view.read(cx).session_state());
+    assert_eq!(before.nav, format!("ws:{}", ws.id));
+    assert_eq!(before.panel.as_deref(), Some(task.id.as_str()));
+    assert!(before.bounds.is_some());
+
+    // 設定に残っている
+    let saved = cx.update(|cx| session::saved(cx));
+    assert_eq!(saved, std::slice::from_ref(&before));
+
+    // 新しく開いたウィンドウに戻すと、同じ画面になる
+    let (window, again) = open(cx, win(1600., 1000.));
+    cx.update(|cx| {
+        window
+            .update(cx, |_, window, cx| {
+                again.update(cx, |v, cx| v.restore_session(&saved[0], window, cx))
+            })
+            .unwrap()
+    });
+    cx.update(|cx| {
+        let v = again.read(cx);
+        assert_eq!(v.nav, Nav::Workspace(ws.id.clone()));
+        assert_eq!(v.query.q, "機材");
+        assert_eq!(v.query.status, Some(Status::NeedsAction));
+        assert!(v.query.descending && v.sidebar_hidden);
+        assert!(v.collapsed.contains(&ws.id));
+        assert_eq!(v.panel.as_deref(), Some(task.id.as_str()));
+        assert_eq!(v.inputs.search.read(cx).value().as_ref(), "機材");
+        let mut state = v.session_state();
+        state.bounds = before.bounds;
+        state.maximized = before.maximized;
+        assert_eq!(state, before);
+    });
+
+    // なくなったワークスペースやタスクは開かず、ホームに戻る
+    cx.update(|cx| {
+        db::shared(cx).update(cx, |db, _| {
+            db.store.delete_task(&task.id).unwrap();
+            db.store.delete_workspace(&sub.id).unwrap();
+            db.store.delete_workspace(&ws.id).unwrap();
+        });
+        window
+            .update(cx, |_, window, cx| {
+                again.update(cx, |v, cx| {
+                    v.reload(cx);
+                    v.restore_session(&saved[0], window, cx)
+                })
+            })
+            .unwrap()
+    });
+    cx.update(|cx| {
+        let v = again.read(cx);
+        assert_eq!(v.nav, Nav::Home);
+        assert_eq!(v.panel, None);
+    });
+
+    // 画面の外に出た位置や、壊れた設定は使わない
+    let mut off = before.clone();
+    off.bounds = Some([-90000., -90000., 800., 600.]);
+    cx.update(|cx| {
+        assert!(off.window_bounds(cx).is_none());
+        db::shared(cx).update(cx, |db, _| {
+            db.store
+                .set_setting("session.windows", Some("{broken"))
+                .unwrap()
+        });
+        assert!(session::saved(cx).is_empty());
+    });
+}

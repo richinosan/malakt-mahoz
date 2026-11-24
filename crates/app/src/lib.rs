@@ -7,6 +7,7 @@ pub mod db;
 pub mod icons;
 pub mod passkey;
 mod render;
+pub mod session;
 pub mod shadow;
 pub mod state;
 pub mod theme;
@@ -144,7 +145,10 @@ pub fn init_with(store: malakt_core::Store, ai: AiConfig, cx: &mut App) {
     cx.on_action(|_: &NewWindow, cx| {
         let _ = open_main_window(cx);
     });
-    cx.on_action(|_: &Quit, cx| cx.quit());
+    cx.on_action(|_: &Quit, cx| {
+        session::quitting(cx);
+        cx.quit()
+    });
     cx.on_action(|_: &LockNow, cx| db::lock_now(cx));
     cx.set_menus([Menu {
         name: APP_NAME.into(),
@@ -159,16 +163,41 @@ pub fn init_with(store: malakt_core::Store, ai: AiConfig, cx: &mut App) {
     }]);
 }
 
+/// 前に閉じたときのウィンドウを、見ていた画面ごと開き直す。なければ 1 枚だけ開く。
+pub fn open_saved_windows(cx: &mut App) -> Result<(AnyWindowHandle, Entity<MainView>)> {
+    let mut first = None;
+    for state in session::saved(cx) {
+        let opened = open_window_with(Some(state), cx)?;
+        first.get_or_insert(opened);
+    }
+    match first {
+        Some(first) => Ok(first),
+        None => open_main_window(cx),
+    }
+}
+
 /// メインのウィンドウを 1 枚開く。何枚でも開ける。
 pub fn open_main_window(cx: &mut App) -> Result<(AnyWindowHandle, Entity<MainView>)> {
+    open_window_with(None, cx)
+}
+
+fn open_window_with(
+    saved: Option<session::WindowState>,
+    cx: &mut App,
+) -> Result<(AnyWindowHandle, Entity<MainView>)> {
     let screen = cx.primary_display().map(|display| display.bounds().size);
     let mut bounds = Bounds::centered(None, initial_window_size(screen), cx);
     // 2 枚目からは少しずらして重ならないようにする
     let offset = px(28.) * (cx.windows().len() % 8) as f32;
     bounds.origin += point(offset, offset);
+    // 前に置いていた位置と大きさがあれば、そこに開く
+    let place = saved
+        .as_ref()
+        .and_then(|state| state.window_bounds(cx))
+        .unwrap_or(WindowBounds::Windowed(bounds));
     // OS のタイトルバーは出さず、アプリの中の細いバーで代える
     let options = WindowOptions {
-        window_bounds: Some(WindowBounds::Windowed(bounds)),
+        window_bounds: Some(place),
         window_min_size: Some(size(px(360.), px(420.))),
         titlebar: Some(TitlebarOptions {
             title: Some(APP_NAME.into()),
@@ -181,7 +210,14 @@ pub fn open_main_window(cx: &mut App) -> Result<(AnyWindowHandle, Entity<MainVie
         ..gpui_kit::component::TitleBar::window_options()
     };
     gpui_kit::open_window(options, cx, |window, cx| {
-        cx.new(|cx| MainView::new(window, cx))
+        cx.new(|cx| {
+            let mut view = MainView::new(window, cx);
+            if let Some(state) = &saved {
+                view.restore_session(state, window, cx);
+            }
+            view.track_session(window, cx);
+            view
+        })
     })
 }
 

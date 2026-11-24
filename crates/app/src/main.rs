@@ -36,12 +36,13 @@ fn main() {
             // 最後のウィンドウを閉じたら終了する
             cx.on_window_closed(|cx, _| {
                 if cx.windows().is_empty() {
+                    malakt_mahoz::session::quitting(cx);
                     cx.quit();
                 }
             })
             .detach();
             let (window, view) =
-                malakt_mahoz::open_main_window(cx).expect("ウィンドウを開けませんでした");
+                malakt_mahoz::open_saved_windows(cx).expect("ウィンドウを開けませんでした");
             // ロックしてあるなら、起動してすぐパスキーを求める
             window
                 .update(cx, |_, window, cx| {
