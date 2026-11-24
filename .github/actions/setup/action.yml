@@ -1,0 +1,16 @@
+name: setup
+description: ビルドに必要な OS のライブラリと、mise で管理しているツールを入れる
+runs:
+  using: composite
+  steps:
+    - name: Linux のライブラリを入れる
+      if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends \
+          clang pkg-config libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev \
+          libwayland-dev libvulkan-dev libfontconfig-dev libfreetype-dev \
+          libssl-dev libasound2-dev libzstd-dev
+    - uses: jdx/mise-action@v2
+    - uses: Swatinem/rust-cache@v2

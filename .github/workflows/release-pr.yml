@@ -1,0 +1,62 @@
+name: リリース PR を作る
+
+# 手動で実行すると、バージョンを上げる PR を作り、CI が通ったら自動でマージする。
+# マージされると release.yml がビルドして公開する。
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 新しいバージョン（例 0.2.0）
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-pr:
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ inputs.version }}
+      # GITHUB_TOKEN で作った PR では CI が動かないので、あれば RELEASE_TOKEN を使う
+      GH_TOKEN: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
+    steps:
+      - name: バージョンの形を確かめる
+        shell: bash
+        run: |
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::バージョンは 1.2.3 の形で指定してください: $VERSION"
+            exit 1
+          fi
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
+      - uses: jdx/mise-action@v2
+      - name: バージョンを書き換える
+        shell: bash
+        run: |
+          # [workspace.package] の version だけを書き換える
+          awk -v v="$VERSION" '
+            /^\[/ { section = $0 }
+            section == "[workspace.package]" && /^version = / { print "version = \"" v "\""; next }
+            { print }
+          ' Cargo.toml > Cargo.toml.new
+          mv Cargo.toml.new Cargo.toml
+          cargo update --workspace
+          git diff --stat
+      - name: PR を作って自動マージにする
+        shell: bash
+        run: |
+          branch="release/v$VERSION"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$branch"
+          git commit -am "v$VERSION をリリースする"
+          git push -u origin "$branch"
+          gh pr create --base main --head "$branch" \
+            --title "v$VERSION をリリースする" \
+            --body "バージョンを $VERSION に上げます。マージすると、ビルドして GitHub Releases に公開します。"
+          gh pr merge "$branch" --auto --squash || \
+            echo "::warning::自動マージを有効にできませんでした。リポジトリの設定で auto-merge を許可するか、手でマージしてください。"
