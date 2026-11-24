@@ -7,7 +7,7 @@ use gpui_kit::{
 };
 use malakt_core::view::Tab;
 use malakt_core::{lock, Role, Roles, Scope, Status, Store, TaskFilter};
-use malakt_mahoz::{db, MainView, Modal, Nav};
+use malakt_mahoz::{db, CommentMode, MainView, Modal, Nav};
 
 fn start(cx: &mut TestAppContext) {
     cx.update(|cx| malakt_mahoz::init(Store::open_in_memory().unwrap(), cx));
@@ -580,4 +580,166 @@ fn assignee_roles_and_per_person_completion(cx: &mut TestAppContext) {
     let t = load(cx);
     assert_eq!((t.status, t.done_count()), (Status::InProcess, (1, 2)));
     assert!(t.is_done_by(&me));
+}
+
+/// コメント欄: 書く、書き直す、メンション、レビューのスレッド、完了報告。
+#[gpui_kit::test]
+fn comments_edit_mention_review_and_report(cx: &mut TestAppContext) {
+    start(cx);
+    // コメント欄は詳細の下のほうにあるので、縦に長いウィンドウで開く
+    let (window, view) = open(cx, size(px(1280.), px(2400.)));
+    let sato = cx.update(|cx| {
+        view.update(cx, |v, cx| {
+            v.write(cx, |s| {
+                s.create_task(
+                    None,
+                    &malakt_core::TaskDraft {
+                        title: "記事を書く".into(),
+                        description: "導入を書く。**本文**を書く。".into(),
+                        ..Default::default()
+                    },
+                )?;
+                Ok(s.create_person("佐藤 花子", false)?.id)
+            })
+            .unwrap()
+        })
+    });
+    ui(cx, window, |window, cx| window.click("nav-all", cx));
+    ui(cx, window, |window, cx| window.click(("title", 0usize), cx));
+    let id = all_tasks(cx).remove(0).id;
+    let comments = |cx: &mut TestAppContext| store(cx, |s| s.comments(&id).unwrap());
+    let write = |cx: &mut TestAppContext, text: &str| {
+        cx.update_window(window, |_, window, cx| {
+            view.update(cx, |v, cx| {
+                v.inputs
+                    .comment
+                    .update(cx, |s, cx| s.set_value(text.to_owned(), window, cx))
+            })
+        })
+        .unwrap();
+        cx.run_until_parked();
+    };
+
+    // `@` を打つと候補が出て、選ぶと名前が入る
+    write(cx, "確認お願いします @佐");
+    ui(cx, window, |window, cx| {
+        window.click(("mention", 0usize), cx)
+    });
+    cx.update(|cx| {
+        assert_eq!(
+            view.read(cx).inputs.comment.read(cx).value().as_ref(),
+            "確認お願いします @佐藤花子 "
+        );
+    });
+    ui(cx, window, |window, cx| window.click("comment-submit", cx));
+    let list = comments(cx);
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].mentions, std::slice::from_ref(&sato));
+    assert!(!list[0].review);
+    cx.update(|cx| assert_eq!(view.read(cx).inputs.comment.read(cx).value().as_ref(), ""));
+
+    // 書き直す
+    ui(cx, window, |window, cx| {
+        window.click(("edit-comment", 0usize), cx)
+    });
+    cx.update(|cx| {
+        let view = view.read(cx);
+        assert_eq!(view.comment_mode, CommentMode::Edit(list[0].id.clone()));
+        assert_eq!(
+            view.inputs.comment.read(cx).value().as_ref(),
+            "確認お願いします @佐藤花子"
+        );
+    });
+    write(cx, "確認は不要になりました");
+    ui(cx, window, |window, cx| window.click("comment-submit", cx));
+    let list = comments(cx);
+    assert_eq!(list[0].body, "確認は不要になりました");
+    assert!(list[0].mentions.is_empty());
+    cx.update(|cx| assert_eq!(view.read(cx).comment_mode, CommentMode::New));
+
+    // 書き直しをやめると、欄は空に戻る
+    ui(cx, window, |window, cx| {
+        window.click(("edit-comment", 0usize), cx)
+    });
+    ui(cx, window, |window, cx| window.click("comment-cancel", cx));
+    cx.update(|cx| {
+        let view = view.read(cx);
+        assert_eq!(view.comment_mode, CommentMode::New);
+        assert_eq!(view.inputs.comment.read(cx).value().as_ref(), "");
+    });
+
+    // 説明の選択範囲に付けるレビューコメント
+    let anchor = malakt_mahoz::anchor_at("導入を書く。**本文**を書く。", 18..28);
+    assert_eq!(anchor.exact, "**本文**");
+    assert_eq!(anchor.prefix, "導入を書く。");
+    assert_eq!(anchor.suffix, "を書く。");
+    cx.update_window(window, |_, window, cx| {
+        view.update(cx, |v, cx| v.set_pending_anchor(anchor.clone(), window, cx))
+    })
+    .unwrap();
+    write(cx, "ここをもっと詳しく");
+    ui(cx, window, |window, cx| window.click("comment-submit", cx));
+    let list = comments(cx);
+    let root = list
+        .iter()
+        .find(|c| c.review)
+        .expect("レビューコメント")
+        .clone();
+    assert_eq!(root.anchor.as_ref(), Some(&anchor));
+    let root_ix = list.iter().position(|c| c.id == root.id).unwrap();
+    cx.update(|cx| assert!(view.read(cx).pending_anchor.is_none()));
+
+    // 返信して、解決済みにし、再開する
+    ui(cx, window, |window, cx| {
+        window.click(("thread-reply", root_ix), cx)
+    });
+    write(cx, "足しました");
+    ui(cx, window, |window, cx| window.click("comment-submit", cx));
+    let list = comments(cx);
+    let reply = list.iter().find(|c| c.reply_to.is_some()).expect("返信");
+    assert_eq!(reply.reply_to.as_deref(), Some(root.id.as_str()));
+    ui(cx, window, |window, cx| {
+        window.click(("thread-resolve", root_ix), cx)
+    });
+    assert!(comments(cx)[root_ix].resolved_at.is_some());
+    // 解決済みはたためて、開ける
+    ui(cx, window, |window, cx| {
+        window.click(("thread-toggle", root_ix), cx)
+    });
+    cx.update(|cx| assert!(view.read(cx).expanded_threads.contains(&root.id)));
+    ui(cx, window, |window, cx| {
+        window.click(("thread-resolve", root_ix), cx)
+    });
+    assert!(comments(cx)[root_ix].resolved_at.is_none());
+
+    // 文書全体へのレビューコメント
+    write(cx, "全体に見出しがほしい");
+    ui(cx, window, |window, cx| window.click("comment-review", cx));
+    let list = comments(cx);
+    assert_eq!(list.iter().filter(|c| c.is_thread_root()).count(), 2);
+    assert!(list.iter().any(|c| c.review && c.anchor.is_none()));
+
+    // 完了にしてコメントすると、完了報告として残る
+    cx.update_window(window, |_, window, cx| {
+        view.update(cx, |v, cx| {
+            v.ask_status(&id, window, cx);
+            v.inputs
+                .status_comment
+                .update(cx, |s, cx| s.set_value("公開しました", window, cx));
+            v.submit_status(window, cx);
+        })
+    })
+    .unwrap();
+    cx.run_until_parked();
+    let list = comments(cx);
+    let report = list
+        .iter()
+        .find(|c| c.is_completion_report())
+        .expect("完了報告");
+    assert_eq!(report.body, "公開しました");
+    assert_eq!(
+        store(cx, |s| s.task(&id).unwrap()).status,
+        Status::Completed
+    );
+    ui(cx, window, |_, _| {});
 }

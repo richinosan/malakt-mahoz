@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use gpui_kit::*;
 
 pub use db::{Db, Shared};
-pub use state::{MainView, Modal, Nav};
+pub use state::{anchor_at, CommentMode, MainView, Modal, Nav};
 
 actions!(malakt, [NewWindow, Quit, LockNow, Dismiss]);
 

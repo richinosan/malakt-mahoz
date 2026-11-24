@@ -6,13 +6,14 @@ use gpui_kit::base::TestSupportExt;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::{Input, Textarea};
+use gpui_kit::component::text::TextView;
 use gpui_kit::component::{ActiveTheme, Sizable};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use malakt_core::view::{self, AssigneeFilter, DueState, Priority as Prio, Sort, Tab};
-use malakt_core::{Role as Raci, Roles, Status, Task as Todo};
+use malakt_core::{Comment, Role as Raci, Roles, Status, Task as Todo};
 
-use crate::state::{Editing, MainView, Modal, Nav};
+use crate::state::{CommentMode, Editing, MainView, Modal, Nav};
 use crate::{Dismiss, LockNow, NewWindow};
 
 const SIDEBAR_WIDTH: Pixels = px(248.);
@@ -1116,6 +1117,74 @@ impl MainView {
 
     // ---- 詳細パネル ----
 
+    /// コメント 1 件。書いた人・時刻・操作と、Markdown の本文。
+    fn render_comment(&self, ix: usize, c: &Comment, now: i64, cx: &mut Context<Self>) -> Div {
+        let theme = cx.theme().clone();
+        let (pin_id, delete_id, edit_id, pinned) =
+            (c.id.clone(), c.id.clone(), c.id.clone(), c.pinned);
+        let author = c
+            .author_id
+            .as_deref()
+            .map_or("", |a| self.person_name(a))
+            .to_owned();
+        // スレッドの中では枠を重ねない
+        let boxed = !c.review && c.reply_to.is_none();
+        col()
+            .gap_1()
+            .when(boxed, |d| {
+                d.p_2().border_1().border_color(theme.border).rounded_md()
+            })
+            .child(
+                row()
+                    .gap_2()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(author)
+                    .child(view::format_relative(c.created_at, now))
+                    .when(c.is_edited(), |d| d.child("（編集済み）"))
+                    .child(div().flex_1())
+                    .child(
+                        Button::new(("edit-comment", ix))
+                            .label("編集")
+                            .ghost()
+                            .xsmall()
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.start_edit_comment(&edit_id, window, cx)
+                            })),
+                    )
+                    // 完了報告は最初から上に固定されているので、留めない
+                    .when(!c.is_completion_report(), |d| {
+                        d.child(
+                            Button::new(("pin", ix))
+                                .label(if pinned {
+                                    "ピン留めを外す"
+                                } else {
+                                    "ピン留め"
+                                })
+                                .ghost()
+                                .xsmall()
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.write(cx, |s| s.set_comment_pinned(&pin_id, !pinned));
+                                })),
+                        )
+                    })
+                    .child(
+                        Button::new(("del-comment", ix))
+                            .label("削除")
+                            .ghost()
+                            .xsmall()
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.write(cx, |s| s.delete_comment(&delete_id));
+                            })),
+                    ),
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .child(TextView::markdown(("comment-body", ix), c.body.clone())),
+            )
+    }
+
     fn property(&self, label: &'static str, cx: &App) -> Div {
         row().gap_2().items_start().child(
             div()
@@ -1242,22 +1311,50 @@ impl MainView {
                                 .child("Ctrl/⌘+Enter で保存、Esc でやめます"),
                         ),
                 )
-        } else {
+        } else if task.description.is_empty() {
             div().child(
                 div()
                     .id("detail-description")
                     .cursor_pointer()
                     .text_sm()
-                    .when(task.description.is_empty(), |d| {
-                        d.text_color(theme.muted_foreground).child("説明を追加…")
-                    })
-                    .when(!task.description.is_empty(), |d| {
-                        d.child(task.description.clone())
-                    })
+                    .text_color(theme.muted_foreground)
+                    .child("説明を追加…")
                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                         this.start_editing(Editing::Description, window, cx)
                     })),
             )
+        } else {
+            // Markdown で見せる。文字を選べるので、押して編集にはしない
+            col()
+                .gap_1()
+                .child(
+                    div()
+                        .id("detail-description")
+                        .text_sm()
+                        .child(TextView::new(&self.description_view)),
+                )
+                .child(
+                    row()
+                        .gap_1()
+                        .child(
+                            Button::new("desc-edit")
+                                .label("編集")
+                                .ghost()
+                                .xsmall()
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.start_editing(Editing::Description, window, cx)
+                                })),
+                        )
+                        .child(
+                            Button::new("desc-quote")
+                                .label("選択範囲にコメント")
+                                .ghost()
+                                .xsmall()
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.quote_selection(window, cx)
+                                })),
+                        ),
+                )
         };
 
         let done = detail
@@ -1484,18 +1581,28 @@ impl MainView {
                 )
         };
 
+        // 返信はルートの下にまとめる。完了報告は上に固定して出すので、ここには出さない
+        let unresolved = detail
+            .comments
+            .iter()
+            .filter(|c| c.is_thread_root() && c.resolved_at.is_none())
+            .count();
         let mut comments = col().gap_2();
         for (ix, c) in detail.comments.iter().enumerate() {
-            let (pin_id, delete_id, pinned) = (c.id.clone(), c.id.clone(), c.pinned);
-            let author = c
-                .author_id
-                .as_deref()
-                .map_or("", |a| self.person_name(a))
-                .to_owned();
-            comments = comments.child(
+            if c.reply_to.is_some() || c.is_completion_report() {
+                continue;
+            }
+            if !c.is_thread_root() {
+                comments = comments.child(self.render_comment(ix, c, now, cx));
+                continue;
+            }
+            let resolved = c.resolved_at.is_some();
+            let open = !resolved || self.expanded_threads.contains(&c.id);
+            let (toggle_id, resolve_id, reply_id) = (c.id.clone(), c.id.clone(), c.id.clone());
+            let mut thread =
                 col()
-                    .p_2()
                     .gap_1()
+                    .p_2()
                     .border_1()
                     .border_color(theme.border)
                     .rounded_md()
@@ -1504,33 +1611,112 @@ impl MainView {
                             .gap_2()
                             .text_xs()
                             .text_color(theme.muted_foreground)
-                            .child(author)
-                            .child(view::format_relative(c.created_at, now))
-                            .child(div().flex_1())
+                            .child(if resolved {
+                                "レビュー（解決済み）"
+                            } else {
+                                "レビュー"
+                            })
+                            .when(!open, |d| {
+                                d.child(
+                                    div().flex_1().min_w_0().truncate().child(
+                                        c.body.lines().next().unwrap_or_default().to_owned(),
+                                    ),
+                                )
+                            })
+                            .when(open, |d| d.child(div().flex_1()))
+                            .when(resolved, |d| {
+                                d.child(
+                                    Button::new(("thread-toggle", ix))
+                                        .label(if open { "たたむ" } else { "開く" })
+                                        .ghost()
+                                        .xsmall()
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.toggle_thread(&toggle_id, cx)
+                                        })),
+                                )
+                            })
                             .child(
-                                Button::new(("pin", ix))
-                                    .label(if pinned {
-                                        "ピン留めを外す"
+                                Button::new(("thread-resolve", ix))
+                                    .label(if resolved {
+                                        "再開する"
                                     } else {
-                                        "ピン留め"
+                                        "解決済みにする"
                                     })
                                     .ghost()
                                     .xsmall()
                                     .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.write(cx, |s| s.set_comment_pinned(&pin_id, !pinned));
-                                    })),
-                            )
-                            .child(
-                                Button::new(("del-comment", ix))
-                                    .label("削除")
-                                    .ghost()
-                                    .xsmall()
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.write(cx, |s| s.delete_comment(&delete_id));
+                                        this.set_thread_resolved(&resolve_id, !resolved, cx)
                                     })),
                             ),
-                    )
-                    .child(div().text_sm().child(c.body.clone())),
+                    );
+            if open {
+                if let Some(anchor) = &c.anchor {
+                    // 引用。説明が書き換わって見つからなくなったら、そう伝える
+                    let found = task.description.contains(anchor.exact.as_str());
+                    thread = thread.child(
+                        col()
+                            .pl_2()
+                            .border_l_2()
+                            .border_color(theme.border)
+                            .text_sm()
+                            .text_color(theme.muted_foreground)
+                            .child(anchor.exact.clone())
+                            .when(!found, |d| {
+                                d.child(
+                                    div()
+                                        .text_xs()
+                                        .child("（説明のこの部分は書き換えられました）"),
+                                )
+                            }),
+                    );
+                }
+                thread = thread.child(self.render_comment(ix, c, now, cx));
+                let mut replies = col().gap_1().pl_4();
+                for (reply_ix, reply) in detail.comments.iter().enumerate() {
+                    if reply.reply_to.as_deref() == Some(c.id.as_str()) {
+                        replies = replies.child(self.render_comment(reply_ix, reply, now, cx));
+                    }
+                }
+                thread = thread.child(replies).child(
+                    row().child(
+                        Button::new(("thread-reply", ix))
+                            .label("返信")
+                            .ghost()
+                            .xsmall()
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.start_reply(&reply_id, window, cx)
+                            })),
+                    ),
+                );
+            }
+            comments = comments.child(thread);
+        }
+        let report_items: Vec<Div> = detail
+            .comments
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.is_completion_report())
+            .map(|(ix, c)| self.render_comment(ix, c, now, cx))
+            .collect();
+
+        // コメント欄の上に、いま何を書いているかを出す
+        let composing: Option<SharedString> = match (&self.comment_mode, &self.pending_anchor) {
+            (CommentMode::Edit(_), _) => Some("コメントを書き直しています".into()),
+            (CommentMode::Reply(_), _) => Some("スレッドに返信します".into()),
+            (CommentMode::New, Some(anchor)) => {
+                Some(format!("「{}」にレビューコメントを付けます", anchor.exact).into())
+            }
+            (CommentMode::New, None) => None,
+        };
+        let is_new = self.comment_mode == CommentMode::New;
+        let mut mention_row = row().gap_1().flex_wrap();
+        for (i, person) in self.mention_candidates(cx).into_iter().enumerate() {
+            mention_row = mention_row.child(
+                chip(("mention", i), format!("@{}", person.name), false, cx)
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        this.complete_mention(&person, window, cx)
+                    }))
+                    .test_support(),
             );
         }
 
@@ -1591,7 +1777,23 @@ impl MainView {
                             .rounded_md()
                             .bg(theme.secondary)
                             .child(section_title("ピン留め"))
-                            .children(pinned.iter().map(|c| div().text_sm().child(c.body.clone()))),
+                            .children(pinned.iter().enumerate().map(|(i, c)| {
+                                div()
+                                    .text_sm()
+                                    .child(TextView::markdown(("pinned-body", i), c.body.clone()))
+                            })),
+                    )
+                })
+                .when(!report_items.is_empty(), |d| {
+                    d.child(
+                        col()
+                            .gap_1()
+                            .p_2()
+                            .rounded_md()
+                            .border_1()
+                            .border_color(theme.border)
+                            .child(section_title("完了報告"))
+                            .children(report_items),
                     )
                 })
                 .child(
@@ -1658,21 +1860,64 @@ impl MainView {
                 .child(
                     col()
                         .gap_2()
-                        .child(section_title("コメント"))
+                        .child(row().gap_2().child(section_title("コメント")).when(
+                            unresolved > 0,
+                            |d| {
+                                d.child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(theme.muted_foreground)
+                                        .child(format!("（未解決のレビュー {unresolved} 件）")),
+                                )
+                            },
+                        ))
                         .child(comments)
+                        .when_some(composing, |d, text| {
+                            d.child(
+                                row()
+                                    .gap_2()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child(div().flex_1().min_w_0().truncate().child(text))
+                                    .child(
+                                        Button::new("comment-cancel")
+                                            .label("やめる")
+                                            .ghost()
+                                            .xsmall()
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.cancel_comment_mode(window, cx)
+                                            })),
+                                    ),
+                            )
+                        })
                         .child(Textarea::new(&self.inputs.comment).h(px(88.)))
+                        .child(mention_row)
                         .child(
                             row()
                                 .gap_2()
                                 .child(
                                     Button::new("comment-submit")
-                                        .label("コメントする")
+                                        .label(match self.comment_mode {
+                                            CommentMode::Edit(_) => "保存",
+                                            CommentMode::Reply(_) => "返信する",
+                                            CommentMode::New => "コメントする",
+                                        })
                                         .primary()
                                         .small()
                                         .on_click(cx.listener(|this, _, window, cx| {
                                             this.submit_comment(window, cx)
                                         })),
                                 )
+                                .when(is_new && self.pending_anchor.is_none(), |d| {
+                                    d.child(
+                                        Button::new("comment-review")
+                                            .label("レビューとしてコメント")
+                                            .small()
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.submit_comment_as(true, window, cx)
+                                            })),
+                                    )
+                                })
                                 .child(
                                     div()
                                         .text_xs()
