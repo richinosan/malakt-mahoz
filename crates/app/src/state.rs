@@ -8,8 +8,8 @@ use gpui_kit::component::text::TextViewState;
 use gpui_kit::*;
 use malakt_core::view::{self, ListQuery};
 use malakt_core::{
-    archive, lock, mention, Anchor, Attachment, Change, Comment, Id, NewComment, Person, Scope,
-    Status, Store, Task as Todo, TaskDraft, TaskFilter, Workspace,
+    archive, lock, mention, Anchor, Attachment, Change, Comment, DueRule, Id, NewComment, Person,
+    Scope, Status, Store, Task as Todo, TaskDefaults, TaskDraft, TaskFilter, Workspace,
 };
 
 use crate::db::{self, Db};
@@ -45,6 +45,8 @@ pub enum Modal {
     Lock,
     /// ディスクの使用量と整理
     Usage,
+    /// ワークスペースの基準日と、タスク追加時の既定値
+    WorkspaceSettings(Id),
 }
 
 /// 詳細パネルで編集中の項目。
@@ -98,6 +100,12 @@ pub struct Inputs {
     pub description: Entity<TextareaState>,
     pub comment: Entity<TextareaState>,
     pub status_comment: Entity<TextareaState>,
+    pub ws_date: Entity<InputState>,
+    pub def_days: Entity<InputState>,
+    pub def_date: Entity<InputState>,
+    pub def_time: Entity<InputState>,
+    pub def_categories: Entity<InputState>,
+    pub def_description: Entity<TextareaState>,
 }
 
 pub struct MainView {
@@ -132,6 +140,8 @@ pub struct MainView {
     pub description_view: Entity<TextViewState>,
     description_shown: String,
     pub modal: Modal,
+    /// 設定のダイアログで編集中の既定値（入力欄にないもの: 担当者・期限の決め方・優先度・表示先）
+    pub defaults_draft: TaskDefaults,
     pub error: Option<SharedString>,
     pub notice: Option<SharedString>,
     pub sidebar_open: bool,
@@ -165,12 +175,18 @@ impl MainView {
             }),
             title: input(window, cx, "タイトル"),
             subtask: input(window, cx, "サブタスクを追加して Enter"),
-            start: input(window, cx, "YYYY-MM-DD"),
-            due: input(window, cx, "YYYY-MM-DD"),
+            start: input(window, cx, "YYYY-MM-DD（時刻は続けて HH:MM）"),
+            due: input(window, cx, "YYYY-MM-DD（時刻は続けて HH:MM）"),
             category: input(window, cx, "カテゴリを追加して Enter"),
             description: area(window, cx, "説明"),
             comment: area(window, cx, "コメントを書く"),
             status_comment: area(window, cx, "コメントを書く"),
+            ws_date: input(window, cx, "YYYY-MM-DD"),
+            def_days: input(window, cx, "例: -7（7 日前）"),
+            def_date: input(window, cx, "YYYY-MM-DD"),
+            def_time: input(window, cx, "HH:MM（空なら日付だけ）"),
+            def_categories: input(window, cx, "「、」か「,」で区切る"),
+            def_description: area(window, cx, "新しいタスクの説明に最初から入れる文章"),
         };
 
         let mut subs = vec![cx.observe(&db, |this, _, cx| this.reload(cx))];
@@ -269,6 +285,7 @@ impl MainView {
             description_view: cx.new(|cx| TextViewState::markdown("", cx).selectable(true)),
             description_shown: String::new(),
             modal: Modal::None,
+            defaults_draft: TaskDefaults::default(),
             error: None,
             notice: None,
             sidebar_open: false,
@@ -478,12 +495,12 @@ impl MainView {
             return;
         }
         let workspace = self.current_workspace().map(str::to_owned);
-        let draft = TaskDraft {
-            title,
-            ..Default::default()
-        };
+        // ワークスペースの既定値（担当・期限・優先度・カテゴリ・説明の雛形）を入れてから作る
         if self
-            .write(cx, |s| s.create_task(workspace.as_deref(), &draft))
+            .write(cx, |s| {
+                let draft = s.draft_for(workspace.as_deref(), &title)?;
+                s.create_task(workspace.as_deref(), &draft)
+            })
             .is_some()
         {
             Self::take(&self.inputs.quick_add.clone(), window, cx);
@@ -1120,6 +1137,144 @@ impl MainView {
         }
     }
 
+    // ---- ワークスペースの設定 ----
+
+    pub fn open_workspace_settings(
+        &mut self,
+        id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let store = &self.db.read(cx).store;
+        let loaded = store
+            .workspace(id)
+            .and_then(|w| Ok((w, store.task_defaults(id)?)));
+        let (workspace, defaults) = match loaded {
+            Ok(loaded) => loaded,
+            Err(error) => {
+                self.error = Some(error.to_string().into());
+                cx.notify();
+                return;
+            }
+        };
+        let (days, date) = match &defaults.due {
+            DueRule::Relative { days } => (days.to_string(), String::new()),
+            DueRule::Fixed { date } => (String::new(), date.clone()),
+            DueRule::None => (String::new(), String::new()),
+        };
+        let set = |input: &Entity<InputState>,
+                   value: String,
+                   window: &mut Window,
+                   cx: &mut Context<Self>| {
+            input.update(cx, |s, cx| s.set_value(value, window, cx));
+        };
+        let inputs = &self.inputs;
+        set(
+            &inputs.ws_date.clone(),
+            workspace.date.unwrap_or_default(),
+            window,
+            cx,
+        );
+        set(&inputs.def_days.clone(), days, window, cx);
+        set(&inputs.def_date.clone(), date, window, cx);
+        set(
+            &inputs.def_time.clone(),
+            defaults.due_time.clone(),
+            window,
+            cx,
+        );
+        set(
+            &inputs.def_categories.clone(),
+            defaults.categories.join("、"),
+            window,
+            cx,
+        );
+        let description = defaults.description.clone();
+        self.inputs
+            .def_description
+            .update(cx, |s, cx| s.set_value(description, window, cx));
+        self.defaults_draft = defaults;
+        self.modal = Modal::WorkspaceSettings(id.to_owned());
+        self.error = None;
+        cx.notify();
+    }
+
+    pub fn toggle_default_assignee(&mut self, person: &str, cx: &mut Context<Self>) {
+        toggle(&mut self.defaults_draft.assignee_ids, person);
+        cx.notify();
+    }
+
+    pub fn toggle_default_link(&mut self, workspace: &str, cx: &mut Context<Self>) {
+        toggle(&mut self.defaults_draft.link_workspace_ids, workspace);
+        cx.notify();
+    }
+
+    pub fn set_default_priority(&mut self, priority: Option<u8>, cx: &mut Context<Self>) {
+        self.defaults_draft.priority = priority;
+        cx.notify();
+    }
+
+    /// 期限の決め方を切り替える。日数や日付は、保存するときに入力欄から読む。
+    pub fn set_default_due(&mut self, due: DueRule, cx: &mut Context<Self>) {
+        self.defaults_draft.due = due;
+        cx.notify();
+    }
+
+    pub fn save_workspace_settings(&mut self, cx: &mut Context<Self>) {
+        let Modal::WorkspaceSettings(id) = self.modal.clone() else {
+            return;
+        };
+        let read = |input: &Entity<InputState>| input.read(cx).value().trim().to_owned();
+        let mut defaults = self.defaults_draft.clone();
+        defaults.workspace_id = id.clone();
+        defaults.due = match defaults.due {
+            DueRule::None => DueRule::None,
+            DueRule::Fixed { .. } => DueRule::Fixed {
+                date: read(&self.inputs.def_date),
+            },
+            DueRule::Relative { .. } => {
+                let text = read(&self.inputs.def_days);
+                // 全角の数字やマイナスで入れても読む
+                let ascii: String = text
+                    .chars()
+                    .map(|c| match c {
+                        '０'..='９' => char::from(b'0' + (c as u32 - '０' as u32) as u8),
+                        '－' | 'ー' | '−' => '-',
+                        '＋' => '+',
+                        c => c,
+                    })
+                    .collect();
+                match ascii.parse::<i32>() {
+                    Ok(days) => DueRule::Relative { days },
+                    Err(_) if ascii.is_empty() => DueRule::Relative { days: 0 },
+                    Err(_) => {
+                        self.error =
+                            Some("基準日からの日数は、-7 のような整数で入れてください。".into());
+                        cx.notify();
+                        return;
+                    }
+                }
+            }
+        };
+        defaults.due_time = read(&self.inputs.def_time);
+        defaults.categories = read(&self.inputs.def_categories)
+            .split(['、', ',', '，'])
+            .map(str::to_owned)
+            .collect();
+        defaults.description = self.inputs.def_description.read(cx).value().to_string();
+        let date = read(&self.inputs.ws_date);
+        let saved = self.write(cx, |s| {
+            // 先に両方を確かめて、片方だけ保存されることがないようにする
+            malakt_core::defaults::clean(&defaults)?;
+            s.set_workspace_date(&id, Some(&date))?;
+            s.set_task_defaults(&defaults)
+        });
+        if saved.is_some() {
+            self.modal = Modal::None;
+            self.notice = Some("ワークスペースの設定を保存しました。".into());
+        }
+    }
+
     // ---- 添付 ----
 
     /// ファイルを選んで、開いているタスクに添付する。
@@ -1315,6 +1470,16 @@ impl MainView {
     }
 }
 
+/// あれば外し、なければ足す。
+fn toggle(list: &mut Vec<Id>, id: &str) {
+    match list.iter().position(|x| x == id) {
+        Some(ix) => {
+            list.remove(ix);
+        }
+        None => list.push(id.to_owned()),
+    }
+}
+
 /// 選んだ範囲と、その前後の文脈（探し直すための手がかり）。
 pub fn anchor_at(source: &str, range: std::ops::Range<usize>) -> Anchor {
     const CONTEXT: usize = 32;
@@ -1378,6 +1543,7 @@ mod tests {
             id: id.into(),
             parent_id: parent.map(str::to_owned),
             name: id.into(),
+            date: None,
             position,
             created_at: 0,
             updated_at: 0,

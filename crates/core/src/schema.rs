@@ -123,6 +123,14 @@ const MIGRATIONS: &[&str] = &[
         DELETE FROM blobs WHERE hash = OLD.hash;
     END;
     "#,
+    // 5: ワークスペースの基準日と、タスク追加時の既定値
+    r#"
+    ALTER TABLE workspaces ADD COLUMN date TEXT;
+    CREATE TABLE task_defaults (
+        workspace_id TEXT PRIMARY KEY NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+        data TEXT NOT NULL
+    ) STRICT;
+    "#,
 ];
 
 pub(crate) fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {

@@ -3,6 +3,7 @@
 //! - `Store`: SQLite への保存と読み出し
 //! - `archive`: zip へのエクスポート / インポート
 //! - `attachment`: 添付ファイル（重複なし・圧縮つきで保存）
+//! - `defaults`: ワークスペースごとのタスク追加時の既定値と基準日
 //! - `lock`: アプリロック
 //! - `mention`: コメントの `@名前`
 //! - `view`: 一覧の絞り込みや並べ替え
@@ -11,6 +12,7 @@
 
 pub mod archive;
 pub mod attachment;
+pub mod defaults;
 pub mod error;
 pub mod lock;
 pub mod mention;

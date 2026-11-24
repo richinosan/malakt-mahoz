@@ -194,12 +194,18 @@ pub const DUE_SOON_DAYS: i64 = 3;
 /// ホームの「期限が近いタスク」に出す日数。
 pub const HOME_DUE_DAYS: i64 = 30;
 
-pub fn due_state(due: &str, today: &str) -> DueState {
-    if due < today {
+/// 期限の近さ。`now` は今日の日付か、時刻つきのいま（`YYYY-MM-DD HH:MM`）。
+/// 時刻つきの期限は、いまの時刻も分かるときだけ、今日のうちに期限切れになる。
+pub fn due_state(due: &str, now: &str) -> DueState {
+    let (day, today) = (crate::date_of(due), crate::date_of(now));
+    if day < today {
         DueState::Overdue
-    } else if due == today {
-        DueState::Today
-    } else if due <= add_days(today, DUE_SOON_DAYS).as_str() {
+    } else if day == today {
+        match (crate::time_of(due), crate::time_of(now)) {
+            (Some(at), Some(clock)) if at < clock => DueState::Overdue,
+            _ => DueState::Today,
+        }
+    } else if day <= add_days(today, DUE_SOON_DAYS).as_str() {
         DueState::Soon
     } else {
         DueState::Later
@@ -222,16 +228,23 @@ pub fn add_days(date: &str, days: i64) -> String {
     }
 }
 
-/// 期限の表示。今年なら「12/24」、ほかの年なら「2027/1/3」。
-pub fn format_date(date: &str, today: &str) -> String {
+/// いまの日時（端末の時刻帯）。`YYYY-MM-DD HH:MM`。
+pub fn now() -> String {
+    chrono::Local::now().format("%Y-%m-%d %H:%M").to_string()
+}
+
+/// 期限の表示。今年なら「12/24」、ほかの年なら「2027/1/3」。時刻があれば「12/24 18:00」。
+pub fn format_date(when: &str, today: &str) -> String {
+    let date = crate::date_of(when);
     let part = |r: std::ops::Range<usize>| date.get(r).and_then(|v| v.parse::<u32>().ok());
-    match (part(0..4), part(5..7), part(8..10)) {
-        (Some(y), Some(m), Some(d)) if date.get(0..4) == today.get(0..4) => {
-            let _ = y;
-            format!("{m}/{d}")
-        }
+    let day = match (part(0..4), part(5..7), part(8..10)) {
+        (Some(_), Some(m), Some(d)) if date.get(0..4) == today.get(0..4) => format!("{m}/{d}"),
         (Some(y), Some(m), Some(d)) => format!("{y}/{m}/{d}"),
-        _ => date.to_owned(),
+        _ => return when.to_owned(),
+    };
+    match crate::time_of(when) {
+        Some(time) => format!("{day} {time}"),
+        None => day,
     }
 }
 
@@ -490,6 +503,30 @@ mod tests {
     fn due_states_and_dates() {
         let today = "2026-12-30";
         assert_eq!(due_state("2026-12-29", today), DueState::Overdue);
+        assert_eq!(due_state("2026-12-29 23:00", today), DueState::Overdue);
+        assert_eq!(due_state("2026-12-30 09:00", today), DueState::Today);
+        assert_eq!(
+            due_state("2026-12-30 09:00", "2026-12-30 08:59"),
+            DueState::Today
+        );
+        assert_eq!(
+            due_state("2026-12-30 09:00", "2026-12-30 09:00"),
+            DueState::Today
+        );
+        assert_eq!(
+            due_state("2026-12-30 09:00", "2026-12-30 09:01"),
+            DueState::Overdue
+        );
+        assert_eq!(due_state("2026-12-30", "2026-12-30 23:59"), DueState::Today);
+        assert_eq!(
+            due_state("2026-12-31 00:00", "2026-12-30 23:59"),
+            DueState::Soon
+        );
+        assert_eq!(super::format_date("2026-12-30 09:00", today), "12/30 09:00");
+        assert_eq!(
+            super::format_date("2027-01-03 18:30", today),
+            "2027/1/3 18:30"
+        );
         assert_eq!(due_state("2026-12-30", today), DueState::Today);
         assert_eq!(due_state("2026-12-31", today), DueState::Soon);
         assert_eq!(due_state("2027-01-02", today), DueState::Soon);

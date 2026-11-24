@@ -54,6 +54,7 @@ pub struct Data {
     pub changes: Vec<Change>,
     /// 添付の名前や大きさ。中身は zip の `files/<ハッシュ>` に 1 つずつ入る。
     pub attachments: Vec<Attachment>,
+    pub task_defaults: Vec<TaskDefaults>,
 }
 
 impl Data {
@@ -102,11 +103,9 @@ impl Data {
 
     fn validate(&self) -> Result<()> {
         let bad = |what: &str| Err(Error::Invalid(format!("{what}が正しくありません")));
-        if self
-            .workspaces
-            .iter()
-            .any(|w| w.name.is_empty() || w.id.is_empty())
-        {
+        if self.workspaces.iter().any(|w| {
+            w.name.is_empty() || w.id.is_empty() || !w.date.as_deref().is_none_or(is_valid_date)
+        }) {
             return bad("ワークスペース");
         }
         if self
@@ -117,8 +116,8 @@ impl Data {
             return bad("担当者");
         }
         for t in &self.tasks {
-            let due_ok = t.due.as_deref().is_none_or(is_valid_date);
-            let start_ok = t.start.as_deref().is_none_or(is_valid_date);
+            let due_ok = t.due.as_deref().is_none_or(is_valid_when);
+            let start_ok = t.start.as_deref().is_none_or(is_valid_when);
             if t.title.is_empty()
                 || t.id.is_empty()
                 || t.priority > 9
@@ -178,6 +177,10 @@ pub fn export<W: Write + Seek>(store: &Store, out: W) -> Result<Manifest> {
     put("data/tasks.json", serde_json::to_vec(&data.tasks)?)?;
     put("data/comments.json", serde_json::to_vec(&data.comments)?)?;
     put("data/changes.json", serde_json::to_vec(&data.changes)?)?;
+    put(
+        "data/task_defaults.json",
+        serde_json::to_vec(&data.task_defaults)?,
+    )?;
     put(
         "data/attachments.json",
         serde_json::to_vec(&data.attachments)?,
@@ -241,12 +244,13 @@ fn read_zip<R: Read + Seek>(zip: &mut ZipArchive<R>) -> Result<(Manifest, Data)>
     if manifest.format_version != FORMAT_VERSION {
         return Err(Error::UnsupportedFormat(manifest.format_version));
     }
-    // 添付は、添付の機能ができる前の書き出しにはない
-    let attachments = if zip.index_for_name("data/attachments.json").is_some() {
-        read_json(zip, "data/attachments.json")?
-    } else {
-        Vec::new()
-    };
+    // あとから足した種類のデータは、古い書き出しにはない
+    let attachments = read_optional(zip, "data/attachments.json")?;
+    let task_defaults: Vec<TaskDefaults> = read_optional(zip, "data/task_defaults.json")?;
+    let task_defaults = task_defaults
+        .iter()
+        .map(crate::defaults::clean)
+        .collect::<Result<_>>()?;
     let mut data = Data {
         workspaces: read_json(zip, "data/workspaces.json")?,
         people: read_json(zip, "data/people.json")?,
@@ -254,6 +258,7 @@ fn read_zip<R: Read + Seek>(zip: &mut ZipArchive<R>) -> Result<(Manifest, Data)>
         comments: read_json(zip, "data/comments.json")?,
         changes: read_json(zip, "data/changes.json")?,
         attachments,
+        task_defaults,
     };
     data.normalize();
     data.validate()?;
@@ -266,6 +271,17 @@ fn read_zip<R: Read + Seek>(zip: &mut ZipArchive<R>) -> Result<(Manifest, Data)>
         }
     }
     Ok((manifest, data))
+}
+
+fn read_optional<R: Read + Seek, T: for<'de> Deserialize<'de>>(
+    zip: &mut ZipArchive<R>,
+    name: &str,
+) -> Result<Vec<T>> {
+    if zip.index_for_name(name).is_some() {
+        read_json(zip, name)
+    } else {
+        Ok(Vec::new())
+    }
 }
 
 fn read_json<R: Read + Seek, T: for<'de> Deserialize<'de>>(

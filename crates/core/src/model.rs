@@ -31,9 +31,67 @@ pub struct Workspace {
     pub id: Id,
     pub parent_id: Option<Id>,
     pub name: String,
+    /// 開催日など、このワークスペースの基準になる日。`YYYY-MM-DD`。
+    /// タスク追加時の既定の期限を「この日の何日前」と決めるのに使う。
+    #[serde(default)]
+    pub date: Option<String>,
     pub position: i64,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+/// 既定の期限の決め方。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum DueRule {
+    /// 期限を入れない。
+    #[default]
+    None,
+    /// ワークスペースの基準日から何日ずらすか（負は前）。基準日がなければ入れない。
+    Relative { days: i32 },
+    /// 決まった日。
+    Fixed { date: String },
+}
+
+/// 基準日からずらせる日数の上限。
+pub const MAX_DUE_OFFSET_DAYS: i32 = 3650;
+/// 既定で一緒に表示するワークスペースの数の上限。
+pub const MAX_DEFAULT_LINKS: usize = 20;
+
+/// ワークスペースごとの「タスク追加時の既定値」。状態は常に未着手で、既定値にしない。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskDefaults {
+    pub workspace_id: Id,
+    #[serde(default)]
+    pub assignee_ids: Vec<Id>,
+    #[serde(default)]
+    pub due: DueRule,
+    /// `HH:MM`。空なら日付だけ。
+    #[serde(default)]
+    pub due_time: String,
+    /// `None` は指定なし。
+    #[serde(default)]
+    pub priority: Option<u8>,
+    #[serde(default)]
+    pub categories: Vec<String>,
+    /// 説明の雛形。
+    #[serde(default)]
+    pub description: String,
+    /// 追加したタスクを一緒に表示するワークスペース。
+    #[serde(default)]
+    pub link_workspace_ids: Vec<Id>,
+}
+
+impl TaskDefaults {
+    /// 何かを入れる設定か（全部空なら、新しいタスクに何も入れない）。
+    pub fn has_any(&self) -> bool {
+        !self.assignee_ids.is_empty()
+            || self.due != DueRule::None
+            || self.priority.is_some()
+            || !self.categories.is_empty()
+            || !self.description.is_empty()
+            || !self.link_workspace_ids.is_empty()
+    }
 }
 
 /// 担当者。自分も、アカウントを持たない人も同じ扱い。
@@ -480,6 +538,34 @@ pub struct TaskFilter {
 }
 
 /// `YYYY-MM-DD` として正しい日付か。
+/// `HH:MM`（24 時間）として正しいか。
+pub fn is_valid_time(s: &str) -> bool {
+    let b = s.as_bytes();
+    b.len() == 5
+        && b[2] == b':'
+        && [0, 1, 3, 4].iter().all(|&i| b[i].is_ascii_digit())
+        && &s[0..2] <= "23"
+        && &s[3..5] <= "59"
+}
+
+/// 期限や開始として正しいか。`YYYY-MM-DD` か、時刻つきの `YYYY-MM-DD HH:MM`。
+pub fn is_valid_when(s: &str) -> bool {
+    match s.split_once(' ') {
+        None => is_valid_date(s),
+        Some((date, time)) => is_valid_date(date) && is_valid_time(time),
+    }
+}
+
+/// 期限や開始の、日付の部分。
+pub fn date_of(when: &str) -> &str {
+    when.split_once(' ').map_or(when, |(date, _)| date)
+}
+
+/// 期限や開始の、時刻の部分。なければ `None`。
+pub fn time_of(when: &str) -> Option<&str> {
+    when.split_once(' ').map(|(_, time)| time)
+}
+
 pub fn is_valid_date(s: &str) -> bool {
     let b = s.as_bytes();
     if b.len() != 10 || b[4] != b'-' || b[7] != b'-' {
@@ -562,6 +648,20 @@ mod tests {
 
     #[test]
     fn dates_are_validated() {
+        assert!(is_valid_when("2026-11-24"));
+        assert!(is_valid_when("2026-11-24 09:30"));
+        assert!(is_valid_when("2026-11-24 23:59"));
+        assert!(!is_valid_when("2026-11-24 24:00"));
+        assert!(!is_valid_when("2026-11-24 9:30"));
+        assert!(!is_valid_when("2026-11-24 09:60"));
+        assert!(!is_valid_when("2026-11-24T09:30"));
+        assert!(!is_valid_when("2026-11-24 "));
+        assert!(!is_valid_when("2026-02-30 09:30"));
+        assert!(!is_valid_time("１２:００"));
+        assert_eq!(date_of("2026-11-24 09:30"), "2026-11-24");
+        assert_eq!(date_of("2026-11-24"), "2026-11-24");
+        assert_eq!(time_of("2026-11-24 09:30"), Some("09:30"));
+        assert_eq!(time_of("2026-11-24"), None);
         assert!(is_valid_date("2026-11-24"));
         assert!(is_valid_date("2024-02-29"));
         assert!(is_valid_date("2000-02-29"));
