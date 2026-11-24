@@ -1,6 +1,7 @@
 # malakt-mahoz
 
-オフラインで使うタスク管理ツールです。Rust と [gpui](https://www.gpui.rs/) で書かれていて、macOS・Windows・Linux で動きます。データはすべて手元の SQLite に保存します。通信するのは、AI チャットに API キーを入れて使うときだけです。
+オフラインで使うタスク管理ツールです。
+Rust と [gpui](https://www.gpui.rs/) で主に構成しており、macOS・Windows・Linux で動作することを目的としています。
 
 ## できること
 
