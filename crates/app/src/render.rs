@@ -397,7 +397,9 @@ impl MainView {
                             .tooltip("AI チャット")
                             .ghost()
                             .small()
-                            .on_click(cx.listener(|this, _, window, cx| this.toggle_ai(window, cx))),
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.toggle_ai(window, cx)),
+                            ),
                     )
                     .child(
                         Button::new("open-notices")

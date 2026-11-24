@@ -210,7 +210,10 @@ mod tests {
 
         // 太字は明るい色にし、色は次の行に続く
         let (text, spans) = parse("\u{1b}[1;32mPASS", &mut state);
-        assert_eq!((text.as_str(), spans), ("PASS", vec![(0..4, Color::BrightGreen)]));
+        assert_eq!(
+            (text.as_str(), spans),
+            ("PASS", vec![(0..4, Color::BrightGreen)])
+        );
         let (_, spans) = parse("next", &mut state);
         assert_eq!(spans, vec![(0..4, Color::BrightGreen)]);
         let (_, spans) = parse("\u{1b}[39;22mplain \u{1b}[94mblue", &mut state);

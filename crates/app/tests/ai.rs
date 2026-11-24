@@ -211,7 +211,7 @@ fn nothing_is_sent_without_a_key(cx: &mut TestAppContext) {
     ui(cx, window, |window, _| {
         assert!(window.find("ai-empty").visible());
         assert!(
-            window.find("ai-shell-empty").visible(),
+            window.find("ai-shell-prompt").visible(),
             "シェルも右に出ている"
         );
     });
@@ -987,9 +987,9 @@ fn the_periodic_check_is_set_up_in_settings(cx: &mut TestAppContext) {
     ui(cx, window, |window, cx| {
         window.click("ai-settings-toggle", cx)
     });
+    ui(cx, window, |window, cx| window.click("ai-watch", cx));
     ui(cx, window, |window, cx| {
-        window.click(("ai-watch", 1usize), cx);
-        window.click(("ai-watch-minutes", 60usize), cx);
+        window.click(("ai-watch-minutes", 60usize), cx)
     });
     ui(cx, window, |window, cx| {
         window.click("ai-watch-instruction", cx);
@@ -1032,9 +1032,7 @@ fn the_periodic_check_is_set_up_in_settings(cx: &mut TestAppContext) {
     assert_eq!(read(cx, |s| s.shell.len()), 2);
 
     // オフに戻すと、もう見に行かない
-    ui(cx, window, |window, cx| {
-        window.click(("ai-watch", 0usize), cx)
-    });
+    ui(cx, window, |window, cx| window.click("ai-watch", cx));
     assert!(!read(cx, |s| s.watch.enabled));
     // カーソルの点滅で時間がかかるので、ウィンドウは閉じてから時計を進める
     ui(cx, window, |window, _| window.remove_window());
@@ -1068,9 +1066,7 @@ fn auto_run_skips_the_confirmations(cx: &mut TestAppContext) {
     ui(cx, window, |window, cx| {
         window.click("ai-settings-toggle", cx)
     });
-    ui(cx, window, |window, cx| {
-        window.click(("ai-auto", 1usize), cx)
-    });
+    ui(cx, window, |window, cx| window.click("ai-auto", cx));
     wait(cx, "コマンドが終わる", |s| !s.busy);
     assert!(read(cx, |s| s.auto_run));
     assert!(read(cx, |s| s.shell.iter().any(|l| l.text == "first-auto")));
@@ -1113,9 +1109,7 @@ fn auto_run_skips_the_confirmations(cx: &mut TestAppContext) {
             .unwrap()
     });
     assert_eq!(saved.as_deref(), Some("1"));
-    ui(cx, window, |window, cx| {
-        window.click(("ai-auto", 0usize), cx)
-    });
+    ui(cx, window, |window, cx| window.click("ai-auto", cx));
     ui(cx, window, |window, _| {
         assert!(window.try_find("ai-auto-badge").is_none());
     });
@@ -1152,4 +1146,125 @@ fn auto_run_does_not_reach_the_periodic_check(cx: &mut TestAppContext) {
         .shell
         .iter()
         .all(|l| !l.text.contains("never"))));
+}
+
+/// シェルの入力行に打って Enter を押す。
+fn type_line(cx: &mut TestAppContext, window: AnyWindowHandle, line: &str) {
+    ui(cx, window, |window, cx| {
+        window.click("ai-shell-input", cx);
+        window.input(line, cx);
+        window.press("enter", cx);
+    });
+    wait(cx, "コマンドが終わる", |s| !s.busy);
+}
+
+fn shell_texts(cx: &mut TestAppContext) -> Vec<String> {
+    read(cx, |s| s.shell.iter().map(|l| l.text.to_string()).collect())
+}
+
+#[gpui_kit::test]
+fn the_shell_runs_typed_commands_like_a_terminal(cx: &mut TestAppContext) {
+    // キーがなくても、自分で打つコマンドは動く
+    let world = start(cx);
+    let (window, view) = open(cx, wide());
+    open_chat(cx, window, &view);
+
+    type_line(cx, window, "echo hello");
+    assert_eq!(shell_texts(cx), ["$ echo hello", "hello"]);
+    assert!(world.sent().is_empty(), "AI には送らない");
+
+    // cd は次のコマンドにも続く
+    let dir = std::env::temp_dir().canonicalize().unwrap();
+    type_line(cx, window, &format!("cd {}", dir.display()));
+    assert_eq!(read(cx, |s| s.cwd.clone()), dir);
+    type_line(cx, window, "cd no-such-folder-here");
+    assert_eq!(read(cx, |s| s.cwd.clone()), dir, "行けなければ動かない");
+    assert_eq!(read(cx, |s| s.shell.last().unwrap().kind), LineKind::Err);
+
+    // ↑ で前のコマンドに戻り、↓ で進む
+    ui(cx, window, |window, cx| {
+        window.click("ai-shell-input", cx);
+        for key in ["up", "up", "up", "up", "down", "up", "enter"] {
+            window.press(key, cx);
+        }
+    });
+    wait(cx, "コマンドが終わる", |s| !s.busy);
+    let texts = shell_texts(cx);
+    assert_eq!(&texts[texts.len() - 2..], ["$ echo hello", "hello"]);
+    assert_eq!(
+        read(cx, |s| s.history.clone()),
+        [
+            "echo hello".to_owned(),
+            format!("cd {}", dir.display()),
+            "cd no-such-folder-here".to_owned(),
+            "echo hello".to_owned()
+        ]
+    );
+
+    // Ctrl+L で画面を消す。履歴と場所は残る
+    ui(cx, window, |window, cx| {
+        assert!(window.find(("ai-shell-line", 0usize)).visible());
+        window.click("ai-shell-input", cx);
+        window.press("ctrl-l", cx);
+    });
+    assert!(shell_texts(cx).is_empty());
+    ui(cx, window, |window, _| {
+        assert!(window.try_find(("ai-shell-line", 0usize)).is_none());
+    });
+    assert_eq!(read(cx, |s| s.cwd.clone()), dir);
+}
+
+#[gpui_kit::test]
+fn long_lines_wrap_and_the_clear_button_empties_the_screen(cx: &mut TestAppContext) {
+    start(cx);
+    let (window, view) = open(cx, wide());
+    open_chat(cx, window, &view);
+
+    let long = "x".repeat(300);
+    type_line(cx, window, &format!("echo {long}"));
+    assert_eq!(read(cx, |s| s.shell.len()), 2);
+    ui(cx, window, |window, _| {
+        // 2 行が、幅に合わせて 4 行より多く出ている
+        assert!(window.find(("ai-shell-line", 4usize)).visible());
+    });
+    ui(cx, window, |window, cx| window.click("ai-shell-clear", cx));
+    assert!(shell_texts(cx).is_empty());
+}
+
+#[cfg(unix)]
+#[gpui_kit::test]
+fn colours_from_the_command_are_kept(cx: &mut TestAppContext) {
+    use malakt_ai::ansi::Color;
+    start(cx);
+    let (window, view) = open(cx, wide());
+    open_chat(cx, window, &view);
+
+    type_line(cx, window, r"printf '\033[31mred\033[0m plain\n'");
+    let line = read(cx, |s| s.shell.last().unwrap().clone());
+    assert_eq!(line.text, "red plain");
+    assert_eq!(line.spans, [(0..3, Color::Red)]);
+}
+
+#[gpui_kit::test]
+fn ctrl_c_in_the_input_line_kills_the_typed_command(cx: &mut TestAppContext) {
+    start(cx);
+    let (window, view) = open(cx, wide());
+    open_chat(cx, window, &view);
+
+    let command = if cfg!(windows) {
+        "ping -n 120 127.0.0.1"
+    } else {
+        "sleep 120"
+    };
+    ui(cx, window, |window, cx| {
+        window.click("ai-shell-input", cx);
+        window.input(command, cx);
+        window.press("enter", cx);
+    });
+    wait(cx, "コマンドが動き出す", |s| s.command_running());
+    let started = std::time::Instant::now();
+    ui(cx, window, |window, cx| window.press("ctrl-c", cx));
+    wait(cx, "止まる", |s| !s.busy && !s.command_running());
+    assert!(started.elapsed() < Duration::from_secs(30));
+    assert!(shell_texts(cx).iter().any(|l| l == "強制終了しました"));
 }
