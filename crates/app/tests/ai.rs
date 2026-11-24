@@ -836,6 +836,9 @@ fn a_locked_app_does_not_talk_to_the_ai(cx: &mut TestAppContext) {
 
 /// リンク付きのタスクを 1 つ作り、定期チェックをオンにする。
 fn watched_task(cx: &mut TestAppContext, minutes: u32) -> String {
+    // 定期チェックだけを見るので、新しいタスクを整えるほうは切る
+    let arrange = session(cx);
+    cx.update(|cx| arrange.update(cx, |s, cx| s.set_arrange(false, cx)));
     let id = cx.update(|cx| {
         db::shared(cx).update(cx, |db, cx| {
             let draft = TaskDraft {
@@ -1295,4 +1298,121 @@ fn ctrl_c_in_the_input_line_kills_the_typed_command(cx: &mut TestAppContext) {
     assert!(started.elapsed() < Duration::from_secs(30));
     assert!(shell_texts(cx).iter().any(|l| l == "強制終了しました"));
     assert!(read(cx, |s| s.items.is_empty()), "チャットには何も書かない");
+}
+
+fn new_task(cx: &mut TestAppContext, title: &str) -> String {
+    cx.update(|cx| {
+        db::shared(cx).update(cx, |db, cx| {
+            let draft = TaskDraft {
+                title: title.into(),
+                ..Default::default()
+            };
+            let task = db.store.create_task(None, &draft).unwrap();
+            cx.notify();
+            task.id
+        })
+    })
+}
+
+/// タスクを作ると、AI がリンクを読んでタスクを整える。整えている間は印が出る。
+#[gpui_kit::test]
+fn a_new_task_is_arranged_by_the_ai(cx: &mut TestAppContext) {
+    let world = start(cx);
+    world.keys.set(Provider::Claude, "k").unwrap();
+    let (window, view) = open(cx, wide());
+    ui(cx, window, |window, cx| window.click("nav-all", cx));
+    cx.run_until_parked();
+
+    // gh が少しかかる間に、印を見る
+    *world.github.lock().unwrap() = if cfg!(windows) {
+        " & ping -n 2 127.0.0.1 > NUL".into()
+    } else {
+        "; sleep 0.5".into()
+    };
+    let task = new_task(cx, "https://github.com/o/r/pull/7 のレビュー");
+    wait(cx, "AI が動き始める", |s| !s.arranging.is_empty());
+    // 始まったら、タスクの行に印が出る
+    assert_eq!(read(cx, |s| s.arranging.clone()), vec![task.clone()]);
+    ui(cx, window, |window, _| {
+        assert!(window.try_find(("ai-working", 0usize)).is_some());
+    });
+    world.reply(tool_reply(
+        "t1",
+        "update_task",
+        json!({"id": task, "title": "ログインを直す PR のレビュー"}),
+    ));
+    world.reply(text_reply("タイトルを付け直しました。"));
+    wait(cx, "AI が整え終わる", |s| !s.busy);
+
+    let sent = world.sent();
+    assert_eq!(sent.len(), 2);
+    let message = sent[0].2["messages"][0]["content"].as_str().unwrap();
+    assert!(message.contains(&format!("## タスク（id: {task}）")));
+    assert!(message.contains("fetched https://github.com/o/r/pull/7"));
+    // 今見ている画面も伝える
+    let system = sent[0].2["system"].as_str().unwrap();
+    assert!(system.contains("すべてのタスク"), "{system}");
+    assert!(system.contains("のレビュー（ID: "), "{system}");
+    assert_eq!(all_tasks(cx)[0].title, "ログインを直す PR のレビュー");
+    assert!(read(cx, |s| s.arranging.is_empty()));
+    ui(cx, window, |window, _| {
+        assert!(window.try_find(("ai-working", 0usize)).is_none());
+    });
+
+    // AI が書き換えた分では、もう一度動かない
+    cx.run_until_parked();
+    assert_eq!(world.sent().len(), 2);
+    let _ = view;
+}
+
+/// API キーがなければ、どこにも通信しない。理由を出し、キーを入れると動く。
+#[gpui_kit::test]
+fn a_new_task_waits_for_the_key(cx: &mut TestAppContext) {
+    let world = start(cx);
+    let task = new_task(cx, "https://github.com/o/r/issues/3");
+    wait(cx, "理由が出る", |s| !s.arrange_notes.is_empty());
+    assert!(world.sent().is_empty());
+    assert!(read(cx, |s| s.shell.is_empty()));
+    let note = read(cx, |s| s.arrange_notes[&task].clone());
+    assert!(note.contains("API キーがない"), "{note}");
+
+    world.reply(text_reply("そのままにしました。"));
+    let session = session(cx);
+    cx.update(|cx| session.update(cx, |s, cx| s.save_key("k", cx)));
+    wait(cx, "AI が整え終わる", |s| {
+        !s.busy && !s.items.is_empty()
+    });
+    assert_eq!(world.sent().len(), 1);
+    assert!(read(cx, |s| s.arrange_notes.is_empty()));
+}
+
+/// 前からあるタスクと、オフにしている間のタスクは整えない。
+#[gpui_kit::test]
+fn old_tasks_are_left_alone(cx: &mut TestAppContext) {
+    let mut store = Store::open_in_memory().unwrap();
+    let draft = TaskDraft {
+        title: "https://github.com/o/r/issues/1".into(),
+        ..Default::default()
+    };
+    let old = store.create_task(None, &draft).unwrap();
+    let world = start_with(cx, store);
+    world.keys.set(Provider::Claude, "k").unwrap();
+    // 前からあるタスクを書き換えても動かない
+    cx.update(|cx| {
+        db::shared(cx).update(cx, |db, cx| {
+            db.store
+                .set_task_status(&old.id, Status::InProcess)
+                .unwrap();
+            cx.notify();
+        })
+    });
+    cx.run_until_parked();
+    let session = session(cx);
+    cx.update(|cx| session.update(cx, |s, cx| s.set_arrange(false, cx)));
+    new_task(cx, "https://github.com/o/r/issues/2");
+    cx.run_until_parked();
+    cx.update(|cx| session.update(cx, |s, cx| s.set_arrange(true, cx)));
+    cx.run_until_parked();
+    assert!(world.sent().is_empty());
+    assert!(read(cx, |s| s.shell.is_empty() && !s.busy));
 }

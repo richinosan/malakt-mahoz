@@ -95,6 +95,42 @@ fn watch_targets(store: &malakt_core::Store) -> Result<Vec<WatchTarget>, String>
     Ok(targets)
 }
 
+/// 新しいタスクを AI が整えるとき、1 回で扱うタスクの数。
+const MAX_ARRANGE_TASKS: usize = 5;
+/// 新しいタスクを整えるとき、タスク 1 つで読みに行くリンクの数。
+const MAX_ARRANGE_LINKS: usize = 3;
+
+/// AI が整える前のタスク。
+struct NewTask {
+    id: String,
+    title: String,
+    description: String,
+    links: Vec<Link>,
+}
+
+/// タスクごとの、書かれている GitHub のリンク。新しいタスクとリンクを見分ける元にする。
+fn task_links(store: &malakt_core::Store) -> Result<Vec<(NewTask, bool)>, String> {
+    let tasks = store
+        .tasks(malakt_core::Scope::All, &malakt_core::TaskFilter::default())
+        .map_err(|e| format!("タスクを読めませんでした: {e}"))?;
+    Ok(tasks
+        .into_iter()
+        .map(|task| {
+            let links = github::find_links(&format!("{}\n{}", task.title, task.description));
+            let open = task.status.is_open();
+            (
+                NewTask {
+                    id: task.id,
+                    title: task.title,
+                    description: task.description,
+                    links,
+                },
+                open,
+            )
+        })
+        .collect())
+}
+
 type Headers = [(&'static str, String)];
 /// 環境変数を読む。
 pub type EnvFn = dyn Fn(&str) -> Option<String> + Send + Sync;
@@ -250,8 +286,21 @@ pub struct Session {
     /// 定期チェックの、いちばん新しい結果。
     pub watch_status: Option<SharedString>,
     watch_timer: Option<Task<()>>,
-    /// 今の進行が、定期チェックから始まったものか。確認が要る操作は実行しない。
+    /// 今の進行が、定期チェックなどアプリから始まったものか。確認が要る操作は実行しない。
     auto: bool,
+    /// 新しいタスクを AI が整える。標準はオン（API キーがなければ動かない）。
+    pub arrange: bool,
+    /// AI が今整えているタスクの ID。
+    pub arranging: Vec<String>,
+    /// タスクを整えられなかった理由。タスクの ID ごと。
+    pub arrange_notes: HashMap<String, SharedString>,
+    /// もう見たタスクと、そのリンク。ここにないタスクやリンクが新しいもの。
+    known: Option<HashMap<String, Vec<String>>>,
+    /// 手が空いたら、新しいタスクを探し直す。
+    arrange_retry: bool,
+    /// ユーザーが今見ている場所（ワークスペースや開いているタスク）。画面が書き込む。
+    pub place: String,
+    _subscriptions: Vec<Subscription>,
 }
 
 /// すべてのウィンドウで共有するチャット。
@@ -278,6 +327,7 @@ impl Session {
         let mut error = None;
         let watch;
         let auto_run;
+        let arrange;
         let (provider, effort, models) = {
             let store = &db.read(cx).store;
             let mut read = |key: &str| match store.setting(key) {
@@ -298,6 +348,7 @@ impl Session {
                 .filter_map(|p| read(&setting_key(p)).map(|m| (p, m)))
                 .collect();
             auto_run = read("ai.auto_run").as_deref() == Some("1");
+            arrange = read("ai.arrange").as_deref() != Some("0");
             let defaults = Watch::default();
             watch = Watch {
                 enabled: read("ai.watch.enabled").as_deref() == Some("1"),
@@ -344,9 +395,246 @@ impl Session {
             watch_status: None,
             watch_timer: None,
             auto: false,
+            arrange,
+            arranging: Vec::new(),
+            arrange_notes: HashMap::new(),
+            known: None,
+            arrange_retry: false,
+            place: String::new(),
+            _subscriptions: Vec::new(),
         };
+        this._subscriptions = vec![
+            cx.observe(&this.db.clone(), |this, _, cx| this.tasks_changed(cx)),
+            cx.observe_self(|this, cx| {
+                if this.arrange_retry && !this.busy {
+                    this.arrange_retry = false;
+                    this.tasks_changed(cx);
+                }
+            }),
+        ];
         this.restart_watch(cx);
+        // 今あるタスクは、もう見たものにする
+        this.tasks_changed(cx);
         this
+    }
+
+    // ---- 新しいタスクを整える ----
+
+    pub fn set_arrange(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.arrange == on || !self.save_setting("ai.arrange", if on { "1" } else { "0" }, cx) {
+            return;
+        }
+        self.arrange = on;
+        // オンにしたときは、今あるタスクをもう見たものにして、次に作られたものから始める
+        self.known = None;
+        self.arrange_notes.clear();
+        self.tasks_changed(cx);
+        cx.notify();
+    }
+
+    /// まだ見ていないタスクと、新しくリンクが書かれたタスク。
+    fn new_tasks(&self, all: Vec<(NewTask, bool)>) -> Vec<NewTask> {
+        let Some(known) = &self.known else {
+            return Vec::new();
+        };
+        all.into_iter()
+            .filter(|(task, open)| {
+                *open
+                    && known.get(&task.id).is_none_or(|seen| {
+                        task.links.iter().any(|link| !seen.contains(&link.url()))
+                    })
+            })
+            .map(|(task, _)| task)
+            .collect()
+    }
+
+    /// AI がツールで書き換えた分を、もう見たものにする。ユーザーが作ってまだ
+    /// 整えていないタスクは、そのまま残す。
+    fn absorb(&mut self, waiting: &[String], cx: &App) {
+        let Some(known) = &mut self.known else {
+            return;
+        };
+        let Ok(all) = task_links(&self.db.read(cx).store) else {
+            return;
+        };
+        for (task, _) in all {
+            if !waiting.contains(&task.id) {
+                known.insert(task.id, task.links.iter().map(Link::url).collect());
+            }
+        }
+    }
+
+    /// 新しいタスクを見つけたら、AI に整えさせる。API キーがなければ通信しない。
+    fn tasks_changed(&mut self, cx: &mut Context<Self>) {
+        if !self.arrange {
+            self.known = None;
+            return;
+        }
+        if !self.db.read(cx).unlocked {
+            return;
+        }
+        let all = match task_links(&self.db.read(cx).store) {
+            Ok(all) => all,
+            Err(_) => return,
+        };
+        let Some(known) = &mut self.known else {
+            self.known = Some(
+                all.into_iter()
+                    .map(|(task, _)| (task.id, task.links.iter().map(Link::url).collect()))
+                    .collect(),
+            );
+            return;
+        };
+        // 消えたタスクの分は忘れるので、増え続けない
+        known.retain(|id, _| all.iter().any(|(task, _)| task.id == *id));
+        let mut tasks = self.new_tasks(all);
+        tasks.truncate(MAX_ARRANGE_TASKS);
+        let before = self.arrange_notes.len();
+        self.arrange_notes
+            .retain(|id, _| !tasks.iter().any(|task| task.id == *id) || self.busy);
+        if tasks.is_empty() {
+            if before != self.arrange_notes.len() {
+                cx.notify();
+            }
+            return;
+        }
+        if self.busy {
+            self.arrange_retry = true;
+            return;
+        }
+        match &self.key {
+            KeyState::Unknown => {
+                // 調べ終わったら、もう一度ここに来る
+                self.refresh_key(cx);
+            }
+            KeyState::Missing | KeyState::Failed(_) => {
+                let note: SharedString = match &self.key {
+                    KeyState::Failed(e) => format!("API キーを読めませんでした: {e}").into(),
+                    _ => format!(
+                        "{} の API キーがないので、AI はリンクを読み込めません",
+                        self.provider.label()
+                    )
+                    .into(),
+                };
+                let mut changed = before != self.arrange_notes.len();
+                // リンクのないタスクには、何も出さない
+                for task in tasks.iter().filter(|task| !task.links.is_empty()) {
+                    changed |= self.arrange_notes.insert(task.id.clone(), note.clone())
+                        != Some(note.clone());
+                }
+                if changed {
+                    cx.notify();
+                }
+            }
+            KeyState::Present { .. } => self.arrange_tasks(tasks, cx),
+        }
+    }
+
+    fn arrange_tasks(&mut self, tasks: Vec<NewTask>, cx: &mut Context<Self>) {
+        self.busy = true;
+        self.auto = true;
+        self.arranging = tasks.iter().map(|task| task.id.clone()).collect();
+        if let Some(known) = &mut self.known {
+            for task in &tasks {
+                known.insert(task.id.clone(), task.links.iter().map(Link::url).collect());
+            }
+        }
+        let ids = self.arranging.clone();
+        self.task = Some(cx.spawn(async move |this, cx| {
+            let result = Self::arrange_run(&this, tasks, cx).await;
+            // チャットがなくなっていれば、知らせる先もない
+            let _ = this.update(cx, |this, cx| {
+                match result {
+                    Ok(notes) => this.arrange_notes.extend(notes),
+                    Err(error) => {
+                        let note: SharedString =
+                            format!("AI がタスクを整えられませんでした: {error}").into();
+                        this.items.push(Item::Error(note.clone()));
+                        for id in ids {
+                            this.arrange_notes.insert(id, note.clone());
+                        }
+                    }
+                }
+                this.finish();
+                this.arrange_retry = true;
+                cx.notify();
+            });
+        }));
+        cx.notify();
+    }
+
+    /// リンクの中身を読み、AI にタスクを整えさせる。返すのは、読めなかったリンクの知らせ。
+    async fn arrange_run(
+        this: &WeakEntity<Self>,
+        tasks: Vec<NewTask>,
+        cx: &mut AsyncApp,
+    ) -> Result<Vec<(String, SharedString)>, String> {
+        let (config, place) = this
+            .read_with(cx, |s, _| (s.config.clone(), s.place.clone()))
+            .map_err(gone)?;
+        let titles: Vec<String> = tasks.iter().map(|t| format!("「{}」", t.title)).collect();
+        this.update(cx, |s, cx| {
+            s.items.push(Item::Notice(
+                format!("新しいタスク {} を AI が整えます。", titles.join("、")).into(),
+            ));
+            cx.notify();
+        })
+        .map_err(gone)?;
+        let mut notes = Vec::new();
+        let mut message = String::from(
+            "（アプリからの自動のメッセージです）\n\
+             次のタスクが新しく作られたか、新しいリンクが書かれました。それぞれのタスクを update_task で整えてください。\n\
+             - タイトルは、中身が一目で分かる短い言葉にする。URL が入っているタイトルは、リンク先の題を元に付け直す（「〜のレビュー」のようにユーザーが書いた目的は残す）。\n\
+             - 説明には、リンクの URL と要点を書く。ユーザーが書いた文は消さない。\n\
+             - 中身から分かる範囲で、優先度や期限を入れる。\n\
+             - 直すところがなければ、何も変えない。\n\
+             - タスクを新しく作らない。消さない。\n",
+        );
+        for task in &tasks {
+            message.push_str(&format!(
+                "\n## タスク（id: {}）\nタイトル: {}\n説明: {}\n",
+                task.id,
+                task.title,
+                if task.description.trim().is_empty() {
+                    "（なし）"
+                } else {
+                    task.description.as_str()
+                }
+            ));
+            for link in task.links.iter().take(MAX_ARRANGE_LINKS) {
+                let url = link.url();
+                match Self::fetch_github(this, &config, link, cx).await {
+                    Ok(content) => message.push_str(&format!(
+                        "### {url} の中身\n{}\n",
+                        clip_tail(&content, MAX_WATCH_CHARS)
+                    )),
+                    Err(error) => {
+                        message.push_str(&format!("### {url} は読み込めませんでした\n"));
+                        let note: SharedString =
+                            format!("{url} を読み込めませんでした: {error}").into();
+                        this.update(cx, |s, cx| {
+                            s.items.push(Item::Error(note.clone()));
+                            cx.notify();
+                        })
+                        .map_err(gone)?;
+                        notes.push((task.id.clone(), note));
+                    }
+                }
+            }
+        }
+        this.update(cx, |s, cx| {
+            s.turns.push(Turn::User(message));
+            cx.notify();
+        })
+        .map_err(gone)?;
+        Self::converse(
+            this,
+            &config,
+            &format!("新しいタスクの整理（アプリが自動で始めました）。{place}"),
+            cx,
+        )
+        .await?;
+        Ok(notes)
     }
 
     /// オート実行を切り替える。待っている確認があれば、オンにしたときに実行へ進める。
@@ -443,6 +731,7 @@ impl Session {
         self.own_command = false;
         self.auto = false;
         self.pending = None;
+        self.arranging.clear();
     }
 
     async fn watch_run(this: &WeakEntity<Self>, cx: &mut AsyncApp) -> Result<String, String> {
@@ -645,6 +934,7 @@ impl Session {
                     Ok(None) => KeyState::Missing,
                     Err(e) => KeyState::Failed(e.into()),
                 };
+                this.arrange_retry = true;
                 cx.notify();
             });
         })
@@ -1247,7 +1537,11 @@ impl Session {
             _ => {
                 let result = this
                     .update(cx, |s, cx| {
-                        s.db.update(cx, |db, cx| {
+                        // ユーザーが作って、まだ整えていないタスク
+                        let waiting: Vec<String> = task_links(&s.db.read(cx).store)
+                            .map(|all| s.new_tasks(all).into_iter().map(|t| t.id).collect())
+                            .unwrap_or_default();
+                        let result = s.db.update(cx, |db, cx| {
                             // 自分が登録されていれば、コメントの書き手にする
                             let author = db
                                 .store
@@ -1259,7 +1553,9 @@ impl Session {
                                 tools::execute(&mut db.store, author.as_deref(), name, &call.args);
                             cx.notify();
                             result
-                        })
+                        });
+                        s.absorb(&waiting, cx);
+                        result
                     })
                     .map_err(gone)?;
                 Ok(result.map_err(ToolError::Failed))

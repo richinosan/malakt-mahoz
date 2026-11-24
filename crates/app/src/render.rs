@@ -7,6 +7,7 @@ use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::{Input, Textarea};
 use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu, PopupMenu, PopupMenuItem};
+use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::text::TextView;
 use gpui_kit::component::{ActiveTheme, Icon, IconName, Sizable};
 use gpui_kit::prelude::FluentBuilder;
@@ -901,6 +902,8 @@ impl MainView {
                 .child(
                     Button::new("ai-toggle")
                         .icon(app_icon("sparkles"))
+                        // AI が動いている間は、回る印に変わる
+                        .loading(self.ai_session.read(cx).busy)
                         .outline()
                         .rounded(px(999.))
                         .tooltip("AI チャット")
@@ -1960,6 +1963,7 @@ impl MainView {
         let active = self.panel.as_deref() == Some(id.as_str());
         let closed = !task.status.is_open();
         let now = malakt_core::now_ms();
+        let arranging = self.ai_session.read(cx).arranging.contains(&task.id);
 
         let select = {
             let id = id.clone();
@@ -2014,6 +2018,19 @@ impl MainView {
                 .child(
                     div()
                         .id(("title", ix))
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        // AI が整えている間は、タイトルの前で印が回る
+                        .when(arranging, |d| {
+                            d.child(
+                                div()
+                                    .id(("ai-working", ix))
+                                    .flex_none()
+                                    .child(Spinner::new().small())
+                                    .test_support(),
+                            )
+                        })
                         .truncate()
                         .text_sm()
                         .font_weight(FontWeight::BOLD)
@@ -2770,6 +2787,38 @@ impl MainView {
             )
         };
 
+        // AI が整えている間の印と、整えられなかった理由
+        let ai_state = {
+            let session = self.ai_session.read(cx);
+            if session.arranging.contains(&task.id) {
+                Some(
+                    row()
+                        .id("ai-working")
+                        .gap_2()
+                        .items_center()
+                        .text_sm()
+                        .text_color(theme.muted_foreground)
+                        .child(Spinner::new().small())
+                        .child("AI が整えています")
+                        .test_support()
+                        .into_any_element(),
+                )
+            } else {
+                session.arrange_notes.get(&task.id).map(|note| {
+                    row()
+                        .id("ai-note")
+                        .gap_2()
+                        .items_start()
+                        .text_sm()
+                        .text_color(theme.muted_foreground)
+                        .child(app_icon("sparkles").small().flex_none().mt_1())
+                        .child(div().min_w_0().child(note.clone()))
+                        .test_support()
+                        .into_any_element()
+                })
+            }
+        };
+
         let status_actions = {
             let id = task.id.clone();
             let mut actions = row().gap_2().flex_wrap();
@@ -3264,6 +3313,7 @@ impl MainView {
                 .p_4()
                 .gap_4()
                 .child(title)
+                .children(ai_state)
                 .child(
                     row()
                         .gap_3()
