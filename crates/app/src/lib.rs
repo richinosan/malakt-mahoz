@@ -1,5 +1,6 @@
 //! malakt-mahoz の画面。gpui で描く。
 
+pub mod cli;
 pub mod db;
 mod render;
 pub mod state;

@@ -4303,6 +4303,8 @@ dependencies = [
  "dirs 5.0.1",
  "gpui-kit",
  "malakt-core",
+ "serde",
+ "serde_json",
  "tempfile",
 ]
 
