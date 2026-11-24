@@ -141,6 +141,27 @@ const MIGRATIONS: &[&str] = &[
     ) STRICT, WITHOUT ROWID;
     CREATE INDEX task_links_workspace ON task_links(workspace_id);
     "#,
+    // 7: 通知
+    r#"
+    CREATE TABLE notices (
+        id TEXT PRIMARY KEY NOT NULL,
+        kind TEXT NOT NULL,
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        task_title TEXT NOT NULL,
+        actor TEXT NOT NULL DEFAULT '',
+        comment_id TEXT REFERENCES comments(id) ON DELETE SET NULL,
+        excerpt TEXT NOT NULL DEFAULT '',
+        status TEXT,
+        done_count INTEGER NOT NULL DEFAULT 0,
+        total_count INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL,
+        read_at INTEGER,
+        delivered_at INTEGER,
+        dedupe TEXT UNIQUE
+    ) STRICT;
+    CREATE INDEX notices_created ON notices(created_at);
+    CREATE INDEX notices_task ON notices(task_id);
+    "#,
 ];
 
 pub(crate) fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {

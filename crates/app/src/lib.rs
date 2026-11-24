@@ -27,6 +27,8 @@ pub fn database_path() -> PathBuf {
 
 /// アプリ全体の準備。ウィンドウを開く前に 1 回呼ぶ。
 pub fn init(store: malakt_core::Store, cx: &mut App) {
+    // OS の通知に出るアプリの名前。通知を出す前に決めておく
+    cx.set_app_identity("io.github.richinosan.malakt-mahoz", "malakt-mahoz");
     gpui_kit::init(cx);
     db::init(store, cx);
     cx.bind_keys([

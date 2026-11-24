@@ -208,6 +208,21 @@ impl MainView {
                     .font_weight(FontWeight::BOLD)
                     .child("malakt-mahoz"),
             )
+            .child(
+                Button::new("open-notices")
+                    .label(if self.unread_notices == 0 {
+                        "通知".to_owned()
+                    } else {
+                        format!("通知（未読 {}）", self.unread_notices)
+                    })
+                    .ghost()
+                    .small()
+                    .w_full()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.modal = Modal::Notices;
+                        cx.notify();
+                    })),
+            )
             .child(row().child(self.nav_item("nav-home", "ホーム", Nav::Home, None, cx)))
             .child(row().child(self.nav_item("nav-all", "すべてのタスク", Nav::All, None, cx)))
             .child(row().child(self.nav_item("nav-unfiled", "未所属", Nav::Unfiled, None, cx)))
@@ -2515,6 +2530,80 @@ impl MainView {
                             ),
                     );
                 self.dialog("状態を変更", body, cx)
+            }
+            Modal::Notices => {
+                let theme = cx.theme().clone();
+                let now = malakt_core::now_ms();
+                let mut list = col().gap_1();
+                for (ix, n) in self.notices.iter().enumerate() {
+                    let id = n.id.clone();
+                    list = list.child(
+                        col()
+                            .id(("notice", ix))
+                            .gap_0p5()
+                            .p_2()
+                            .rounded_md()
+                            .cursor_pointer()
+                            .hover(|s| s.bg(theme.secondary_hover))
+                            .when(n.is_unread(), |d| d.bg(theme.secondary))
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .when(n.is_unread(), |d| d.font_weight(FontWeight::BOLD))
+                                    .child(n.headline()),
+                            )
+                            .when(!n.excerpt.is_empty(), |d| {
+                                d.child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(theme.muted_foreground)
+                                        .truncate()
+                                        .child(n.excerpt.clone()),
+                                )
+                            })
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child(view::format_relative(n.created_at, now)),
+                            )
+                            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                                this.open_notice(&id, window, cx)
+                            }))
+                            .test_support(),
+                    );
+                }
+                let body = col()
+                    .gap_3()
+                    .min_h_0()
+                    .when(self.notices.is_empty(), |d| {
+                        d.child(muted(
+                            "通知はまだありません。期限が今日のタスクや、ほかの人からの完了報告がここに出ます。"
+                                .to_owned(),
+                        ))
+                    })
+                    .child(
+                        div()
+                            .id("notices-scroll")
+                            .flex_1()
+                            .min_h_0()
+                            .max_h(px(420.))
+                            .overflow_y_scroll()
+                            .child(list),
+                    )
+                    .when(self.unread_notices > 0, |d| {
+                        d.child(
+                            row().justify_end().child(
+                                Button::new("notices-read-all")
+                                    .label("すべて既読にする")
+                                    .small()
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| this.mark_all_notices_read(cx)),
+                                    ),
+                            ),
+                        )
+                    });
+                self.dialog("通知", body, cx)
             }
             Modal::BulkDue => {
                 let count = self.selected_ids().len();

@@ -1173,3 +1173,80 @@ fn bulk_changes_and_full_new_task_form(cx: &mut TestAppContext) {
         assert!(view.error.is_some());
     });
 }
+
+/// 期限が今日のタスクは、通知の一覧と OS の通知に 1 回だけ出る。
+#[gpui_kit::test]
+fn due_today_reaches_the_notice_list_and_the_os(cx: &mut TestAppContext) {
+    start(cx);
+    let today = malakt_core::view::today();
+    let task = cx.update(|cx| {
+        db::shared(cx).update(cx, |db, _| {
+            let me = db.store.create_person("自分", true).unwrap();
+            let draft = malakt_core::TaskDraft {
+                title: "請求書を出す".into(),
+                due: Some(today.clone()),
+                assignee_ids: vec![me.id],
+                ..Default::default()
+            };
+            db.store.create_task(None, &draft).unwrap()
+        })
+    });
+    let (window, view) = open(cx, wide());
+    cx.run_until_parked();
+    let shown = cx.shown_system_notifications();
+    assert_eq!(shown.len(), 1);
+    assert_eq!(shown[0].title.as_ref(), "「請求書を出す」の期限は今日です");
+    cx.update(|cx| assert_eq!(view.read(cx).unread_notices, 1));
+
+    // ウィンドウを増やしても、読み直しても、同じ通知は出し直さない
+    let (_second, second_view) = open(cx, wide());
+    cx.update(|cx| view.update(cx, |v, cx| v.write(cx, |s| s.create_person("佐藤", false))));
+    cx.run_until_parked();
+    assert_eq!(cx.shown_system_notifications().len(), 1);
+    cx.update(|cx| assert_eq!(second_view.read(cx).unread_notices, 1));
+
+    // 一覧から開くと、既読になって、そのタスクの詳細が出る
+    ui(cx, window, |window, cx| window.click("open-notices", cx));
+    cx.update(|cx| assert_eq!(view.read(cx).modal, Modal::Notices));
+    ui(cx, window, |window, cx| {
+        window.click(("notice", 0usize), cx)
+    });
+    cx.update(|cx| {
+        let view = view.read(cx);
+        assert_eq!(view.modal, Modal::None);
+        assert_eq!(view.panel.as_deref(), Some(task.id.as_str()));
+        assert_eq!(view.unread_notices, 0);
+        assert_eq!(second_view.read(cx).unread_notices, 0);
+    });
+}
+
+/// ロック中は、タスクのタイトルを OS の通知に出さない。解除したら出す。
+#[gpui_kit::test]
+fn notices_wait_until_unlocked(cx: &mut TestAppContext) {
+    start(cx);
+    let today = malakt_core::view::today();
+    cx.update(|cx| {
+        db::shared(cx).update(cx, |db, _| {
+            let draft = malakt_core::TaskDraft {
+                title: "ひみつの用事".into(),
+                due: Some(today.clone()),
+                ..Default::default()
+            };
+            db.store.create_task(None, &draft).unwrap();
+            lock::set_passphrase(&mut db.store, None, "ひらけごま").unwrap();
+        })
+    });
+    cx.update(db::lock_now);
+    let (window, view) = open(cx, wide());
+    cx.run_until_parked();
+    cx.update(|cx| assert!(!view.read(cx).unlocked(cx)));
+    assert!(cx.shown_system_notifications().is_empty());
+
+    ui(cx, window, |window, cx| {
+        window.click("unlock-input", cx);
+        window.input("ひらけごま", cx);
+        window.press("enter", cx);
+    });
+    cx.update(|cx| assert!(view.read(cx).unlocked(cx)));
+    assert_eq!(cx.shown_system_notifications().len(), 1);
+}

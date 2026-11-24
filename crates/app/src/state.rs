@@ -5,8 +5,10 @@ use std::rc::Rc;
 
 use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
 use gpui_kit::component::text::TextViewState;
+use gpui_kit::component::WindowExt;
 use gpui_kit::*;
 use malakt_core::bulk::{self, BulkOp, ListMode};
+use malakt_core::notice::Notice;
 use malakt_core::view::{self, ListQuery};
 use malakt_core::{
     archive, lock, mention, Anchor, Attachment, Change, Comment, DueRule, Id, NewComment, Person,
@@ -58,6 +60,8 @@ pub enum Modal {
     BulkCategories,
     /// 項目を入れてタスクを作る
     NewTask,
+    /// 通知の一覧
+    Notices,
 }
 
 /// 詳細パネルで編集中の項目。
@@ -166,6 +170,9 @@ pub struct MainView {
     pub description_view: Entity<TextViewState>,
     description_shown: String,
     pub modal: Modal,
+    /// 通知（新しい順）と、未読の数
+    pub notices: Vec<Notice>,
+    pub unread_notices: u32,
     /// 設定のダイアログで編集中の既定値（入力欄にないもの: 担当者・期限の決め方・優先度・表示先）
     pub defaults_draft: TaskDefaults,
     pub error: Option<SharedString>,
@@ -222,7 +229,13 @@ impl MainView {
             nt_description: area(window, cx, "説明"),
         };
 
-        let mut subs = vec![cx.observe(&db, |this, _, cx| this.reload(cx))];
+        let mut subs = vec![
+            cx.observe(&db, |this, _, cx| this.reload(cx)),
+            // 読み直すたびに、まだ出していない通知を OS に出す
+            cx.observe_in(&db, window, |this, _, window, cx| {
+                this.deliver_notices(window, cx)
+            }),
+        ];
         macro_rules! on_enter {
             ($field:ident, $method:ident) => {
                 subs.push(cx.subscribe_in(
@@ -323,6 +336,8 @@ impl MainView {
             description_view: cx.new(|cx| TextViewState::markdown("", cx).selectable(true)),
             description_shown: String::new(),
             modal: Modal::None,
+            notices: Vec::new(),
+            unread_notices: 0,
             defaults_draft: TaskDefaults::default(),
             error: None,
             notice: None,
@@ -332,6 +347,8 @@ impl MainView {
             _subscriptions: subs,
         };
         this.reload(cx);
+        // ウィンドウの準備が終わってから、たまっている通知を出す
+        cx.defer_in(window, |this, window, cx| this.deliver_notices(window, cx));
         this
     }
 
@@ -374,6 +391,8 @@ impl MainView {
         self.people = store.people()?;
         self.self_id = self.people.iter().find(|p| p.is_self).map(|p| p.id.clone());
         self.categories = store.categories()?;
+        self.notices = store.notices(NOTICES_SHOWN)?;
+        self.unread_notices = store.unread_notice_count()?;
         let filter = TaskFilter {
             include_descendants: self.include_descendants,
             ..Default::default()
@@ -1390,6 +1409,74 @@ impl MainView {
         }
     }
 
+    // ---- 通知 ----
+
+    /// 期限が今日のタスクの通知を作り、まだ出していない通知を OS の通知に出す。
+    /// ロック中はタイトルを外に出さないよう、解除してから出す。
+    pub fn deliver_notices(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.unlocked(cx) {
+            return;
+        }
+        let today = view::today();
+        let (pending, changed) = self.db.update(cx, |db, cx| {
+            let (pending, made) = db.take_notices(&today);
+            // 通知が増えたときだけ、ほかのウィンドウにも読み直させる
+            if made {
+                cx.notify();
+            }
+            (pending, made)
+        });
+        if changed || !pending.is_empty() {
+            self.reload(cx);
+        }
+        for notice in pending {
+            let view = cx.entity().downgrade();
+            let id = notice.id.clone();
+            let mut note = gpui_kit::component::notification::Notification::new()
+                .id1::<Notice>(SharedString::from(notice.id.clone()))
+                .title(notice.headline())
+                .system()
+                .on_click(move |_, window, cx| {
+                    let _ = view.update(cx, |this, cx| this.open_notice(&id, window, cx));
+                });
+            if !notice.excerpt.is_empty() {
+                note = note.message(notice.excerpt.clone());
+            }
+            window.push_notification(note, cx);
+        }
+    }
+
+    /// 通知を開く。既読にして、そのタスクの詳細を出す。
+    pub fn open_notice(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(task_id) = self
+            .notices
+            .iter()
+            .find(|n| n.id == id)
+            .map(|n| n.task_id.clone())
+        else {
+            return;
+        };
+        self.write(cx, |s| s.mark_notice_read(id));
+        self.modal = Modal::None;
+        self.query.tab = if self
+            .db
+            .read(cx)
+            .store
+            .task(&task_id)
+            .is_ok_and(|t| t.status.is_open())
+        {
+            view::Tab::Open
+        } else {
+            view::Tab::Closed
+        };
+        self.go(Nav::All, cx);
+        self.open_panel(&task_id, window, cx);
+    }
+
+    pub fn mark_all_notices_read(&mut self, cx: &mut Context<Self>) {
+        self.write(cx, |s| s.mark_all_notices_read());
+    }
+
     // ---- ワークスペースの設定 ----
 
     pub fn open_workspace_settings(
@@ -1719,6 +1806,9 @@ impl MainView {
         cx.notify();
     }
 }
+
+/// 通知の一覧に出す数。
+const NOTICES_SHOWN: usize = 100;
 
 /// 「、」や「,」で区切った入力を、空でない項目の並びにする。
 fn split_list(text: &str) -> Vec<String> {
