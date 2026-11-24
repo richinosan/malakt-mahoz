@@ -1575,3 +1575,116 @@ fn sidebar_toggles_and_keeps_its_width(cx: &mut TestAppContext) {
     let (_second, second_view) = open(cx, wide());
     cx.update(|cx| assert_eq!(second_view.read(cx).sidebar_width, SIDEBAR_MAX));
 }
+
+/// 表の列は、幅を変え、並べ替え、隠せる。見出しのメニューで並び順を変えられる。どれも保存される。
+#[gpui_kit::test]
+fn table_columns_resize_reorder_hide_and_sort(cx: &mut TestAppContext) {
+    use malakt_core::view::Sort;
+    use malakt_mahoz::state::{Column, COLUMN_MAX, COLUMN_MIN};
+    start(cx);
+    let (window, view) = open(cx, wide());
+    ui(cx, window, |window, cx| {
+        window.click("nav-all", cx);
+        window.click("quick-add", cx);
+        window.input("会場を決める", cx);
+        window.press("enter", cx);
+    });
+    let head = |column: Column| ("col-head", column as usize);
+    ui(cx, window, |window, _| {
+        for column in Column::ALL {
+            assert!(window.try_find(head(column)).is_some());
+            assert!(window.try_find(("col-resize", column as usize)).is_some());
+        }
+        assert!(window.try_find("col-title").is_some());
+    });
+
+    // 左の境界を左へ動かすと広がり、右へ動かすと狭まる。範囲の外には出ない
+    cx.update(|cx| {
+        view.update(cx, |v, cx| {
+            let width =
+                |v: &MainView, column| v.columns.iter().find(|c| c.column == column).unwrap().width;
+            let scale = malakt_mahoz::UI_SCALE;
+            v.start_column_resize(Column::Due, 500., cx);
+            v.drag_column(500. - 40. * scale, cx);
+            assert_eq!(width(v, Column::Due), Column::Due.default_width() + 40.);
+            v.drag_column(-9999., cx);
+            assert_eq!(width(v, Column::Due), COLUMN_MAX);
+            v.drag_column(9999., cx);
+            v.finish_column_resize(cx);
+            assert_eq!(width(v, Column::Due), COLUMN_MIN);
+            assert!(v.column_resize.is_none());
+            // ダブルクリックで最初の幅に戻す
+            v.reset_column_width(Column::Due, cx);
+            assert_eq!(width(v, Column::Due), Column::Due.default_width());
+            v.start_column_resize(Column::Status, 0., cx);
+            v.drag_column(-20. * scale, cx);
+            v.finish_column_resize(cx);
+
+            // 見出しをほかの列の上まで動かして離すと、そこへ入る
+            v.column_drag = Some(malakt_mahoz::state::ColumnDrag {
+                column: Column::Updated,
+                start_x: 0.,
+                moved: true,
+                over: Some(Column::Status),
+            });
+            v.finish_column_drag(cx);
+            assert_eq!(v.columns[0].column, Column::Updated);
+            // 動かさずに離したら（クリック）、並びは変わらない
+            v.column_drag = Some(malakt_mahoz::state::ColumnDrag {
+                column: Column::Due,
+                start_x: 0.,
+                moved: false,
+                over: Some(Column::Status),
+            });
+            v.finish_column_drag(cx);
+            assert_eq!(v.columns[4].column, Column::Due);
+
+            v.toggle_column(Column::Assignee, cx);
+        })
+    });
+    ui(cx, window, |window, _| {
+        assert!(window.try_find(head(Column::Assignee)).is_none());
+        assert!(window.try_find(head(Column::Due)).is_some());
+        // 追加のボタンは、どの列を隠しても残る
+        assert!(window.try_find("quick-add-submit").is_some());
+    });
+    let saved = store(cx, |s| s.setting("table.columns").unwrap());
+    assert_eq!(
+        saved.as_deref(),
+        Some("updated:84,status:116,priority:84,-assignee:160,due:150")
+    );
+
+    // 新しく開いたウィンドウも同じ列で始まる
+    let (second, second_view) = open(cx, wide());
+    cx.update(|cx| {
+        let v = second_view.read(cx);
+        assert_eq!(v.columns[0].column, Column::Updated);
+        assert!(v.columns[3].hidden);
+    });
+    ui(cx, second, |window, cx| window.click("nav-all", cx));
+    ui(cx, second, |window, _| {
+        assert!(window.try_find(head(Column::Assignee)).is_none())
+    });
+
+    // 見出しのメニューの並べ替え。同じものをもう一度選ぶと、最初の並び順に戻る
+    cx.update(|cx| {
+        view.update(cx, |v, cx| {
+            v.sort_by(Sort::Title, true, cx);
+            assert_eq!((v.query.sort, v.query.descending), (Sort::Title, true));
+            v.sort_by(Sort::Title, true, cx);
+            assert_eq!((v.query.sort, v.query.descending), (Sort::Due, false));
+        })
+    });
+    // 見出しを押すとメニューが開き、もう一度押すと閉じる
+    ui(cx, window, |window, cx| window.click("col-title", cx));
+    cx.update(|cx| assert!(view.read(cx).column_menu.is_some()));
+    ui(cx, window, |window, cx| window.click("col-title", cx));
+    cx.update(|cx| assert!(view.read(cx).column_menu.is_none()));
+    ui(cx, window, |window, cx| {
+        window.click(("col-menu", Column::Due as usize), cx)
+    });
+    cx.update(|cx| {
+        let open = view.read(cx).column_menu.as_ref().map(|m| m.column);
+        assert_eq!(open, Some(Some(Column::Due)));
+    });
+}

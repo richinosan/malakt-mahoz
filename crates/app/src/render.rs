@@ -17,7 +17,7 @@ use malakt_core::{Comment, DueRule, Role as Raci, Roles, Status, Task as Todo, W
 
 use crate::ai::ShellPlace;
 use crate::ai_view::{docked_width, TASKS_MIN};
-use crate::state::{CommentMode, Detail, Editing, MainView, Modal, Nav};
+use crate::state::{Column, CommentMode, Detail, Editing, MainView, Modal, Nav};
 use crate::{Dismiss, LockNow, NewWindow, ToggleAi};
 use malakt_core::Id;
 
@@ -38,11 +38,6 @@ const HEADER_HEIGHT: Pixels = px(84.);
 const PANEL_WIDTH: Pixels = px(544.);
 const ROW_HEIGHT: Pixels = px(60.);
 const CARD_HEIGHT: Pixels = px(96.);
-const COL_STATUS: Pixels = px(96.);
-const COL_PRIORITY: Pixels = px(84.);
-const COL_ASSIGNEE: Pixels = px(160.);
-const COL_DUE: Pixels = px(150.);
-const COL_UPDATED: Pixels = px(84.);
 
 /// 枠つきのボタン。乗せると淡い金、押している間ははっきり濃くなる。
 trait Framed {
@@ -1685,7 +1680,7 @@ impl MainView {
     }
 
     fn render_table_head(&self, cx: &mut Context<Self>) -> Div {
-        let theme = cx.theme();
+        let theme = cx.theme().clone();
         let all = !self.visible.is_empty() && self.selected.len() == self.visible.len();
         row()
             .h_9()
@@ -1707,12 +1702,167 @@ impl MainView {
                         .on_click(cx.listener(|this, _: &bool, _, cx| this.toggle_select_all(cx))),
                 ),
             )
-            .child(div().flex_1().child("タイトル"))
-            .child(div().w(COL_STATUS).child("状態"))
-            .child(div().w(COL_PRIORITY).child("優先度"))
-            .child(div().w(COL_ASSIGNEE).child("担当"))
-            .child(div().w(COL_DUE).child("期限"))
-            .child(div().w(COL_UPDATED).child("更新"))
+            .child(div().flex_1().min_w_0().flex().child(self.column_menu(
+                "col-title",
+                "タイトル",
+                None,
+                cx,
+            )))
+            .children(
+                self.shown_columns()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .map(|c| {
+                        let column = c.column;
+                        let over = self.column_drag.as_ref().is_some_and(|d| {
+                            d.moved && d.over == Some(column) && d.column != column
+                        });
+                        let dragged = self
+                            .column_drag
+                            .as_ref()
+                            .is_some_and(|d| d.moved && d.column == column);
+                        let resizing = self.column_resize.is_some_and(|(r, _, _)| r == column);
+                        div()
+                            .id(("col-head", column as usize))
+                            .relative()
+                            .w(px(c.width))
+                            .h_full()
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .when(over, |d| d.bg(theme.accent))
+                            .when(dragged, |d| d.opacity(0.5))
+                            // 見出しを押したまま横へ動かすと、列を並べ替える
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                                    this.column_drag = Some(crate::state::ColumnDrag {
+                                        column,
+                                        start_x: f32::from(event.position.x),
+                                        moved: false,
+                                        over: None,
+                                    });
+                                    cx.notify();
+                                }),
+                            )
+                            .on_mouse_move(cx.listener(move |this, _: &MouseMoveEvent, _, cx| {
+                                if let Some(drag) = &mut this.column_drag {
+                                    if drag.moved && drag.over != Some(column) {
+                                        drag.over = Some(column);
+                                        cx.notify();
+                                    }
+                                }
+                            }))
+                            .child(self.column_menu(
+                                ("col-menu", column as usize),
+                                column.label(),
+                                Some(column),
+                                cx,
+                            ))
+                            .child(
+                                // 左の境界をドラッグして幅を変える。ダブルクリックで最初の幅に戻す
+                                div()
+                                    .id(("col-resize", column as usize))
+                                    .absolute()
+                                    .top_0()
+                                    .bottom_0()
+                                    .left(px(-9.))
+                                    .w(px(6.))
+                                    .cursor_col_resize()
+                                    .when(resizing, |d| d.bg(theme.ring))
+                                    .hover(|s| s.bg(theme.ring))
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                                            cx.stop_propagation();
+                                            if event.click_count >= 2 {
+                                                this.reset_column_width(column, cx);
+                                            } else {
+                                                this.start_column_resize(
+                                                    column,
+                                                    f32::from(event.position.x),
+                                                    cx,
+                                                );
+                                            }
+                                        }),
+                                    )
+                                    .test_support(),
+                            )
+                            .test_support()
+                    }),
+            )
+    }
+
+    /// 表の見出し。押すと、並べ替えと、列を出す・隠すメニューが開く。`column` が `None` はタイトル。
+    fn column_menu(
+        &self,
+        id: impl Into<ElementId>,
+        label: &'static str,
+        column: Option<Column>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let theme = cx.theme();
+        let current = self.column_sorted(column);
+        let open = self
+            .column_menu
+            .as_ref()
+            .filter(|open| open.column == column);
+        div()
+            .relative()
+            .child(
+                row()
+                    .id(id)
+                    .ml(px(-6.))
+                    .px(px(6.))
+                    .py_0p5()
+                    .gap_1()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .when(open.is_some(), |d| d.bg(theme.accent))
+                    .hover(|s| s.bg(theme.accent))
+                    .active(|s| s.bg(theme.primary.opacity(0.4)))
+                    .child(label)
+                    .when_some(current, |d, descending| {
+                        d.child(
+                            app_icon(if descending { "arrow-down" } else { "arrow-up" }).xsmall(),
+                        )
+                    })
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        // 見出しを動かして離したときは、開かない
+                        if this.column_drag.as_ref().is_some_and(|d| d.moved) {
+                            return;
+                        }
+                        this.toggle_column_menu(column, window, cx);
+                    }))
+                    .test_support(),
+            )
+            .when_some(open, |d, open| {
+                d.child(
+                    div().absolute().top_full().left(px(-6.)).child(
+                        deferred(
+                            anchored()
+                                .snap_to_window_with_margin(px(8.))
+                                .child(div().occlude().pt_1().child(open.menu.clone())),
+                        )
+                        .with_priority(1),
+                    ),
+                )
+            })
+    }
+
+    /// 表の 1 行に、今出している列の順でセルを並べる。
+    fn column_cells(&self, mut cells: [Option<AnyElement>; 5]) -> Vec<Div> {
+        self.shown_columns()
+            .map(|c| {
+                div()
+                    .w(px(c.width))
+                    .flex_none()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .children(cells[c.column as usize].take())
+            })
+            .collect()
     }
 
     /// 一覧での担当の表示。全員を頭文字の丸と名前で並べ、幅が足りなければ人ごとに折り返す。
@@ -1956,11 +2106,13 @@ impl MainView {
                 .gap_3()
                 .child(select)
                 .child(title)
-                .child(status.w(COL_STATUS))
-                .child(div().w(COL_PRIORITY).child(priority))
-                .child(div().w(COL_ASSIGNEE).child(assignees))
-                .child(div().w(COL_DUE).child(due))
-                .child(updated.w(COL_UPDATED))
+                .children(self.column_cells([
+                    Some(status.into_any_element()),
+                    Some(priority.into_any_element()),
+                    Some(assignees.into_any_element()),
+                    Some(due.into_any_element()),
+                    Some(updated.into_any_element()),
+                ]))
         } else {
             // 狭い画面では 1 件を 2 段のカードにする
             base.h(CARD_HEIGHT)
@@ -2074,10 +2226,19 @@ impl MainView {
             .aria_label("タスクを追加")
             .prefix(app_icon("plus").small())
             .flex_1();
-        let submit = Button::new("quick-add-submit")
-            .label("追加")
-            .primary()
-            .on_click(cx.listener(|this, _, window, cx| this.submit_quick_add(window, cx)));
+        let view = cx.entity().downgrade();
+        let submit = move || {
+            let view = view.clone();
+            Button::new("quick-add-submit")
+                .label("追加")
+                .primary()
+                .on_click(move |_, window, cx| {
+                    // ウィンドウを閉じたあとなら、反映する先がない
+                    let _ = view.update(cx, |this, cx| this.submit_quick_add(window, cx));
+                })
+        };
+        // 追加のボタンは「更新」の列に置く。隠しているときは右の端に出す
+        let updated_shown = self.shown_columns().any(|c| c.column == Column::Updated);
         let base = div()
             .flex_none()
             .border_t_1()
@@ -2092,16 +2253,19 @@ impl MainView {
                 .gap_3()
                 .child(div().w_6().flex_none())
                 .child(input)
-                .child(div().w(COL_STATUS).child(status))
-                .child(div().w(COL_PRIORITY).child(priority))
-                .child(div().w(COL_ASSIGNEE).child(assignees))
-                .child(div().w(COL_DUE).child(due))
-                .child(div().w(COL_UPDATED).child(submit))
+                .children(self.column_cells([
+                    Some(status.into_any_element()),
+                    Some(priority.into_any_element()),
+                    Some(assignees.into_any_element()),
+                    Some(due.into_any_element()),
+                    updated_shown.then(|| submit().into_any_element()),
+                ]))
+                .when(!updated_shown, |d| d.child(submit()))
         } else {
             base.flex()
                 .flex_col()
                 .gap_2()
-                .child(row().gap_2().child(input).child(submit))
+                .child(row().gap_2().child(input).child(submit()))
                 .child(
                     row()
                         .gap_1()
@@ -4488,6 +4652,36 @@ impl Render for MainView {
                 .on_mouse_up(
                     MouseButton::Left,
                     cx.listener(|this, _, _, cx| this.finish_sidebar_drag(cx)),
+                )
+            })
+            // 表の列の幅を変えている間と、見出しを動かしている間も、どこにマウスがあっても追う
+            .when(self.column_resize.is_some(), |d| {
+                d.on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
+                    if event.pressed_button == Some(MouseButton::Left) {
+                        this.drag_column(f32::from(event.position.x), cx);
+                    } else {
+                        this.finish_column_resize(cx);
+                    }
+                }))
+                .on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, cx| this.finish_column_resize(cx)),
+                )
+            })
+            .when(self.column_drag.is_some(), |d| {
+                d.on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
+                    if event.pressed_button != Some(MouseButton::Left) {
+                        this.finish_column_drag(cx);
+                    } else if let Some(drag) = &mut this.column_drag {
+                        if !drag.moved && (f32::from(event.position.x) - drag.start_x).abs() > 6. {
+                            drag.moved = true;
+                            cx.notify();
+                        }
+                    }
+                }))
+                .on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, cx| this.finish_column_drag(cx)),
                 )
             })
             .size_full()

@@ -19,10 +19,19 @@ pub enum Sort {
     Priority,
     Updated,
     Created,
+    Title,
+    Status,
 }
 
 impl Sort {
-    pub const ALL: [Sort; 4] = [Sort::Due, Sort::Priority, Sort::Updated, Sort::Created];
+    pub const ALL: [Sort; 6] = [
+        Sort::Due,
+        Sort::Priority,
+        Sort::Updated,
+        Sort::Created,
+        Sort::Title,
+        Sort::Status,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -30,6 +39,8 @@ impl Sort {
             Sort::Priority => "優先度が高い順",
             Sort::Updated => "更新が新しい順",
             Sort::Created => "作成が新しい順",
+            Sort::Title => "タイトル順",
+            Sort::Status => "状態順",
         }
     }
 }
@@ -98,6 +109,8 @@ pub struct ListQuery {
     pub priority: Option<Priority>,
     pub category: Option<String>,
     pub sort: Sort,
+    /// 並び順を逆にする。
+    pub descending: bool,
 }
 
 impl ListQuery {
@@ -116,6 +129,7 @@ impl ListQuery {
         *self = ListQuery {
             tab: self.tab,
             sort: self.sort,
+            descending: self.descending,
             ..Default::default()
         };
     }
@@ -169,11 +183,18 @@ pub fn apply(tasks: &[Task], query: &ListQuery, self_id: Option<&str>) -> Vec<us
     let due = |t: &Task| (t.due.is_none(), t.due.clone());
     hits.sort_by(|&a, &b| {
         let (a, b) = (&tasks[a], &tasks[b]);
-        match query.sort {
+        let order = match query.sort {
             Sort::Due => due(a).cmp(&due(b)).then(prio(a).cmp(&prio(b))),
             Sort::Priority => prio(a).cmp(&prio(b)).then(due(a).cmp(&due(b))),
             Sort::Updated => b.updated_at.cmp(&a.updated_at),
             Sort::Created => b.created_at.cmp(&a.created_at),
+            Sort::Title => a.title.to_lowercase().cmp(&b.title.to_lowercase()),
+            Sort::Status => (a.status as u8).cmp(&(b.status as u8)),
+        };
+        if query.descending {
+            order.reverse()
+        } else {
+            order
         }
         .then_with(|| a.id.cmp(&b.id))
     });
@@ -497,7 +518,13 @@ mod tests {
         assert_eq!(sorted(Sort::Priority), ["a", "d", "c", "b", "e"]);
         assert_eq!(sorted(Sort::Updated), ["b", "c", "d", "e", "a"]);
         assert_eq!(sorted(Sort::Created), ["a", "b", "c", "d", "e"]);
-        assert_eq!(Sort::ALL.map(Sort::label).len(), 4);
+        assert_eq!(sorted(Sort::Title), ["a", "b", "c", "d", "e"]);
+        let reversed = ListQuery {
+            descending: true,
+            ..Default::default()
+        };
+        assert_eq!(ids(&tasks, &reversed, None), ["e", "a", "b", "c", "d"]);
+        assert_eq!(Sort::ALL.map(Sort::label).len(), 6);
         assert_eq!(Sort::Due.label(), "期限が近い順");
     }
 
