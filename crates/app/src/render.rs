@@ -11,7 +11,7 @@ use gpui_kit::component::{ActiveTheme, Sizable};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use malakt_core::view::{self, AssigneeFilter, DueState, Priority as Prio, Sort, Tab};
-use malakt_core::{Comment, Role as Raci, Roles, Status, Task as Todo};
+use malakt_core::{Comment, DueRule, Role as Raci, Roles, Status, Task as Todo};
 
 use crate::state::{CommentMode, Detail, Editing, MainView, Modal, Nav};
 use crate::{Dismiss, LockNow, NewWindow};
@@ -92,7 +92,7 @@ impl MainView {
         if !task.status.is_open() {
             return div().text_color(theme.muted_foreground).child(text);
         }
-        match view::due_state(due, &self.today) {
+        match view::due_state(due, &view::now()) {
             DueState::Overdue => div()
                 .text_color(theme.danger)
                 .font_weight(FontWeight::BOLD)
@@ -786,7 +786,20 @@ impl MainView {
                 .child(self.list_title()),
         );
         if let Some(id) = workspace_id.clone() {
-            let (a, b, c) = (id.clone(), id.clone(), id);
+            let (a, b, c, d) = (id.clone(), id.clone(), id.clone(), id.clone());
+            if let Some(date) = self
+                .workspaces
+                .iter()
+                .find(|w| w.id == id)
+                .and_then(|w| w.date.as_deref())
+            {
+                header = header.child(
+                    div()
+                        .text_sm()
+                        .text_color(theme.muted_foreground)
+                        .child(format!("基準日 {}", view::format_date(date, &self.today))),
+                );
+            }
             header = header
                 .child(
                     Button::new("ws-add-child")
@@ -804,6 +817,15 @@ impl MainView {
                         .outline()
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.ask_workspace_name(None, Some(b.clone()), window, cx)
+                        })),
+                )
+                .child(
+                    Button::new("ws-settings")
+                        .label("設定")
+                        .small()
+                        .outline()
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.open_workspace_settings(&d, window, cx)
                         })),
                 )
                 .child(
@@ -2391,6 +2413,180 @@ impl MainView {
                             ),
                     );
                 self.dialog("状態を変更", body, cx)
+            }
+            Modal::WorkspaceSettings(id) => {
+                let theme = cx.theme().clone();
+                let draft = &self.defaults_draft;
+                let label =
+                    |text: &'static str| div().text_sm().font_weight(FontWeight::BOLD).child(text);
+                let mut assignees = row().gap_1().flex_wrap();
+                for (ix, p) in self.people.iter().enumerate() {
+                    let pid = p.id.clone();
+                    assignees = assignees.child(
+                        chip(
+                            ("def-as", ix),
+                            p.name.clone(),
+                            draft.assignee_ids.contains(&p.id),
+                            cx,
+                        )
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            this.toggle_default_assignee(&pid, cx)
+                        }))
+                        .test_support(),
+                    );
+                }
+                if self.people.is_empty() {
+                    assignees = assignees.child(muted(
+                        "担当者はまだいません。左のメニューの「担当者」から足せます。".to_owned(),
+                    ));
+                }
+                let due_kinds = [
+                    ("def-due-none", "入れない", DueRule::None),
+                    (
+                        "def-due-relative",
+                        "基準日から",
+                        DueRule::Relative { days: 0 },
+                    ),
+                    (
+                        "def-due-fixed",
+                        "決まった日",
+                        DueRule::Fixed {
+                            date: String::new(),
+                        },
+                    ),
+                ];
+                let mut due = row().gap_1().flex_wrap();
+                for (chip_id, text, rule) in due_kinds {
+                    let active =
+                        std::mem::discriminant(&draft.due) == std::mem::discriminant(&rule);
+                    due = due.child(
+                        chip(chip_id, text, active, cx)
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                this.set_default_due(rule.clone(), cx)
+                            }))
+                            .test_support(),
+                    );
+                }
+                let due_detail = match &draft.due {
+                    DueRule::None => col(),
+                    DueRule::Relative { .. } => col()
+                        .gap_1()
+                        .child(muted(
+                            "基準日から何日ずらすか。前なら -7 のように入れます。基準日がないときは、親のワークスペースの基準日を使います。"
+                                .to_owned(),
+                        ))
+                        .child(Input::new(&self.inputs.def_days).id("def-days").aria_label("日数"))
+                        .child(Input::new(&self.inputs.def_time).id("def-time").aria_label("時刻")),
+                    DueRule::Fixed { .. } => col()
+                        .gap_1()
+                        .child(Input::new(&self.inputs.def_date).id("def-date").aria_label("日付"))
+                        .child(Input::new(&self.inputs.def_time).id("def-time").aria_label("時刻")),
+                };
+                let mut priority = row().gap_1().flex_wrap();
+                for (ix, (text, value)) in [
+                    ("指定しない", None),
+                    ("高", Some(1u8)),
+                    ("中", Some(5)),
+                    ("低", Some(9)),
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    priority = priority.child(
+                        chip(("def-prio", ix), text, draft.priority == value, cx)
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                this.set_default_priority(value, cx)
+                            }))
+                            .test_support(),
+                    );
+                }
+                let mut links = row().gap_1().flex_wrap();
+                let mut any_link = false;
+                for (ix, w) in self.workspaces.iter().enumerate() {
+                    if &w.id == id {
+                        continue;
+                    }
+                    any_link = true;
+                    let wid = w.id.clone();
+                    links = links.child(
+                        chip(
+                            ("def-link", ix),
+                            w.name.clone(),
+                            draft.link_workspace_ids.contains(&w.id),
+                            cx,
+                        )
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            this.toggle_default_link(&wid, cx)
+                        }))
+                        .test_support(),
+                    );
+                }
+                let form = col()
+                    .gap_3()
+                    .child(
+                        col()
+                            .gap_1()
+                            .child(label("基準日（開催日など）"))
+                            .child(Input::new(&self.inputs.ws_date).id("ws-date").aria_label("基準日")),
+                    )
+                    .child(div().h(px(1.)).bg(theme.border))
+                    .child(muted(
+                        "ここから下は、このワークスペースでタスクを足すときに最初から入れる値です。すでにあるタスクは変わりません。"
+                            .to_owned(),
+                    ))
+                    .child(col().gap_1().child(label("担当者")).child(assignees))
+                    .child(col().gap_1().child(label("期限")).child(due).child(due_detail))
+                    .child(col().gap_1().child(label("優先度")).child(priority))
+                    .child(
+                        col().gap_1().child(label("カテゴリ")).child(
+                            Input::new(&self.inputs.def_categories)
+                                .id("def-categories")
+                                .aria_label("カテゴリ"),
+                        ),
+                    )
+                    .child(
+                        col()
+                            .gap_1()
+                            .child(label("説明の雛形"))
+                            .child(Textarea::new(&self.inputs.def_description).h(px(96.))),
+                    )
+                    .when(any_link, |d| {
+                        d.child(
+                            col()
+                                .gap_1()
+                                .child(label("一緒に表示するワークスペース"))
+                                .child(links),
+                        )
+                    });
+                let body = col()
+                    .gap_3()
+                    .min_h_0()
+                    .child(
+                        div()
+                            .id("ws-settings-scroll")
+                            .flex_1()
+                            .min_h_0()
+                            .overflow_y_scroll()
+                            .child(form),
+                    )
+                    .when_some(self.error.clone(), |d, error| {
+                        d.child(div().text_sm().text_color(theme.danger).child(error))
+                    })
+                    .child(
+                        row().gap_2().justify_end().child(cancel(cx)).child(
+                            Button::new("ws-settings-save")
+                                .label("保存")
+                                .primary()
+                                .on_click(
+                                    cx.listener(|this, _, _, cx| this.save_workspace_settings(cx)),
+                                ),
+                        ),
+                    );
+                self.dialog(
+                    format!("「{}」の設定", self.workspace_name(Some(id))),
+                    body,
+                    cx,
+                )
             }
             Modal::Usage => {
                 let usage = self.usage(cx);

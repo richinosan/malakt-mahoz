@@ -327,6 +327,7 @@ fn archive_layout_is_portable() {
             "data/changes.json",
             "data/comments.json",
             "data/people.json",
+            "data/task_defaults.json",
             "data/tasks.json",
             "data/workspaces.json",
             "manifest.json"

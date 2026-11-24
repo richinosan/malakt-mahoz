@@ -1,12 +1,13 @@
 //! 画面を通したシナリオテスト。実際のウィンドウ（ヘッドレス）を開き、クリックと入力で操作する。
 
+use gpui_kit::component::input::InputState;
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{
     px, size, AnyWindowHandle, AppContext, Bounds, Entity, Pixels, Point, Size, TestAppContext,
     WindowBounds, WindowOptions,
 };
 use malakt_core::view::Tab;
-use malakt_core::{lock, Role, Roles, Scope, Status, Store, TaskFilter};
+use malakt_core::{lock, DueRule, Role, Roles, Scope, Status, Store, TaskFilter};
 use malakt_mahoz::{db, CommentMode, MainView, Modal, Nav};
 
 fn start(cx: &mut TestAppContext) {
@@ -855,4 +856,108 @@ fn attachments_add_save_and_delete(cx: &mut TestAppContext) {
     });
     assert!(store(cx, |s| s.attachments(&id).unwrap()).is_empty());
     cx.update(|cx| assert_eq!(view.read(cx).usage(cx).attachment_bytes, 0));
+}
+
+/// ワークスペースの設定で決めた既定値が、そこで足すタスクに入る。
+#[gpui_kit::test]
+fn workspace_defaults_fill_new_tasks(cx: &mut TestAppContext) {
+    start(cx);
+    let (window, view) = open(cx, size(px(1280.), px(2400.)));
+    let (ws, sato) = cx.update(|cx| {
+        view.update(cx, |v, cx| {
+            v.write(cx, |s| {
+                Ok((
+                    s.create_workspace(None, "冬のイベント")?.id,
+                    s.create_person("佐藤 花子", false)?.id,
+                ))
+            })
+            .unwrap()
+        })
+    });
+    let set = |cx: &mut TestAppContext, pick: fn(&MainView) -> &Entity<InputState>, text: &str| {
+        cx.update_window(window, |_, window, cx| {
+            let input = pick(view.read(cx)).clone();
+            input.update(cx, |s, cx| s.set_value(text.to_owned(), window, cx));
+        })
+        .unwrap();
+        cx.run_until_parked();
+    };
+    cx.update(|cx| view.update(cx, |v, cx| v.go(Nav::Workspace(ws.clone()), cx)));
+    cx.run_until_parked();
+
+    // 正しくない日付は保存せず、ダイアログに理由を出す
+    ui(cx, window, |window, cx| window.click("ws-settings", cx));
+    set(cx, |v| &v.inputs.ws_date, "2026-02-30");
+    ui(cx, window, |window, cx| {
+        window.click("ws-settings-save", cx)
+    });
+    cx.update(|cx| {
+        let view = view.read(cx);
+        assert_eq!(view.modal, Modal::WorkspaceSettings(ws.clone()));
+        assert!(view.error.as_ref().is_some_and(|e| e.contains("基準日")));
+    });
+
+    set(cx, |v| &v.inputs.ws_date, "2027-01-03");
+    ui(cx, window, |window, cx| {
+        window.click("def-due-relative", cx)
+    });
+    // 全角で入れても読む
+    set(cx, |v| &v.inputs.def_days, "－７");
+    set(cx, |v| &v.inputs.def_time, "18:00");
+    ui(cx, window, |window, cx| {
+        window.click(("def-as", 0usize), cx)
+    });
+    ui(cx, window, |window, cx| {
+        window.click(("def-prio", 1usize), cx)
+    });
+    set(cx, |v| &v.inputs.def_categories, "準備、会場, 準備");
+    ui(cx, window, |window, cx| {
+        window.click("ws-settings-save", cx)
+    });
+    cx.update(|cx| {
+        let view = view.read(cx);
+        assert_eq!(view.modal, Modal::None);
+        assert!(view.error.is_none(), "{:?}", view.error);
+    });
+    let saved = store(cx, |s| s.task_defaults(&ws).unwrap());
+    assert_eq!(saved.due, DueRule::Relative { days: -7 });
+    assert_eq!(saved.categories, ["準備", "会場"]);
+    assert_eq!(
+        store(cx, |s| s.workspace(&ws).unwrap()).date.as_deref(),
+        Some("2027-01-03")
+    );
+
+    set(cx, |v| &v.inputs.quick_add, "会場を下見する");
+    ui(cx, window, |window, cx| {
+        window.click("quick-add-submit", cx)
+    });
+    let task = all_tasks(cx).remove(0);
+    assert_eq!(task.due.as_deref(), Some("2026-12-27 18:00"));
+    assert_eq!(task.assignee_ids, std::slice::from_ref(&sato));
+    assert_eq!(task.priority, 1);
+    assert_eq!(task.categories, ["会場", "準備"]);
+
+    // 開き直すと、保存した値が入っている
+    ui(cx, window, |window, cx| window.click("ws-settings", cx));
+    cx.update(|cx| {
+        let view = view.read(cx);
+        assert_eq!(view.inputs.def_days.read(cx).value().as_ref(), "-7");
+        assert_eq!(
+            view.defaults_draft.assignee_ids,
+            std::slice::from_ref(&sato)
+        );
+    });
+
+    // ワークスペースの外で足すタスクには、何も入らない
+    ui(cx, window, |window, cx| window.click("modal-cancel", cx));
+    ui(cx, window, |window, cx| window.click("nav-all", cx));
+    set(cx, |v| &v.inputs.quick_add, "メモ");
+    ui(cx, window, |window, cx| {
+        window.click("quick-add-submit", cx)
+    });
+    let memo = all_tasks(cx)
+        .into_iter()
+        .find(|t| t.title == "メモ")
+        .unwrap();
+    assert!(memo.due.is_none() && memo.assignee_ids.is_empty());
 }

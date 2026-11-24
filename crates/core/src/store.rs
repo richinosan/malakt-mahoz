@@ -118,6 +118,7 @@ impl Store {
             id: new_id(),
             parent_id: parent_id.map(str::to_owned),
             name,
+            date: None,
             position,
             created_at: now,
             updated_at: now,
@@ -129,7 +130,7 @@ impl Store {
     pub fn workspace(&self, id: &str) -> Result<Workspace> {
         self.conn
             .prepare_cached(
-                "SELECT id, parent_id, name, position, created_at, updated_at \
+                "SELECT id, parent_id, name, position, created_at, updated_at, date \
                  FROM workspaces WHERE id = ?1",
             )?
             .query_row(params![id], workspace_from_row)
@@ -140,7 +141,7 @@ impl Store {
     /// すべてのワークスペース。親ごとに `position` 順。
     pub fn workspaces(&self) -> Result<Vec<Workspace>> {
         let mut stmt = self.conn.prepare_cached(
-            "SELECT id, parent_id, name, position, created_at, updated_at \
+            "SELECT id, parent_id, name, position, created_at, updated_at, date \
              FROM workspaces ORDER BY parent_id, position, id",
         )?;
         let rows = stmt.query_map([], workspace_from_row)?;
@@ -202,14 +203,14 @@ impl Store {
     /// 最上位からそのワークスペースまでの道筋（パンくず用）。
     pub fn workspace_path(&self, id: &str) -> Result<Vec<Workspace>> {
         let mut stmt = self.conn.prepare_cached(
-            "WITH RECURSIVE up(id, parent_id, name, position, created_at, updated_at, depth) AS ( \
-                 SELECT id, parent_id, name, position, created_at, updated_at, 0 \
+            "WITH RECURSIVE up(id, parent_id, name, position, created_at, updated_at, date, depth) AS ( \
+                 SELECT id, parent_id, name, position, created_at, updated_at, date, 0 \
                  FROM workspaces WHERE id = ?1 \
                  UNION ALL \
                  SELECT w.id, w.parent_id, w.name, w.position, w.created_at, w.updated_at, \
-                        up.depth + 1 \
+                        w.date, up.depth + 1 \
                  FROM workspaces w JOIN up ON w.id = up.parent_id) \
-             SELECT id, parent_id, name, position, created_at, updated_at \
+             SELECT id, parent_id, name, position, created_at, updated_at, date \
              FROM up ORDER BY depth DESC",
         )?;
         let rows = stmt.query_map(params![id], workspace_from_row)?;
@@ -373,7 +374,7 @@ impl Store {
     pub fn due_tasks(&self, until: &str, assignee_id: Option<&str>) -> Result<Vec<Task>> {
         let sql = format!(
             "SELECT {TASK_COLUMNS} FROM tasks t \
-             WHERE t.due IS NOT NULL AND t.due <= ?1 \
+             WHERE t.due IS NOT NULL AND substr(t.due, 1, 10) <= ?1 \
                AND t.status IN ('needs_action', 'in_process') \
                AND (?2 IS NULL OR EXISTS (SELECT 1 FROM task_assignees a \
                     WHERE a.task_id = t.id AND a.person_id = ?2)) \
@@ -1070,6 +1071,7 @@ impl Store {
             comments,
             changes,
             attachments: self.all_attachments()?,
+            task_defaults: self.all_task_defaults()?,
         })
     }
 
@@ -1132,6 +1134,9 @@ impl Store {
                 c.created_at
             ])?;
         }
+        for d in &data.task_defaults {
+            crate::defaults::save(&tx, d)?;
+        }
         for a in &data.attachments {
             let known: bool = tx
                 .prepare_cached("SELECT EXISTS(SELECT 1 FROM blobs WHERE hash = ?1)")?
@@ -1173,7 +1178,7 @@ impl Store {
     }
 }
 
-fn required_line(input: &str, what: &str) -> Result<String> {
+pub(crate) fn required_line(input: &str, what: &str) -> Result<String> {
     let s = normalize_line(input);
     if s.is_empty() {
         return Err(Error::Invalid(format!("{what}が空です")));
@@ -1195,12 +1200,12 @@ fn clean_draft(draft: &TaskDraft) -> Result<TaskDraft> {
     }
     let due = match draft.due.as_deref().map(str::trim) {
         None | Some("") => None,
-        Some(d) if is_valid_date(d) => Some(d.to_owned()),
+        Some(d) if is_valid_when(d) => Some(d.to_owned()),
         Some(d) => return Err(Error::Invalid(format!("期限の日付が正しくありません: {d}"))),
     };
     let start = match draft.start.as_deref().map(str::trim) {
         None | Some("") => None,
-        Some(d) if is_valid_date(d) => Some(d.to_owned()),
+        Some(d) if is_valid_when(d) => Some(d.to_owned()),
         Some(d) => {
             return Err(Error::Invalid(format!(
                 "開始日の日付が正しくありません: {d}"
@@ -1242,10 +1247,10 @@ fn clean_draft(draft: &TaskDraft) -> Result<TaskDraft> {
 
 fn insert_workspace(conn: &Connection, w: &Workspace) -> rusqlite::Result<usize> {
     conn.prepare_cached(
-        "INSERT INTO workspaces(id, parent_id, name, position, created_at, updated_at) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
+        "INSERT INTO workspaces(id, parent_id, name, position, created_at, updated_at, date) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
          ON CONFLICT(id) DO UPDATE SET parent_id = excluded.parent_id, name = excluded.name, \
-         position = excluded.position, updated_at = excluded.updated_at",
+         position = excluded.position, updated_at = excluded.updated_at, date = excluded.date",
     )?
     .execute(params![
         w.id,
@@ -1253,7 +1258,8 @@ fn insert_workspace(conn: &Connection, w: &Workspace) -> rusqlite::Result<usize>
         w.name,
         w.position,
         w.created_at,
-        w.updated_at
+        w.updated_at,
+        w.date
     ])
 }
 
@@ -1402,6 +1408,7 @@ fn workspace_from_row(r: &Row<'_>) -> rusqlite::Result<Workspace> {
         position: r.get(3)?,
         created_at: r.get(4)?,
         updated_at: r.get(5)?,
+        date: r.get(6)?,
     })
 }
 
