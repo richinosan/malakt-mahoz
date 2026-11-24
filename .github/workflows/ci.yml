@@ -1,7 +1,8 @@
 name: CI
 
+# プルリクエストでは動かさない。コミットの前の確認は pre-commit フック（mise run hooks）で行い、
+# ここでは main に入ったものを 3 つの OS で確かめる。
 on:
-  pull_request:
   push:
     branches: [main]
 

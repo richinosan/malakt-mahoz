@@ -1,0 +1,11 @@
+#!/bin/sh
+# コミットの前に、書式・clippy・テストを確かめる。通らなければコミットしない。
+# 入れ方: mise run hooks
+set -e
+cd "$(git rev-parse --show-toplevel)"
+if command -v mise >/dev/null 2>&1; then
+  exec mise run verify
+fi
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --locked
