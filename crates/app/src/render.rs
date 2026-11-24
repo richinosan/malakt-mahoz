@@ -184,6 +184,11 @@ fn app_icon(name: &str) -> Icon {
     Icon::default().path(crate::state::icon_path(name))
 }
 
+/// 出てくるときの動き。すっと出て、ゆっくり止まる。
+fn appear(ms: u64) -> Animation {
+    Animation::new(std::time::Duration::from_millis(ms)).with_easing(ease_out_quint())
+}
+
 fn section_title(text: &'static str) -> Div {
     div().text_sm().child(text)
 }
@@ -236,6 +241,7 @@ impl MainView {
                 d.bg(theme.accent).text_color(theme.accent_foreground)
             })
             .when(!active, |d| d.hover(|s| s.bg(theme.accent.opacity(0.6))))
+            .active(|s| s.bg(theme.accent).opacity(0.8))
             .child(icon.small().flex_none())
             .child(div().flex_1().truncate().child(label.into()))
     }
@@ -801,6 +807,7 @@ impl MainView {
                         .bg(theme.popover)
                         .cursor_pointer()
                         .hover(|s| s.border_color(theme.primary))
+                        .active(|s| s.bg(theme.accent))
                         .child(
                             div()
                                 .size(px(56.))
@@ -1200,6 +1207,7 @@ impl MainView {
                     d.text_color(theme.muted_foreground)
                         .hover(|s| s.text_color(theme.foreground))
                 })
+                .active(|s| s.bg(theme.background).opacity(0.7))
                 .child(app_icon(icon).small())
                 .child(label)
                 .child(
@@ -1587,6 +1595,7 @@ impl MainView {
                         .font_weight(FontWeight::BOLD)
                         .cursor_pointer()
                         .hover(|s| s.text_color(theme.primary))
+                        .active(|s| s.opacity(0.6))
                         .when(closed, |d| {
                             d.text_color(theme.muted_foreground).line_through()
                         })
@@ -1605,6 +1614,7 @@ impl MainView {
                     .id(("status", ix))
                     .cursor_pointer()
                     .hover(|s| s.border_color(theme.primary))
+                    .active(|s| s.bg(theme.accent))
                     .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                         this.ask_status(&id, window, cx)
                     })),
@@ -1999,41 +2009,42 @@ impl MainView {
         let open = task.status.is_open();
 
         let title = if self.editing == Some(Editing::Title) {
-            col()
-                .gap_2()
+            // その場で書き直す。文字の大きさも太さも位置も、読むときと同じ。
+            // Enter かほかの場所を押すと保存、Esc で取り消し
+            div()
+                .mx(px(-8.))
+                .text_xl()
+                .font_weight(FontWeight::BOLD)
+                .on_mouse_down_out(cx.listener(|this, _, window, cx| {
+                    if this.editing == Some(Editing::Title) {
+                        this.save_title(window, cx);
+                        cx.notify();
+                    }
+                }))
                 .child(
                     Input::new(&self.inputs.title)
                         .id("title-input")
-                        .aria_label("タイトル"),
-                )
-                .child(
-                    row()
-                        .gap_2()
-                        .child(
-                            Button::new("title-save")
-                                .label("保存")
-                                .primary()
-                                .small()
-                                .on_click(
-                                    cx.listener(|this, _, window, cx| this.save_title(window, cx)),
-                                ),
-                        )
-                        .child(
-                            Button::new("title-cancel")
-                                .label("キャンセル")
-                                .small()
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.editing = None;
-                                    cx.notify();
-                                })),
-                        ),
+                        .aria_label("タイトル")
+                        .text_xl()
+                        .bg(theme.background)
+                        .border_color(theme.ring)
+                        .px_2(),
                 )
         } else {
             div().child(
                 div()
                     .id("detail-title")
+                    .mx(px(-8.))
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(gpui_kit::transparent_black())
                     .text_xl()
+                    .font_weight(FontWeight::BOLD)
+                    .when(!open, |d| d.text_color(theme.muted_foreground))
                     .cursor_pointer()
+                    .hover(|s| s.bg(theme.muted))
                     .child(task.title.clone())
                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                         this.start_editing(Editing::Title, window, cx)
@@ -4020,10 +4031,36 @@ impl Render for MainView {
                     .min_w_0()
                     .h_full()
                     .child(self.render_header(true, wide, cx))
-                    .child(div().flex_1().min_h_0().child(main)),
+                    .child(
+                        // 画面を切り替えたときは、少し下から浮かび上がる
+                        div().flex_1().min_h_0().relative().child(
+                            div().absolute().inset_0().child(main).with_animation(
+                                ElementId::Name(format!("page-{:?}", self.nav).into()),
+                                appear(160),
+                                |page, t| page.top(px(8.) * (1. - t)).opacity(t),
+                            ),
+                        ),
+                    ),
             )
-            .children(self.render_panel(sheet, cx))
-            .children(self.render_modal(cx))
+            // 詳細は右から入り、ダイアログはふわっと出る
+            .children(self.render_panel(sheet, cx).map(|panel| {
+                if !self.motion {
+                    return panel.into_any_element();
+                }
+                panel
+                    .with_animation("panel-in", appear(180), |panel, t| {
+                        panel.right(px(-48.) * (1. - t)).opacity(t)
+                    })
+                    .into_any_element()
+            }))
+            .children(self.render_modal(cx).map(|modal| {
+                if !self.motion {
+                    return modal.into_any_element();
+                }
+                modal
+                    .with_animation("modal-in", appear(140), |modal, t| modal.opacity(t))
+                    .into_any_element()
+            }))
             .when_some(
                 self.error
                     .clone()

@@ -193,6 +193,8 @@ pub struct MainView {
     pub sidebar_open: bool,
     /// 広いウィンドウで、左のメニューを閉じている
     pub sidebar_hidden: bool,
+    /// 出入りの動きを付ける。テストでは止めて、すぐ最後の位置に出す
+    pub motion: bool,
     pub today: String,
     pub inputs: Inputs,
     _subscriptions: Vec<Subscription>,
@@ -268,6 +270,16 @@ impl MainView {
         on_enter!(name, submit_name);
         on_enter!(passphrase, submit_unlock);
         on_enter!(title, save_title);
+        // タイトルは、ほかの場所を押したときにも保存する
+        subs.push(cx.subscribe_in(
+            &inputs.title,
+            window,
+            |this, _, event: &InputEvent, window, cx| {
+                if matches!(event, InputEvent::Blur) && this.editing == Some(Editing::Title) {
+                    this.save_title(window, cx);
+                }
+            },
+        ));
         on_enter!(subtask, submit_subtask);
         on_enter!(start, save_start);
         on_enter!(due, save_due);
@@ -363,6 +375,7 @@ impl MainView {
             notice: None,
             sidebar_open: false,
             sidebar_hidden: false,
+            motion: true,
             today: view::today(),
             inputs,
             _subscriptions: subs,
