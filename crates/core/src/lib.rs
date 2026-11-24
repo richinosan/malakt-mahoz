@@ -3,6 +3,7 @@
 //! - `Store`: SQLite への保存と読み出し
 //! - `archive`: zip へのエクスポート / インポート
 //! - `attachment`: 添付ファイル（重複なし・圧縮つきで保存）
+//! - `bulk`: 複数のタスクをまとめて変える操作と、一覧での選択
 //! - `defaults`: ワークスペースごとのタスク追加時の既定値と基準日
 //! - `links`: 1 つのタスクを複数のワークスペースに表示する
 //! - `lock`: アプリロック
@@ -13,6 +14,7 @@
 
 pub mod archive;
 pub mod attachment;
+pub mod bulk;
 pub mod defaults;
 pub mod error;
 pub mod links;

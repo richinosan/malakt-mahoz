@@ -1026,3 +1026,150 @@ fn task_shown_in_two_workspaces(cx: &mut TestAppContext) {
     assert!(task.linked_workspace_ids.is_empty());
     assert_eq!(shown(cx), 0);
 }
+
+/// 選んだタスクの期限・担当者・カテゴリをまとめて変え、項目を入れてタスクを作れる。
+#[gpui_kit::test]
+fn bulk_changes_and_full_new_task_form(cx: &mut TestAppContext) {
+    start(cx);
+    let (window, view) = open(cx, size(px(1280.), px(2400.)));
+    let sato = cx.update(|cx| {
+        view.update(cx, |v, cx| {
+            v.write(cx, |s| {
+                for title in ["a", "b", "c", "d"] {
+                    s.add_task_in(None, title)?;
+                }
+                Ok(s.create_person("佐藤 花子", false)?.id)
+            })
+            .unwrap()
+        })
+    });
+    let set = |cx: &mut TestAppContext, pick: fn(&MainView) -> &Entity<InputState>, text: &str| {
+        cx.update_window(window, |_, window, cx| {
+            let input = pick(view.read(cx)).clone();
+            input.update(cx, |s, cx| s.set_value(text.to_owned(), window, cx));
+        })
+        .unwrap();
+        cx.run_until_parked();
+    };
+    ui(cx, window, |window, cx| window.click("nav-all", cx));
+    let shown: Vec<String> = cx.update(|cx| {
+        let v = view.read(cx);
+        v.visible.iter().map(|&i| v.tasks[i].id.clone()).collect()
+    });
+
+    // 1 行目を選び、Shift つきで 3 行目を押すと、あいだもまとめて選ばれる
+    cx.update(|cx| {
+        view.update(cx, |v, cx| {
+            v.click_select(&shown[0], false, cx);
+            v.click_select(&shown[2], true, cx);
+        })
+    });
+    cx.run_until_parked();
+    cx.update(|cx| assert_eq!(view.read(cx).selected_ids(), shown[..3]));
+
+    // 期限: 正しくない値は断り、ダイアログを開いたままにする
+    ui(cx, window, |window, cx| window.click("bulk-due", cx));
+    set(cx, |v| &v.inputs.bulk_due, "来週");
+    ui(cx, window, |window, cx| window.click("bulk-due-submit", cx));
+    cx.update(|cx| {
+        let view = view.read(cx);
+        assert_eq!(view.modal, Modal::BulkDue);
+        assert!(view.error.is_some());
+    });
+    set(cx, |v| &v.inputs.bulk_due, "2026-12-24 18:00");
+    ui(cx, window, |window, cx| window.click("bulk-due-submit", cx));
+    let due = |cx: &mut TestAppContext, id: &str| store(cx, |s| s.task(id).unwrap().due);
+    assert_eq!(due(cx, &shown[1]).as_deref(), Some("2026-12-24 18:00"));
+    assert_eq!(due(cx, &shown[3]), None);
+
+    // 担当者: 追加してから、置き換えで空にする
+    ui(cx, window, |window, cx| window.click("bulk-assignees", cx));
+    ui(cx, window, |window, cx| {
+        window.click(("bulk-person", 0usize), cx)
+    });
+    ui(cx, window, |window, cx| {
+        window.click("bulk-assignees-submit", cx)
+    });
+    let assignees =
+        |cx: &mut TestAppContext, id: &str| store(cx, |s| s.task(id).unwrap().assignee_ids);
+    assert_eq!(assignees(cx, &shown[2]), std::slice::from_ref(&sato));
+    assert!(assignees(cx, &shown[3]).is_empty());
+    ui(cx, window, |window, cx| window.click("bulk-assignees", cx));
+    ui(cx, window, |window, cx| {
+        window.click(("bulk-mode", 2usize), cx)
+    });
+    ui(cx, window, |window, cx| {
+        window.click("bulk-assignees-submit", cx)
+    });
+    assert!(assignees(cx, &shown[0]).is_empty());
+
+    // カテゴリ: 足して、片方を外す
+    ui(cx, window, |window, cx| window.click("bulk-categories", cx));
+    set(cx, |v| &v.inputs.bulk_categories, "準備、会場");
+    ui(cx, window, |window, cx| {
+        window.click("bulk-categories-submit", cx)
+    });
+    ui(cx, window, |window, cx| window.click("bulk-categories", cx));
+    ui(cx, window, |window, cx| {
+        window.click(("bulk-cat-mode", 1usize), cx)
+    });
+    set(cx, |v| &v.inputs.bulk_categories, "準備");
+    ui(cx, window, |window, cx| {
+        window.click("bulk-categories-submit", cx)
+    });
+    assert_eq!(
+        store(cx, |s| s.task(&shown[0]).unwrap().categories),
+        ["会場"]
+    );
+
+    // 期限をなくす
+    ui(cx, window, |window, cx| window.click("bulk-due", cx));
+    ui(cx, window, |window, cx| window.click("bulk-due-clear", cx));
+    assert_eq!(due(cx, &shown[0]), None);
+
+    // 書きかけのタイトルを引き継いで、項目を入れて作る
+    set(cx, |v| &v.inputs.quick_add, "見積もりを取る");
+    ui(cx, window, |window, cx| window.click("new-task-open", cx));
+    cx.update(|cx| {
+        let view = view.read(cx);
+        assert_eq!(view.modal, Modal::NewTask);
+        assert_eq!(
+            view.inputs.nt_title.read(cx).value().as_ref(),
+            "見積もりを取る"
+        );
+    });
+    set(cx, |v| &v.inputs.nt_due, "2026-12-01");
+    set(cx, |v| &v.inputs.nt_start, "2026-11-30 09:00");
+    set(cx, |v| &v.inputs.nt_categories, "経理");
+    ui(cx, window, |window, cx| {
+        window.click(("nt-prio", 1usize), cx)
+    });
+    ui(cx, window, |window, cx| window.click(("nt-as", 0usize), cx));
+    ui(cx, window, |window, cx| window.click("new-task-submit", cx));
+    let made = all_tasks(cx)
+        .into_iter()
+        .find(|t| t.title == "見積もりを取る")
+        .unwrap();
+    assert_eq!(made.due.as_deref(), Some("2026-12-01"));
+    assert_eq!(made.start.as_deref(), Some("2026-11-30 09:00"));
+    assert_eq!(made.categories, ["経理"]);
+    assert_eq!(made.assignee_ids, std::slice::from_ref(&sato));
+    assert_eq!(made.priority, 1);
+    cx.update(|cx| {
+        let view = view.read(cx);
+        assert_eq!(view.modal, Modal::None);
+        // 作ったタスクの詳細が開く
+        assert_eq!(view.panel.as_deref(), Some(made.id.as_str()));
+    });
+
+    // タイトルが空なら作らない（詳細は入力欄に重なるので、先に閉じる）
+    cx.update(|cx| view.update(cx, |v, cx| v.dismiss(cx)));
+    cx.run_until_parked();
+    ui(cx, window, |window, cx| window.click("new-task-open", cx));
+    ui(cx, window, |window, cx| window.click("new-task-submit", cx));
+    cx.update(|cx| {
+        let view = view.read(cx);
+        assert_eq!(view.modal, Modal::NewTask);
+        assert!(view.error.is_some());
+    });
+}

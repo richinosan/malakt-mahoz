@@ -124,11 +124,20 @@ impl Store {
     /// ワークスペースの既定値を入れてタスクを作る。既定の表示先にも出す。
     pub fn add_task_in(&mut self, workspace_id: Option<&str>, title: &str) -> Result<Task> {
         let draft = self.draft_for(workspace_id, title)?;
+        self.create_task_shown(workspace_id, &draft)
+    }
+
+    /// 下書きのとおりにタスクを作り、ワークスペースの既定の表示先にも出す。
+    pub fn create_task_shown(
+        &mut self,
+        workspace_id: Option<&str>,
+        draft: &TaskDraft,
+    ) -> Result<Task> {
         let links = match workspace_id {
             Some(w) => self.task_defaults(w)?.link_workspace_ids,
             None => Vec::new(),
         };
-        let task = self.create_task(workspace_id, &draft)?;
+        let task = self.create_task(workspace_id, draft)?;
         if links.is_empty() {
             return Ok(task);
         }
