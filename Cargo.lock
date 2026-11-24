@@ -4280,7 +4280,6 @@ checksum = "dae608c151f68243f2b000364e1f7b186d9c29845f7d2d85bd31b9ad77ad552b"
 name = "malakt-core"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "argon2",
  "chrono",
  "criterion 0.5.1",
@@ -4299,7 +4298,6 @@ dependencies = [
 name = "malakt-mahoz"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "dirs 5.0.1",
  "gpui-kit",
  "malakt-core",
