@@ -213,6 +213,9 @@ pub struct MainView {
     pub columns: Vec<TableColumn>,
     /// 幅を変えている列と、押し始めた位置・そのときの幅。
     pub column_resize: Option<(Column, f32, f32)>,
+    /// タスクの一覧と、期限が近いタスクの一覧のスクロール位置。
+    pub list_scroll: UniformListScrollHandle,
+    pub due_scroll: UniformListScrollHandle,
     /// 開いている見出しのメニュー。
     pub column_menu: Option<ColumnMenu>,
     /// 見出しをドラッグして動かしている列。
@@ -424,6 +427,8 @@ impl MainView {
             columns: Column::ALL.map(TableColumn::new).to_vec(),
             column_resize: None,
             column_menu: None,
+            list_scroll: UniformListScrollHandle::new(),
+            due_scroll: UniformListScrollHandle::new(),
             column_drag: None,
             motion: true,
             today: view::today(),

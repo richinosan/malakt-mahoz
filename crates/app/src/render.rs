@@ -7,6 +7,7 @@ use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::{Input, Textarea};
 use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu, PopupMenu, PopupMenuItem};
+use gpui_kit::component::scroll::ScrollableElement;
 use gpui_kit::component::text::TextView;
 use gpui_kit::component::{ActiveTheme, Icon, IconName, Sizable};
 use gpui_kit::prelude::FluentBuilder;
@@ -468,7 +469,7 @@ impl MainView {
                     .id("sidebar-nav")
                     .flex_1()
                     .min_h_0()
-                    .overflow_y_scroll()
+                    .overflow_y_scrollbar()
                     .p_3()
                     .gap_1()
                     .child(row().child(self.nav_item(
@@ -987,7 +988,7 @@ impl MainView {
 
     // ---- ホーム ----
 
-    fn render_home(&self, roomy: bool, cx: &mut Context<Self>) -> Stateful<Div> {
+    fn render_home(&self, roomy: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let due = self.due.clone();
         let count = due.len();
@@ -1002,7 +1003,7 @@ impl MainView {
         col()
             .id("home")
             .size_full()
-            .overflow_y_scroll()
+            .overflow_y_scrollbar()
             .p_6()
             .gap_3()
             .child(
@@ -1043,6 +1044,7 @@ impl MainView {
                     .rounded_lg()
                     .bg(theme.popover)
                     .overflow_hidden()
+                    .relative()
                     .child(
                         uniform_list(
                             "due-list",
@@ -1053,8 +1055,10 @@ impl MainView {
                                     .collect::<Vec<_>>()
                             }),
                         )
+                        .track_scroll(&self.due_scroll)
                         .size_full(),
                     )
+                    .vertical_scrollbar(&self.due_scroll)
             })
             .child(div().mt_6().child(heading("ワークスペース")))
             .child(row().flex_wrap().items_start().gap_3().children(
@@ -1603,18 +1607,24 @@ impl MainView {
                 })
         } else {
             // 件数が少ないときは、表を中身の高さで終える
-            col().h(ROW_HEIGHT * visible as f32).min_h_0().child(
-                uniform_list(
-                    "task-list",
-                    visible,
-                    cx.processor(move |this, range: Range<usize>, _, cx| {
-                        range
-                            .map(|ix| this.render_task_row(ix, table, cx))
-                            .collect::<Vec<_>>()
-                    }),
+            col()
+                .relative()
+                .h(if table { ROW_HEIGHT } else { CARD_HEIGHT } * visible as f32)
+                .min_h_0()
+                .child(
+                    uniform_list(
+                        "task-list",
+                        visible,
+                        cx.processor(move |this, range: Range<usize>, _, cx| {
+                            range
+                                .map(|ix| this.render_task_row(ix, table, cx))
+                                .collect::<Vec<_>>()
+                        }),
+                    )
+                    .track_scroll(&self.list_scroll)
+                    .flex_1(),
                 )
-                .flex_1(),
-            )
+                .vertical_scrollbar(&self.list_scroll)
         };
 
         let card = col()
@@ -1662,15 +1672,25 @@ impl MainView {
         div()
             .size_full()
             .relative()
-            .child(col().size_full().p_6().gap_3().child(header).child(card))
+            // 下は、右下の「＋」が表に重ならないだけ空ける
+            .child(
+                col()
+                    .size_full()
+                    .p_6()
+                    .pb(px(72.))
+                    .gap_3()
+                    .child(header)
+                    .child(card),
+            )
             // 右下の「＋」。どこまでスクロールしていても、新しいタスクを始められる
             .child(
-                div().absolute().right_6().bottom_24().child(
+                div().absolute().right_6().bottom(px(16.)).child(
                     Button::new("fab-new-task")
                         .icon(app_icon("plus"))
                         .primary()
                         .large()
                         .rounded(px(999.))
+                        .shadow_lg()
                         .tooltip("新しいタスク")
                         .on_click(
                             cx.listener(|this, _, window, cx| this.open_new_task(window, cx)),
@@ -3458,7 +3478,7 @@ impl MainView {
         Some(
             div()
                 .absolute()
-                .top(HEADER_HEIGHT)
+                .top_0()
                 .right_0()
                 .bottom_0()
                 .when(sheet, |d| d.left_0())
@@ -3478,8 +3498,14 @@ impl MainView {
                         .id("detail-panel")
                         .flex_1()
                         .min_h_0()
-                        .overflow_y_scroll()
-                        .child(content),
+                        .child(
+                            div()
+                                .id("detail-scroll")
+                                .size_full()
+                                .overflow_y_scrollbar()
+                                .child(content),
+                        )
+                        .test_support(),
                 ),
         )
     }
@@ -3498,6 +3524,7 @@ impl MainView {
             .occlude()
             .child(
                 col()
+                    .id("dialog")
                     .w(px(460.))
                     .max_w(relative(0.94))
                     .max_h(relative(0.9))
@@ -3523,7 +3550,8 @@ impl MainView {
                                     })),
                             ),
                     )
-                    .child(body),
+                    .child(body)
+                    .test_support(),
             )
     }
 
@@ -3546,7 +3574,7 @@ impl MainView {
             div()
                 .id("move-options")
                 .max_h(px(320.))
-                .overflow_y_scroll()
+                .overflow_y_scrollbar()
                 .child(list),
         )
     }
@@ -3688,7 +3716,7 @@ impl MainView {
                         div()
                             .id("icon-list")
                             .h(px(320.))
-                            .overflow_y_scroll()
+                            .overflow_y_scrollbar()
                             .child(icons)
                             .when(none_found, |d| {
                                 d.child(muted("見つかりません。".to_owned()))
@@ -3870,7 +3898,7 @@ impl MainView {
                     div()
                         .id("history-list")
                         .max_h(px(360.))
-                        .overflow_y_scroll()
+                        .overflow_y_scrollbar()
                         .child(if changes.is_empty() {
                             muted("変更はまだありません。".to_owned())
                         } else {
@@ -4081,7 +4109,7 @@ impl MainView {
                                 .flex_1()
                                 .min_h_0()
                                 .max_h(px(420.))
-                                .overflow_y_scroll()
+                                .overflow_y_scrollbar()
                                 .child(list),
                         )
                         .when(self.unread_notices > 0, |d| {
@@ -4304,7 +4332,7 @@ impl MainView {
                             .id("new-task-scroll")
                             .flex_1()
                             .min_h_0()
-                            .overflow_y_scroll()
+                            .overflow_y_scrollbar()
                             .child(form),
                     )
                     .when_some(self.error.clone(), |d, error| {
@@ -4366,7 +4394,7 @@ impl MainView {
                         div()
                             .id("link-options")
                             .max_h(px(320.))
-                            .overflow_y_scroll()
+                            .overflow_y_scrollbar()
                             .child(
                                 col()
                                     .gap_2()
@@ -4546,7 +4574,7 @@ impl MainView {
                             .id("ws-settings-scroll")
                             .flex_1()
                             .min_h_0()
-                            .overflow_y_scroll()
+                            .overflow_y_scrollbar()
                             .child(form),
                     )
                     .when_some(self.error.clone(), |d, error| {
