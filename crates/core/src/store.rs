@@ -13,7 +13,29 @@ use crate::{schema, Error, Result};
 ///
 /// 書き込みはすべてトランザクションで行う。複数ウィンドウからは 1 つの `Store` を共有する。
 pub struct Store {
-    conn: Connection,
+    pub(crate) conn: Connection,
+}
+
+/// ディスクの使用量（バイト）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Usage {
+    /// データベースのファイルの大きさ。
+    pub database_bytes: u64,
+    /// そのうち、消したデータの跡で、整理すると返せる分。
+    pub reclaimable_bytes: u64,
+    /// そのうち、添付ファイルの中身（圧縮後、重複なし）。
+    pub attachment_bytes: u64,
+}
+
+const AUTO_VACUUM_INCREMENTAL: i64 = 2;
+/// WAL のファイルをこの大きさまで切り詰める。
+const WAL_SIZE_LIMIT: i64 = 4 * 1024 * 1024;
+
+impl Drop for Store {
+    /// 閉じるときに、消した分の領域を返し、WAL を空にする。
+    fn drop(&mut self) {
+        let _ = self.compact();
+    }
 }
 
 const TASK_COLUMNS: &str = "t.id, t.workspace_id, t.title, t.description, t.status, t.priority, \
@@ -23,10 +45,55 @@ impl Store {
     /// ファイルを開く。なければ作る。
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let conn = Connection::open(path)?;
+        // 消した分の領域をファイルから返せるようにする。途中から変えるには作り直しが要る
+        let auto_vacuum: i64 = conn.query_row("PRAGMA auto_vacuum", [], |r| r.get(0))?;
+        if auto_vacuum != AUTO_VACUUM_INCREMENTAL {
+            conn.pragma_update(None, "auto_vacuum", AUTO_VACUUM_INCREMENTAL)?;
+            conn.execute_batch("VACUUM")?;
+        }
         // WAL は読み書きが互いを止めず、fsync の回数も少ない。
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
+        // WAL のファイルが大きくなったまま残らないようにする
+        conn.pragma_update(None, "journal_size_limit", WAL_SIZE_LIMIT)?;
         Self::init(conn)
+    }
+
+    /// ほかのプロセス（コマンドなど）がデータベースを書き換えるたびに変わる番号。
+    pub fn data_version(&self) -> Result<i64> {
+        Ok(self
+            .conn
+            .query_row("PRAGMA data_version", [], |r| r.get(0))?)
+    }
+
+    /// ディスクの使用量。
+    pub fn usage(&self) -> Result<Usage> {
+        let get = |name: &str| -> rusqlite::Result<u64> {
+            self.conn
+                .query_row(&format!("PRAGMA {name}"), [], |r| r.get::<_, i64>(0))
+                .map(|n| n as u64)
+        };
+        let page = get("page_size")?;
+        Ok(Usage {
+            database_bytes: get("page_count")? * page,
+            reclaimable_bytes: get("freelist_count")? * page,
+            attachment_bytes: self.blob_bytes()?,
+        })
+    }
+
+    /// 使っていない領域をファイルから返し、WAL を空にする。
+    pub fn compact(&mut self) -> Result<Usage> {
+        {
+            // 1 行進めるごとに 1 ページ返るので、最後まで進める
+            let mut stmt = self.conn.prepare("PRAGMA incremental_vacuum")?;
+            let mut rows = stmt.query([])?;
+            while rows.next()?.is_some() {}
+        }
+        // メモリ上のデータベースなど、WAL でないときは何も起きない
+        self.conn
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
+            .optional()?;
+        self.usage()
     }
 
     /// メモリ上に作る（テスト用）。
@@ -58,6 +125,7 @@ impl Store {
             id: new_id(),
             parent_id: parent_id.map(str::to_owned),
             name,
+            date: None,
             position,
             created_at: now,
             updated_at: now,
@@ -69,7 +137,7 @@ impl Store {
     pub fn workspace(&self, id: &str) -> Result<Workspace> {
         self.conn
             .prepare_cached(
-                "SELECT id, parent_id, name, position, created_at, updated_at \
+                "SELECT id, parent_id, name, position, created_at, updated_at, date \
                  FROM workspaces WHERE id = ?1",
             )?
             .query_row(params![id], workspace_from_row)
@@ -80,7 +148,7 @@ impl Store {
     /// すべてのワークスペース。親ごとに `position` 順。
     pub fn workspaces(&self) -> Result<Vec<Workspace>> {
         let mut stmt = self.conn.prepare_cached(
-            "SELECT id, parent_id, name, position, created_at, updated_at \
+            "SELECT id, parent_id, name, position, created_at, updated_at, date \
              FROM workspaces ORDER BY parent_id, position, id",
         )?;
         let rows = stmt.query_map([], workspace_from_row)?;
@@ -119,11 +187,14 @@ impl Store {
     }
 
     /// 子孫のワークスペースと、その中のタスクもすべて消す。
+    /// ほかのワークスペースにも表示しているタスクは消さず、そちらに残す。
     pub fn delete_workspace(&mut self, id: &str) -> Result<()> {
-        let n = self
-            .conn
-            .execute("DELETE FROM workspaces WHERE id = ?1", params![id])?;
-        found(n, "ワークスペース", id)
+        let tx = self.conn.transaction()?;
+        crate::links::rehome_before_delete(&tx, id)?;
+        let n = tx.execute("DELETE FROM workspaces WHERE id = ?1", params![id])?;
+        found(n, "ワークスペース", id)?;
+        tx.commit()?;
+        Ok(())
     }
 
     /// 自分自身と、すべての子孫の ID。
@@ -142,14 +213,14 @@ impl Store {
     /// 最上位からそのワークスペースまでの道筋（パンくず用）。
     pub fn workspace_path(&self, id: &str) -> Result<Vec<Workspace>> {
         let mut stmt = self.conn.prepare_cached(
-            "WITH RECURSIVE up(id, parent_id, name, position, created_at, updated_at, depth) AS ( \
-                 SELECT id, parent_id, name, position, created_at, updated_at, 0 \
+            "WITH RECURSIVE up(id, parent_id, name, position, created_at, updated_at, date, depth) AS ( \
+                 SELECT id, parent_id, name, position, created_at, updated_at, date, 0 \
                  FROM workspaces WHERE id = ?1 \
                  UNION ALL \
                  SELECT w.id, w.parent_id, w.name, w.position, w.created_at, w.updated_at, \
-                        up.depth + 1 \
+                        w.date, up.depth + 1 \
                  FROM workspaces w JOIN up ON w.id = up.parent_id) \
-             SELECT id, parent_id, name, position, created_at, updated_at \
+             SELECT id, parent_id, name, position, created_at, updated_at, date \
              FROM up ORDER BY depth DESC",
         )?;
         let rows = stmt.query_map(params![id], workspace_from_row)?;
@@ -163,9 +234,13 @@ impl Store {
     /// ワークスペースごとの、未完了のタスクの数（子孫は含めない）。
     pub fn open_task_counts(&self) -> Result<HashMap<Id, u32>> {
         let mut stmt = self.conn.prepare_cached(
-            "SELECT workspace_id, COUNT(*) FROM tasks \
-             WHERE status IN ('needs_action', 'in_process') AND workspace_id IS NOT NULL \
-             GROUP BY workspace_id",
+            "SELECT place, COUNT(*) FROM ( \
+                 SELECT workspace_id AS place FROM tasks \
+                 WHERE status IN ('needs_action', 'in_process') AND workspace_id IS NOT NULL \
+                 UNION ALL \
+                 SELECT l.workspace_id FROM task_links l JOIN tasks t ON t.id = l.task_id \
+                 WHERE t.status IN ('needs_action', 'in_process')) \
+             GROUP BY place",
         )?;
         let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -249,8 +324,14 @@ impl Store {
             due: draft.due,
             percent: draft.percent,
             parent_id: draft.parent_id,
+            assignee_roles: vec![Roles::R; draft.assignee_ids.len()],
+            assignee_done: vec![
+                (draft.status == Status::Completed).then_some(now);
+                draft.assignee_ids.len()
+            ],
             assignee_ids: draft.assignee_ids,
             categories: draft.categories,
+            linked_workspace_ids: Vec::new(),
             position,
             created_at: now,
             updated_at: now,
@@ -270,15 +351,28 @@ impl Store {
             .optional()?
             .ok_or_else(|| Error::NotFound(format!("タスク {id}")))?;
         let mut stmt = self.conn.prepare_cached(
-            "SELECT person_id FROM task_assignees WHERE task_id = ?1 ORDER BY person_id",
+            "SELECT person_id, roles, completed_at FROM task_assignees \
+             WHERE task_id = ?1 ORDER BY person_id",
         )?;
-        task.assignee_ids = stmt
-            .query_map(params![id], |r| r.get(0))?
-            .collect::<rusqlite::Result<_>>()?;
+        let mut rows = stmt.query(params![id])?;
+        while let Some(row) = rows.next()? {
+            task.assignee_ids.push(row.get(0)?);
+            task.assignee_roles
+                .push(Roles::parse(row.get_ref(1)?.as_str().unwrap_or_default()));
+            task.assignee_done.push(row.get(2)?);
+        }
+        drop(rows);
         let mut stmt = self.conn.prepare_cached(
             "SELECT category FROM task_categories WHERE task_id = ?1 ORDER BY category",
         )?;
         task.categories = stmt
+            .query_map(params![id], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT workspace_id FROM task_links WHERE task_id = ?1 \
+             ORDER BY created_at, workspace_id",
+        )?;
+        task.linked_workspace_ids = stmt
             .query_map(params![id], |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?;
         Ok(task)
@@ -302,7 +396,7 @@ impl Store {
     pub fn due_tasks(&self, until: &str, assignee_id: Option<&str>) -> Result<Vec<Task>> {
         let sql = format!(
             "SELECT {TASK_COLUMNS} FROM tasks t \
-             WHERE t.due IS NOT NULL AND t.due <= ?1 \
+             WHERE t.due IS NOT NULL AND substr(t.due, 1, 10) <= ?1 \
                AND t.status IN ('needs_action', 'in_process') \
                AND (?2 IS NULL OR EXISTS (SELECT 1 FROM task_assignees a \
                     WHERE a.task_id = t.id AND a.person_id = ?2)) \
@@ -349,8 +443,15 @@ impl Store {
         sql.push_str(match scope {
             Scope::All => "?1 IS NULL",
             Scope::Unfiled => "?1 IS NULL AND t.workspace_id IS NULL",
-            Scope::Workspace(_) if descendants => "t.workspace_id IN (SELECT id FROM sub)",
-            Scope::Workspace(_) => "t.workspace_id = ?1",
+            Scope::Workspace(_) if descendants => {
+                "(t.workspace_id IN (SELECT id FROM sub) OR EXISTS ( \
+                 SELECT 1 FROM task_links l WHERE l.task_id = t.id \
+                 AND l.workspace_id IN (SELECT id FROM sub)))"
+            }
+            Scope::Workspace(_) => {
+                "(t.workspace_id = ?1 OR EXISTS (SELECT 1 FROM task_links l \
+                 WHERE l.task_id = t.id AND l.workspace_id = ?1))"
+            }
         });
         if filter.open_only {
             sql.push_str(" AND t.status IN ('needs_action', 'in_process')");
@@ -389,16 +490,18 @@ impl Store {
             .enumerate()
             .map(|(i, t)| (t.id.as_str(), i))
             .collect();
-        let mut found: Vec<(usize, Id)> = Vec::new();
+        let mut found: Vec<(usize, Id, Roles, Option<i64>)> = Vec::new();
         {
             let mut stmt = self.conn.prepare_cached(
-                "SELECT task_id, person_id FROM task_assignees ORDER BY task_id, person_id",
+                "SELECT task_id, person_id, roles, completed_at FROM task_assignees \
+                 ORDER BY task_id, person_id",
             )?;
             let mut rows = stmt.query([])?;
             while let Some(row) = rows.next()? {
                 let task_id = row.get_ref(0)?.as_str().map_err(rusqlite::Error::from)?;
                 if let Some(&i) = index.get(task_id) {
-                    found.push((i, row.get(1)?));
+                    let roles = Roles::parse(row.get_ref(2)?.as_str().unwrap_or_default());
+                    found.push((i, row.get(1)?, roles, row.get(3)?));
                 }
             }
         }
@@ -415,9 +518,28 @@ impl Store {
                 }
             }
         }
+        let mut links: Vec<(usize, Id)> = Vec::new();
+        {
+            let mut stmt = self.conn.prepare_cached(
+                "SELECT task_id, workspace_id FROM task_links \
+                 ORDER BY task_id, created_at, workspace_id",
+            )?;
+            let mut rows = stmt.query([])?;
+            while let Some(row) = rows.next()? {
+                let task_id = row.get_ref(0)?.as_str().map_err(rusqlite::Error::from)?;
+                if let Some(&i) = index.get(task_id) {
+                    links.push((i, row.get(1)?));
+                }
+            }
+        }
         drop(index);
-        for (i, person_id) in found {
+        for (i, workspace_id) in links {
+            tasks[i].linked_workspace_ids.push(workspace_id);
+        }
+        for (i, person_id, roles, done) in found {
             tasks[i].assignee_ids.push(person_id);
+            tasks[i].assignee_roles.push(roles);
+            tasks[i].assignee_done.push(done);
         }
         for (i, category) in categories {
             tasks[i].categories.push(category);
@@ -516,8 +638,33 @@ impl Store {
             ],
         )?;
         if old.assignee_ids != draft.assignee_ids {
-            tx.execute("DELETE FROM task_assignees WHERE task_id = ?1", params![id])?;
-            insert_assignees(&tx, id, &draft.assignee_ids)?;
+            // 残る人の役と完了は変えない。足した人は R から始まる
+            for person_id in &old.assignee_ids {
+                if !draft.assignee_ids.contains(person_id) {
+                    tx.execute(
+                        "DELETE FROM task_assignees WHERE task_id = ?1 AND person_id = ?2",
+                        params![id, person_id],
+                    )?;
+                }
+            }
+            insert_assignees(&tx, id, &draft.assignee_ids, &[], &[])?;
+        }
+        // タスクごと完了にしたら全員の分を完了にし、完了から戻したら全員の分を取り消す
+        match (old.status, draft.status) {
+            (Status::Completed, s) if s != Status::Completed => {
+                tx.execute(
+                    "UPDATE task_assignees SET completed_at = NULL WHERE task_id = ?1",
+                    params![id],
+                )?;
+            }
+            (_, Status::Completed) => {
+                tx.execute(
+                    "UPDATE task_assignees SET completed_at = ?2 \
+                     WHERE task_id = ?1 AND completed_at IS NULL",
+                    params![id, now],
+                )?;
+            }
+            _ => {}
         }
         if old.categories != draft.categories {
             tx.execute(
@@ -527,21 +674,7 @@ impl Store {
             insert_categories(&tx, id, &draft.categories)?;
         }
         tx.commit()?;
-        Ok(Task {
-            title: draft.title,
-            description: draft.description,
-            status: draft.status,
-            priority: draft.priority,
-            start: draft.start,
-            due: draft.due,
-            percent: draft.percent,
-            parent_id: draft.parent_id,
-            assignee_ids: draft.assignee_ids,
-            categories: draft.categories,
-            updated_at: now,
-            completed_at,
-            ..old
-        })
+        self.task(id)
     }
 
     /// 親タスクにできるか。自分自身や、自分の子孫は親にできない。
@@ -573,6 +706,123 @@ impl Store {
         self.update_task(id, &draft)
     }
 
+    /// 担当者の役を変える。
+    ///
+    /// 役は 1 つ以上。A（説明責任者）は 1 つのタスクに 1 人までなので、
+    /// A を付けるとほかの人の A は外れる（役がなくなる人は R に戻る）。
+    pub fn set_assignee_roles(&mut self, id: &str, person_id: &str, roles: Roles) -> Result<Task> {
+        let old = self.task(id)?;
+        let Some(current) = old.roles_of(person_id) else {
+            return Err(Error::Invalid(
+                "担当者ではない人の役は変えられません".into(),
+            ));
+        };
+        if roles.is_empty() {
+            return Err(Error::Invalid("役は 1 つ以上必要です".into()));
+        }
+        if roles == current {
+            return Ok(old);
+        }
+        let now = now_ms();
+        let tx = self.conn.transaction()?;
+        let write = |person: &str, before: Roles, after: Roles| -> Result<()> {
+            tx.prepare_cached(
+                "UPDATE task_assignees SET roles = ?3 WHERE task_id = ?1 AND person_id = ?2",
+            )?
+            .execute(params![id, person, after.to_string()])?;
+            insert_change(
+                &tx,
+                id,
+                "assignee_roles",
+                &format!("{person}={before}"),
+                &format!("{person}={after}"),
+                now,
+            )?;
+            Ok(())
+        };
+        if roles.contains(Role::A) {
+            for other in old.assignee_ids.iter().filter(|p| *p != person_id) {
+                let before = old.roles_of(other).unwrap_or_default();
+                if before.contains(Role::A) {
+                    let after = before.without(Role::A);
+                    write(
+                        other,
+                        before,
+                        if after.is_empty() { Roles::R } else { after },
+                    )?;
+                }
+            }
+        }
+        write(person_id, current, roles)?;
+        tx.execute(
+            "UPDATE tasks SET updated_at = ?2 WHERE id = ?1",
+            params![id, now],
+        )?;
+        tx.commit()?;
+        self.task(id)
+    }
+
+    /// 担当者の「自分の分」を完了にする・取り消す。
+    ///
+    /// 全員の分がそろうとタスクが完了になる。完了したタスクで誰かの分を
+    /// 取り消すと、タスクは進行中に戻る。
+    pub fn set_assignee_done(&mut self, id: &str, person_id: &str, done: bool) -> Result<Task> {
+        let old = self.task(id)?;
+        if old.roles_of(person_id).is_none() {
+            return Err(Error::Invalid(
+                "担当者ではない人の分は完了にできません".into(),
+            ));
+        }
+        if old.is_done_by(person_id) == done {
+            return Ok(old);
+        }
+        let (was_done, total) = old.done_count();
+        if done && was_done + 1 == total {
+            // 最後の 1 人。タスクごと完了にする（全員の分も完了になる）
+            return self.set_task_status(id, Status::Completed);
+        }
+        if !done && old.status == Status::Completed {
+            // タスクを戻すと全員の分が取り消されるので、ほかの人の分を戻す
+            let keep: Vec<(Id, i64)> = old
+                .assignee_ids
+                .iter()
+                .zip(&old.assignee_done)
+                .filter(|(p, _)| *p != person_id)
+                .filter_map(|(p, at)| at.map(|at| (p.clone(), at)))
+                .collect();
+            self.set_task_status(id, Status::InProcess)?;
+            let tx = self.conn.transaction()?;
+            for (person, at) in &keep {
+                tx.execute(
+                    "UPDATE task_assignees SET completed_at = ?3 \
+                     WHERE task_id = ?1 AND person_id = ?2",
+                    params![id, person, at],
+                )?;
+            }
+            insert_change(&tx, id, "assignee_done", person_id, "", now_ms())?;
+            tx.commit()?;
+            return self.task(id);
+        }
+        let now = now_ms();
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "UPDATE task_assignees SET completed_at = ?3 WHERE task_id = ?1 AND person_id = ?2",
+            params![id, person_id, done.then_some(now)],
+        )?;
+        let (before, after) = if done {
+            ("", person_id)
+        } else {
+            (person_id, "")
+        };
+        insert_change(&tx, id, "assignee_done", before, after, now)?;
+        tx.execute(
+            "UPDATE tasks SET updated_at = ?2 WHERE id = ?1",
+            params![id, now],
+        )?;
+        tx.commit()?;
+        self.task(id)
+    }
+
     /// 別のワークスペースの末尾に移す。`None` ならどこにも入れない状態に戻す。
     pub fn move_task(&mut self, id: &str, workspace_id: Option<&str>) -> Result<()> {
         let old = self.task(id)?;
@@ -592,6 +842,12 @@ impl Store {
         tx.execute(
             "UPDATE tasks SET workspace_id = ?2, position = ?3, updated_at = ?4 WHERE id = ?1",
             params![id, workspace_id, position, now],
+        )?;
+        // 移した先にすでに表示していたなら、二重にならないよう表示のほうを外す。
+        // どこにも入れない状態に戻すなら、表示先もすべて外す
+        tx.execute(
+            "DELETE FROM task_links WHERE task_id = ?1 AND (?2 IS NULL OR workspace_id = ?2)",
+            params![id, workspace_id],
         )?;
         insert_change(
             &tx,
@@ -629,41 +885,177 @@ impl Store {
         author_id: Option<&str>,
         body: &str,
     ) -> Result<Comment> {
-        let body = normalize(body).trim().to_owned();
+        self.add_comment_with(
+            task_id,
+            author_id,
+            &NewComment {
+                body: body.to_owned(),
+                ..Default::default()
+            },
+        )
+    }
+
+    /// コメントを書く。状態の変更、レビューコメント、返信もここから。
+    ///
+    /// - `status` があれば、同時にタスクの状態を変える（完了なら完了報告）
+    /// - `review` か `anchor` があれば、返信と解決ができるスレッドのルートになる
+    /// - `reply_to` はスレッドのルートだけを指せる。解決済みのスレッドに返信すると未解決に戻る
+    pub fn add_comment_with(
+        &mut self,
+        task_id: &str,
+        author_id: Option<&str>,
+        new: &NewComment,
+    ) -> Result<Comment> {
+        let body = normalize(&new.body).trim().to_owned();
         if body.is_empty() {
             return Err(Error::Invalid("コメントが空です".into()));
         }
+        let review = new.review || new.anchor.is_some();
+        let kinds = usize::from(review)
+            + usize::from(new.reply_to.is_some())
+            + usize::from(new.status.is_some());
+        if kinds > 1 {
+            return Err(Error::Invalid(
+                "レビューコメント、返信、状態の変更は同時に指定できません".into(),
+            ));
+        }
+        let anchor = match &new.anchor {
+            Some(a) => {
+                let exact = normalize(&a.exact);
+                if exact.trim().is_empty() {
+                    return Err(Error::Invalid("選択範囲が空です".into()));
+                }
+                Some(Anchor {
+                    exact,
+                    prefix: normalize(&a.prefix),
+                    suffix: normalize(&a.suffix),
+                })
+            }
+            None => None,
+        };
         self.task(task_id)?;
+        if let Some(root_id) = new.reply_to.as_deref() {
+            let root = self.comment(root_id)?;
+            if root.task_id != task_id || !root.is_thread_root() {
+                return Err(Error::Invalid(
+                    "返信できるのは、同じタスクのレビューコメントだけです".into(),
+                ));
+            }
+        }
+        if let Some(status) = new.status {
+            self.set_task_status(task_id, status)?;
+        }
         let now = now_ms();
         let comment = Comment {
             id: new_id(),
             task_id: task_id.to_owned(),
             author_id: author_id.map(str::to_owned),
+            mentions: crate::mention::find(&body, &self.people()?),
             body,
             pinned: false,
             created_at: now,
             updated_at: now,
+            status: new.status,
+            review,
+            anchor,
+            reply_to: new.reply_to.clone(),
+            resolved_at: None,
         };
-        insert_comment(&self.conn, &comment)?;
+        let tx = self.conn.transaction()?;
+        insert_comment(&tx, &comment)?;
+        if let Some(root_id) = &comment.reply_to {
+            tx.execute(
+                "UPDATE comments SET resolved_at = NULL WHERE id = ?1",
+                params![root_id],
+            )?;
+        }
+        tx.commit()?;
         Ok(comment)
+    }
+
+    pub fn comment(&self, id: &str) -> Result<Comment> {
+        let sql = format!("SELECT {COMMENT_COLUMNS} FROM comments WHERE id = ?1");
+        self.conn
+            .prepare_cached(&sql)?
+            .query_row(params![id], comment_from_row)
+            .optional()?
+            .ok_or_else(|| Error::NotFound(format!("コメント {id}")))
     }
 
     /// ピン留めが先、あとは古い順。
     pub fn comments(&self, task_id: &str) -> Result<Vec<Comment>> {
-        let mut stmt = self.conn.prepare_cached(
-            "SELECT id, task_id, author_id, body, pinned, created_at, updated_at \
-             FROM comments WHERE task_id = ?1 ORDER BY pinned DESC, created_at, id",
-        )?;
+        let sql = format!(
+            "SELECT {COMMENT_COLUMNS} FROM comments WHERE task_id = ?1 \
+             ORDER BY pinned DESC, created_at, id"
+        );
+        let mut stmt = self.conn.prepare_cached(&sql)?;
         let rows = stmt.query_map(params![task_id], comment_from_row)?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// 本文を書き直す。メンションも読み直す。
+    pub fn update_comment(&mut self, id: &str, body: &str) -> Result<Comment> {
+        let body = normalize(body).trim().to_owned();
+        if body.is_empty() {
+            return Err(Error::Invalid("コメントが空です".into()));
+        }
+        let old = self.comment(id)?;
+        if old.body == body {
+            return Ok(old);
+        }
+        let mentions = crate::mention::find(&body, &self.people()?);
+        self.conn.execute(
+            "UPDATE comments SET body = ?2, mentions = ?3, updated_at = ?4 WHERE id = ?1",
+            params![id, body, mentions.join(","), now_ms()],
+        )?;
+        self.comment(id)
+    }
+
+    /// ピン留めする・外す。1 つのタスクに 10 件まで。
+    /// 完了報告は最初から目立つ場所に出るので、留める対象にしない。
     pub fn set_comment_pinned(&mut self, id: &str, pinned: bool) -> Result<()> {
-        let n = self.conn.execute(
+        let comment = self.comment(id)?;
+        if comment.pinned == pinned {
+            return Ok(());
+        }
+        if pinned {
+            if comment.is_completion_report() {
+                return Err(Error::Invalid("完了報告はピン留めできません".into()));
+            }
+            let count: usize = self.conn.query_row(
+                "SELECT COUNT(*) FROM comments WHERE task_id = ?1 AND pinned = 1",
+                params![comment.task_id],
+                |r| r.get(0),
+            )?;
+            if count >= MAX_PINNED_COMMENTS {
+                return Err(Error::Invalid(format!(
+                    "ピン留めできるのは {MAX_PINNED_COMMENTS} 件までです"
+                )));
+            }
+        }
+        self.conn.execute(
             "UPDATE comments SET pinned = ?2 WHERE id = ?1",
             params![id, pinned],
         )?;
-        found(n, "コメント", id)
+        Ok(())
+    }
+
+    /// レビューコメントのスレッドを解決済みにする・再開する。何度呼んでも同じ。
+    pub fn set_comment_resolved(&mut self, id: &str, resolved: bool) -> Result<Comment> {
+        let comment = self.comment(id)?;
+        if !comment.is_thread_root() {
+            return Err(Error::Invalid(
+                "解決済みにできるのはレビューコメントだけです".into(),
+            ));
+        }
+        if comment.resolved_at.is_some() == resolved {
+            return Ok(comment);
+        }
+        self.conn.execute(
+            "UPDATE comments SET resolved_at = ?2 WHERE id = ?1",
+            params![id, resolved.then(now_ms)],
+        )?;
+        self.comment(id)
     }
 
     pub fn delete_comment(&mut self, id: &str) -> Result<()> {
@@ -711,10 +1103,9 @@ impl Store {
         self.fill_links(&mut tasks)?;
         let comments = self
             .conn
-            .prepare(
-                "SELECT id, task_id, author_id, body, pinned, created_at, updated_at \
-                 FROM comments ORDER BY id",
-            )?
+            .prepare(&format!(
+                "SELECT {COMMENT_COLUMNS} FROM comments ORDER BY id"
+            ))?
             .query_map([], comment_from_row)?
             .collect::<rusqlite::Result<_>>()?;
         let changes = self
@@ -731,11 +1122,18 @@ impl Store {
             tasks,
             comments,
             changes,
+            attachments: self.all_attachments()?,
+            task_defaults: self.all_task_defaults()?,
         })
     }
 
     /// ID が同じものは上書き、なければ追加する。全体を 1 つのトランザクションで行う。
-    pub(crate) fn merge(&mut self, data: &crate::archive::Data) -> Result<()> {
+    /// 添付の中身は、まだ持っていないものだけ `fetch` にハッシュを渡して受け取る。
+    pub(crate) fn merge(
+        &mut self,
+        data: &crate::archive::Data,
+        fetch: &mut dyn FnMut(&str) -> Result<Vec<u8>>,
+    ) -> Result<()> {
         let tx = self.conn.transaction()?;
         // 親より先に子が来ても入るように、検査をコミットまで遅らせる。
         tx.pragma_update(None, "defer_foreign_keys", "ON")?;
@@ -769,6 +1167,7 @@ impl Store {
                 "DELETE FROM task_categories WHERE task_id = ?1",
                 params![t.id],
             )?;
+            tx.execute("DELETE FROM task_links WHERE task_id = ?1", params![t.id])?;
             insert_task(&tx, t)?;
         }
         for c in &data.comments {
@@ -787,6 +1186,25 @@ impl Store {
                 c.new_value,
                 c.created_at
             ])?;
+        }
+        for d in &data.task_defaults {
+            crate::defaults::save(&tx, d)?;
+        }
+        for a in &data.attachments {
+            let known: bool = tx
+                .prepare_cached("SELECT EXISTS(SELECT 1 FROM blobs WHERE hash = ?1)")?
+                .query_row(params![a.hash], |r| r.get(0))?;
+            if !known {
+                let bytes = fetch(&a.hash)?;
+                if bytes.len() as u64 != a.size || crate::attachment::hash_of(&bytes) != a.hash {
+                    return Err(Error::Invalid(format!(
+                        "添付「{}」の中身が壊れています",
+                        a.name
+                    )));
+                }
+                crate::attachment::put_blob(&tx, &a.hash, &bytes)?;
+            }
+            crate::attachment::insert(&tx, a)?;
         }
         // 取り込んだ結果、親子が輪になっていないか確かめる。
         let reachable: i64 = tx.query_row(
@@ -813,7 +1231,7 @@ impl Store {
     }
 }
 
-fn required_line(input: &str, what: &str) -> Result<String> {
+pub(crate) fn required_line(input: &str, what: &str) -> Result<String> {
     let s = normalize_line(input);
     if s.is_empty() {
         return Err(Error::Invalid(format!("{what}が空です")));
@@ -835,12 +1253,12 @@ fn clean_draft(draft: &TaskDraft) -> Result<TaskDraft> {
     }
     let due = match draft.due.as_deref().map(str::trim) {
         None | Some("") => None,
-        Some(d) if is_valid_date(d) => Some(d.to_owned()),
+        Some(d) if is_valid_when(d) => Some(d.to_owned()),
         Some(d) => return Err(Error::Invalid(format!("期限の日付が正しくありません: {d}"))),
     };
     let start = match draft.start.as_deref().map(str::trim) {
         None | Some("") => None,
-        Some(d) if is_valid_date(d) => Some(d.to_owned()),
+        Some(d) if is_valid_when(d) => Some(d.to_owned()),
         Some(d) => {
             return Err(Error::Invalid(format!(
                 "開始日の日付が正しくありません: {d}"
@@ -882,10 +1300,10 @@ fn clean_draft(draft: &TaskDraft) -> Result<TaskDraft> {
 
 fn insert_workspace(conn: &Connection, w: &Workspace) -> rusqlite::Result<usize> {
     conn.prepare_cached(
-        "INSERT INTO workspaces(id, parent_id, name, position, created_at, updated_at) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
+        "INSERT INTO workspaces(id, parent_id, name, position, created_at, updated_at, date) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
          ON CONFLICT(id) DO UPDATE SET parent_id = excluded.parent_id, name = excluded.name, \
-         position = excluded.position, updated_at = excluded.updated_at",
+         position = excluded.position, updated_at = excluded.updated_at, date = excluded.date",
     )?
     .execute(params![
         w.id,
@@ -893,7 +1311,8 @@ fn insert_workspace(conn: &Connection, w: &Workspace) -> rusqlite::Result<usize>
         w.name,
         w.position,
         w.created_at,
-        w.updated_at
+        w.updated_at,
+        w.date
     ])
 }
 
@@ -941,7 +1360,18 @@ fn insert_task(conn: &Connection, t: &Task) -> rusqlite::Result<()> {
         t.percent,
         t.parent_id
     ])?;
-    insert_assignees(conn, &t.id, &t.assignee_ids)?;
+    insert_assignees(
+        conn,
+        &t.id,
+        &t.assignee_ids,
+        &t.assignee_roles,
+        &t.assignee_done,
+    )?;
+    for workspace_id in &t.linked_workspace_ids {
+        if t.workspace_id.as_ref() != Some(workspace_id) {
+            crate::links::insert(conn, &t.id, workspace_id, t.updated_at)?;
+        }
+    }
     insert_categories(conn, &t.id, &t.categories)
 }
 
@@ -959,22 +1389,40 @@ fn insert_categories(
     Ok(())
 }
 
-fn insert_assignees(conn: &Connection, task_id: &str, ids: &[Id]) -> rusqlite::Result<()> {
+/// 担当者を足す。すでにいる人はそのままにする。役の指定がない人は R。
+fn insert_assignees(
+    conn: &Connection,
+    task_id: &str,
+    ids: &[Id],
+    roles: &[Roles],
+    done: &[Option<i64>],
+) -> rusqlite::Result<()> {
     let mut stmt = conn.prepare_cached(
-        "INSERT OR IGNORE INTO task_assignees(task_id, person_id) VALUES (?1, ?2)",
+        "INSERT OR IGNORE INTO task_assignees(task_id, person_id, roles, completed_at) \
+         VALUES (?1, ?2, ?3, ?4)",
     )?;
-    for person_id in ids {
-        stmt.execute(params![task_id, person_id])?;
+    for (i, person_id) in ids.iter().enumerate() {
+        let roles = roles.get(i).copied().unwrap_or_default();
+        stmt.execute(params![
+            task_id,
+            person_id,
+            roles.to_string(),
+            done.get(i).copied().flatten()
+        ])?;
     }
     Ok(())
 }
 
 fn insert_comment(conn: &Connection, c: &Comment) -> rusqlite::Result<usize> {
     conn.prepare_cached(
-        "INSERT INTO comments(id, task_id, author_id, body, pinned, created_at, updated_at) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
+        "INSERT INTO comments(id, task_id, author_id, body, pinned, created_at, updated_at, \
+         status, review, anchor, reply_to, resolved_at, mentions) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13) \
          ON CONFLICT(id) DO UPDATE SET body = excluded.body, pinned = excluded.pinned, \
-         author_id = excluded.author_id, updated_at = excluded.updated_at",
+         author_id = excluded.author_id, updated_at = excluded.updated_at, \
+         status = excluded.status, review = excluded.review, anchor = excluded.anchor, \
+         reply_to = excluded.reply_to, resolved_at = excluded.resolved_at, \
+         mentions = excluded.mentions",
     )?
     .execute(params![
         c.id,
@@ -983,11 +1431,19 @@ fn insert_comment(conn: &Connection, c: &Comment) -> rusqlite::Result<usize> {
         c.body,
         c.pinned,
         c.created_at,
-        c.updated_at
+        c.updated_at,
+        c.status.map(Status::as_str),
+        c.review,
+        c.anchor
+            .as_ref()
+            .map(|a| serde_json::to_string(a).expect("文字列だけの構造体")),
+        c.reply_to,
+        c.resolved_at,
+        c.mentions.join(",")
     ])
 }
 
-fn insert_change(
+pub(crate) fn insert_change(
     conn: &Connection,
     task_id: &str,
     field: &str,
@@ -1010,6 +1466,7 @@ fn workspace_from_row(r: &Row<'_>) -> rusqlite::Result<Workspace> {
         position: r.get(3)?,
         created_at: r.get(4)?,
         updated_at: r.get(5)?,
+        date: r.get(6)?,
     })
 }
 
@@ -1038,7 +1495,10 @@ fn task_from_row(r: &Row<'_>) -> rusqlite::Result<Task> {
         percent: r.get(12)?,
         parent_id: r.get(13)?,
         assignee_ids: Vec::new(),
+        assignee_roles: Vec::new(),
+        assignee_done: Vec::new(),
         categories: Vec::new(),
+        linked_workspace_ids: Vec::new(),
         position: r.get(7)?,
         created_at: r.get(8)?,
         updated_at: r.get(9)?,
@@ -1055,8 +1515,26 @@ fn comment_from_row(r: &Row<'_>) -> rusqlite::Result<Comment> {
         pinned: r.get(4)?,
         created_at: r.get(5)?,
         updated_at: r.get(6)?,
+        status: r.get_ref(7)?.as_str_or_null()?.and_then(Status::parse),
+        review: r.get(8)?,
+        anchor: r
+            .get_ref(9)?
+            .as_str_or_null()?
+            .and_then(|json| serde_json::from_str(json).ok()),
+        reply_to: r.get(10)?,
+        resolved_at: r.get(11)?,
+        mentions: r
+            .get_ref(12)?
+            .as_str()?
+            .split(',')
+            .filter(|id| !id.is_empty())
+            .map(str::to_owned)
+            .collect(),
     })
 }
+
+const COMMENT_COLUMNS: &str = "id, task_id, author_id, body, pinned, created_at, updated_at, \
+     status, review, anchor, reply_to, resolved_at, mentions";
 
 fn change_from_row(r: &Row<'_>) -> rusqlite::Result<Change> {
     Ok(Change {
@@ -1801,5 +2279,665 @@ mod unfiled_tests {
             s.tasks(Scope::All, &TaskFilter::default()).unwrap().len(),
             2
         );
+    }
+}
+
+#[cfg(test)]
+mod raci_tests {
+    use super::Store;
+    use crate::model::*;
+    use crate::Error;
+
+    /// 担当者 3 人のタスクを用意する。
+    fn setup() -> (Store, Task, [Id; 3]) {
+        let mut s = Store::open_in_memory().unwrap();
+        let ids = ["あ", "い", "う"].map(|name| s.create_person(name, false).unwrap().id);
+        let task = s
+            .create_task(
+                None,
+                &TaskDraft {
+                    title: "会場を決める".into(),
+                    assignee_ids: ids.to_vec(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        (s, task, ids)
+    }
+
+    #[test]
+    fn new_assignees_start_as_r() {
+        let (s, task, ids) = setup();
+        assert_eq!(task.assignee_roles, [Roles::R; 3]);
+        let loaded = s.task(&task.id).unwrap();
+        assert_eq!(loaded, task);
+        assert_eq!(loaded.roles_of(&ids[0]), Some(Roles::R));
+        assert_eq!(loaded.roles_of("いない人"), None);
+        let listed = s.tasks(Scope::All, &TaskFilter::default()).unwrap();
+        assert_eq!(listed[0], task);
+    }
+
+    #[test]
+    fn accountable_is_one_person_per_task() {
+        let (mut s, task, ids) = setup();
+        let ra = Roles::of(&[Role::R, Role::A]);
+        let t = s.set_assignee_roles(&task.id, &ids[0], ra).unwrap();
+        assert_eq!(t.roles_of(&ids[0]), Some(ra));
+        // A だけの人から A が移ると、その人は R に戻る
+        let only_a = Roles::of(&[Role::A]);
+        let t = s.set_assignee_roles(&task.id, &ids[1], only_a).unwrap();
+        assert_eq!(t.roles_of(&ids[0]), Some(Roles::R));
+        assert_eq!(t.roles_of(&ids[1]), Some(only_a));
+        let t = s
+            .set_assignee_roles(&task.id, &ids[2], Roles::of(&[Role::A, Role::I]))
+            .unwrap();
+        assert_eq!(t.roles_of(&ids[1]), Some(Roles::R));
+        assert_eq!(t.roles_of(&ids[2]).unwrap().to_string(), "A,I");
+        assert_eq!(
+            t.assignee_roles
+                .iter()
+                .filter(|r| r.contains(Role::A))
+                .count(),
+            1
+        );
+        // A 以外は何人でも持てる
+        let c = Roles::of(&[Role::C]);
+        s.set_assignee_roles(&task.id, &ids[0], c).unwrap();
+        let t = s.set_assignee_roles(&task.id, &ids[1], c).unwrap();
+        assert_eq!(t.assignee_roles[..2], [c, c]);
+    }
+
+    #[test]
+    fn roles_need_at_least_one_and_an_assignee() {
+        let (mut s, task, ids) = setup();
+        assert!(matches!(
+            s.set_assignee_roles(&task.id, &ids[0], Roles::NONE),
+            Err(Error::Invalid(_))
+        ));
+        let outsider = s.create_person("え", false).unwrap();
+        assert!(matches!(
+            s.set_assignee_roles(&task.id, &outsider.id, Roles::R),
+            Err(Error::Invalid(_))
+        ));
+        assert!(matches!(
+            s.set_assignee_done(&task.id, &outsider.id, true),
+            Err(Error::Invalid(_))
+        ));
+        assert_eq!(s.task(&task.id).unwrap(), task);
+    }
+
+    #[test]
+    fn role_changes_are_recorded() {
+        let (mut s, task, ids) = setup();
+        s.set_assignee_roles(&task.id, &ids[0], Roles::of(&[Role::A]))
+            .unwrap();
+        // 同じ役をもう一度付けても履歴は増えない
+        s.set_assignee_roles(&task.id, &ids[0], Roles::of(&[Role::A]))
+            .unwrap();
+        s.set_assignee_roles(&task.id, &ids[1], Roles::of(&[Role::A, Role::C]))
+            .unwrap();
+        let changes: Vec<(String, String)> = s
+            .changes(&task.id)
+            .unwrap()
+            .into_iter()
+            .filter(|c| c.field == "assignee_roles")
+            .map(|c| (c.old_value, c.new_value))
+            .collect();
+        assert_eq!(
+            changes,
+            [
+                (format!("{}=R", ids[0]), format!("{}=A", ids[0])),
+                (format!("{}=A", ids[0]), format!("{}=R", ids[0])),
+                (format!("{}=R", ids[1]), format!("{}=A,C", ids[1])),
+            ]
+        );
+    }
+
+    #[test]
+    fn roles_survive_adding_and_removing_other_assignees() {
+        let (mut s, task, ids) = setup();
+        let ci = Roles::of(&[Role::C, Role::I]);
+        s.set_assignee_roles(&task.id, &ids[0], ci).unwrap();
+        s.set_assignee_done(&task.id, &ids[0], true).unwrap();
+        let mut draft = TaskDraft::from(&s.task(&task.id).unwrap());
+        draft.assignee_ids = vec![ids[0].clone(), ids[2].clone()];
+        let t = s.update_task(&task.id, &draft).unwrap();
+        assert_eq!(t.assignee_ids, [ids[0].clone(), ids[2].clone()]);
+        assert_eq!(t.assignee_roles, [ci, Roles::R]);
+        assert!(t.is_done_by(&ids[0]) && !t.is_done_by(&ids[2]));
+        // 外して足し直した人は R から
+        draft.assignee_ids = vec![ids[2].clone()];
+        s.update_task(&task.id, &draft).unwrap();
+        draft.assignee_ids = vec![ids[0].clone(), ids[2].clone()];
+        let t = s.update_task(&task.id, &draft).unwrap();
+        assert_eq!(t.roles_of(&ids[0]), Some(Roles::R));
+        assert!(!t.is_done_by(&ids[0]));
+    }
+
+    #[test]
+    fn task_completes_when_everyone_is_done() {
+        let (mut s, task, ids) = setup();
+        let t = s.set_assignee_done(&task.id, &ids[0], true).unwrap();
+        assert_eq!((t.status, t.done_count()), (Status::NeedsAction, (1, 3)));
+        let t = s.set_assignee_done(&task.id, &ids[1], true).unwrap();
+        assert_eq!((t.status, t.done_count()), (Status::NeedsAction, (2, 3)));
+        // 役に関わらず全員を数える
+        s.set_assignee_roles(&task.id, &ids[2], Roles::of(&[Role::I]))
+            .unwrap();
+        let t = s.set_assignee_done(&task.id, &ids[2], true).unwrap();
+        assert_eq!((t.status, t.done_count()), (Status::Completed, (3, 3)));
+        assert_eq!(t.percent, 100);
+        assert!(t.completed_at.is_some());
+    }
+
+    #[test]
+    fn undoing_one_person_reopens_the_task() {
+        let (mut s, task, ids) = setup();
+        for id in &ids {
+            s.set_assignee_done(&task.id, id, true).unwrap();
+        }
+        let t = s.set_assignee_done(&task.id, &ids[1], false).unwrap();
+        assert_eq!((t.status, t.done_count()), (Status::InProcess, (2, 3)));
+        assert!(t.is_done_by(&ids[0]) && !t.is_done_by(&ids[1]) && t.is_done_by(&ids[2]));
+        assert_eq!(t.completed_at, None);
+        // 取り消しの取り消しは何もしない
+        assert_eq!(s.set_assignee_done(&task.id, &ids[1], false).unwrap(), t);
+    }
+
+    #[test]
+    fn completing_the_whole_task_completes_everyone() {
+        let (mut s, task, ids) = setup();
+        s.set_assignee_done(&task.id, &ids[0], true).unwrap();
+        let first = s.task(&task.id).unwrap().assignee_done[0];
+        let t = s.set_task_status(&task.id, Status::Completed).unwrap();
+        assert_eq!(t.done_count(), (3, 3));
+        // 先に完了していた人の時刻は変えない
+        assert_eq!(t.assignee_done[0], first);
+        // タスクを戻すと全員の分が取り消される
+        let t = s.set_task_status(&task.id, Status::NeedsAction).unwrap();
+        assert_eq!(t.done_count(), (0, 3));
+        // 中止では誰の分も完了にしない
+        let t = s.set_task_status(&task.id, Status::Cancelled).unwrap();
+        assert_eq!(t.done_count(), (0, 3));
+    }
+
+    #[test]
+    fn a_single_assignee_completes_the_task() {
+        let mut s = Store::open_in_memory().unwrap();
+        let me = s.create_person("自分", true).unwrap();
+        let task = s
+            .create_task(
+                None,
+                &TaskDraft {
+                    title: "牛乳を買う".into(),
+                    assignee_ids: vec![me.id.clone()],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let t = s.set_assignee_done(&task.id, &me.id, true).unwrap();
+        assert_eq!((t.status, t.done_count()), (Status::Completed, (1, 1)));
+        let t = s.set_assignee_done(&task.id, &me.id, false).unwrap();
+        assert_eq!((t.status, t.done_count()), (Status::InProcess, (0, 1)));
+    }
+
+    #[test]
+    fn done_changes_are_recorded() {
+        let (mut s, task, ids) = setup();
+        s.set_assignee_done(&task.id, &ids[0], true).unwrap();
+        s.set_assignee_done(&task.id, &ids[0], false).unwrap();
+        let changes: Vec<(String, String)> = s
+            .changes(&task.id)
+            .unwrap()
+            .into_iter()
+            .filter(|c| c.field == "assignee_done")
+            .map(|c| (c.old_value, c.new_value))
+            .collect();
+        assert_eq!(
+            changes,
+            [
+                (String::new(), ids[0].clone()),
+                (ids[0].clone(), String::new())
+            ]
+        );
+    }
+
+    #[test]
+    fn roles_and_done_round_trip_through_dump_and_merge() {
+        let (mut s, task, ids) = setup();
+        s.set_assignee_roles(&task.id, &ids[0], Roles::of(&[Role::A, Role::C]))
+            .unwrap();
+        s.set_assignee_done(&task.id, &ids[1], true).unwrap();
+        let expect = s.task(&task.id).unwrap();
+        let mut other = Store::open_in_memory().unwrap();
+        other
+            .merge(&s.dump().unwrap(), &mut |hash| s.blob(hash))
+            .unwrap();
+        assert_eq!(other.task(&task.id).unwrap(), expect);
+    }
+}
+
+#[cfg(test)]
+mod comment_tests {
+    use super::Store;
+    use crate::model::*;
+    use crate::Error;
+
+    fn setup() -> (Store, Task) {
+        let mut s = Store::open_in_memory().unwrap();
+        let task = s
+            .create_task(
+                None,
+                &TaskDraft {
+                    title: "記事を書く".into(),
+                    description: "導入を書く。本文を書く。".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        (s, task)
+    }
+
+    fn review(body: &str) -> NewComment {
+        NewComment {
+            body: body.into(),
+            review: true,
+            ..Default::default()
+        }
+    }
+
+    fn reply(root: &Comment, body: &str) -> NewComment {
+        NewComment {
+            body: body.into(),
+            reply_to: Some(root.id.clone()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn status_comment_changes_the_task_and_is_a_completion_report() {
+        let (mut s, task) = setup();
+        let c = s
+            .add_comment_with(
+                &task.id,
+                None,
+                &NewComment {
+                    body: "公開しました".into(),
+                    status: Some(Status::Completed),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert!(c.is_completion_report());
+        assert_eq!(s.task(&task.id).unwrap().status, Status::Completed);
+        assert_eq!(s.comments(&task.id).unwrap(), [c.clone()]);
+        // 完了報告はピン留めできない
+        assert!(matches!(
+            s.set_comment_pinned(&c.id, true),
+            Err(Error::Invalid(_))
+        ));
+        // 状態つきでも、完了でなければ完了報告ではない
+        let c = s
+            .add_comment_with(
+                &task.id,
+                None,
+                &NewComment {
+                    body: "やり直します".into(),
+                    status: Some(Status::InProcess),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert!(!c.is_completion_report());
+        assert_eq!(s.task(&task.id).unwrap().status, Status::InProcess);
+        s.set_comment_pinned(&c.id, true).unwrap();
+    }
+
+    #[test]
+    fn empty_status_comment_changes_nothing() {
+        let (mut s, task) = setup();
+        let result = s.add_comment_with(
+            &task.id,
+            None,
+            &NewComment {
+                body: "  \n".into(),
+                status: Some(Status::Completed),
+                ..Default::default()
+            },
+        );
+        assert!(matches!(result, Err(Error::Invalid(_))));
+        assert_eq!(s.task(&task.id).unwrap().status, Status::NeedsAction);
+    }
+
+    #[test]
+    fn pins_are_limited_per_task() {
+        let (mut s, task) = setup();
+        let ids: Vec<Id> = (0..=MAX_PINNED_COMMENTS)
+            .map(|i| {
+                s.add_comment(&task.id, None, &format!("メモ {i}"))
+                    .unwrap()
+                    .id
+            })
+            .collect();
+        for id in &ids[..MAX_PINNED_COMMENTS] {
+            s.set_comment_pinned(id, true).unwrap();
+        }
+        // すでに留めてあるものをもう一度留めても数えない
+        s.set_comment_pinned(&ids[0], true).unwrap();
+        assert!(matches!(
+            s.set_comment_pinned(&ids[MAX_PINNED_COMMENTS], true),
+            Err(Error::Invalid(_))
+        ));
+        // 1 つ外せば留められる
+        s.set_comment_pinned(&ids[0], false).unwrap();
+        s.set_comment_pinned(&ids[MAX_PINNED_COMMENTS], true)
+            .unwrap();
+        let pinned = s
+            .comments(&task.id)
+            .unwrap()
+            .iter()
+            .filter(|c| c.pinned)
+            .count();
+        assert_eq!(pinned, MAX_PINNED_COMMENTS);
+        // 別のタスクの数は別
+        let other = s
+            .create_task(
+                None,
+                &TaskDraft {
+                    title: "別".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let c = s.add_comment(&other.id, None, "メモ").unwrap();
+        s.set_comment_pinned(&c.id, true).unwrap();
+    }
+
+    #[test]
+    fn editing_updates_body_time_and_mentions() {
+        let (mut s, task) = setup();
+        let sato = s.create_person("佐藤", false).unwrap();
+        let tanaka = s.create_person("田中", false).unwrap();
+        let c = s
+            .add_comment(&task.id, None, "@佐藤 確認お願いします")
+            .unwrap();
+        assert_eq!(c.mentions, [sato.id.clone()]);
+        assert!(!c.is_edited());
+        // 同じ本文なら何も変わらない
+        assert_eq!(
+            s.update_comment(&c.id, "@佐藤 確認お願いします\n").unwrap(),
+            c
+        );
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let edited = s.update_comment(&c.id, "@田中 に変更します").unwrap();
+        assert_eq!(edited.body, "@田中 に変更します");
+        assert_eq!(edited.mentions, [tanaka.id.clone()]);
+        assert!(edited.is_edited());
+        assert_eq!(edited.created_at, c.created_at);
+        assert!(matches!(
+            s.update_comment(&c.id, " "),
+            Err(Error::Invalid(_))
+        ));
+        assert!(matches!(
+            s.update_comment("ない", "本文"),
+            Err(Error::NotFound(_))
+        ));
+        assert_eq!(s.comments(&task.id).unwrap(), [edited]);
+    }
+
+    #[test]
+    fn review_threads_reply_resolve_and_reopen() {
+        let (mut s, task) = setup();
+        let root = s
+            .add_comment_with(&task.id, None, &review("全体に見出しがほしい"))
+            .unwrap();
+        assert!(root.is_thread_root());
+        let first = s
+            .add_comment_with(&task.id, None, &reply(&root, "足します"))
+            .unwrap();
+        assert_eq!(first.reply_to.as_deref(), Some(root.id.as_str()));
+        assert!(!first.is_thread_root());
+
+        let resolved = s.set_comment_resolved(&root.id, true).unwrap();
+        assert!(resolved.resolved_at.is_some());
+        // 何度呼んでも同じ
+        assert_eq!(s.set_comment_resolved(&root.id, true).unwrap(), resolved);
+        // 解決済みのスレッドに返信すると未解決に戻る
+        s.add_comment_with(&task.id, None, &reply(&root, "まだでした"))
+            .unwrap();
+        assert_eq!(s.comment(&root.id).unwrap().resolved_at, None);
+        s.set_comment_resolved(&root.id, true).unwrap();
+        let reopened = s.set_comment_resolved(&root.id, false).unwrap();
+        assert_eq!(reopened.resolved_at, None);
+
+        // ルートを消すと返信も消える
+        s.delete_comment(&root.id).unwrap();
+        assert!(s.comments(&task.id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn anchored_review_keeps_the_selection() {
+        let (mut s, task) = setup();
+        let c = s
+            .add_comment_with(
+                &task.id,
+                None,
+                &NewComment {
+                    body: "ここを詳しく".into(),
+                    anchor: Some(Anchor {
+                        exact: "本文を書く".into(),
+                        prefix: "導入を書く。".into(),
+                        suffix: "。".into(),
+                    }),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        // 選択範囲があればレビューコメントになる
+        assert!(c.review && c.is_thread_root());
+        let loaded = s.comment(&c.id).unwrap();
+        assert_eq!(loaded, c);
+        assert_eq!(loaded.anchor.unwrap().exact, "本文を書く");
+        let empty = NewComment {
+            body: "x".into(),
+            anchor: Some(Anchor::default()),
+            ..Default::default()
+        };
+        assert!(matches!(
+            s.add_comment_with(&task.id, None, &empty),
+            Err(Error::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn thread_rules_are_enforced() {
+        let (mut s, task) = setup();
+        let plain = s.add_comment(&task.id, None, "ふつうのコメント").unwrap();
+        let root = s
+            .add_comment_with(&task.id, None, &review("レビュー"))
+            .unwrap();
+        let child = s
+            .add_comment_with(&task.id, None, &reply(&root, "返信"))
+            .unwrap();
+        let invalid = |s: &mut Store, task_id: &str, new: &NewComment| {
+            assert!(matches!(
+                s.add_comment_with(task_id, None, new),
+                Err(Error::Invalid(_))
+            ));
+        };
+        // ふつうのコメントや返信には返信できない（スレッドは 1 段）
+        invalid(&mut s, &task.id, &reply(&plain, "x"));
+        invalid(&mut s, &task.id, &reply(&child, "x"));
+        // 別のタスクのスレッドには返信できない
+        let other = s
+            .create_task(
+                None,
+                &TaskDraft {
+                    title: "別".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        invalid(&mut s, &other.id, &reply(&root, "x"));
+        // レビュー、返信、状態の変更は同時に指定できない
+        let mut both = reply(&root, "x");
+        both.review = true;
+        invalid(&mut s, &task.id, &both);
+        let mut with_status = review("x");
+        with_status.status = Some(Status::Completed);
+        invalid(&mut s, &task.id, &with_status);
+        assert_eq!(s.task(&task.id).unwrap().status, Status::NeedsAction);
+        // 解決済みにできるのはルートだけ
+        for id in [&plain.id, &child.id] {
+            assert!(matches!(
+                s.set_comment_resolved(id, true),
+                Err(Error::Invalid(_))
+            ));
+        }
+        assert_eq!(s.comments(&task.id).unwrap().len(), 3);
+    }
+
+    #[test]
+    fn threads_and_mentions_round_trip_through_dump_and_merge() {
+        let (mut s, task) = setup();
+        let sato = s.create_person("佐藤", false).unwrap();
+        let anchored = NewComment {
+            body: "@佐藤 ここ".into(),
+            anchor: Some(Anchor {
+                exact: "導入".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let root = s
+            .add_comment_with(&task.id, Some(&sato.id), &anchored)
+            .unwrap();
+        s.add_comment_with(&task.id, None, &reply(&root, "直しました"))
+            .unwrap();
+        s.set_comment_resolved(&root.id, true).unwrap();
+        s.add_comment_with(
+            &task.id,
+            None,
+            &NewComment {
+                body: "完了".into(),
+                status: Some(Status::Completed),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let expect = s.comments(&task.id).unwrap();
+        assert_eq!(expect[0].mentions, [sato.id.clone()]);
+        let mut other = Store::open_in_memory().unwrap();
+        other
+            .merge(&s.dump().unwrap(), &mut |hash| s.blob(hash))
+            .unwrap();
+        assert_eq!(other.comments(&task.id).unwrap(), expect);
+    }
+}
+
+#[cfg(test)]
+mod disk_tests {
+    use super::Store;
+    use crate::model::*;
+
+    fn size(path: &std::path::Path) -> u64 {
+        std::fs::metadata(path).map_or(0, |m| m.len())
+    }
+
+    #[test]
+    fn deleted_data_gives_the_space_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("data.sqlite3");
+        let wal = dir.path().join("data.sqlite3-wal");
+        let mut s = Store::open(&path).unwrap();
+        let ids: Vec<Id> = (0..200)
+            .map(|i| {
+                let draft = TaskDraft {
+                    title: format!("タスク {i}"),
+                    description: "長い説明。".repeat(400),
+                    ..Default::default()
+                };
+                s.create_task(None, &draft).unwrap().id
+            })
+            .collect();
+        let full = s.compact().unwrap();
+        assert_eq!(full.reclaimable_bytes, 0);
+        assert_eq!(size(&path), full.database_bytes);
+        assert!(full.database_bytes > 1_000_000);
+
+        for id in &ids {
+            s.delete_task(id).unwrap();
+        }
+        // 消した直後は、跡が返せる領域として残る
+        assert!(s.usage().unwrap().reclaimable_bytes > 500_000);
+        let after = s.compact().unwrap();
+        assert_eq!(after.reclaimable_bytes, 0);
+        assert!(after.database_bytes < full.database_bytes / 4);
+        assert_eq!(size(&path), after.database_bytes);
+        assert_eq!(size(&wal), 0);
+    }
+
+    #[test]
+    fn closing_compacts_and_empties_the_wal() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("data.sqlite3");
+        let full = {
+            let mut s = Store::open(&path).unwrap();
+            let ids: Vec<Id> = (0..100)
+                .map(|i| {
+                    let draft = TaskDraft {
+                        title: format!("タスク {i}"),
+                        description: "長い説明。".repeat(400),
+                        ..Default::default()
+                    };
+                    s.create_task(None, &draft).unwrap().id
+                })
+                .collect();
+            let full = s.compact().unwrap().database_bytes;
+            for id in &ids {
+                s.delete_task(id).unwrap();
+            }
+            full
+        };
+        assert!(size(&path) < full / 4);
+        assert_eq!(size(&dir.path().join("data.sqlite3-wal")), 0);
+        // 開き直しても中身は読める
+        let s = Store::open(&path).unwrap();
+        assert!(s
+            .tasks(Scope::All, &TaskFilter::default())
+            .unwrap()
+            .is_empty());
+        assert_eq!(s.usage().unwrap().reclaimable_bytes, 0);
+    }
+
+    #[test]
+    fn existing_databases_are_converted_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("old.sqlite3");
+        // 領域を返さない設定で作られた、古いデータベース
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "PRAGMA auto_vacuum = NONE; CREATE TABLE keep(x); INSERT INTO keep VALUES (1);",
+            )
+            .unwrap();
+        }
+        drop(Store::open(&path).unwrap());
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        let mode: i64 = conn
+            .query_row("PRAGMA auto_vacuum", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(mode, super::AUTO_VACUUM_INCREMENTAL);
+        let kept: i64 = conn
+            .query_row("SELECT x FROM keep", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(kept, 1);
+    }
+
+    #[test]
+    fn in_memory_store_reports_usage() {
+        let mut s = Store::open_in_memory().unwrap();
+        assert!(s.usage().unwrap().database_bytes > 0);
+        s.compact().unwrap();
     }
 }
