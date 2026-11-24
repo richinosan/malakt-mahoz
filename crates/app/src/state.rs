@@ -19,6 +19,7 @@ use malakt_core::{
 use crate::ai::{self, Session};
 use crate::ai_view::{AiPane, PaneMode};
 use crate::db::{self, Db};
+use crate::passkey::{self, Passkey};
 
 /// 左のメニューで選んでいる場所。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,7 +49,6 @@ pub enum Modal {
     History,
     /// 状態の変更（コメントを添えられる）
     Status(Id, Status),
-    Lock,
     /// ワークスペースの基準日と、タスク追加時の既定値
     WorkspaceSettings(Id),
     /// ワークスペースのアイコンと色を選ぶ
@@ -111,8 +111,6 @@ pub struct Inputs {
     pub search: Entity<InputState>,
     pub icon_search: Entity<InputState>,
     pub name: Entity<InputState>,
-    pub passphrase: Entity<InputState>,
-    pub new_passphrase: Entity<InputState>,
     pub title: Entity<InputState>,
     pub subtask: Entity<InputState>,
     pub start: Entity<InputState>,
@@ -227,16 +225,6 @@ impl MainView {
             search: input(window, cx, "キーワード"),
             icon_search: input(window, cx, "アイコンを検索"),
             name: input(window, cx, "名前"),
-            passphrase: cx.new(|cx| {
-                InputState::new(window, cx)
-                    .masked(true)
-                    .placeholder("パスフレーズ")
-            }),
-            new_passphrase: cx.new(|cx| {
-                InputState::new(window, cx)
-                    .masked(true)
-                    .placeholder("新しいパスフレーズ")
-            }),
             title: input(window, cx, "タイトル"),
             subtask: input(window, cx, "サブタスクを追加…"),
             start: input(window, cx, "YYYY-MM-DD"),
@@ -285,7 +273,6 @@ impl MainView {
         }
         on_enter!(quick_add, submit_quick_add);
         on_enter!(name, submit_name);
-        on_enter!(passphrase, submit_unlock);
         on_enter!(title, save_title);
         // タイトルは、ほかの場所を押したときにも保存する
         subs.push(cx.subscribe_in(
@@ -1482,60 +1469,80 @@ impl MainView {
         lock::is_enabled(&self.db.read(cx).store).unwrap_or(false)
     }
 
-    pub fn submit_unlock(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // ロックの設定のダイアログでも同じ欄を使うので、ロック画面のときだけ解除する
+    pub fn verifying(&self, cx: &App) -> bool {
+        self.db.read(cx).verifying
+    }
+
+    /// パスキーで本人確認をして、通ったら `done` を実行する。
+    fn with_passkey(
+        &mut self,
+        action: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        done: fn(&mut Self, &mut Context<Self>),
+    ) {
+        if self.verifying(cx) {
+            return;
+        }
+        let verify = cx.global::<Passkey>().0.clone();
+        let request = passkey::Request {
+            app: crate::APP_NAME.into(),
+            action: action.into(),
+            window: passkey::native_window(window),
+        };
+        self.error = None;
+        let db = self.db.clone();
+        db.update(cx, |db, cx| {
+            db.verifying = true;
+            cx.notify();
+        });
+        cx.spawn(async move |this, cx| {
+            // OS のダイアログに答えるまで戻らないので、画面のスレッドでは待たない
+            let result = cx.background_spawn(async move { verify(request) }).await;
+            db.update(cx, |db, cx| {
+                db.verifying = false;
+                cx.notify();
+            });
+            // 待っている間にウィンドウを閉じたなら、結果を出す先がない
+            let _ = this.update(cx, |this, cx| {
+                match result {
+                    Ok(()) => done(this, cx),
+                    Err(failure) => this.error = Some(failure.to_string().into()),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// ロック画面を、パスキーで開く。
+    pub fn request_unlock(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.unlocked(cx) {
             return;
         }
-        let passphrase = Self::take(&self.inputs.passphrase.clone(), window, cx);
-        let ok = lock::unlock(
-            &self.db.read(cx).store,
-            &lock::NoDeviceAuth,
-            Some(&passphrase),
-        );
-        match ok {
-            Ok(true) => {
-                self.error = None;
-                self.db.update(cx, |db, cx| {
-                    db.unlocked = true;
-                    cx.notify();
-                });
+        self.with_passkey("ロックを解除", window, cx, |this, cx| {
+            this.db.update(cx, |db, cx| {
+                db.unlocked = true;
+                cx.notify();
+            });
+        });
+    }
+
+    /// ロックを有効にする。この端末のパスキーで確認できたときだけ有効になる。
+    pub fn enable_lock(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.with_passkey("ロックを有効にする", window, cx, |this, cx| {
+            if this.write(cx, lock::enable).is_some() {
+                this.notice = Some("ロックを有効にしました。".into());
             }
-            Ok(false) => self.error = Some("パスフレーズが違います".into()),
-            Err(error) => self.error = Some(error.to_string().into()),
-        }
-        cx.notify();
-    }
-
-    pub fn open_lock_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        for input in [&self.inputs.passphrase, &self.inputs.new_passphrase] {
-            input.update(cx, |s, cx| s.set_value("", window, cx));
-        }
-        self.modal = Modal::Lock;
-        cx.notify();
-    }
-
-    /// ロックを掛ける（すでに有効なら、パスフレーズを変える）。
-    pub fn save_lock(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let enabled = self.lock_enabled(cx);
-        let current = Self::take(&self.inputs.passphrase.clone(), window, cx);
-        let new = Self::take(&self.inputs.new_passphrase.clone(), window, cx);
-        let current = enabled.then_some(current);
-        if self
-            .write(cx, |s| lock::set_passphrase(s, current.as_deref(), &new))
-            .is_some()
-        {
-            self.modal = Modal::None;
-            self.notice = Some("ロックを有効にしました。".into());
-        }
+        });
     }
 
     pub fn disable_lock(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let current = Self::take(&self.inputs.passphrase.clone(), window, cx);
-        if self.write(cx, |s| lock::disable(s, &current)).is_some() {
-            self.modal = Modal::None;
-            self.notice = Some("ロックを無効にしました。".into());
-        }
+        self.with_passkey("ロックを無効にする", window, cx, |this, cx| {
+            if this.write(cx, lock::disable).is_some() {
+                this.notice = Some("ロックを無効にしました。".into());
+            }
+        });
     }
 
     // ---- 完了チケット ----

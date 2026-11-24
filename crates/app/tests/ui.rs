@@ -8,6 +8,7 @@ use gpui_kit::{
 };
 use malakt_core::view::Tab;
 use malakt_core::{lock, DueRule, Role, Roles, Scope, Status, Store, TaskFilter};
+use malakt_mahoz::passkey::{Failure, Passkey};
 use malakt_mahoz::{db, CommentMode, MainView, Modal, Nav};
 
 fn start(cx: &mut TestAppContext) {
@@ -33,6 +34,26 @@ fn open(cx: &mut TestAppContext, window_size: Size<Pixels>) -> (AnyWindowHandle,
         })
         .expect("ウィンドウを開く")
     })
+}
+
+/// OS の本人確認を、決まった答えを返すものに差し替える。戻り値は、確認を求めた目的の記録。
+fn passkey(
+    cx: &mut TestAppContext,
+    answer: Result<(), Failure>,
+) -> std::sync::Arc<std::sync::Mutex<Vec<String>>> {
+    let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let log = asked.clone();
+    cx.update(|cx| {
+        cx.set_global(Passkey(std::sync::Arc::new(move |request| {
+            log.lock().unwrap().push(request.action);
+            answer.clone()
+        })))
+    });
+    asked
+}
+
+fn enable_lock(cx: &mut TestAppContext) {
+    cx.update(|cx| db::shared(cx).update(cx, |db, _| lock::enable(&mut db.store).unwrap()));
 }
 
 /// ウィンドウの大きさ。画面の拡大率に合わせて、同じ見え方になる大きさにする。
@@ -274,18 +295,14 @@ fn windows_share_changes(cx: &mut TestAppContext) {
     });
 }
 
-/// ロックを掛けると全部のウィンドウが隠れ、正しいパスフレーズでだけ開く。
+/// ロックを掛けると全部のウィンドウが隠れ、パスキーで確認できたときだけ開く。
 #[gpui_kit::test]
 fn lock_hides_every_window(cx: &mut TestAppContext) {
     start(cx);
     let (first, first_view) = open(cx, wide());
     let (_second, second_view) = open(cx, wide());
 
-    cx.update(|cx| {
-        db::shared(cx).update(cx, |db, _| {
-            lock::set_passphrase(&mut db.store, None, "ひらけごま").unwrap()
-        })
-    });
+    enable_lock(cx);
     // ロックが無効なら「今すぐロック」は何もしないが、有効なら全部を隠す
     cx.update(db::lock_now);
     cx.run_until_parked();
@@ -294,20 +311,20 @@ fn lock_hides_every_window(cx: &mut TestAppContext) {
         assert!(!second_view.read(cx).unlocked(cx));
     });
 
-    ui(cx, first, |window, cx| {
-        window.click("unlock-input", cx);
-        window.input("ちがう", cx);
-        window.press("enter", cx);
-    });
+    let asked = passkey(cx, Err(Failure::Denied));
+    ui(cx, first, |window, cx| window.click("unlock", cx));
     cx.update(|cx| {
         assert!(!first_view.read(cx).unlocked(cx));
-        assert!(first_view.read(cx).error.is_some());
+        assert!(!first_view.read(cx).verifying(cx));
+        assert_eq!(
+            first_view.read(cx).error.as_deref(),
+            Some("パスキーで確認できませんでした")
+        );
     });
-    ui(cx, first, |window, cx| {
-        window.click("unlock-input", cx);
-        window.input("ひらけごま", cx);
-        window.click("unlock", cx);
-    });
+    assert_eq!(*asked.lock().unwrap(), ["ロックを解除"]);
+
+    passkey(cx, Ok(()));
+    ui(cx, first, |window, cx| window.click("unlock", cx));
     cx.update(|cx| {
         assert!(first_view.read(cx).unlocked(cx));
         assert!(
@@ -318,9 +335,72 @@ fn lock_hides_every_window(cx: &mut TestAppContext) {
     });
 }
 
+/// ロックの有効・無効は、パスキーで確認できたときだけ変わる。
+#[gpui_kit::test]
+fn lock_changes_only_after_the_passkey(cx: &mut TestAppContext) {
+    start(cx);
+    let (window, view) = open(cx, wide());
+    let enabled = |cx: &mut TestAppContext| cx.update(|cx| view.read(cx).lock_enabled(cx));
+
+    // パスキーのない端末では、有効にならない（開けなくなるのを防ぐ）
+    passkey(cx, Err(Failure::Unavailable));
+    ui(cx, window, |window, cx| {
+        view.update(cx, |v, cx| v.enable_lock(window, cx))
+    });
+    assert!(!enabled(cx));
+    cx.update(|cx| {
+        assert_eq!(
+            view.read(cx).error.as_deref(),
+            Some("この端末にはパスキーがありません")
+        )
+    });
+
+    let asked = passkey(cx, Ok(()));
+    ui(cx, window, |window, cx| {
+        view.update(cx, |v, cx| v.enable_lock(window, cx))
+    });
+    assert!(enabled(cx));
+    cx.update(|cx| assert!(view.read(cx).unlocked(cx), "有効にしただけでは隠れない"));
+
+    passkey(cx, Err(Failure::Denied));
+    ui(cx, window, |window, cx| {
+        view.update(cx, |v, cx| v.disable_lock(window, cx))
+    });
+    assert!(enabled(cx));
+
+    let asked_again = passkey(cx, Ok(()));
+    ui(cx, window, |window, cx| {
+        view.update(cx, |v, cx| v.disable_lock(window, cx))
+    });
+    assert!(!enabled(cx));
+    assert_eq!(*asked.lock().unwrap(), ["ロックを有効にする"]);
+    assert_eq!(*asked_again.lock().unwrap(), ["ロックを無効にする"]);
+}
+
+/// 確認の答えを待っている間は、もう 1 つ確認を出さない。
+#[gpui_kit::test]
+fn one_passkey_prompt_at_a_time(cx: &mut TestAppContext) {
+    start(cx);
+    let (window, view) = open(cx, wide());
+    enable_lock(cx);
+    cx.update(db::lock_now);
+    let asked = passkey(cx, Ok(()));
+    cx.update_window(window, |_, window, cx| {
+        view.update(cx, |v, cx| {
+            v.request_unlock(window, cx);
+            v.request_unlock(window, cx);
+            assert!(v.verifying(cx));
+        })
+    })
+    .unwrap();
+    cx.run_until_parked();
+    assert_eq!(asked.lock().unwrap().len(), 1);
+    cx.update(|cx| assert!(view.read(cx).unlocked(cx)));
+}
+
 /// ロックが無効なら「今すぐロック」をしても隠れない。
 #[gpui_kit::test]
-fn lock_now_without_passphrase_does_nothing(cx: &mut TestAppContext) {
+fn lock_now_while_disabled_does_nothing(cx: &mut TestAppContext) {
     start(cx);
     let (_window, view) = open(cx, wide());
     cx.update(db::lock_now);
@@ -441,7 +521,6 @@ fn every_screen_renders_at_any_size(cx: &mut TestAppContext) {
             Modal::People,
             Modal::History,
             Modal::Status(task.clone(), Status::Completed),
-            Modal::Lock,
             Modal::WorkspaceSettings(ws.clone()),
             Modal::LinkTask(task.clone()),
             Modal::BulkDue,
@@ -1236,7 +1315,7 @@ fn notices_wait_until_unlocked(cx: &mut TestAppContext) {
                 ..Default::default()
             };
             db.store.create_task(None, &draft).unwrap();
-            lock::set_passphrase(&mut db.store, None, "ひらけごま").unwrap();
+            lock::enable(&mut db.store).unwrap();
         })
     });
     cx.update(db::lock_now);
@@ -1245,11 +1324,8 @@ fn notices_wait_until_unlocked(cx: &mut TestAppContext) {
     cx.update(|cx| assert!(!view.read(cx).unlocked(cx)));
     assert!(cx.shown_system_notifications().is_empty());
 
-    ui(cx, window, |window, cx| {
-        window.click("unlock-input", cx);
-        window.input("ひらけごま", cx);
-        window.press("enter", cx);
-    });
+    passkey(cx, Ok(()));
+    ui(cx, window, |window, cx| window.click("unlock", cx));
     cx.update(|cx| assert!(view.read(cx).unlocked(cx)));
     assert_eq!(cx.shown_system_notifications().len(), 1);
 }
