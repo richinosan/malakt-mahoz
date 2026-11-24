@@ -93,6 +93,8 @@ pub struct ListQuery {
     pub q: String,
     pub status: Option<Status>,
     pub assignee: AssigneeFilter,
+    /// 自分の役。自分がその役を持つタスクだけにする。
+    pub my_role: Option<Role>,
     pub priority: Option<Priority>,
     pub category: Option<String>,
     pub sort: Sort,
@@ -104,6 +106,7 @@ impl ListQuery {
         usize::from(!self.q.trim().is_empty())
             + usize::from(self.status.is_some())
             + usize::from(self.assignee != AssigneeFilter::All)
+            + usize::from(self.my_role.is_some())
             + usize::from(self.priority.is_some())
             + usize::from(self.category.is_some())
     }
@@ -145,6 +148,11 @@ pub fn apply(tasks: &[Task], query: &ListQuery, self_id: Option<&str>) -> Vec<us
                     AssigneeFilter::Unassigned => t.assignee_ids.is_empty(),
                     AssigneeFilter::Person(id) => t.assignee_ids.contains(id),
                 }
+                && query.my_role.is_none_or(|role| {
+                    self_id
+                        .and_then(|me| t.roles_of(me))
+                        .is_some_and(|roles| roles.contains(role))
+                })
                 && query.priority.is_none_or(|p| Priority::of(t.priority) == p)
                 && query
                     .category
@@ -186,12 +194,18 @@ pub const DUE_SOON_DAYS: i64 = 3;
 /// ホームの「期限が近いタスク」に出す日数。
 pub const HOME_DUE_DAYS: i64 = 30;
 
-pub fn due_state(due: &str, today: &str) -> DueState {
-    if due < today {
+/// 期限の近さ。`now` は今日の日付か、時刻つきのいま（`YYYY-MM-DD HH:MM`）。
+/// 時刻つきの期限は、いまの時刻も分かるときだけ、今日のうちに期限切れになる。
+pub fn due_state(due: &str, now: &str) -> DueState {
+    let (day, today) = (crate::date_of(due), crate::date_of(now));
+    if day < today {
         DueState::Overdue
-    } else if due == today {
-        DueState::Today
-    } else if due <= add_days(today, DUE_SOON_DAYS).as_str() {
+    } else if day == today {
+        match (crate::time_of(due), crate::time_of(now)) {
+            (Some(at), Some(clock)) if at < clock => DueState::Overdue,
+            _ => DueState::Today,
+        }
+    } else if day <= add_days(today, DUE_SOON_DAYS).as_str() {
         DueState::Soon
     } else {
         DueState::Later
@@ -214,16 +228,23 @@ pub fn add_days(date: &str, days: i64) -> String {
     }
 }
 
-/// 期限の表示。今年なら「12/24」、ほかの年なら「2027/1/3」。
-pub fn format_date(date: &str, today: &str) -> String {
+/// いまの日時（端末の時刻帯）。`YYYY-MM-DD HH:MM`。
+pub fn now() -> String {
+    chrono::Local::now().format("%Y-%m-%d %H:%M").to_string()
+}
+
+/// 期限の表示。今年なら「12/24」、ほかの年なら「2027/1/3」。時刻があれば「12/24 18:00」。
+pub fn format_date(when: &str, today: &str) -> String {
+    let date = crate::date_of(when);
     let part = |r: std::ops::Range<usize>| date.get(r).and_then(|v| v.parse::<u32>().ok());
-    match (part(0..4), part(5..7), part(8..10)) {
-        (Some(y), Some(m), Some(d)) if date.get(0..4) == today.get(0..4) => {
-            let _ = y;
-            format!("{m}/{d}")
-        }
+    let day = match (part(0..4), part(5..7), part(8..10)) {
+        (Some(_), Some(m), Some(d)) if date.get(0..4) == today.get(0..4) => format!("{m}/{d}"),
         (Some(y), Some(m), Some(d)) => format!("{y}/{m}/{d}"),
-        _ => date.to_owned(),
+        _ => return when.to_owned(),
+    };
+    match crate::time_of(when) {
+        Some(time) => format!("{day} {time}"),
+        None => day,
     }
 }
 
@@ -248,6 +269,21 @@ pub fn format_datetime(at_ms: i64) -> String {
     }
 }
 
+/// バイト数を「1.2 MB」の形にする。
+pub fn format_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 4] = ["KB", "MB", "GB", "TB"];
+    if bytes < 1024 {
+        return format!("{bytes} B");
+    }
+    let mut value = bytes as f64 / 1024.0;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    format!("{value:.1} {}", UNITS[unit])
+}
+
 /// 変更履歴の項目名。
 pub fn field_label(field: &str) -> &str {
     match field {
@@ -260,8 +296,11 @@ pub fn field_label(field: &str) -> &str {
         "percent" => "進捗",
         "parent" => "親タスク",
         "assignees" => "担当",
+        "assignee_roles" => "担当者の役",
+        "assignee_done" => "担当者ごとの完了",
         "categories" => "カテゴリ",
         "workspace" => "ワークスペース",
+        "link" => "表示するワークスペース",
         other => other,
     }
 }
@@ -283,10 +322,13 @@ mod tests {
             percent: 0,
             parent_id: None,
             assignee_ids: vec![],
+            assignee_roles: vec![],
+            assignee_done: vec![],
             categories: vec![],
             position: 0,
             created_at: 0,
             updated_at: 0,
+            linked_workspace_ids: Vec::new(),
             completed_at: None,
         }
     }
@@ -463,6 +505,30 @@ mod tests {
     fn due_states_and_dates() {
         let today = "2026-12-30";
         assert_eq!(due_state("2026-12-29", today), DueState::Overdue);
+        assert_eq!(due_state("2026-12-29 23:00", today), DueState::Overdue);
+        assert_eq!(due_state("2026-12-30 09:00", today), DueState::Today);
+        assert_eq!(
+            due_state("2026-12-30 09:00", "2026-12-30 08:59"),
+            DueState::Today
+        );
+        assert_eq!(
+            due_state("2026-12-30 09:00", "2026-12-30 09:00"),
+            DueState::Today
+        );
+        assert_eq!(
+            due_state("2026-12-30 09:00", "2026-12-30 09:01"),
+            DueState::Overdue
+        );
+        assert_eq!(due_state("2026-12-30", "2026-12-30 23:59"), DueState::Today);
+        assert_eq!(
+            due_state("2026-12-31 00:00", "2026-12-30 23:59"),
+            DueState::Soon
+        );
+        assert_eq!(super::format_date("2026-12-30 09:00", today), "12/30 09:00");
+        assert_eq!(
+            super::format_date("2027-01-03 18:30", today),
+            "2027/1/3 18:30"
+        );
         assert_eq!(due_state("2026-12-30", today), DueState::Today);
         assert_eq!(due_state("2026-12-31", today), DueState::Soon);
         assert_eq!(due_state("2027-01-02", today), DueState::Soon);
@@ -492,6 +558,47 @@ mod tests {
         // 時計がずれて未来になっていても崩れない
         assert_eq!(ago(-100), "たった今");
         assert_eq!(format_datetime(now).len(), 16);
+    }
+
+    #[test]
+    fn filters_by_my_role() {
+        let mut a = task("a", Status::NeedsAction);
+        a.assignee_ids = vec!["me".into(), "you".into()];
+        a.assignee_roles = vec![Roles::of(&[Role::R, Role::A]), Roles::of(&[Role::C])];
+        // 役の記録がない担当者は R として読む
+        let mut b = task("b", Status::NeedsAction);
+        b.assignee_ids = vec!["me".into()];
+        let mut c = task("c", Status::NeedsAction);
+        c.assignee_ids = vec!["you".into()];
+        c.assignee_roles = vec![Roles::of(&[Role::A])];
+        let tasks = [a, b, c];
+        let pick = |role, me| {
+            let query = ListQuery {
+                my_role: Some(role),
+                ..Default::default()
+            };
+            assert_eq!(query.active_count(), 1);
+            apply(&tasks, &query, me)
+                .into_iter()
+                .map(|i| tasks[i].id.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(pick(Role::R, Some("me")), ["a", "b"]);
+        assert_eq!(pick(Role::A, Some("me")), ["a"]);
+        assert!(pick(Role::C, Some("me")).is_empty());
+        assert_eq!(pick(Role::C, Some("you")), ["a"]);
+        // 自分が分からなければ 0 件
+        assert!(pick(Role::R, None).is_empty());
+    }
+
+    #[test]
+    fn bytes_are_readable() {
+        assert_eq!(format_bytes(0), "0 B");
+        assert_eq!(format_bytes(1023), "1023 B");
+        assert_eq!(format_bytes(1024), "1.0 KB");
+        assert_eq!(format_bytes(1_572_864), "1.5 MB");
+        assert_eq!(format_bytes(3 * 1024 * 1024 * 1024), "3.0 GB");
+        assert_eq!(format_bytes(u64::MAX), "16777216.0 TB");
     }
 
     #[test]

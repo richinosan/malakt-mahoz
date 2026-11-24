@@ -1,5 +1,6 @@
 //! malakt-mahoz の画面。gpui で描く。
 
+pub mod cli;
 pub mod db;
 mod render;
 pub mod state;
@@ -9,7 +10,7 @@ use std::path::PathBuf;
 use gpui_kit::*;
 
 pub use db::{Db, Shared};
-pub use state::{MainView, Modal, Nav};
+pub use state::{anchor_at, CommentMode, MainView, Modal, Nav};
 
 actions!(malakt, [NewWindow, Quit, LockNow, Dismiss]);
 
@@ -27,6 +28,8 @@ pub fn database_path() -> PathBuf {
 
 /// アプリ全体の準備。ウィンドウを開く前に 1 回呼ぶ。
 pub fn init(store: malakt_core::Store, cx: &mut App) {
+    // OS の通知に出るアプリの名前。通知を出す前に決めておく
+    cx.set_app_identity("io.github.richinosan.malakt-mahoz", "malakt-mahoz");
     gpui_kit::init(cx);
     db::init(store, cx);
     cx.bind_keys([
