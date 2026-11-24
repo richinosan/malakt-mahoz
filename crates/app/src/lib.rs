@@ -17,6 +17,8 @@ actions!(malakt, [NewWindow, Quit, LockNow, Dismiss]);
 
 /// 画面に出すアプリの名前。
 pub const APP_NAME: &str = "Malakt Mahoz";
+/// 画面全体の拡大率。文字（rem）と、px で決めた寸法の両方に掛ける。
+pub const UI_SCALE: f32 = 1.25;
 /// OS がウィンドウや通知をこのアプリのものと見分けるための名前。
 pub const APP_ID: &str = "io.github.richinosan.malakt-mahoz";
 

@@ -16,7 +16,7 @@ pub enum Error {
     NotFound(String),
     #[error("入力が正しくありません: {0}")]
     Invalid(String),
-    #[error("ワークスペースを自分自身や子孫の中には移動できません")]
+    #[error("ワークスペースを自分自身やそのサブワークスペースの中には移動できません")]
     Cycle,
     #[error("対応していないエクスポート形式です（format_version = {0}）")]
     UnsupportedFormat(u32),

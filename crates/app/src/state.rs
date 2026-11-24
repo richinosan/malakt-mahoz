@@ -235,14 +235,14 @@ impl MainView {
             def_days: input(window, cx, "例: -7（7 日前）"),
             def_date: input(window, cx, "YYYY-MM-DD"),
             def_time: input(window, cx, "HH:MM（空なら日付だけ）"),
-            def_categories: input(window, cx, "「、」か「,」で区切る"),
-            def_description: area(window, cx, "新しいタスクの説明に最初から入れる文章"),
+            def_categories: input(window, cx, "「、」で区切って入力"),
+            def_description: area(window, cx, "説明の雛形"),
             bulk_due: input(window, cx, "YYYY-MM-DD（時刻は続けて HH:MM）"),
-            bulk_categories: input(window, cx, "「、」か「,」で区切る"),
+            bulk_categories: input(window, cx, "「、」で区切って入力"),
             nt_title: input(window, cx, "タイトル"),
             nt_start: input(window, cx, "YYYY-MM-DD（時刻は続けて HH:MM）"),
             nt_due: input(window, cx, "YYYY-MM-DD（時刻は続けて HH:MM）"),
-            nt_categories: input(window, cx, "「、」か「,」で区切る"),
+            nt_categories: input(window, cx, "「、」で区切って入力"),
             nt_description: area(window, cx, "説明"),
         };
 
@@ -882,7 +882,7 @@ impl MainView {
             .filter(|r| r.start < r.end && r.end <= source.len())
             .filter(|r| source.is_char_boundary(r.start) && source.is_char_boundary(r.end));
         let Some(range) = range else {
-            self.error = Some("説明の文章を選んでから押してください。".into());
+            self.error = Some("説明の文章を選択してください。".into());
             cx.notify();
             return;
         };
@@ -1075,7 +1075,7 @@ impl MainView {
                 format!("{removed} 件をこのワークスペースから外しました。").into()
             } else {
                 format!(
-                    "{removed} 件をこのワークスペースから外しました。ここにしかない {kept} 件は残しています。"
+                    "{removed} 件をこのワークスペースから外しました。同期先のない {kept} 件はそのままです。"
                 )
                 .into()
             });
@@ -1090,7 +1090,7 @@ impl MainView {
         if self.write(cx, |s| s.link_task(&id, workspace)).is_some() {
             self.modal = Modal::None;
             let name = self.workspace_name(Some(workspace));
-            self.notice = Some(format!("「{name}」にも表示しました。").into());
+            self.notice = Some(format!("「{name}」と同期しました。").into());
         }
     }
 
@@ -1193,8 +1193,7 @@ impl MainView {
         } else {
             let value = self.inputs.bulk_due.read(cx).value().trim().to_owned();
             if value.is_empty() {
-                self.error =
-                    Some("期限を入れてください。なくすときは「期限をなくす」を押します。".into());
+                self.error = Some("期限を入力してください。".into());
                 cx.notify();
                 return;
             }
@@ -1228,7 +1227,7 @@ impl MainView {
     pub fn submit_bulk_categories(&mut self, cx: &mut Context<Self>) {
         let values = split_list(self.inputs.bulk_categories.read(cx).value().as_ref());
         if values.is_empty() {
-            self.error = Some("カテゴリを入れてください。".into());
+            self.error = Some("カテゴリを入力してください。".into());
             cx.notify();
             return;
         }
@@ -1693,7 +1692,7 @@ impl MainView {
                     Err(_) if ascii.is_empty() => DueRule::Relative { days: 0 },
                     Err(_) => {
                         self.error =
-                            Some("基準日からの日数は、-7 のような整数で入れてください。".into());
+                            Some("基準日からの日数は、-7 のような整数で入力してください。".into());
                         cx.notify();
                         return;
                     }
