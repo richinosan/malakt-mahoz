@@ -24,6 +24,15 @@ run = [
   "cargo clippy --workspace --all-targets --locked -- -D warnings",
 ]
 
+[tasks.verify]
+description = "コミットの前の確認（書式、clippy、テスト）。pre-commit フックが実行する"
+depends = ["lint"]
+run = "cargo test --workspace --locked"
+
+[tasks.hooks]
+description = "コミットの前に verify を実行するフックを、このリポジトリに入れる"
+run = "git config core.hooksPath .githooks"
+
 [tasks.fmt]
 description = "書式をそろえる"
 run = "cargo fmt --all"

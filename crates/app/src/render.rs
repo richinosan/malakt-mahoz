@@ -28,6 +28,12 @@ const fn px(value: f32) -> Pixels {
 
 /// アイコンを選ぶ画面に一度に出す数。それより多いときは検索で絞る。
 const ICONS_SHOWN: usize = 240;
+/// 見出しの枠（40px）の中のアイコンの大きさ。
+const TILE_ICON_SIZE: Pixels = px(24.);
+/// ホームのカードの枠（56px）の中のアイコンの大きさ。
+const CARD_ICON_SIZE: Pixels = px(32.);
+/// アイコンを選ぶ画面のアイコンの大きさ。
+const PICKER_ICON_SIZE: Pixels = px(22.);
 const SIDEBAR_WIDTH: Pixels = px(256.);
 const HEADER_HEIGHT: Pixels = px(84.);
 const PANEL_WIDTH: Pixels = px(544.);
@@ -567,7 +573,9 @@ impl MainView {
                 (
                     self.list_title(),
                     Some("タスク一覧"),
-                    ws.map(|w| workspace_icon(w.icon.as_deref(), w.color.as_deref())),
+                    ws.map(|w| {
+                        workspace_icon(w.icon.as_deref(), w.color.as_deref()).size(TILE_ICON_SIZE)
+                    }),
                 )
             }
         }
@@ -908,7 +916,10 @@ impl MainView {
                                 .justify_center()
                                 .rounded_md()
                                 .bg(theme.muted)
-                                .child(workspace_icon(ws.icon.as_deref(), ws.color.as_deref())),
+                                .child(
+                                    workspace_icon(ws.icon.as_deref(), ws.color.as_deref())
+                                        .size(CARD_ICON_SIZE),
+                                ),
                         )
                         .child(
                             col()
@@ -3092,7 +3103,7 @@ impl MainView {
                     icons = icons.child(
                         div()
                             .id(("ws-icon", ix))
-                            .size_9()
+                            .size(px(40.))
                             .flex()
                             .items_center()
                             .justify_center()
@@ -3105,7 +3116,9 @@ impl MainView {
                                 theme.transparent
                             })
                             .hover(|s| s.bg(theme.secondary_hover))
-                            .child(workspace_icon(Some(name), color.as_deref()))
+                            .child(
+                                workspace_icon(Some(name), color.as_deref()).size(PICKER_ICON_SIZE),
+                            )
                             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                                 this.set_workspace_icon(&ws, Some(name), color.as_deref(), cx)
                             }))
@@ -3125,7 +3138,7 @@ impl MainView {
                     .child(
                         div()
                             .id("icon-list")
-                            .h(px(264.))
+                            .h(px(320.))
                             .overflow_y_scroll()
                             .child(icons)
                             .when(none_found, |d| {
