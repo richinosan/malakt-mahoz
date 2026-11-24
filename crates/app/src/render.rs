@@ -8,7 +8,7 @@ use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::{Input, Textarea};
 use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu, PopupMenu, PopupMenuItem};
 use gpui_kit::component::text::TextView;
-use gpui_kit::component::{ActiveTheme, Icon, Sizable, TitleBar};
+use gpui_kit::component::{ActiveTheme, Icon, Sizable, TitleBar, TITLE_BAR_HEIGHT};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use malakt_core::bulk::{BulkOp, ListMode};
@@ -26,6 +26,8 @@ const fn px(value: f32) -> Pixels {
     gpui_kit::px(value * crate::UI_SCALE)
 }
 
+/// アイコンを選ぶ画面に一度に出す数。それより多いときは検索で絞る。
+const ICONS_SHOWN: usize = 240;
 const SIDEBAR_WIDTH: Pixels = px(256.);
 const HEADER_HEIGHT: Pixels = px(84.);
 const PANEL_WIDTH: Pixels = px(544.);
@@ -358,7 +360,12 @@ impl MainView {
                         let _ = view.update(cx, |this, cx| run(this, id.clone(), window, cx));
                     })
                 };
-                menu.item(item("アイコンを変更", |this, id, _, cx| {
+                menu.item(item("アイコンを変更", |this, id, window, cx| {
+                    // 開いたらすぐ打って探せるよう、検索欄を空にしてフォーカスする
+                    this.inputs.icon_search.update(cx, |state, cx| {
+                        state.set_value("", window, cx);
+                        state.focus(window, cx);
+                    });
                     this.modal = Modal::WorkspaceIcon(id);
                     cx.notify();
                 }))
@@ -570,9 +577,11 @@ impl MainView {
         use crate::theme::Choice;
         let theme = cx.theme();
         let current = crate::theme::choice(cx);
+        // 隣の丸いボタンと同じ高さにそろえる
         let mut toggle = row()
             .flex_none()
-            .p_0p5()
+            .h_8()
+            .px_1()
             .gap_0p5()
             .rounded_md()
             .border_1()
@@ -611,9 +620,32 @@ impl MainView {
         toggle
     }
 
-    fn render_header(&self, unlocked: bool, wide: bool, cx: &mut Context<Self>) -> TitleBar {
+    fn render_header(&self, unlocked: bool, wide: bool, cx: &mut Context<Self>) -> Div {
         let theme = cx.theme().clone();
-        let bar = TitleBar::new().h(HEADER_HEIGHT).bg(theme.background);
+        // ウィンドウを動かす帯と、最小化・最大化・閉じるのボタンは、OS のタイトルバーと同じ高さで
+        // 右上に置く。macOS はボタンを OS が描くので、バー全体でウィンドウを動かせるようにする
+        let strip = if cfg!(target_os = "macos") {
+            HEADER_HEIGHT
+        } else {
+            TITLE_BAR_HEIGHT
+        };
+        let bar = row()
+            .relative()
+            .flex_none()
+            .h(HEADER_HEIGHT)
+            .border_b_1()
+            .border_color(theme.border)
+            .bg(theme.background)
+            .child(
+                TitleBar::new()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .right_0()
+                    .h(strip)
+                    .border_0()
+                    .bg(theme.transparent),
+            );
         if !unlocked {
             return bar.child(
                 div()
@@ -688,6 +720,10 @@ impl MainView {
                 .flex_none()
                 .gap_2()
                 .pr_3()
+                // 右上のウィンドウのボタン（3 つ）の分を空ける
+                .when(!cfg!(target_os = "macos"), |d| {
+                    d.pr(TITLE_BAR_HEIGHT * 3. + gpui_kit::px(12.))
+                })
                 .child(self.theme_toggle(cx))
                 .child(
                     Button::new("ai-toggle")
@@ -3045,8 +3081,12 @@ impl MainView {
                             .test_support(),
                     );
                 }
+                let query = self.inputs.icon_search.read(cx).value().to_string();
+                let found =
+                    crate::icons::search(&query, &crate::state::WORKSPACE_ICONS, ICONS_SHOWN);
+                let none_found = found.is_empty();
                 let mut icons = row().gap_1().flex_wrap();
-                for (ix, name) in crate::state::WORKSPACE_ICONS.into_iter().enumerate() {
+                for (ix, name) in found.into_iter().enumerate() {
                     let (ws, color) = (id.clone(), color.clone());
                     let selected = chosen == name;
                     icons = icons.child(
@@ -3075,7 +3115,23 @@ impl MainView {
                 let body = col()
                     .gap_3()
                     .child(colors)
-                    .child(icons)
+                    .child(
+                        Input::new(&self.inputs.icon_search)
+                            .id("icon-search")
+                            .aria_label("アイコンを検索")
+                            .prefix(app_icon("search").small())
+                            .cleanable(true),
+                    )
+                    .child(
+                        div()
+                            .id("icon-list")
+                            .h(px(264.))
+                            .overflow_y_scroll()
+                            .child(icons)
+                            .when(none_found, |d| {
+                                d.child(muted("見つかりません。".to_owned()))
+                            }),
+                    )
                     .when_some(self.error.clone(), |d, error| {
                         d.child(div().text_sm().text_color(theme.danger).child(error))
                     });
