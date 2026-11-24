@@ -1968,7 +1968,7 @@ fn the_last_screen_comes_back_after_a_restart(cx: &mut TestAppContext) {
             .unwrap()
     });
     cx.run_until_parked();
-    let before = cx.update(|cx| view.read(cx).session_state());
+    let before = cx.update(|cx| view.read(cx).session_state(cx));
     assert_eq!(before.nav, format!("ws:{}", ws.id));
     assert_eq!(before.panel.as_deref(), Some(task.id.as_str()));
     assert!(before.bounds.is_some());
@@ -1995,7 +1995,7 @@ fn the_last_screen_comes_back_after_a_restart(cx: &mut TestAppContext) {
         assert!(v.collapsed.contains(&ws.id));
         assert_eq!(v.panel.as_deref(), Some(task.id.as_str()));
         assert_eq!(v.inputs.search.read(cx).value().as_ref(), "機材");
-        let mut state = v.session_state();
+        let mut state = v.session_state(cx);
         state.bounds = before.bounds;
         state.maximized = before.maximized;
         assert_eq!(state, before);
@@ -2035,4 +2035,218 @@ fn the_last_screen_comes_back_after_a_restart(cx: &mut TestAppContext) {
         });
         assert!(session::saved(cx).is_empty());
     });
+}
+
+/// 画面はペインに分けられる。Ctrl+B のキーで分割・移動・入れ替え・拡大・リサイズ・閉じるができ、
+/// どのペインも別々の場所を持ち、配置は再起動しても戻る。
+#[gpui_kit::test]
+fn panes_split_move_resize_close_and_come_back(cx: &mut TestAppContext) {
+    use gpui_kit::Keystroke;
+    use malakt_core::panes::{Action, Dir, Keys};
+    use malakt_mahoz::panes::PaneOverlay;
+    start(cx);
+    let ws = cx.update(|cx| {
+        db::shared(cx).update(cx, |db, _| {
+            let ws = db.store.create_workspace(None, "文化祭").unwrap();
+            db.store.add_task_in(Some(&ws.id), "機材を借りる").unwrap();
+            ws
+        })
+    });
+    let (window, view) = open(cx, win(1600., 1000.));
+    // Ctrl+B のあとにキーを押す
+    let keys = |cx: &mut TestAppContext, strokes: &[&'static str]| {
+        for stroke in strokes {
+            let stroke = Keystroke::parse(stroke).unwrap();
+            cx.update(|cx| {
+                window
+                    .update(cx, |_, window, cx| {
+                        view.update(cx, |v, cx| {
+                            if !v.pane_resize {
+                                v.pane_prefix = true;
+                            }
+                            assert!(v.pane_key(&stroke, window, cx));
+                        })
+                    })
+                    .unwrap()
+            });
+        }
+        ui(cx, window, |_, _| {});
+    };
+    let panes = |cx: &mut TestAppContext| cx.update(|cx| view.read(cx).layout.panes());
+    let focus = |cx: &mut TestAppContext| cx.update(|cx| view.read(cx).layout.focus());
+    cx.update(|cx| view.update(cx, |v, cx| v.reload(cx)));
+
+    // 分けていないときは、ペインの枠を出さない
+    ui(cx, window, |window, _| {
+        assert!(window.try_find(("pane", 0usize)).is_none());
+    });
+
+    // v で右に、- で下に分ける。新しいペインが今のペインになり、ホームから始まる
+    keys(cx, &["v", "-"]);
+    assert_eq!((panes(cx), focus(cx)), (vec![0, 1, 2], 2));
+    ui(cx, window, |window, _| {
+        for id in 0..3usize {
+            assert!(window.try_find(("pane", id)).is_some());
+        }
+        assert!(window.try_find(("pane-border", 1usize)).is_some());
+    });
+
+    // 左のメニューは、今のペインだけを動かす
+    cx.update(|cx| view.update(cx, |v, cx| v.go(Nav::Workspace(ws.id.clone()), cx)));
+    cx.update(|cx| {
+        let v = view.read(cx);
+        assert_eq!(v.nav, Nav::Home);
+        assert_eq!(v.shown_nav(cx), Nav::Workspace(ws.id.clone()));
+        assert_eq!(v.children[&2].read(cx).nav, Nav::Workspace(ws.id.clone()));
+        assert_eq!(v.children[&2].read(cx).visible.len(), 1);
+        assert_eq!(v.children[&1].read(cx).nav, Nav::Home);
+    });
+
+    // 向きと順番で移る
+    keys(cx, &["k"]);
+    assert_eq!(focus(cx), 1);
+    keys(cx, &["left"]);
+    assert_eq!(focus(cx), 0);
+    keys(cx, &["tab"]);
+    assert_eq!(focus(cx), 1);
+    keys(cx, &["shift-tab"]);
+    assert_eq!(focus(cx), 0);
+    // 押したペインが今のペインになる
+    ui(cx, window, |window, cx| {
+        window.click(("pane-bar", 2usize), cx)
+    });
+    assert_eq!(focus(cx), 2);
+
+    // Shift+K で上のペインと入れ替える
+    keys(cx, &["shift-k"]);
+    assert_eq!((panes(cx), focus(cx)), (vec![0, 2, 1], 2));
+
+    // z で拡大し、Esc で戻る
+    keys(cx, &["z"]);
+    cx.update(|cx| assert!(view.read(cx).layout.zoomed()));
+    ui(cx, window, |window, _| {
+        assert!(window.try_find(("pane", 0usize)).is_none())
+    });
+    cx.update(|cx| view.update(cx, |v, cx| v.dismiss(cx)));
+    cx.update(|cx| assert!(!view.read(cx).layout.zoomed()));
+
+    // r でリサイズモード。キーを押すたびに境界が動き、Esc で終わる
+    let width = |cx: &mut TestAppContext| {
+        cx.update(|cx| {
+            let v = view.read(cx);
+            v.layout
+                .rects()
+                .iter()
+                .find(|(id, _)| *id == 2)
+                .unwrap()
+                .1
+                .w
+        })
+    };
+    let before = width(cx);
+    keys(cx, &["r", "l", "l"]);
+    cx.update(|cx| assert!(view.read(cx).pane_resize));
+    assert!(width(cx) > before);
+    cx.update(|cx| view.update(cx, |v, cx| v.dismiss(cx)));
+    cx.update(|cx| assert!(!view.read(cx).pane_resize));
+
+    // ? でキーの一覧、b でプリセット。Esc で閉じる
+    keys(cx, &["shift-/"]);
+    cx.update(|cx| assert_eq!(view.read(cx).pane_overlay, Some(PaneOverlay::Help)));
+    ui(cx, window, |window, cx| {
+        window.click(("pane-keys", 1usize), cx)
+    });
+    cx.update(|cx| assert_eq!(view.read(cx).pane_keys, Keys::Tmux));
+    assert_eq!(
+        store(cx, |s| s.setting("panes.keys").unwrap()).as_deref(),
+        Some("tmux")
+    );
+    cx.update(|cx| view.update(cx, |v, cx| v.set_pane_keys(Keys::Herdr, cx)));
+    cx.update(|cx| view.update(cx, |v, cx| v.dismiss(cx)));
+    keys(cx, &["b"]);
+    cx.update(|cx| assert_eq!(view.read(cx).pane_overlay, Some(PaneOverlay::Presets)));
+    cx.update(|cx| view.update(cx, |v, cx| v.dismiss(cx)));
+    cx.update(|cx| assert_eq!(view.read(cx).pane_overlay, None));
+
+    // d で同じ中身のペインを右に足す
+    keys(cx, &["d"]);
+    assert_eq!(panes(cx).len(), 4);
+    cx.update(|cx| {
+        let v = view.read(cx);
+        assert_eq!(v.children[&3].read(cx).nav, Nav::Workspace(ws.id.clone()));
+    });
+
+    // 配置とそれぞれのペインの中身は、保存した形から戻る
+    let saved = cx.update(|cx| view.read(cx).session_state(cx));
+    assert!(saved.layout.is_some());
+    assert_eq!(saved.panes.len(), 3);
+    let (other_window, other) = open(cx, win(1600., 1000.));
+    cx.update(|cx| {
+        other_window
+            .update(cx, |_, window, cx| {
+                other.update(cx, |v, cx| v.restore_session(&saved, window, cx))
+            })
+            .unwrap()
+    });
+    cx.update(|cx| {
+        let v = other.read(cx);
+        assert_eq!(v.layout.encode(), view.read(cx).layout.encode());
+        assert_eq!(v.children[&2].read(cx).nav, Nav::Workspace(ws.id.clone()));
+        assert_eq!(v.session_state(cx).panes, saved.panes);
+    });
+    // ペインの数が合わない保存は、配置を戻さない
+    let mut broken = saved.clone();
+    broken.panes.pop();
+    cx.update(|cx| {
+        other_window
+            .update(cx, |_, window, cx| {
+                other.update(cx, |v, cx| {
+                    v.apply_pane_layout("0@0", window, cx);
+                    v.restore_session(&broken, window, cx);
+                    assert_eq!(v.layout.panes(), [0]);
+                })
+            })
+            .unwrap()
+    });
+
+    // x で閉じる。ウィンドウが兼ねているペインを閉じると、ほかのペインの中身を引き取る
+    keys(cx, &["x"]);
+    assert_eq!(panes(cx).len(), 3);
+    cx.update(|cx| {
+        window
+            .update(cx, |_, window, cx| {
+                view.update(cx, |v, cx| {
+                    v.focus_pane(0, cx);
+                    v.pane_action(Action::Close, window, cx);
+                })
+            })
+            .unwrap()
+    });
+    cx.update(|cx| {
+        let v = view.read(cx);
+        assert_eq!(v.layout.panes(), [2, 1]);
+        assert_eq!(v.primary, 2);
+        assert_eq!(v.nav, Nav::Workspace(ws.id.clone()));
+        assert_eq!(v.children.len(), 1);
+    });
+    // プリセットで 4 つに分け、1 画面に戻す。最後の 1 つは閉じない
+    cx.update(|cx| {
+        window
+            .update(cx, |_, window, cx| {
+                view.update(cx, |v, cx| {
+                    v.apply_pane_layout(malakt_core::panes::PRESETS[4].1, window, cx);
+                    assert_eq!(v.layout.panes().len(), 4);
+                    assert_eq!(v.nav, Nav::Workspace(ws.id.clone()));
+                    v.apply_pane_layout("0@0", window, cx);
+                    assert_eq!(v.layout.panes(), [0]);
+                    assert!(v.children.is_empty());
+                    v.pane_action(Action::Close, window, cx);
+                    assert_eq!(v.layout.panes(), [0]);
+                    v.pane_action(Action::Split(Dir::Down), window, cx);
+                    assert_eq!(v.layout.panes().len(), 2);
+                })
+            })
+            .unwrap()
+    });
+    ui(cx, window, |_, _| {});
 }
