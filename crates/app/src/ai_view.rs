@@ -481,6 +481,8 @@ impl AiPane {
             .main
             .as_ref()
             .and_then(|main| main.read_with(cx, |main, _| main.ai_place()).ok())
+            // 別ウィンドウのチャットでも、メインのウィンドウで見ている場所を伝える
+            .or_else(|| Some(self.session.read(cx).place.clone()).filter(|p| !p.is_empty()))
             .unwrap_or_else(|| "ユーザーは、チャットだけのウィンドウを開いています。".to_owned());
         let sent = self.session.update(cx, |s, cx| s.send(&text, place, cx));
         if sent {
@@ -642,6 +644,7 @@ impl AiPane {
         let watch_status = session.watch_status.clone();
         let busy = session.busy;
         let auto_run = session.auto_run;
+        let arrange = session.arrange;
         let mut minutes_row = row().gap_1().flex_wrap();
         for minutes in WATCH_MINUTES {
             let text = if minutes < 60 {
@@ -773,6 +776,18 @@ impl AiPane {
                         .on_click(cx.listener(|this, on: &bool, _, cx| {
                             let on = *on;
                             this.session.update(cx, |s, cx| s.set_auto_run(on, cx));
+                        })),
+                ),
+            )
+            .child(
+                section().child(
+                    Switch::new("ai-arrange")
+                        .checked(arrange)
+                        .label("新しいタスクを整える")
+                        .tooltip("タスクを作ると、AI がリンクを読んでタイトルと説明を整える")
+                        .on_click(cx.listener(|this, on: &bool, _, cx| {
+                            let on = *on;
+                            this.session.update(cx, |s, cx| s.set_arrange(on, cx));
                         })),
                 ),
             )

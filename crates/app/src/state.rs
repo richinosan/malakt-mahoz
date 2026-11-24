@@ -267,6 +267,13 @@ impl MainView {
             cx.observe(&db, |this, _, cx| this.reload(cx)),
             // チャットを別ウィンドウに出した・戻したときに、右の表示を合わせる
             cx.observe(&ai_session, |_, _, cx| cx.notify()),
+            // 今見ている場所を、AI に伝えられるようにしておく
+            cx.observe_self(|this, cx| {
+                let place = this.ai_place();
+                if this.ai_session.read(cx).place != place {
+                    this.ai_session.update(cx, |s, _| s.place = place);
+                }
+            }),
             // 読み直すたびに、まだ出していない通知を OS に出す
             cx.observe_in(&db, window, |this, _, window, cx| {
                 this.deliver_notices(window, cx)
@@ -2017,13 +2024,53 @@ impl MainView {
                 self.workspace_name(Some(id))
             ),
         };
-        match &self.detail {
-            Some(detail) => format!(
-                "{place}詳細を開いているタスクは「{}」（ID: {}）です。",
-                detail.task.title, detail.task.id
-            ),
-            None => place,
+        let mut place = place;
+        if !matches!(self.nav, Nav::Home) {
+            // 一覧に今出ているもの
+            place.push_str(match self.query.tab {
+                view::Tab::Open => "\n一覧は未完了のタブです。",
+                view::Tab::Closed => "\n一覧は完了のタブです。",
+            });
+            if !self.query.q.trim().is_empty() {
+                place.push_str(&format!("検索の言葉は「{}」です。", self.query.q.trim()));
+            }
+            place.push_str(&format!(
+                "\n一覧に出ているタスク（{} 件）:\n",
+                self.visible.len()
+            ));
+            for &ix in self.visible.iter().take(AI_PLACE_TASKS) {
+                let task = &self.tasks[ix];
+                place.push_str(&format!(
+                    "- {}（ID: {}、{}）\n",
+                    task.title,
+                    task.id,
+                    task.status.label()
+                ));
+            }
         }
+        if !self.selected.is_empty() {
+            let mut ids: Vec<&str> = self.selected.iter().map(String::as_str).collect();
+            ids.sort_unstable();
+            place.push_str(&format!(
+                "\nチェックを付けて選んでいるタスクの ID: {}\n",
+                ids.join("、")
+            ));
+        }
+        if let Some(detail) = &self.detail {
+            place.push_str(&format!(
+                "\n詳細を開いているタスクは「{}」（ID: {}、{}）です。「これ」「このタスク」は、このタスクのことです。\n",
+                detail.task.title,
+                detail.task.id,
+                detail.task.status.label()
+            ));
+            if !detail.task.description.trim().is_empty() {
+                place.push_str(&format!(
+                    "説明: {}\n",
+                    malakt_ai::clip_tail(detail.task.description.trim(), AI_PLACE_CHARS)
+                ));
+            }
+        }
+        place
     }
 
     /// Esc。いちばん手前のものから閉じる。
@@ -2044,6 +2091,11 @@ impl MainView {
         cx.notify();
     }
 }
+
+/// AI に伝える、一覧に出ているタスクの数。
+const AI_PLACE_TASKS: usize = 30;
+/// AI に伝える、開いているタスクの説明の文字数。
+const AI_PLACE_CHARS: usize = 1500;
 
 /// 通知の一覧に出す数。
 const NOTICES_SHOWN: usize = 100;
