@@ -21,7 +21,7 @@ use malakt_core::Id;
 
 const SIDEBAR_WIDTH: Pixels = px(256.);
 const HEADER_HEIGHT: Pixels = px(72.);
-const PANEL_WIDTH: Pixels = px(480.);
+const PANEL_WIDTH: Pixels = px(544.);
 const ROW_HEIGHT: Pixels = px(60.);
 const CARD_HEIGHT: Pixels = px(96.);
 const COL_STATUS: Pixels = px(96.);
@@ -190,7 +190,19 @@ fn appear(ms: u64) -> Animation {
 }
 
 fn section_title(text: &'static str) -> Div {
-    div().text_sm().child(text)
+    div().font_weight(FontWeight::BOLD).child(text)
+}
+
+/// 詳細の中の 1 まとまり。白い地に枠。
+fn card(cx: &App) -> Div {
+    let theme = cx.theme();
+    col()
+        .p_4()
+        .gap_2()
+        .rounded_lg()
+        .border_1()
+        .border_color(theme.border)
+        .bg(theme.popover)
 }
 
 impl MainView {
@@ -1992,10 +2004,11 @@ impl MainView {
     fn property(&self, label: &'static str, cx: &App) -> Div {
         row().gap_2().items_start().child(
             div()
-                .w(px(72.))
+                .w(px(96.))
                 .flex_none()
-                .pt_0p5()
+                .pt_1()
                 .text_sm()
+                .font_weight(FontWeight::BOLD)
                 .text_color(cx.theme().muted_foreground)
                 .child(label),
         )
@@ -2055,13 +2068,12 @@ impl MainView {
 
         let status_actions = {
             let id = task.id.clone();
-            let mut actions = row()
-                .gap_2()
-                .flex_wrap()
-                .child(status_badge(task.status, cx));
+            let mut actions = row().gap_2().flex_wrap();
             let set = |label: &'static str, key: &'static str, status: Status, primary: bool| {
                 let id = id.clone();
-                let button = Button::new(key).label(label).small();
+                let button = Button::new(key)
+                    .icon(app_icon(status_icon(status)))
+                    .label(label);
                 let button = if primary {
                     button.primary()
                 } else {
@@ -2184,31 +2196,29 @@ impl MainView {
         }
 
         // プロパティ
-        let mut status_chips = self.property("状態", cx);
-        let mut chips = row().gap_1().flex_wrap();
-        for (i, s) in Status::ALL.into_iter().enumerate() {
+        let status_chips = {
             let id = task.id.clone();
-            chips = chips.child(
-                chip(("p-status", i), s.label(), task.status == s, cx).on_click(cx.listener(
-                    move |this, _: &ClickEvent, window, cx| {
-                        this.ask_status(&id, window, cx);
-                        this.modal = Modal::Status(id.clone(), s);
-                    },
-                )),
-            );
-        }
-        status_chips = status_chips.child(chips);
-
-        let mut prio_chips = row().gap_1().flex_wrap();
-        for (i, p) in Prio::ALL.into_iter().enumerate() {
-            prio_chips = prio_chips.child(
-                chip(("p-prio", i), p.label(), Prio::of(task.priority) == p, cx).on_click(
-                    cx.listener(move |this, _: &ClickEvent, _, cx| {
-                        this.edit_task(cx, |d| d.priority = p.value())
-                    }),
+            self.property("状態", cx).child(
+                div().flex().child(
+                    status_badge(task.status, cx)
+                        .id("p-status")
+                        .cursor_pointer()
+                        .hover(|s| s.border_color(theme.primary))
+                        .active(|s| s.bg(theme.accent))
+                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                            this.ask_status(&id, window, cx)
+                        })),
                 ),
-            );
-        }
+            )
+        };
+        let current_priority = Prio::of(task.priority);
+        let prio_chips = self.value_menu(
+            "p-prio",
+            priority_label(current_priority, cx),
+            Self::priority_options(current_priority),
+            |this, value, cx| this.edit_task(cx, |d| d.priority = value),
+            cx,
+        );
 
         let mut people = row().gap_1().flex_wrap();
         for (i, p) in self.people.iter().enumerate() {
@@ -2573,119 +2583,75 @@ impl MainView {
         }
 
         let delete_id = task.id.clone();
+        let bar =
+            row()
+                .flex_none()
+                .h_12()
+                .px_4()
+                .gap_2()
+                .border_b_1()
+                .border_color(theme.border)
+                .bg(theme.popover)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_sm()
+                        .font_weight(FontWeight::BOLD)
+                        .child("タスクの詳細"),
+                )
+                .child({
+                    let ticket_task = task.id.clone();
+                    Button::new("ticket-open")
+                        .icon(app_icon("bookmark"))
+                        .tooltip("完了チケット")
+                        .outline()
+                        .small()
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.open_ticket_dialog(&ticket_task, cx)
+                        }))
+                })
+                .child(
+                    Button::new("close-panel")
+                        .icon(app_icon("x"))
+                        .tooltip("閉じる")
+                        .outline()
+                        .small()
+                        .on_click(cx.listener(|this, _, _, cx| this.close_panel(cx))),
+                );
         let content =
             col()
                 .p_4()
                 .gap_4()
+                .child(title)
                 .child(
                     row()
-                        .gap_2()
-                        .child(
-                            div()
-                                .flex_1()
-                                .text_xs()
-                                .text_color(theme.muted_foreground)
-                                .truncate()
-                                .child(format!(
-                                    "{}のタスク",
-                                    self.workspace_name(task.workspace_id.as_deref())
-                                )),
-                        )
-                        .child({
-                            let ticket_task = task.id.clone();
-                            Button::new("ticket-open")
-                                .label("完了チケット")
-                                .ghost()
-                                .xsmall()
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.open_ticket_dialog(&ticket_task, cx)
-                                }))
-                        })
+                        .gap_3()
+                        .flex_wrap()
+                        .text_sm()
+                        .text_color(theme.muted_foreground)
+                        .child(status_badge(task.status, cx))
                         .child(
                             Button::new("history")
+                                .icon(app_icon("rotate-ccw-clock"))
                                 .label("変更履歴")
-                                .ghost()
-                                .xsmall()
+                                .outline()
+                                .small()
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.modal = Modal::History;
                                     cx.notify();
                                 })),
                         )
-                        .child(
-                            Button::new("close-panel")
-                                .label("閉じる")
-                                .ghost()
-                                .xsmall()
-                                .on_click(cx.listener(|this, _, _, cx| this.close_panel(cx))),
-                        ),
-                )
-                .child(title)
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(theme.muted_foreground)
                         .child(format!(
-                            "作成 {}　更新 {}",
+                            "{}　作成 {}　更新 {}",
+                            self.workspace_name(task.workspace_id.as_deref()),
                             view::format_datetime(task.created_at),
                             view::format_relative(task.updated_at, now)
                         )),
                 )
-                .child(status_actions)
-                .when(!pinned.is_empty(), |d| {
-                    d.child(
-                        col()
-                            .gap_1()
-                            .p_2()
-                            .rounded_md()
-                            .bg(theme.secondary)
-                            .child(section_title("ピン留め"))
-                            .children(pinned.iter().enumerate().map(|(i, c)| {
-                                div()
-                                    .text_sm()
-                                    .child(TextView::markdown(("pinned-body", i), c.body.clone()))
-                            })),
-                    )
-                })
-                .when(!report_items.is_empty(), |d| {
-                    d.child(
-                        col()
-                            .gap_1()
-                            .p_2()
-                            .rounded_md()
-                            .border_1()
-                            .border_color(theme.border)
-                            .child(section_title("完了報告"))
-                            .children(report_items),
-                    )
-                })
                 .child(
-                    col()
-                        .gap_1()
-                        .child(section_title("説明"))
-                        .child(description),
-                )
-                .child(
-                    col()
-                        .gap_2()
-                        .child(row().gap_2().child(section_title("サブタスク")).when(
-                            !detail.subtasks.is_empty(),
-                            |d| {
-                                d.child(div().text_xs().text_color(theme.muted_foreground).child(
-                                    format!("（{done}/{} 件が完了）", detail.subtasks.len()),
-                                ))
-                            },
-                        ))
-                        .child(subtasks)
-                        .child(
-                            Input::new(&self.inputs.subtask)
-                                .id("subtask-input")
-                                .aria_label("サブタスクを追加")
-                                .small(),
-                        ),
-                )
-                .child(
-                    col()
-                        .gap_2()
+                    card(cx)
                         .child(status_chips)
                         .child(self.property("優先度", cx).child(prio_chips))
                         .child(self.property("担当", cx).child(people))
@@ -2719,10 +2685,56 @@ impl MainView {
                             )
                         }),
                 )
-                .child(self.render_attachments(detail, cx))
+                .child(status_actions)
+                .when(!pinned.is_empty(), |d| {
+                    d.child(
+                        col()
+                            .gap_1()
+                            .p_2()
+                            .rounded_md()
+                            .bg(theme.secondary)
+                            .child(section_title("ピン留め"))
+                            .children(pinned.iter().enumerate().map(|(i, c)| {
+                                div()
+                                    .text_sm()
+                                    .child(TextView::markdown(("pinned-body", i), c.body.clone()))
+                            })),
+                    )
+                })
+                .when(!report_items.is_empty(), |d| {
+                    d.child(
+                        col()
+                            .gap_1()
+                            .p_2()
+                            .rounded_md()
+                            .border_1()
+                            .border_color(theme.border)
+                            .child(section_title("完了報告"))
+                            .children(report_items),
+                    )
+                })
+                .child(card(cx).child(section_title("説明")).child(description))
                 .child(
-                    col()
-                        .gap_2()
+                    card(cx)
+                        .child(row().gap_2().child(section_title("サブタスク")).when(
+                            !detail.subtasks.is_empty(),
+                            |d| {
+                                d.child(div().text_xs().text_color(theme.muted_foreground).child(
+                                    format!("（{done}/{} 件が完了）", detail.subtasks.len()),
+                                ))
+                            },
+                        ))
+                        .child(subtasks)
+                        .child(
+                            Input::new(&self.inputs.subtask)
+                                .id("subtask-input")
+                                .aria_label("サブタスクを追加")
+                                .small(),
+                        ),
+                )
+                .child(card(cx).child(self.render_attachments(detail, cx)))
+                .child(
+                    card(cx)
                         .child(row().gap_2().child(section_title("コメント")).when(
                             unresolved > 0,
                             |d| {
@@ -2790,7 +2802,7 @@ impl MainView {
                         ),
                 )
                 .child(
-                    col().gap_2().child(section_title("削除")).child(
+                    card(cx).child(section_title("削除")).child(
                         row().child(
                             Button::new("delete-task")
                                 .label("このタスクを削除")
@@ -2807,7 +2819,7 @@ impl MainView {
         Some(
             div()
                 .absolute()
-                .top_0()
+                .top(HEADER_HEIGHT)
                 .right_0()
                 .bottom_0()
                 .when(sheet, |d| d.left_0())
@@ -2819,10 +2831,14 @@ impl MainView {
                 })
                 .bg(theme.background)
                 .occlude()
+                .flex()
+                .flex_col()
+                .child(bar)
                 .child(
                     div()
                         .id("detail-panel")
-                        .size_full()
+                        .flex_1()
+                        .min_h_0()
                         .overflow_y_scroll()
                         .child(content),
                 ),
