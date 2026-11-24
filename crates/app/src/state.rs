@@ -17,7 +17,7 @@ use malakt_core::{
     Scope, Status, Store, Task as Todo, TaskDefaults, TaskDraft, TaskFilter, Workspace,
 };
 
-use crate::ai::{self, Session};
+use crate::ai::{self, Session, ShellPlace};
 use crate::ai_view::{AiPane, PaneMode};
 use crate::db::{self, Db};
 use crate::passkey::{self, Passkey};
@@ -437,6 +437,39 @@ impl MainView {
             crate::theme::system_changed(window, cx)
         });
         cx.defer_in(window, |this, window, cx| this.deliver_notices(window, cx));
+        // 前に閉じたときの AI チャットとシェルを、最初のウィンドウで戻す
+        if let Some((chat_window, shell_window)) =
+            this.ai_session.update(cx, |s, _| s.restore.take())
+        {
+            if this.ai_session.read(cx).open {
+                this.ai_open = true;
+                let main = cx.weak_entity();
+                this.ai_pane =
+                    Some(cx.new(|cx| AiPane::new(PaneMode::Docked, Some(main), window, cx)));
+            }
+            let session = this.ai_session.clone();
+            cx.defer(move |cx| {
+                for (wanted, mode) in [
+                    (chat_window, PaneMode::ChatWindow),
+                    (shell_window, PaneMode::ShellWindow),
+                ] {
+                    if !wanted {
+                        continue;
+                    }
+                    let opened = crate::open_ai_window(mode, cx);
+                    session.update(cx, |s, cx| {
+                        match (opened, mode) {
+                            (Ok(handle), PaneMode::ChatWindow) => s.chat_window = Some(handle),
+                            (Ok(handle), _) => s.shell_place = ShellPlace::Window(handle),
+                            (Err(e), _) => {
+                                s.error = Some(format!("ウィンドウを開けませんでした: {e}").into())
+                            }
+                        }
+                        cx.notify();
+                    });
+                }
+            });
+        }
         this
     }
 
@@ -2222,6 +2255,8 @@ impl MainView {
             self.ai_session.update(cx, |s, _| s.chat_window = None);
         }
         self.ai_open = !self.ai_open;
+        let open = self.ai_open;
+        self.ai_session.update(cx, |s, cx| s.set_open(open, cx));
         if self.ai_open {
             let pane = match &self.ai_pane {
                 Some(pane) => pane.clone(),

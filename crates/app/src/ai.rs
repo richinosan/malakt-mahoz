@@ -95,6 +95,21 @@ fn watch_targets(store: &malakt_core::Store) -> Result<Vec<WatchTarget>, String>
     Ok(targets)
 }
 
+/// 表示の状態（開いているか、別ウィンドウか、シェルの場所）を保存する設定の名前。
+const UI_SETTING: &str = "ai.ui";
+/// 会話を保存する設定の名前。
+const CHAT_SETTING: &str = "ai.chat";
+/// 保存する会話の大きさ（AI に送る分）と、画面に出す行の数。
+const MAX_SAVED_CHAT_BYTES: usize = 200_000;
+const MAX_SAVED_ITEMS: usize = 200;
+
+#[derive(Default)]
+struct SavedUi {
+    open: bool,
+    chat_window: bool,
+    shell: String,
+}
+
 /// 新しいタスクを AI が整えるとき、1 回で扱うタスクの数。
 const MAX_ARRANGE_TASKS: usize = 5;
 /// 新しいタスクを整えるとき、タスク 1 つで読みに行くリンクの数。
@@ -298,6 +313,13 @@ pub struct Session {
     known: Option<HashMap<String, Vec<String>>>,
     /// 手が空いたら、新しいタスクを探し直す。
     arrange_retry: bool,
+    /// チャットを出している（メインのウィンドウの右か、別ウィンドウ）。次の起動で戻す。
+    pub open: bool,
+    /// 起動したときに開き直す別ウィンドウ（チャット、シェル）。最初のウィンドウが受け取る。
+    pub restore: Option<(bool, bool)>,
+    /// 保存してある表示の状態と会話。同じなら書き込まない。
+    saved_ui: String,
+    saved_chat: (usize, usize, String),
     /// ユーザーが今見ている場所（ワークスペースや開いているタスク）。画面が書き込む。
     pub place: String,
     _subscriptions: Vec<Subscription>,
@@ -327,6 +349,8 @@ impl Session {
         let mut error = None;
         let watch;
         let auto_run;
+        let ui: SavedUi;
+        let chat: Option<Value>;
         let arrange;
         let (provider, effort, models) = {
             let store = &db.read(cx).store;
@@ -347,6 +371,15 @@ impl Session {
                 .into_iter()
                 .filter_map(|p| read(&setting_key(p)).map(|m| (p, m)))
                 .collect();
+            ui = read(UI_SETTING)
+                .and_then(|v| serde_json::from_str::<Value>(&v).ok())
+                .map(|v| SavedUi {
+                    open: v["open"].as_bool().unwrap_or(false),
+                    chat_window: v["chat"] == "window",
+                    shell: v["shell"].as_str().unwrap_or("docked").to_owned(),
+                })
+                .unwrap_or_default();
+            chat = read(CHAT_SETTING).and_then(|v| serde_json::from_str::<Value>(&v).ok());
             auto_run = read("ai.auto_run").as_deref() == Some("1");
             arrange = read("ai.arrange").as_deref() != Some("0");
             let defaults = Watch::default();
@@ -387,7 +420,11 @@ impl Session {
             allow_shell: false,
             auto_run,
             chat_window: None,
-            shell_place: ShellPlace::Docked,
+            shell_place: if ui.shell == "closed" {
+                ShellPlace::Closed
+            } else {
+                ShellPlace::Docked
+            },
             conversation: malakt_core::new_id(),
             task: None,
             error,
@@ -400,11 +437,17 @@ impl Session {
             arrange_notes: HashMap::new(),
             known: None,
             arrange_retry: false,
+            open: ui.open,
+            restore: (ui.open || ui.shell == "window")
+                .then_some((ui.open && ui.chat_window, ui.shell == "window")),
+            saved_ui: String::new(),
+            saved_chat: (0, 0, String::new()),
             place: String::new(),
             _subscriptions: Vec::new(),
         };
         this._subscriptions = vec![
             cx.observe(&this.db.clone(), |this, _, cx| this.tasks_changed(cx)),
+            cx.observe_self(|this, cx| this.persist(cx)),
             cx.observe_self(|this, cx| {
                 if this.arrange_retry && !this.busy {
                     this.arrange_retry = false;
@@ -412,10 +455,175 @@ impl Session {
                 }
             }),
         ];
+        if let Some(chat) = chat {
+            this.load_chat(&chat);
+        }
+        this.saved_ui = this.ui_json();
+        this.saved_chat = this.chat_mark();
         this.restart_watch(cx);
         // 今あるタスクは、もう見たものにする
         this.tasks_changed(cx);
         this
+    }
+
+    // ---- 次の起動で戻すもの ----
+
+    pub fn set_open(&mut self, open: bool, cx: &mut Context<Self>) {
+        if self.open != open {
+            self.open = open;
+            cx.notify();
+        }
+    }
+
+    fn ui_json(&self) -> String {
+        serde_json::json!({
+            "open": self.open || self.chat_window.is_some(),
+            "chat": if self.chat_window.is_some() { "window" } else { "docked" },
+            "shell": match self.shell_place {
+                ShellPlace::Closed => "closed",
+                ShellPlace::Docked => "docked",
+                ShellPlace::Window(_) => "window",
+            },
+        })
+        .to_string()
+    }
+
+    fn chat_mark(&self) -> (usize, usize, String) {
+        (
+            self.items.len(),
+            self.turns.len(),
+            self.conversation.clone(),
+        )
+    }
+
+    /// 表示の状態と会話を保存する。変わっていなければ書き込まない。
+    fn persist(&mut self, cx: &mut Context<Self>) {
+        if !self.db.read(cx).unlocked {
+            return;
+        }
+        // 起動してすぐ、別ウィンドウを開き直す前の状態では上書きしない
+        if self.restore.is_none() {
+            let ui = self.ui_json();
+            if ui != self.saved_ui && self.save_setting(UI_SETTING, &ui, cx) {
+                self.saved_ui = ui;
+            }
+        }
+        let mark = self.chat_mark();
+        if !self.busy && mark != self.saved_chat {
+            let chat = self.chat_json();
+            if self.save_setting(CHAT_SETTING, &chat, cx) {
+                self.saved_chat = mark;
+            }
+        }
+    }
+
+    /// 会話の終わりのほうを、決めた大きさまで。古いものから落とすので、増え続けない。
+    fn chat_json(&self) -> String {
+        let mut turns: Vec<Value> = Vec::new();
+        let mut size = 0;
+        // AI に送る会話は、ユーザーの発言から始まる形で切る
+        let mut start = self.turns.len();
+        for (ix, turn) in self.turns.iter().enumerate().rev() {
+            let value = match turn {
+                Turn::User(text) => serde_json::json!({"k": "user", "t": text}),
+                Turn::Assistant { text, calls, .. } => serde_json::json!({
+                    "k": "assistant",
+                    "t": text,
+                    "calls": calls.iter().map(|c| serde_json::json!({
+                        "id": c.id, "name": c.name, "args": c.args,
+                    })).collect::<Vec<_>>(),
+                }),
+                Turn::Tool {
+                    id,
+                    name,
+                    output,
+                    is_error,
+                } => serde_json::json!({
+                    "k": "tool", "id": id, "name": name, "t": output, "e": is_error,
+                }),
+            };
+            size += value.to_string().len();
+            if size > MAX_SAVED_CHAT_BYTES {
+                break;
+            }
+            turns.push(value);
+            if matches!(turn, Turn::User(_)) {
+                start = ix;
+            }
+        }
+        turns.reverse();
+        let turns = turns.split_off(turns.len() - (self.turns.len() - start));
+        let skip = self.items.len().saturating_sub(MAX_SAVED_ITEMS);
+        let items: Vec<Value> = self.items[skip..]
+            .iter()
+            .map(|item| match item {
+                Item::User(t) => serde_json::json!({"k": "user", "t": t}),
+                Item::Assistant(t) => serde_json::json!({"k": "assistant", "t": t}),
+                Item::Notice(t) => serde_json::json!({"k": "notice", "t": t}),
+                Item::Error(t) => serde_json::json!({"k": "error", "t": t}),
+                Item::Tool { summary, state } => {
+                    let (state, detail) = match state {
+                        ToolState::Done => ("done", None),
+                        ToolState::Denied => ("denied", None),
+                        ToolState::Failed(e) => ("failed", Some(e.to_string())),
+                        ToolState::Running => ("failed", Some("中断しました".to_owned())),
+                    };
+                    serde_json::json!({"k": "tool", "t": summary, "s": state, "d": detail})
+                }
+            })
+            .collect();
+        serde_json::json!({"id": self.conversation, "items": items, "turns": turns}).to_string()
+    }
+
+    fn load_chat(&mut self, chat: &Value) {
+        let text = |v: &Value| v["t"].as_str().unwrap_or_default().to_owned();
+        for v in chat["items"].as_array().into_iter().flatten() {
+            let t: SharedString = text(v).into();
+            self.items.push(match v["k"].as_str() {
+                Some("user") => Item::User(t),
+                Some("assistant") => Item::Assistant(t),
+                Some("notice") => Item::Notice(t),
+                Some("tool") => Item::Tool {
+                    summary: t,
+                    state: match v["s"].as_str() {
+                        Some("done") => ToolState::Done,
+                        Some("denied") => ToolState::Denied,
+                        _ => {
+                            ToolState::Failed(v["d"].as_str().unwrap_or_default().to_owned().into())
+                        }
+                    },
+                },
+                _ => Item::Error(t),
+            });
+        }
+        for v in chat["turns"].as_array().into_iter().flatten() {
+            self.turns.push(match v["k"].as_str() {
+                Some("user") => Turn::User(text(v)),
+                Some("assistant") => Turn::Assistant {
+                    text: text(v),
+                    calls: v["calls"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .map(|c| ToolCall {
+                            id: c["id"].as_str().unwrap_or_default().to_owned(),
+                            name: c["name"].as_str().unwrap_or_default().to_owned(),
+                            args: c["args"].clone(),
+                        })
+                        .collect(),
+                    raw: None,
+                },
+                _ => Turn::Tool {
+                    id: v["id"].as_str().unwrap_or_default().to_owned(),
+                    name: v["name"].as_str().unwrap_or_default().to_owned(),
+                    output: text(v),
+                    is_error: v["e"].as_bool().unwrap_or(false),
+                },
+            });
+        }
+        if let Some(id) = chat["id"].as_str().filter(|id| !id.is_empty()) {
+            self.conversation = id.to_owned();
+        }
     }
 
     // ---- 新しいタスクを整える ----

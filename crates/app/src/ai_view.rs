@@ -1426,6 +1426,7 @@ impl AiPane {
                                 main.ai_open = false;
                                 cx.notify();
                             });
+                            this.session.update(cx, |s, cx| s.set_open(false, cx));
                         }
                     },
                 )))

@@ -1488,3 +1488,75 @@ fn tool_runs_fold_into_one_row(cx: &mut TestAppContext) {
         assert!(window.find(("ai-tool", 2usize)).visible());
     });
 }
+
+fn setting(cx: &mut TestAppContext, key: &str) -> Option<String> {
+    cx.update(|cx| db::shared(cx).read(cx).store.setting(key).unwrap())
+}
+
+/// チャットの開閉、シェルの場所、会話は保存され、次に起動したときに戻る。
+#[gpui_kit::test]
+fn the_chat_comes_back_after_a_restart(cx: &mut TestAppContext) {
+    let world = start(cx);
+    world.keys.set(Provider::Claude, "k").unwrap();
+    let (window, view) = open(cx, wide());
+    let pane = open_chat(cx, window, &view);
+    world.reply(text_reply("はい"));
+    say(cx, window, &pane, "こんにちは");
+    ui(cx, window, |window, cx| window.click("ai-shell-toggle", cx));
+    cx.run_until_parked();
+    let ui_state: Value = serde_json::from_str(&setting(cx, "ai.ui").unwrap()).unwrap();
+    assert_eq!(
+        ui_state,
+        json!({"open": true, "chat": "docked", "shell": "closed"})
+    );
+    let chat: Value = serde_json::from_str(&setting(cx, "ai.chat").unwrap()).unwrap();
+    assert_eq!(chat["items"][0], json!({"k": "user", "t": "こんにちは"}));
+    assert_eq!(chat["items"][1], json!({"k": "assistant", "t": "はい"}));
+    assert_eq!(chat["turns"].as_array().unwrap().len(), 2);
+
+    // 新しいチャットにすると、保存した会話も空になる
+    ui(cx, window, |window, cx| window.click("ai-new-chat", cx));
+    cx.run_until_parked();
+    let chat: Value = serde_json::from_str(&setting(cx, "ai.chat").unwrap()).unwrap();
+    assert_eq!(chat["items"], json!([]));
+}
+
+#[gpui_kit::test]
+fn a_saved_chat_is_shown_at_startup(cx: &mut TestAppContext) {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .set_setting(
+            "ai.ui",
+            Some(r#"{"open":true,"chat":"docked","shell":"closed"}"#),
+        )
+        .unwrap();
+    store
+        .set_setting(
+            "ai.chat",
+            Some(
+                &json!({"id": "c1", "items": [
+                    {"k": "user", "t": "こんにちは"}, {"k": "assistant", "t": "はい"}],
+                    "turns": [{"k": "user", "t": "こんにちは"},
+                        {"k": "assistant", "t": "はい", "calls": []}]})
+                .to_string(),
+            ),
+        )
+        .unwrap();
+    let world = start_with(cx, store);
+    world.keys.set(Provider::Claude, "k").unwrap();
+    let (window, view) = open(cx, wide());
+    cx.run_until_parked();
+    // 押さなくても、チャットが開いていて、前の会話が出ている。シェルは閉じたまま
+    cx.update(|cx| assert!(view.read(cx).ai_open));
+    ui(cx, window, |window, _| {
+        assert!(window.find(("ai-user", 0usize)).visible());
+        assert!(window.find(("ai-assistant", 1usize)).visible());
+        assert!(window.try_find("ai-shell").is_none());
+    });
+    // 続きを送ると、前の会話も AI に渡る
+    let pane = cx.update(|cx| view.read(cx).ai_pane.clone().unwrap());
+    world.reply(text_reply("続きです"));
+    say(cx, window, &pane, "続けて");
+    let messages = world.sent()[0].2["messages"].as_array().unwrap().clone();
+    assert_eq!(messages.len(), 3);
+}
