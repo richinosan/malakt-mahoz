@@ -127,6 +127,7 @@ pub fn open_main_window(cx: &mut App) -> Result<(AnyWindowHandle, Entity<MainVie
 
 /// AI チャット、またはシェルだけのウィンドウを開く。
 pub fn open_ai_window(mode: PaneMode, cx: &mut App) -> Result<AnyWindowHandle> {
+    let px = |value: f32| px(value * UI_SCALE);
     let (title, window_size) = match mode {
         PaneMode::ShellWindow => ("AI のシェル - Malakt Mahoz", size(px(640.), px(480.))),
         _ => ("AI チャット - Malakt Mahoz", size(px(860.), px(720.))),

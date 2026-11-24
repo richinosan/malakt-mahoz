@@ -25,6 +25,11 @@ use crate::render::app_icon;
 use crate::state::MainView;
 use crate::{ClearShell, StopAi};
 
+/// 参照する寸法を、画面全体の拡大率に合わせる。
+const fn px(value: f32) -> Pixels {
+    gpui_kit::px(value * crate::UI_SCALE)
+}
+
 const CHAT_WIDTH: Pixels = px(380.);
 const SHELL_WIDTH: Pixels = px(360.);
 const SHELL_ROW: Pixels = px(20.);
@@ -832,7 +837,7 @@ impl AiPane {
                     }),
             )
             .overflow_y_scroll()
-            .flex_shrink(1.)
+            .flex_1()
             .min_h_0()
             .with_animation("ai-settings-in", appear(), |el, delta| el.opacity(delta))
             .into_any_element()
@@ -1139,6 +1144,8 @@ impl AiPane {
             .child(
                 div()
                     .id("ai-messages")
+                    // 設定を開いている間は、設定がチャットの場所を全部使う
+                    .when(self.settings_open, |d| d.hidden())
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
@@ -1150,6 +1157,7 @@ impl AiPane {
                 row()
                     .flex_none()
                     .items_end()
+                    .when(self.settings_open, |d| d.hidden())
                     .gap_2()
                     .p_3()
                     .border_t_1()
