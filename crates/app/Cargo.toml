@@ -1,0 +1,25 @@
+[package]
+name = "malakt-mahoz"
+description = "オフラインのタスク管理ツール"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "malakt_mahoz"
+path = "src/lib.rs"
+
+[[bin]]
+name = "malakt-mahoz"
+path = "src/main.rs"
+
+[dependencies]
+malakt-core.workspace = true
+anyhow.workspace = true
+gpui-kit = "0.11.0"
+dirs = "5"
+
+[dev-dependencies]
+gpui-kit = { version = "0.11.0", features = ["test-support"] }
+tempfile = "3"
