@@ -7,6 +7,7 @@
 //! - `defaults`: ワークスペースごとのタスク追加時の既定値と基準日
 //! - `links`: 1 つのタスクを複数のワークスペースに表示する
 //! - `notice`: 通知（期限が今日、ほかの人からの変更）
+//! - `ticket`: 完了チケット（画面で発行し、コマンドで完了報告する）
 //! - `lock`: アプリロック
 //! - `mention`: コメントの `@名前`
 //! - `view`: 一覧の絞り込みや並べ替え
@@ -26,6 +27,7 @@ pub mod notice;
 mod schema;
 pub mod store;
 pub mod text;
+pub mod ticket;
 pub mod view;
 
 pub use error::{Error, Result};

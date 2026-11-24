@@ -18,6 +18,8 @@ path = "src/main.rs"
 malakt-core.workspace = true
 gpui-kit = "0.11.0"
 dirs = "5"
+serde.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
 gpui-kit = { version = "0.11.0", features = ["test-support"] }

@@ -9,6 +9,7 @@ use gpui_kit::component::WindowExt;
 use gpui_kit::*;
 use malakt_core::bulk::{self, BulkOp, ListMode};
 use malakt_core::notice::Notice;
+use malakt_core::ticket::IssuedTicket;
 use malakt_core::view::{self, ListQuery};
 use malakt_core::{
     archive, lock, mention, Anchor, Attachment, Change, Comment, DueRule, Id, NewComment, Person,
@@ -62,6 +63,8 @@ pub enum Modal {
     NewTask,
     /// 通知の一覧
     Notices,
+    /// 完了チケットの発行
+    Ticket(Id),
 }
 
 /// 詳細パネルで編集中の項目。
@@ -170,6 +173,10 @@ pub struct MainView {
     pub description_view: Entity<TextViewState>,
     description_shown: String,
     pub modal: Modal,
+    /// 完了チケットをだれの分として発行するか（`None` は自分）と、発行したばかりのチケット。
+    /// チケットの文字列は発行したときしか分からないので、ダイアログを閉じるまで持つ
+    pub ticket_person: Option<Id>,
+    pub issued_ticket: Option<IssuedTicket>,
     /// 通知（新しい順）と、未読の数
     pub notices: Vec<Notice>,
     pub unread_notices: u32,
@@ -336,6 +343,8 @@ impl MainView {
             description_view: cx.new(|cx| TextViewState::markdown("", cx).selectable(true)),
             description_shown: String::new(),
             modal: Modal::None,
+            ticket_person: None,
+            issued_ticket: None,
             notices: Vec::new(),
             unread_notices: 0,
             defaults_draft: TaskDefaults::default(),
@@ -1409,6 +1418,52 @@ impl MainView {
         }
     }
 
+    // ---- 完了チケット ----
+
+    pub fn open_ticket_dialog(&mut self, task_id: &str, cx: &mut Context<Self>) {
+        self.ticket_person = self.self_id.clone();
+        self.issued_ticket = None;
+        self.error = None;
+        self.modal = Modal::Ticket(task_id.to_owned());
+        cx.notify();
+    }
+
+    pub fn issue_ticket(&mut self, cx: &mut Context<Self>) {
+        let Modal::Ticket(task_id) = self.modal.clone() else {
+            return;
+        };
+        let person = self.ticket_person.clone();
+        self.issued_ticket = self.write(cx, |s| s.issue_ticket(&task_id, person.as_deref()));
+    }
+
+    /// 発行したチケットをクリップボードに写す。
+    pub fn copy_ticket(&mut self, cx: &mut Context<Self>) {
+        if let Some(ticket) = &self.issued_ticket {
+            cx.write_to_clipboard(ClipboardItem::new_string(ticket.secret.clone()));
+            self.notice = Some("完了チケットをコピーしました。".into());
+            cx.notify();
+        }
+    }
+
+    pub fn revoke_tickets(&mut self, cx: &mut Context<Self>) {
+        let Modal::Ticket(task_id) = self.modal.clone() else {
+            return;
+        };
+        if let Some(count) = self.write(cx, |s| s.revoke_tickets(&task_id)) {
+            self.issued_ticket = None;
+            self.notice = Some(format!("{count} 枚の完了チケットを取り消しました。").into());
+        }
+    }
+
+    /// そのタスクの、引き換えていない有効なチケットの数。
+    pub fn active_tickets(&self, task_id: &str, cx: &App) -> usize {
+        self.db
+            .read(cx)
+            .store
+            .active_ticket_count(task_id)
+            .unwrap_or(0)
+    }
+
     // ---- 通知 ----
 
     /// 期限が今日のタスクの通知を作り、まだ出していない通知を OS の通知に出す。
@@ -1795,6 +1850,7 @@ impl MainView {
     pub fn dismiss(&mut self, cx: &mut Context<Self>) {
         if self.modal != Modal::None {
             self.modal = Modal::None;
+            self.issued_ticket = None;
         } else if self.editing.is_some() {
             self.editing = None;
         } else if self.panel.is_some() {

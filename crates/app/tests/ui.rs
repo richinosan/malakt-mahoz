@@ -428,6 +428,14 @@ fn every_screen_renders_at_any_size(cx: &mut TestAppContext) {
             Modal::Status(task.clone(), Status::Completed),
             Modal::Lock,
             Modal::Usage,
+            Modal::WorkspaceSettings(ws.clone()),
+            Modal::LinkTask(task.clone()),
+            Modal::BulkDue,
+            Modal::BulkAssignees,
+            Modal::BulkCategories,
+            Modal::NewTask,
+            Modal::Notices,
+            Modal::Ticket(task.clone()),
         ];
         for modal in modals {
             cx.update(|cx| {
@@ -1249,4 +1257,83 @@ fn notices_wait_until_unlocked(cx: &mut TestAppContext) {
     });
     cx.update(|cx| assert!(view.read(cx).unlocked(cx)));
     assert_eq!(cx.shown_system_notifications().len(), 1);
+}
+
+/// 画面で発行した完了チケットをコマンドで引き換えると、開いている画面に届く。
+#[gpui_kit::test]
+fn completion_ticket_issued_here_and_redeemed_by_command(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("data.sqlite3");
+    cx.update(|cx| malakt_mahoz::init(Store::open(&path).unwrap(), cx));
+    let (window, view) = open(cx, size(px(1280.), px(2400.)));
+    let id = cx.update(|cx| {
+        view.update(cx, |v, cx| {
+            v.write(cx, |s| {
+                let me = s.create_person("自分", true)?;
+                let sato = s.create_person("佐藤", false)?;
+                let draft = malakt_core::TaskDraft {
+                    title: "チラシを配る".into(),
+                    assignee_ids: vec![me.id, sato.id],
+                    ..Default::default()
+                };
+                Ok(s.create_task(None, &draft)?.id)
+            })
+            .unwrap()
+        })
+    });
+    ui(cx, window, |window, cx| window.click("nav-all", cx));
+    ui(cx, window, |window, cx| window.click(("title", 0usize), cx));
+    ui(cx, window, |window, cx| window.click("ticket-open", cx));
+    cx.update(|cx| assert_eq!(view.read(cx).modal, Modal::Ticket(id.clone())));
+    // 佐藤さんの分として発行する
+    ui(cx, window, |window, cx| {
+        window.click(("ticket-who", 1usize), cx)
+    });
+    ui(cx, window, |window, cx| window.click("ticket-issue", cx));
+    let secret = cx.update(|cx| {
+        let view = view.read(cx);
+        assert_eq!(view.active_tickets(&id, cx), 1);
+        view.issued_ticket
+            .as_ref()
+            .expect("発行した")
+            .secret
+            .clone()
+    });
+    // 閉じると、チケットの文字列は画面から消える
+    ui(cx, window, |window, cx| window.click("dialog-close", cx));
+    cx.update(|cx| assert!(view.read(cx).issued_ticket.is_none()));
+
+    // 別のプロセスとして引き換える
+    let args: Vec<String> = ["redeem", &secret, "--message", "駅前で配り終えました"]
+        .iter()
+        .map(|a| (*a).to_owned())
+        .collect();
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let code = malakt_mahoz::cli::run(&args, || Store::open(&path), &mut out, &mut err);
+    assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
+
+    // 1 分ごとの見張りが気づくのと同じことをする
+    cx.update(|cx| {
+        db::shared(cx).update(cx, |db, cx| {
+            assert!(db.changed_outside());
+            cx.notify();
+        })
+    });
+    cx.run_until_parked();
+    let task = store(cx, |s| s.task(&id).unwrap());
+    assert_eq!(task.done_count(), (1, 2));
+    assert_eq!(task.status, Status::NeedsAction);
+    cx.update(|cx| {
+        let view = view.read(cx);
+        assert_eq!(view.unread_notices, 1);
+        assert_eq!(view.active_tickets(&id, cx), 0);
+        assert_eq!(view.detail.as_ref().unwrap().comments.len(), 1);
+    });
+    let shown = cx.shown_system_notifications();
+    assert_eq!(shown.len(), 1);
+    assert_eq!(
+        shown[0].title.as_ref(),
+        "佐藤 さんが「チラシを配る」の自分の分を完了にしました（1/2 人）"
+    );
+    assert_eq!(shown[0].body.as_ref(), "駅前で配り終えました");
 }

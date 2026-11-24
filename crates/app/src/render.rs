@@ -1937,6 +1937,16 @@ impl MainView {
                                     self.workspace_name(task.workspace_id.as_deref())
                                 )),
                         )
+                        .child({
+                            let ticket_task = task.id.clone();
+                            Button::new("ticket-open")
+                                .label("完了チケット")
+                                .ghost()
+                                .xsmall()
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.open_ticket_dialog(&ticket_task, cx)
+                                }))
+                        })
                         .child(
                             Button::new("history")
                                 .label("変更履歴")
@@ -2214,6 +2224,7 @@ impl MainView {
                                     .xsmall()
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.modal = Modal::None;
+                                        this.issued_ticket = None;
                                         cx.notify();
                                     })),
                             ),
@@ -2259,6 +2270,7 @@ impl MainView {
                 .label("キャンセル")
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.modal = Modal::None;
+                    this.issued_ticket = None;
                     cx.notify();
                 }))
         };
@@ -2530,6 +2542,122 @@ impl MainView {
                             ),
                     );
                 self.dialog("状態を変更", body, cx)
+            }
+            Modal::Ticket(id) => {
+                let theme = cx.theme().clone();
+                let task = self
+                    .detail
+                    .as_ref()
+                    .map(|d| &d.task)
+                    .filter(|t| &t.id == id);
+                // 自分（タスク全体を完了にする）と、ほかの担当者（その人の分だけ）
+                let mut who = row().gap_1().flex_wrap();
+                let mut options: Vec<(Option<malakt_core::Id>, String)> = Vec::new();
+                match self.people.iter().find(|p| p.is_self) {
+                    Some(me) => options.push((Some(me.id.clone()), format!("{}（自分）", me.name))),
+                    None => options.push((None, "自分".to_owned())),
+                }
+                for p in &self.people {
+                    if !p.is_self && task.is_some_and(|t| t.roles_of(&p.id).is_some()) {
+                        options.push((Some(p.id.clone()), p.name.clone()));
+                    }
+                }
+                for (ix, (person, name)) in options.into_iter().enumerate() {
+                    let active = self.ticket_person == person;
+                    who = who.child(
+                        chip(("ticket-who", ix), name, active, cx)
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                this.ticket_person = person.clone();
+                                this.issued_ticket = None;
+                                cx.notify();
+                            }))
+                            .test_support(),
+                    );
+                }
+                let whole = self
+                    .ticket_person
+                    .as_ref()
+                    .is_none_or(|id| self.self_id.as_ref() == Some(id));
+                let active = self.active_tickets(id, cx);
+                let body = col()
+                    .gap_3()
+                    .child(muted(
+                        "完了チケットは、アプリを開かずに、あとでこのタスクを完了報告つきで完了にするための引換券です。コマンドや自動の処理に渡して使います。"
+                            .to_owned(),
+                    ))
+                    .child(
+                        col()
+                            .gap_1()
+                            .child(div().text_sm().font_weight(FontWeight::BOLD).child("だれの分として"))
+                            .child(who)
+                            .child(muted(if whole {
+                                "引き換えると、タスク全体が完了になります。".to_owned()
+                            } else {
+                                "引き換えると、その人の分だけが完了になります。全員の分がそろうと、タスクが完了になります。"
+                                    .to_owned()
+                            })),
+                    )
+                    .when_some(self.issued_ticket.as_ref(), |d, ticket| {
+                        d.child(
+                            col()
+                                .gap_1()
+                                .p_2()
+                                .rounded_md()
+                                .bg(theme.secondary)
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .font_weight(FontWeight::BOLD)
+                                        .child("発行しました。この文字列は、いましか表示されません。"),
+                                )
+                                .child(
+                                    div()
+                                        .id("ticket-secret")
+                                        .text_sm()
+                                        .font_family(theme.mono_font_family.clone())
+                                        .child(ticket.secret.clone()),
+                                )
+                                .child(muted(format!(
+                                    "使い方: malakt-mahoz redeem <チケット> --message \"完了報告\"　（{} まで有効）",
+                                    view::format_datetime(ticket.expires_at)
+                                )))
+                                .child(
+                                    row().child(
+                                        Button::new("ticket-copy")
+                                            .label("コピー")
+                                            .small()
+                                            .on_click(cx.listener(|this, _, _, cx| this.copy_ticket(cx))),
+                                    ),
+                                ),
+                        )
+                    })
+                    .when_some(self.error.clone(), |d, error| {
+                        d.child(div().text_sm().text_color(theme.danger).child(error))
+                    })
+                    .child(
+                        row()
+                            .gap_2()
+                            .items_center()
+                            .child(muted(format!("引き換えていないチケット: {active} 枚")))
+                            .child(div().flex_1())
+                            .when(active > 0, |d| {
+                                d.child(
+                                    Button::new("ticket-revoke")
+                                        .label("すべて取り消す")
+                                        .small()
+                                        .on_click(
+                                            cx.listener(|this, _, _, cx| this.revoke_tickets(cx)),
+                                        ),
+                                )
+                            })
+                            .child(
+                                Button::new("ticket-issue")
+                                    .label("発行")
+                                    .primary()
+                                    .on_click(cx.listener(|this, _, _, cx| this.issue_ticket(cx))),
+                            ),
+                    );
+                self.dialog("完了チケット", body, cx)
             }
             Modal::Notices => {
                 let theme = cx.theme().clone();

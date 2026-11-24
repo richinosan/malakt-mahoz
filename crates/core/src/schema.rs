@@ -162,6 +162,21 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX notices_created ON notices(created_at);
     CREATE INDEX notices_task ON notices(task_id);
     "#,
+    // 8: 完了チケット。secret はハッシュだけを置く
+    r#"
+    CREATE TABLE tickets (
+        id TEXT PRIMARY KEY NOT NULL,
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        secret_hash TEXT NOT NULL UNIQUE,
+        person_id TEXT REFERENCES people(id) ON DELETE CASCADE,
+        whole_task INTEGER NOT NULL,
+        created_at INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL,
+        redeemed_at INTEGER,
+        comment_id TEXT REFERENCES comments(id) ON DELETE SET NULL
+    ) STRICT;
+    CREATE INDEX tickets_task ON tickets(task_id);
+    "#,
 ];
 
 pub(crate) fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
