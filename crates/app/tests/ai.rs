@@ -309,7 +309,7 @@ fn the_ai_creates_a_task_and_the_list_updates(cx: &mut TestAppContext) {
             Item::User("牛乳を買うタスクを 12/1 期限で".into()),
             Item::Assistant("やります".into()),
             Item::Tool {
-                summary: "タスクを作る: 牛乳を買う".into(),
+                summary: "タスクを作成: 牛乳を買う".into(),
                 state: ToolState::Done
             },
             Item::Assistant("牛乳を買うタスクを作りました。".into()),
@@ -375,12 +375,12 @@ fn deleting_asks_first(cx: &mut TestAppContext) {
     assert_eq!(all_tasks(cx).len(), 1);
     let items = read(cx, |s| s.items.clone());
     assert!(items.contains(&Item::Tool {
-        summary: "タスクを削除する".into(),
+        summary: "タスクを削除".into(),
         state: ToolState::Denied
     }));
     let result = &world.sent()[1].2["messages"][2]["content"][0];
     assert_eq!(result["is_error"], true);
-    assert_eq!(result["content"], "ユーザーが許可しませんでした");
+    assert_eq!(result["content"], "ユーザーが拒否しました");
 
     // もう一度頼んで、今度は実行する
     world.reply(tool_reply("t2", "delete_task", json!({"id": task.id})));
@@ -489,7 +489,7 @@ fn ctrl_c_kills_the_running_command(cx: &mut TestAppContext) {
     let items = read(cx, |s| s.items.clone());
     assert_eq!(items.last(), Some(&Item::Notice("中止しました。".into())));
     assert!(items.contains(&Item::Tool {
-        summary: format!("コマンドを実行する: {command}").into(),
+        summary: format!("コマンドを実行: {command}").into(),
         state: ToolState::Failed("中止しました".into())
     }));
     assert_eq!(world.sent().len(), 1, "止めたあとは AI に送らない");
@@ -805,7 +805,7 @@ fn a_locked_app_does_not_talk_to_the_ai(cx: &mut TestAppContext) {
     let _ = Status::Completed;
 }
 
-/// リンク付きのタスクを 1 つ作り、定期確認をオンにする。
+/// リンク付きのタスクを 1 つ作り、定期チェックをオンにする。
 fn watched_task(cx: &mut TestAppContext, minutes: u32) -> String {
     let id = cx.update(|cx| {
         db::shared(cx).update(cx, |db, cx| {
@@ -836,10 +836,10 @@ fn watched_task(cx: &mut TestAppContext, minutes: u32) -> String {
 fn tick(cx: &mut TestAppContext, minutes: u64) {
     cx.executor()
         .advance_clock(Duration::from_secs(minutes * 60));
-    wait(cx, "定期確認が終わる", |s| !s.busy);
+    wait(cx, "定期チェックが終わる", |s| !s.busy);
 }
 
-/// 定期確認は、標準ではオフ。オンにするまで、GitHub にも AI にも何も送らない。
+/// 定期チェックは、標準ではオフ。オンにするまで、GitHub にも AI にも何も送らない。
 #[gpui_kit::test]
 fn github_is_not_polled_until_turned_on(cx: &mut TestAppContext) {
     let world = start(cx);
@@ -871,10 +871,7 @@ fn changes_on_github_are_reflected_into_tasks(cx: &mut TestAppContext) {
     );
     assert!(world.sent().is_empty());
     let status = read(cx, |s| s.watch_status.clone()).unwrap();
-    assert!(
-        status.contains("リンク 1 件のうち、変化は 0 件"),
-        "{status}"
-    );
+    assert!(status.contains("リンク 1 件中、更新 0 件"), "{status}");
 
     // 変化がなければ、AI は呼ばない
     tick(cx, 15);
@@ -902,7 +899,7 @@ fn changes_on_github_are_reflected_into_tasks(cx: &mut TestAppContext) {
     assert_eq!(
         items[0],
         Item::Notice(
-            "GitHub の定期確認: https://github.com/o/r/issues/3 に変化がありました。AI がタスクに反映します。"
+            "GitHub の定期チェック: https://github.com/o/r/issues/3 に更新がありました。AI がタスクに反映します。"
                 .into()
         )
     );
@@ -928,7 +925,7 @@ fn changes_on_github_are_reflected_into_tasks(cx: &mut TestAppContext) {
     assert_eq!(seen.as_deref(), Some("{}"));
 }
 
-/// 定期確認からは、タスクの削除もコマンドの実行もしない（確認に答える人がいない）。
+/// 定期チェックからは、タスクの削除もコマンドの実行もしない（確認に答える人がいない）。
 #[gpui_kit::test]
 fn the_periodic_check_never_deletes_or_runs_commands(cx: &mut TestAppContext) {
     let world = start(cx);
@@ -954,7 +951,7 @@ fn the_periodic_check_never_deletes_or_runs_commands(cx: &mut TestAppContext) {
     assert_eq!(result["is_error"], true);
     assert_eq!(
         result["content"],
-        "定期確認からは、タスクの削除とコマンドの実行はできません"
+        "定期チェックからは、タスクの削除とコマンドの実行はできません"
     );
     // チャットから頼めば、いつもどおり確認が出る
     let (window, view) = open(cx, wide());
@@ -977,7 +974,7 @@ fn the_periodic_check_stays_offline_without_a_key(cx: &mut TestAppContext) {
     assert!(read(cx, |s| s.items.is_empty()), "チャットには何も足さない");
 }
 
-/// 定期確認は設定の画面でオンにでき、間隔と指示を変えられる。起動し直しても残る。
+/// 定期チェックは設定の画面でオンにでき、間隔と指示を変えられる。起動し直しても残る。
 #[gpui_kit::test]
 fn the_periodic_check_is_set_up_in_settings(cx: &mut TestAppContext) {
     let world = start(cx);
@@ -1123,7 +1120,7 @@ fn auto_run_skips_the_confirmations(cx: &mut TestAppContext) {
     assert!(read(cx, |s| s.shell.iter().all(|l| l.text != "third-auto")));
 }
 
-/// オート実行がオンでも、定期確認からは削除もコマンドの実行もしない。
+/// オート実行がオンでも、定期チェックからは削除もコマンドの実行もしない。
 #[gpui_kit::test]
 fn auto_run_does_not_reach_the_periodic_check(cx: &mut TestAppContext) {
     let world = start(cx);
@@ -1267,4 +1264,5 @@ fn ctrl_c_in_the_input_line_kills_the_typed_command(cx: &mut TestAppContext) {
     wait(cx, "止まる", |s| !s.busy && !s.command_running());
     assert!(started.elapsed() < Duration::from_secs(30));
     assert!(shell_texts(cx).iter().any(|l| l == "強制終了しました"));
+    assert!(read(cx, |s| s.items.is_empty()), "チャットには何も書かない");
 }

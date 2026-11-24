@@ -32,8 +32,8 @@ fn describe(status: u16, body: &str) -> String {
         .and_then(|v| error_message(&v))
         .unwrap_or_else(|| body.chars().take(300).collect());
     let hint = match status {
-        401 | 403 => "API キーを確かめてください。",
-        404 => "モデルの名前を確かめてください。",
+        401 | 403 => "API キーを確認してください。",
+        404 => "モデルの名前を確認してください。",
         429 => "利用の上限に達しています。少し待ってから送り直してください。",
         _ => "",
     };
@@ -153,7 +153,7 @@ mod tests {
         let error = post_json(&url, &[], &serde_json::json!({})).unwrap_err();
         server.join().unwrap();
         assert!(error.contains("401"));
-        assert!(error.contains("API キーを確かめてください"));
+        assert!(error.contains("API キーを確認してください"));
         assert!(error.contains("invalid x-api-key"));
 
         let (url, server) = serve("404 Not Found", "nothing here");
