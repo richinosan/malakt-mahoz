@@ -20,15 +20,14 @@ pub struct Spec {
 impl Spec {
     /// OS のシェルに 1 行のコマンドを渡す。
     pub fn shell(command: &str) -> Self {
-        let (program, flag, line) = if cfg!(windows) {
-            // cmd の出力を UTF-8 にする。そのままだと、日本語が端末の文字コードで出て読めない
-            ("cmd", "/C", format!("chcp 65001>nul & {command}"))
+        let (program, flag) = if cfg!(windows) {
+            ("cmd", "/C")
         } else {
-            ("sh", "-c", command.to_owned())
+            ("sh", "-c")
         };
         Self {
             program: program.into(),
-            args: vec![flag.into(), line],
+            args: vec![flag.into(), command.into()],
             display: command.into(),
             ..Default::default()
         }
@@ -101,6 +100,43 @@ fn hide_window(command: &mut Command) {
 #[cfg(not(windows))]
 fn hide_window(_: &mut Command) {}
 
+/// Windows のコマンドが出力に使う文字コード（日本語の Windows なら 932）。
+#[cfg(windows)]
+fn oem_code_page() -> u32 {
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        safe fn GetOEMCP() -> u32;
+    }
+    GetOEMCP()
+}
+
+#[cfg(not(windows))]
+fn oem_code_page() -> u32 {
+    65001
+}
+
+/// コマンドの出力 1 行を文字列にする。UTF-8 として読めればそのまま、読めなければ
+/// `code_page`（Windows の cmd や古いコマンドが使う Shift_JIS など）として読む。
+fn decode(line: &[u8], code_page: u32) -> String {
+    if let Ok(text) = std::str::from_utf8(line) {
+        return text.to_owned();
+    }
+    let label = match code_page {
+        932 => "shift_jis".to_owned(),
+        936 => "gbk".to_owned(),
+        949 => "euc-kr".to_owned(),
+        950 => "big5".to_owned(),
+        874 | 1250..=1258 => format!("windows-{code_page}"),
+        866 => "ibm866".to_owned(),
+        // そのほかは、読めるところまで出す
+        _ => return String::from_utf8_lossy(line).into_owned(),
+    };
+    match encoding_rs::Encoding::for_label(label.as_bytes()) {
+        Some(encoding) => encoding.decode(line).0.into_owned(),
+        None => String::from_utf8_lossy(line).into_owned(),
+    }
+}
+
 fn pump(reader: impl Read, mut emit: impl FnMut(String)) {
     let mut reader = BufReader::new(reader);
     let mut line = Vec::new();
@@ -109,8 +145,7 @@ fn pump(reader: impl Read, mut emit: impl FnMut(String)) {
         match reader.read_until(b'\n', &mut line) {
             Ok(0) | Err(_) => return,
             Ok(_) => {
-                // 文字コードが UTF-8 でない出力も、読めるところまで出す
-                let text = String::from_utf8_lossy(&line);
+                let text = decode(&line, oem_code_page());
                 emit(text.trim_end_matches(['\n', '\r']).to_owned());
             }
         }
@@ -240,6 +275,20 @@ mod tests {
     }
 
     #[test]
+    fn output_in_the_windows_code_page_is_readable() {
+        // UTF-8 はそのまま
+        assert_eq!(decode("こんにちは".as_bytes(), 932), "こんにちは");
+        // 日本語の Windows の cmd が出す Shift_JIS
+        let sjis = [0x82, 0xb1, 0x82, 0xf1, 0x82, 0xc9, 0x82, 0xbf, 0x82, 0xcd];
+        assert_eq!(decode(&sjis, 932), "こんにちは");
+        // 西欧の Windows-1252
+        assert_eq!(decode(&[b'c', b'a', b'f', 0xe9], 1252), "café");
+        // 分からない文字コードでも、読めるところは出す
+        assert_eq!(decode(&[b'o', b'k', 0xff], 437), "ok\u{fffd}");
+        assert_eq!(decode(&[b'o', b'k', 0xff], 65001), "ok\u{fffd}");
+    }
+
+    #[test]
     fn env_and_cwd_are_passed() {
         let dir = tempfile::tempdir().unwrap();
         let mut spec = Spec::shell(if cfg!(windows) {
@@ -247,12 +296,19 @@ mod tests {
         } else {
             "echo $MALAKT_TEST; pwd"
         });
-        spec.env.push(("MALAKT_TEST".into(), "こんにちは".into()));
+        // Windows の cmd は端末の文字コードで出すので、CI（英語の Windows）では日本語を出せない。
+        // 日本語の出力は `output_in_the_windows_code_page_is_readable` で確かめる
+        let value = if cfg!(windows) {
+            "hello"
+        } else {
+            "こんにちは"
+        };
+        spec.env.push(("MALAKT_TEST".into(), value.into()));
         spec.cwd = Some(dir.path().to_owned());
         let (_, rx) = collect(&spec);
         let (events, code) = wait_exit(&rx);
         assert_eq!(code, Some(0));
-        assert_eq!(events[0], Event::Stdout("こんにちは".into()));
+        assert_eq!(events[0], Event::Stdout(value.into()));
         let name = dir
             .path()
             .file_name()
