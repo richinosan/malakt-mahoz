@@ -297,7 +297,7 @@ impl MainView {
             )
     }
 
-    fn render_home(&self, cx: &mut Context<Self>) -> Div {
+    fn render_home(&self, roomy: bool, cx: &mut Context<Self>) -> Div {
         let theme = cx.theme().clone();
         let due = self.due.clone();
         let count = due.len();
@@ -364,7 +364,7 @@ impl MainView {
                             count,
                             cx.processor(move |this, range: Range<usize>, _, cx| {
                                 range
-                                    .map(|ix| this.render_due_row(ix, &due[ix], cx))
+                                    .map(|ix| this.render_due_row(ix, &due[ix], roomy, cx))
                                     .collect::<Vec<_>>()
                             }),
                         )
@@ -427,7 +427,13 @@ impl MainView {
             )
     }
 
-    fn render_due_row(&self, ix: usize, task: &Todo, cx: &mut Context<Self>) -> AnyElement {
+    fn render_due_row(
+        &self,
+        ix: usize,
+        task: &Todo,
+        roomy: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let theme = cx.theme();
         let id = task.id.clone();
         row()
@@ -447,23 +453,28 @@ impl MainView {
                     .truncate()
                     .child(task.title.clone()),
             )
-            .child(
-                div()
-                    .w(px(140.))
-                    .truncate()
-                    .text_sm()
-                    .text_color(theme.muted_foreground)
-                    .child(self.workspace_name(task.workspace_id.as_deref())),
-            )
+            // 狭いウィンドウでは、タイトルが読めるように場所と担当を省く
+            .when(roomy, |d| {
+                d.child(
+                    div()
+                        .w(px(140.))
+                        .truncate()
+                        .text_sm()
+                        .text_color(theme.muted_foreground)
+                        .child(self.workspace_name(task.workspace_id.as_deref())),
+                )
+            })
             .child(self.due_label(task, cx).w(px(130.)).text_sm())
             .child(status_badge(task.status, cx).w(px(76.)))
-            .child(
-                div()
-                    .w(px(120.))
-                    .truncate()
-                    .text_sm()
-                    .child(self.assignee_label(&task.assignee_ids)),
-            )
+            .when(roomy, |d| {
+                d.child(
+                    div()
+                        .w(px(120.))
+                        .truncate()
+                        .text_sm()
+                        .child(self.assignee_label(&task.assignee_ids)),
+                )
+            })
             .on_click(
                 cx.listener(move |this, _: &ClickEvent, window, cx| {
                     this.open_panel(&id, window, cx)
@@ -2067,7 +2078,7 @@ impl Render for MainView {
             self.render_sidebar(cx).w_full().flex_1().min_h_0()
         } else {
             match self.nav {
-                Nav::Home => self.render_home(cx),
+                Nav::Home => self.render_home(table, cx),
                 _ => self.render_list(table, cx),
             }
         };
