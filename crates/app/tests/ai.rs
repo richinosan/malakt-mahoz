@@ -823,7 +823,7 @@ fn the_chat_leaves_the_bar_and_tasks_in_a_small_window(cx: &mut TestAppContext) 
 #[gpui_kit::test]
 fn a_locked_app_does_not_talk_to_the_ai(cx: &mut TestAppContext) {
     let mut store = Store::open_in_memory().unwrap();
-    malakt_core::lock::set_passphrase(&mut store, None, "passphrase-1").unwrap();
+    malakt_core::lock::enable(&mut store).unwrap();
     let world = start_with(cx, store);
     world.keys.set(Provider::Claude, "k").unwrap();
     let session = session(cx);

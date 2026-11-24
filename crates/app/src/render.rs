@@ -968,13 +968,20 @@ impl MainView {
                                     this.import(window, cx)
                                 }))
                                 .separator()
-                                .item(item("ロックの設定", |this, window, cx| {
-                                    this.open_lock_settings(window, cx)
-                                }));
+                                .item(if lock_enabled {
+                                    item("今すぐロック", |_, window, cx| {
+                                        window.dispatch_action(Box::new(LockNow), cx)
+                                    })
+                                } else {
+                                    item("ロックを有効にする", |this, window, cx| {
+                                        this.enable_lock(window, cx)
+                                    })
+                                });
                             let menu = if lock_enabled {
-                                menu.item(item("今すぐロック", |_, window, cx| {
-                                    window.dispatch_action(Box::new(LockNow), cx)
-                                }))
+                                menu.item(item(
+                                    "ロックを無効にする",
+                                    |this, window, cx| this.disable_lock(window, cx),
+                                ))
                             } else {
                                 menu
                             };
@@ -4618,52 +4625,6 @@ impl MainView {
                     cx,
                 )
             }
-            Modal::Lock => {
-                let enabled = self.lock_enabled(cx);
-                let body = col()
-                    .gap_3()
-                    .when(enabled, |d| {
-                        d.child(section_title("今のパスフレーズ")).child(
-                            Input::new(&self.inputs.passphrase)
-                                .id("lock-current")
-                                .aria_label("今のパスフレーズ"),
-                        )
-                    })
-                    .child(section_title("新しいパスフレーズ"))
-                    .child(
-                        Input::new(&self.inputs.new_passphrase)
-                            .id("lock-new")
-                            .aria_label("新しいパスフレーズ"),
-                    )
-                    .child(
-                        row()
-                            .gap_2()
-                            .justify_end()
-                            .when(enabled, |d| {
-                                d.child(
-                                    Button::new("lock-disable")
-                                        .label("ロックを無効にする")
-                                        .danger()
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            this.disable_lock(window, cx)
-                                        })),
-                                )
-                            })
-                            .child(
-                                Button::new("lock-save")
-                                    .label(if enabled {
-                                        "変更する"
-                                    } else {
-                                        "ロックを有効にする"
-                                    })
-                                    .primary()
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.save_lock(window, cx)
-                                    })),
-                            ),
-                    );
-                self.dialog("ロックの設定", body, cx)
-            }
         })
     }
 
@@ -4678,16 +4639,12 @@ impl MainView {
             .text_color(theme.foreground)
             .child(div().text_xl().child("ロックされています"))
             .child(
-                Input::new(&self.inputs.passphrase)
-                    .id("unlock-input")
-                    .aria_label("パスフレーズ")
-                    .w(px(280.)),
-            )
-            .child(
                 Button::new("unlock")
-                    .label("解除")
+                    .icon(app_icon("fingerprint-pattern"))
+                    .label("パスキーで解除")
                     .primary()
-                    .on_click(cx.listener(|this, _, window, cx| this.submit_unlock(window, cx))),
+                    .loading(self.verifying(cx))
+                    .on_click(cx.listener(|this, _, window, cx| this.request_unlock(window, cx))),
             )
             .when_some(self.error.clone(), |d, error| {
                 d.child(div().text_sm().text_color(theme.danger).child(error))

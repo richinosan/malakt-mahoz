@@ -40,7 +40,14 @@ fn main() {
                 }
             })
             .detach();
-            malakt_mahoz::open_main_window(cx).expect("ウィンドウを開けませんでした");
+            let (window, view) =
+                malakt_mahoz::open_main_window(cx).expect("ウィンドウを開けませんでした");
+            // ロックしてあるなら、起動してすぐパスキーを求める
+            window
+                .update(cx, |_, window, cx| {
+                    view.update(cx, |view, cx| view.request_unlock(window, cx))
+                })
+                .expect("開いたばかりのウィンドウがありません");
             cx.activate(true);
         });
 }

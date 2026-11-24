@@ -5,6 +5,7 @@ pub mod ai_view;
 pub mod cli;
 pub mod db;
 pub mod icons;
+pub mod passkey;
 mod render;
 pub mod state;
 pub mod theme;
@@ -56,6 +57,7 @@ pub fn init_with(store: malakt_core::Store, ai: AiConfig, cx: &mut App) {
     gpui_kit::init(cx);
     load_fonts(cx);
     db::init(store, cx);
+    passkey::init(cx);
     ai::init(ai, cx);
     theme::init(cx);
     cx.bind_keys([

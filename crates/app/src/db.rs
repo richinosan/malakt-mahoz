@@ -7,6 +7,8 @@ pub struct Db {
     pub store: Store,
     /// ロックを解除済みか。ロックが無効なら最初から `true`。
     pub unlocked: bool,
+    /// パスキーの確認の答えを待っているか。待っている間は、もう 1 つ確認を出さない。
+    pub verifying: bool,
     /// 添付を外のアプリで開くときに、中身を一時的に書き出す場所。
     pub opened_dir: std::path::PathBuf,
     /// 最後に見た、データベースの外からの変更の番号。
@@ -37,6 +39,7 @@ impl Db {
         Self {
             store,
             unlocked,
+            verifying: false,
             opened_dir,
             data_version,
         }
