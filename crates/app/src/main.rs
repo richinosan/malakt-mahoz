@@ -28,7 +28,7 @@ fn main() {
         }
     };
     gpui_kit::application()
-        .with_assets(gpui_kit::assets::Assets)
+        .with_assets(malakt_mahoz::Assets)
         .run(move |cx| {
             malakt_mahoz::db::clear_stale_opened();
             malakt_mahoz::init(store, cx);

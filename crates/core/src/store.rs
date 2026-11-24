@@ -41,6 +41,9 @@ impl Drop for Store {
 const TASK_COLUMNS: &str = "t.id, t.workspace_id, t.title, t.description, t.status, t.priority, \
      t.due, t.position, t.created_at, t.updated_at, t.completed_at, t.start, t.percent, t.parent_id";
 
+/// 自動で作る「自分」の名前。あとから変えられる。
+const SELF_NAME: &str = "自分";
+
 impl Store {
     /// ファイルを開く。なければ作る。
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
@@ -126,6 +129,8 @@ impl Store {
             parent_id: parent_id.map(str::to_owned),
             name,
             date: None,
+            icon: None,
+            color: None,
             position,
             created_at: now,
             updated_at: now,
@@ -137,7 +142,7 @@ impl Store {
     pub fn workspace(&self, id: &str) -> Result<Workspace> {
         self.conn
             .prepare_cached(
-                "SELECT id, parent_id, name, position, created_at, updated_at, date \
+                "SELECT id, parent_id, name, position, created_at, updated_at, date, icon, color \
                  FROM workspaces WHERE id = ?1",
             )?
             .query_row(params![id], workspace_from_row)
@@ -148,7 +153,7 @@ impl Store {
     /// すべてのワークスペース。親ごとに `position` 順。
     pub fn workspaces(&self) -> Result<Vec<Workspace>> {
         let mut stmt = self.conn.prepare_cached(
-            "SELECT id, parent_id, name, position, created_at, updated_at, date \
+            "SELECT id, parent_id, name, position, created_at, updated_at, date, icon, color \
              FROM workspaces ORDER BY parent_id, position, id",
         )?;
         let rows = stmt.query_map([], workspace_from_row)?;
@@ -213,14 +218,14 @@ impl Store {
     /// 最上位からそのワークスペースまでの道筋（パンくず用）。
     pub fn workspace_path(&self, id: &str) -> Result<Vec<Workspace>> {
         let mut stmt = self.conn.prepare_cached(
-            "WITH RECURSIVE up(id, parent_id, name, position, created_at, updated_at, date, depth) AS ( \
-                 SELECT id, parent_id, name, position, created_at, updated_at, date, 0 \
+            "WITH RECURSIVE up(id, parent_id, name, position, created_at, updated_at, date, icon, color, depth) AS ( \
+                 SELECT id, parent_id, name, position, created_at, updated_at, date, icon, color, 0 \
                  FROM workspaces WHERE id = ?1 \
                  UNION ALL \
                  SELECT w.id, w.parent_id, w.name, w.position, w.created_at, w.updated_at, \
-                        w.date, up.depth + 1 \
+                        w.date, w.icon, w.color, up.depth + 1 \
                  FROM workspaces w JOIN up ON w.id = up.parent_id) \
-             SELECT id, parent_id, name, position, created_at, updated_at, date \
+             SELECT id, parent_id, name, position, created_at, updated_at, date, icon, color \
              FROM up ORDER BY depth DESC",
         )?;
         let rows = stmt.query_map(params![id], workspace_from_row)?;
@@ -246,7 +251,53 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// ワークスペースのアイコンと色を決める。`None` で既定に戻す。
+    pub fn set_workspace_icon(
+        &mut self,
+        id: &str,
+        icon: Option<&str>,
+        color: Option<&str>,
+    ) -> Result<Workspace> {
+        let icon = icon.map(str::trim).filter(|i| !i.is_empty());
+        if let Some(icon) = icon {
+            let ok = icon.len() <= 40
+                && icon
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+            if !ok {
+                return Err(Error::Invalid(format!(
+                    "アイコンの名前が正しくありません: {icon}"
+                )));
+            }
+        }
+        let color = color.map(str::trim).filter(|c| !c.is_empty());
+        if let Some(color) = color {
+            if !crate::model::WORKSPACE_COLORS.contains(&color) {
+                return Err(Error::Invalid(format!("色が正しくありません: {color}")));
+            }
+        }
+        let n = self.conn.execute(
+            "UPDATE workspaces SET icon = ?2, color = ?3, updated_at = ?4 WHERE id = ?1",
+            params![id, icon, color, now_ms()],
+        )?;
+        found(n, "ワークスペース", id)?;
+        self.workspace(id)
+    }
+
     // ---- 担当者 ----
+
+    /// 「自分」がまだいなければ作る。自分はいつでも担当に選べる。
+    pub fn ensure_self(&mut self) -> Result<()> {
+        let has_self: bool = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM people WHERE is_self = 1)",
+            [],
+            |r| r.get(0),
+        )?;
+        if !has_self {
+            self.create_person(SELF_NAME, true)?;
+        }
+        Ok(())
+    }
 
     pub fn create_person(&mut self, name: &str, is_self: bool) -> Result<Person> {
         let name = required_line(name, "名前")?;
@@ -1137,6 +1188,20 @@ impl Store {
         let tx = self.conn.transaction()?;
         // 親より先に子が来ても入るように、検査をコミットまで遅らせる。
         tx.pragma_update(None, "defer_foreign_keys", "ON")?;
+        // 自動で作ったままの「自分」しかいないところへ、自分のいるデータを取り込むなら復元。
+        // 取り込む側の「自分」を使い、手つかずのほうは消す。
+        if let Some(theirs) = data.people.iter().find(|p| p.is_self) {
+            tx.execute(
+                "DELETE FROM people WHERE is_self = 1 AND id <> ?1 AND name = ?2 \
+                 AND note = '' AND created_at = updated_at \
+                 AND (SELECT COUNT(*) FROM people) = 1 \
+                 AND NOT EXISTS(SELECT 1 FROM task_assignees WHERE person_id = people.id) \
+                 AND NOT EXISTS(SELECT 1 FROM comments WHERE author_id = people.id) \
+                 AND NOT EXISTS(SELECT 1 FROM attachments WHERE author_id = people.id) \
+                 AND NOT EXISTS(SELECT 1 FROM tickets WHERE person_id = people.id)",
+                params![theirs.id, SELF_NAME],
+            )?;
+        }
         let had_self: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM people WHERE is_self = 1)",
             [],
@@ -1300,10 +1365,11 @@ fn clean_draft(draft: &TaskDraft) -> Result<TaskDraft> {
 
 fn insert_workspace(conn: &Connection, w: &Workspace) -> rusqlite::Result<usize> {
     conn.prepare_cached(
-        "INSERT INTO workspaces(id, parent_id, name, position, created_at, updated_at, date) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
+        "INSERT INTO workspaces(id, parent_id, name, position, created_at, updated_at, date, icon, color) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) \
          ON CONFLICT(id) DO UPDATE SET parent_id = excluded.parent_id, name = excluded.name, \
-         position = excluded.position, updated_at = excluded.updated_at, date = excluded.date",
+         position = excluded.position, updated_at = excluded.updated_at, date = excluded.date, \
+         icon = excluded.icon, color = excluded.color",
     )?
     .execute(params![
         w.id,
@@ -1312,7 +1378,9 @@ fn insert_workspace(conn: &Connection, w: &Workspace) -> rusqlite::Result<usize>
         w.position,
         w.created_at,
         w.updated_at,
-        w.date
+        w.date,
+        w.icon,
+        w.color
     ])
 }
 
@@ -1467,6 +1535,8 @@ fn workspace_from_row(r: &Row<'_>) -> rusqlite::Result<Workspace> {
         created_at: r.get(4)?,
         updated_at: r.get(5)?,
         date: r.get(6)?,
+        icon: r.get(7)?,
+        color: r.get(8)?,
     })
 }
 
@@ -2939,5 +3009,46 @@ mod disk_tests {
         let mut s = Store::open_in_memory().unwrap();
         assert!(s.usage().unwrap().database_bytes > 0);
         s.compact().unwrap();
+    }
+
+    #[test]
+    fn workspace_icon_and_color() {
+        let mut store = Store::open_in_memory().unwrap();
+        let ws = store.create_workspace(None, "旅行").unwrap();
+        assert_eq!((ws.icon, ws.color), (None, None));
+        let ws = store
+            .set_workspace_icon(&ws.id, Some("plane"), Some("blue"))
+            .unwrap();
+        assert_eq!(ws.icon.as_deref(), Some("plane"));
+        assert_eq!(ws.color.as_deref(), Some("blue"));
+        assert_eq!(store.workspaces().unwrap()[0], ws);
+        // 正しくない値は入れない
+        assert!(store
+            .set_workspace_icon(&ws.id, Some("../x"), None)
+            .is_err());
+        assert!(store
+            .set_workspace_icon(&ws.id, Some("plane"), Some("#fff"))
+            .is_err());
+        assert!(store.set_workspace_icon("ない", None, None).is_err());
+        assert_eq!(store.workspace(&ws.id).unwrap(), ws);
+        // 既定に戻す
+        let ws = store.set_workspace_icon(&ws.id, None, Some(" ")).unwrap();
+        assert_eq!((ws.icon, ws.color), (None, None));
+    }
+
+    #[test]
+    fn self_is_made_once() {
+        let mut store = Store::open_in_memory().unwrap();
+        store.ensure_self().unwrap();
+        store.ensure_self().unwrap();
+        let people = store.people().unwrap();
+        assert_eq!(people.len(), 1);
+        assert!(people[0].is_self);
+        assert_eq!(people[0].name, "自分");
+        // すでに自分がいれば足さない
+        let mut store = Store::open_in_memory().unwrap();
+        let me = store.create_person("田中", true).unwrap();
+        store.ensure_self().unwrap();
+        assert_eq!(store.people().unwrap(), [me]);
     }
 }
