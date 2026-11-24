@@ -4659,8 +4659,9 @@ impl Render for MainView {
         // 右に AI チャットを置いた分、タスクの画面は狭くなる
         let ai = self.ai_docked(cx).then(|| self.ai_pane.clone()).flatten();
         let ai_width = ai.as_ref().and_then(|_| {
-            let shell = self.ai_session.read(cx).shell_place == ShellPlace::Docked;
-            docked_width(window_width, shell)
+            let s = self.ai_session.read(cx);
+            let shell = s.shell_place == ShellPlace::Docked;
+            docked_width(window_width, shell, (s.chat_width, s.shell_width))
         });
         let width = window_width - ai_width.unwrap_or(px(0.));
         let unlocked = self.unlocked(cx);

@@ -1506,8 +1506,8 @@ fn the_chat_comes_back_after_a_restart(cx: &mut TestAppContext) {
     cx.run_until_parked();
     let ui_state: Value = serde_json::from_str(&setting(cx, "ai.ui").unwrap()).unwrap();
     assert_eq!(
-        ui_state,
-        json!({"open": true, "chat": "docked", "shell": "closed"})
+        (&ui_state["open"], &ui_state["chat"], &ui_state["shell"]),
+        (&json!(true), &json!("docked"), &json!("closed"))
     );
     let chat: Value = serde_json::from_str(&setting(cx, "ai.chat").unwrap()).unwrap();
     assert_eq!(chat["items"][0], json!({"k": "user", "t": "こんにちは"}));
@@ -1559,4 +1559,42 @@ fn a_saved_chat_is_shown_at_startup(cx: &mut TestAppContext) {
     say(cx, window, &pane, "続けて");
     let messages = world.sent()[0].2["messages"].as_array().unwrap().clone();
     assert_eq!(messages.len(), 3);
+}
+
+/// 境界で決めたチャットとシェルの幅は保存され、次の起動で戻る。
+#[gpui_kit::test]
+fn pane_widths_are_kept(cx: &mut TestAppContext) {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .set_setting(
+            "ai.ui",
+            Some(r#"{"open":true,"chat":"docked","shell":"docked","cw":500,"sw":300}"#),
+        )
+        .unwrap();
+    start_with(cx, store);
+    let (window, _view) = open(cx, size(px(2400.), px(1125.)));
+    cx.run_until_parked();
+    assert_eq!(read(cx, |s| (s.chat_width, s.shell_width)), (500., 300.));
+    ui(cx, window, |window, _| {
+        // 拡大率 1.25 を掛けた幅で並ぶ
+        let chat = window.find("ai-chat").bounds();
+        let shell = window.find("ai-shell").bounds();
+        // 左の境界の線の分だけ狭い
+        assert!(chat.size.width + shell.size.width >= px(996.));
+        assert!(chat.size.width + shell.size.width <= px(1000.));
+        assert!(shell.size.width >= px(373.) && shell.size.width <= px(375.));
+        assert!(window.find("ai-resize").visible());
+        assert!(window.find("ai-shell-resize").visible());
+    });
+
+    // 範囲の外には出ない。変えた幅は保存される
+    let session = session(cx);
+    cx.update(|cx| session.update(cx, |s, cx| s.set_widths(100., 5000., cx)));
+    cx.run_until_parked();
+    assert_eq!(read(cx, |s| (s.chat_width, s.shell_width)), (320., 900.));
+    let saved: Value = serde_json::from_str(&setting(cx, "ai.ui").unwrap()).unwrap();
+    assert_eq!(
+        (saved["cw"].as_f64(), saved["sw"].as_f64()),
+        (Some(320.), Some(900.))
+    );
 }
