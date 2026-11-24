@@ -161,6 +161,12 @@ pub struct MainView {
     pub bulk_category_add: bool,
     /// 新しいタスクのダイアログで編集中の下書き（入力欄にないもの: 優先度・担当者）
     pub new_task: TaskDraft,
+    /// 一覧の最後の追加行に入れている状態・優先度・担当・期限
+    pub quick: TaskDraft,
+    /// `quick` を作ったときの行き先。行き先が変わったら作り直す
+    quick_nav: Option<Nav>,
+    /// 追加行の値を手で変えた。変えるまでは、既定値の変更に合わせて作り直す
+    pub quick_touched: bool,
     pub panel: Option<Id>,
     pub detail: Option<Detail>,
     pub editing: Option<Editing>,
@@ -185,6 +191,10 @@ pub struct MainView {
     pub error: Option<SharedString>,
     pub notice: Option<SharedString>,
     pub sidebar_open: bool,
+    /// 広いウィンドウで、左のメニューを閉じている
+    pub sidebar_hidden: bool,
+    /// 出入りの動きを付ける。テストでは止めて、すぐ最後の位置に出す
+    pub motion: bool,
     pub today: String,
     pub inputs: Inputs,
     _subscriptions: Vec<Subscription>,
@@ -200,7 +210,7 @@ impl MainView {
             cx.new(|cx| TextareaState::new(window, cx).placeholder(placeholder))
         };
         let inputs = Inputs {
-            quick_add: input(window, cx, "タスクを追加して Enter"),
+            quick_add: input(window, cx, "タスクを追加…"),
             search: input(window, cx, "キーワード"),
             name: input(window, cx, "名前"),
             passphrase: cx.new(|cx| {
@@ -214,7 +224,7 @@ impl MainView {
                     .placeholder("新しいパスフレーズ")
             }),
             title: input(window, cx, "タイトル"),
-            subtask: input(window, cx, "サブタスクを追加して Enter"),
+            subtask: input(window, cx, "サブタスクを追加…"),
             start: input(window, cx, "YYYY-MM-DD"),
             due: input(window, cx, "YYYY-MM-DD"),
             category: input(window, cx, "カテゴリを追加して Enter"),
@@ -260,6 +270,16 @@ impl MainView {
         on_enter!(name, submit_name);
         on_enter!(passphrase, submit_unlock);
         on_enter!(title, save_title);
+        // タイトルは、ほかの場所を押したときにも保存する
+        subs.push(cx.subscribe_in(
+            &inputs.title,
+            window,
+            |this, _, event: &InputEvent, window, cx| {
+                if matches!(event, InputEvent::Blur) && this.editing == Some(Editing::Title) {
+                    this.save_title(window, cx);
+                }
+            },
+        ));
         on_enter!(subtask, submit_subtask);
         on_enter!(start, save_start);
         on_enter!(due, save_due);
@@ -334,6 +354,9 @@ impl MainView {
             bulk_people: Vec::new(),
             bulk_category_add: true,
             new_task: TaskDraft::default(),
+            quick: TaskDraft::default(),
+            quick_nav: None,
+            quick_touched: false,
             panel: None,
             detail: None,
             editing: None,
@@ -351,12 +374,22 @@ impl MainView {
             error: None,
             notice: None,
             sidebar_open: false,
+            sidebar_hidden: false,
+            motion: true,
             today: view::today(),
             inputs,
             _subscriptions: subs,
         };
         this.reload(cx);
         // ウィンドウの準備が終わってから、たまっている通知を出す
+        // 「システムに合わせる」のとき、OS の外観が変わったら塗り直す
+        cx.observe_window_appearance(window, |_, window, cx| {
+            crate::theme::system_changed(window, cx)
+        })
+        .detach();
+        cx.defer_in(window, |_, window, cx| {
+            crate::theme::system_changed(window, cx)
+        });
         cx.defer_in(window, |this, window, cx| this.deliver_notices(window, cx));
         this
     }
@@ -370,6 +403,9 @@ impl MainView {
     /// データベースから読み直す。どのウィンドウで変えても、全部のウィンドウで呼ばれる。
     pub fn reload(&mut self, cx: &mut Context<Self>) {
         self.today = view::today();
+        if !self.quick_touched || self.quick_nav.as_ref() != Some(&self.nav) {
+            self.reset_quick(cx);
+        }
         let result = self.load(cx);
         if let Err(error) = result {
             self.error = Some(error.to_string().into());
@@ -567,20 +603,38 @@ impl MainView {
         value
     }
 
+    /// 追加行の状態・優先度・担当・期限を、今のワークスペースの既定値に戻す。
+    pub fn reset_quick(&mut self, cx: &mut Context<Self>) {
+        let workspace = self.current_workspace().map(str::to_owned);
+        // 既定値を読めないときは、何も入っていない状態から始める（追加のときに同じ失敗が画面に出る）
+        self.quick = self
+            .db
+            .read(cx)
+            .store
+            .draft_for(workspace.as_deref(), "")
+            .unwrap_or_default();
+        self.quick_nav = Some(self.nav.clone());
+        self.quick_touched = false;
+    }
+
     pub fn submit_quick_add(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let title = self.inputs.quick_add.read(cx).value().to_string();
         if title.trim().is_empty() {
             return;
         }
         let workspace = self.current_workspace().map(str::to_owned);
-        // ワークスペースの既定値（担当・期限・優先度・カテゴリ・説明の雛形）を入れてから作る
+        let mut draft = self.quick.clone();
+        draft.title = title.trim().to_owned();
         if self
-            .write(cx, |s| s.add_task_in(workspace.as_deref(), &title))
+            .write(cx, |s| s.create_task_shown(workspace.as_deref(), &draft))
             .is_some()
         {
             Self::take(&self.inputs.quick_add.clone(), window, cx);
+            self.reset_quick(cx);
             // 追加したものが見えるように、未完了のタブに戻す
             self.query.tab = view::Tab::Open;
+            self.refilter();
+            cx.notify();
         }
     }
 
@@ -767,7 +821,7 @@ impl MainView {
             ..Default::default()
         };
         if self
-            .write(cx, |s| s.create_task(workspace.as_deref(), &draft))
+            .write(cx, |s| s.create_task_shown(workspace.as_deref(), &draft))
             .is_some()
         {
             Self::take(&self.inputs.subtask.clone(), window, cx);
@@ -2002,7 +2056,37 @@ bundled_icons! {
         "graduation-cap",
         "shopping-cart",
     ],
-    other: ["settings", "trash", "ellipsis", "plus", "download", "upload"],
+    other: [
+        "settings",
+        "trash",
+        "ellipsis",
+        "plus",
+        "download",
+        "upload",
+        "menu",
+        "circle-question-mark",
+        "x",
+        "monitor",
+        "user",
+        "circle-dot",
+        "search",
+        "calendar-days",
+        "sliders-horizontal",
+        "arrow-right",
+        "arrow-left",
+        "maximize-2",
+        "rotate-ccw-clock",
+        "circle-x",
+        "paperclip",
+        "chevron-down",
+        "chevron-right",
+        "check-check",
+        "signal-high",
+        "signal-medium",
+        "signal-low",
+        "circle",
+        "link",
+    ],
 }
 
 /// アイコンのファイルの場所。[`Assets`] が読む。
