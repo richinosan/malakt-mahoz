@@ -5,6 +5,7 @@ pub mod ai_view;
 pub mod cli;
 pub mod db;
 pub mod icons;
+pub mod passkey;
 mod render;
 pub mod state;
 pub mod theme;
@@ -110,6 +111,7 @@ pub fn init_with(store: malakt_core::Store, ai: AiConfig, cx: &mut App) {
     gpui_kit::init(cx);
     load_fonts(cx);
     db::init(store, cx);
+    passkey::init(cx);
     ai::init(ai, cx);
     theme::init(cx);
     cx.bind_keys([
@@ -190,11 +192,20 @@ pub fn open_ai_window(mode: PaneMode, cx: &mut App) -> Result<AnyWindowHandle> {
         _ => ("AI チャット - Malakt Mahoz", size(px(860.), px(720.))),
     };
     let offset = px(28.) * (cx.windows().len() % 8) as f32;
-    let options = WindowOptions {
-        window_bounds: Some(WindowBounds::Windowed(Bounds {
+    // 前に置いていた位置と大きさがあれば、そこに開く
+    let slot = usize::from(mode == PaneMode::ShellWindow);
+    let bounds = match ai::shared(cx).read(cx).window_bounds[slot] {
+        Some([x, y, w, h]) => Bounds {
+            origin: point(gpui_kit::px(x), gpui_kit::px(y)),
+            size: size(gpui_kit::px(w), gpui_kit::px(h)),
+        },
+        None => Bounds {
             origin: point(px(160.) + offset, px(100.) + offset),
             size: window_size,
-        })),
+        },
+    };
+    let options = WindowOptions {
+        window_bounds: Some(WindowBounds::Windowed(bounds)),
         window_min_size: Some(size(px(320.), px(280.))),
         titlebar: Some(TitlebarOptions {
             title: Some(title.into()),

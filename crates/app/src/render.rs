@@ -8,6 +8,7 @@ use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::{Input, Textarea};
 use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu, PopupMenu, PopupMenuItem};
 use gpui_kit::component::scroll::ScrollableElement;
+use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::text::TextView;
 use gpui_kit::component::{ActiveTheme, Icon, IconName, Sizable};
 use gpui_kit::prelude::FluentBuilder;
@@ -902,6 +903,8 @@ impl MainView {
                 .child(
                     Button::new("ai-toggle")
                         .icon(app_icon("sparkles"))
+                        // AI が動いている間は、回る印に変わる
+                        .loading(self.ai_session.read(cx).busy)
                         .outline()
                         .rounded(px(999.))
                         .tooltip("AI チャット")
@@ -966,13 +969,20 @@ impl MainView {
                                     this.import(window, cx)
                                 }))
                                 .separator()
-                                .item(item("ロックの設定", |this, window, cx| {
-                                    this.open_lock_settings(window, cx)
-                                }));
+                                .item(if lock_enabled {
+                                    item("今すぐロック", |_, window, cx| {
+                                        window.dispatch_action(Box::new(LockNow), cx)
+                                    })
+                                } else {
+                                    item("ロックを有効にする", |this, window, cx| {
+                                        this.enable_lock(window, cx)
+                                    })
+                                });
                             let menu = if lock_enabled {
-                                menu.item(item("今すぐロック", |_, window, cx| {
-                                    window.dispatch_action(Box::new(LockNow), cx)
-                                }))
+                                menu.item(item(
+                                    "ロックを無効にする",
+                                    |this, window, cx| this.disable_lock(window, cx),
+                                ))
                             } else {
                                 menu
                             };
@@ -1980,6 +1990,7 @@ impl MainView {
         let active = self.panel.as_deref() == Some(id.as_str());
         let closed = !task.status.is_open();
         let now = malakt_core::now_ms();
+        let arranging = self.ai_session.read(cx).arranging.contains(&task.id);
 
         let select = {
             let id = id.clone();
@@ -2034,6 +2045,19 @@ impl MainView {
                 .child(
                     div()
                         .id(("title", ix))
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        // AI が整えている間は、タイトルの前で印が回る
+                        .when(arranging, |d| {
+                            d.child(
+                                div()
+                                    .id(("ai-working", ix))
+                                    .flex_none()
+                                    .child(Spinner::new().small())
+                                    .test_support(),
+                            )
+                        })
                         .truncate()
                         .text_sm()
                         .font_weight(FontWeight::BOLD)
@@ -2790,6 +2814,38 @@ impl MainView {
             )
         };
 
+        // AI が整えている間の印と、整えられなかった理由
+        let ai_state = {
+            let session = self.ai_session.read(cx);
+            if session.arranging.contains(&task.id) {
+                Some(
+                    row()
+                        .id("ai-working")
+                        .gap_2()
+                        .items_center()
+                        .text_sm()
+                        .text_color(theme.muted_foreground)
+                        .child(Spinner::new().small())
+                        .child("AI が整えています")
+                        .test_support()
+                        .into_any_element(),
+                )
+            } else {
+                session.arrange_notes.get(&task.id).map(|note| {
+                    row()
+                        .id("ai-note")
+                        .gap_2()
+                        .items_start()
+                        .text_sm()
+                        .text_color(theme.muted_foreground)
+                        .child(app_icon("sparkles").small().flex_none().mt_1())
+                        .child(div().min_w_0().child(note.clone()))
+                        .test_support()
+                        .into_any_element()
+                })
+            }
+        };
+
         let status_actions = {
             let id = task.id.clone();
             let mut actions = row().gap_2().flex_wrap();
@@ -3284,6 +3340,7 @@ impl MainView {
                 .p_4()
                 .gap_4()
                 .child(title)
+                .children(ai_state)
                 .child(
                     row()
                         .gap_3()
@@ -4596,52 +4653,6 @@ impl MainView {
                     cx,
                 )
             }
-            Modal::Lock => {
-                let enabled = self.lock_enabled(cx);
-                let body = col()
-                    .gap_3()
-                    .when(enabled, |d| {
-                        d.child(section_title("今のパスフレーズ")).child(
-                            Input::new(&self.inputs.passphrase)
-                                .id("lock-current")
-                                .aria_label("今のパスフレーズ"),
-                        )
-                    })
-                    .child(section_title("新しいパスフレーズ"))
-                    .child(
-                        Input::new(&self.inputs.new_passphrase)
-                            .id("lock-new")
-                            .aria_label("新しいパスフレーズ"),
-                    )
-                    .child(
-                        row()
-                            .gap_2()
-                            .justify_end()
-                            .when(enabled, |d| {
-                                d.child(
-                                    Button::new("lock-disable")
-                                        .label("ロックを無効にする")
-                                        .danger()
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            this.disable_lock(window, cx)
-                                        })),
-                                )
-                            })
-                            .child(
-                                Button::new("lock-save")
-                                    .label(if enabled {
-                                        "変更する"
-                                    } else {
-                                        "ロックを有効にする"
-                                    })
-                                    .primary()
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.save_lock(window, cx)
-                                    })),
-                            ),
-                    );
-                self.dialog("ロックの設定", body, cx)
-            }
         })
     }
 
@@ -4656,16 +4667,12 @@ impl MainView {
             .text_color(theme.foreground)
             .child(div().text_xl().child("ロックされています"))
             .child(
-                Input::new(&self.inputs.passphrase)
-                    .id("unlock-input")
-                    .aria_label("パスフレーズ")
-                    .w(px(280.)),
-            )
-            .child(
                 Button::new("unlock")
-                    .label("解除")
+                    .icon(app_icon("fingerprint-pattern"))
+                    .label("パスキーで解除")
                     .primary()
-                    .on_click(cx.listener(|this, _, window, cx| this.submit_unlock(window, cx))),
+                    .loading(self.verifying(cx))
+                    .on_click(cx.listener(|this, _, window, cx| this.request_unlock(window, cx))),
             )
             .when_some(self.error.clone(), |d, error| {
                 d.child(div().text_sm().text_color(theme.danger).child(error))
@@ -4680,8 +4687,9 @@ impl Render for MainView {
         // 右に AI チャットを置いた分、タスクの画面は狭くなる
         let ai = self.ai_docked(cx).then(|| self.ai_pane.clone()).flatten();
         let ai_width = ai.as_ref().and_then(|_| {
-            let shell = self.ai_session.read(cx).shell_place == ShellPlace::Docked;
-            docked_width(window_width, shell)
+            let s = self.ai_session.read(cx);
+            let shell = s.shell_place == ShellPlace::Docked;
+            docked_width(window_width, shell, (s.chat_width, s.shell_width))
         });
         let width = window_width - ai_width.unwrap_or(px(0.));
         let unlocked = self.unlocked(cx);

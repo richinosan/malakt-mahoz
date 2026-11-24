@@ -603,8 +603,13 @@ fn provider_model_and_effort_are_chosen_in_settings(cx: &mut TestAppContext) {
     });
 
     // Claude のモデルと effort を変える
+    // モデルは、開いた一覧から選ぶ。選ぶと一覧は閉じる
+    ui(cx, window, |window, cx| window.click("ai-model-open", cx));
     ui(cx, window, |window, cx| {
-        window.click(("ai-model", 2usize), cx);
+        window.click(("ai-model", 2usize), cx)
+    });
+    ui(cx, window, |window, cx| {
+        assert!(window.try_find("ai-model-list").is_none());
         window.click(("ai-effort", Effort::High as usize), cx);
     });
     assert_eq!(
@@ -620,10 +625,14 @@ fn provider_model_and_effort_are_chosen_in_settings(cx: &mut TestAppContext) {
 
     // モデルの ID を入力して選ぶ
     open_settings(cx, window, &pane);
+    ui(cx, window, |window, cx| window.click("ai-model-open", cx));
     ui(cx, window, |window, cx| {
         window.click("ai-model-input", cx);
-        window.press("secondary-a", cx);
-        window.input("claude-haiku-5-5", cx);
+        window.input("haiku", cx);
+    });
+    // 検索の言葉に合うものだけが残る
+    ui(cx, window, |window, cx| {
+        assert!(window.try_find(("ai-model", 1usize)).is_none());
         window.press("enter", cx);
     });
     assert_eq!(read(cx, |s| s.model().to_owned()), "claude-haiku-5-5");
@@ -656,9 +665,14 @@ fn provider_model_and_effort_are_chosen_in_settings(cx: &mut TestAppContext) {
         read(cx, |s| s.items.last().cloned()),
         Some(Item::Assistant("やあ".into()))
     );
+    // モデルの一覧を開いた 2 回は Claude の一覧を、送るときは OpenCode Go の一覧を読む
     assert_eq!(
         *world.fetched.lock().unwrap(),
-        ["https://opencode.ai/inference/go/v1/models"]
+        [
+            "https://api.anthropic.com/v1/models?limit=100",
+            "https://api.anthropic.com/v1/models?limit=100",
+            "https://opencode.ai/inference/go/v1/models"
+        ]
     );
 
     // このモデルで選べない effort は、送る前にエラーになる
@@ -823,7 +837,7 @@ fn the_chat_leaves_the_bar_and_tasks_in_a_small_window(cx: &mut TestAppContext) 
 #[gpui_kit::test]
 fn a_locked_app_does_not_talk_to_the_ai(cx: &mut TestAppContext) {
     let mut store = Store::open_in_memory().unwrap();
-    malakt_core::lock::set_passphrase(&mut store, None, "passphrase-1").unwrap();
+    malakt_core::lock::enable(&mut store).unwrap();
     let world = start_with(cx, store);
     world.keys.set(Provider::Claude, "k").unwrap();
     let session = session(cx);
@@ -836,6 +850,9 @@ fn a_locked_app_does_not_talk_to_the_ai(cx: &mut TestAppContext) {
 
 /// リンク付きのタスクを 1 つ作り、定期チェックをオンにする。
 fn watched_task(cx: &mut TestAppContext, minutes: u32) -> String {
+    // 定期チェックだけを見るので、新しいタスクを整えるほうは切る
+    let arrange = session(cx);
+    cx.update(|cx| arrange.update(cx, |s, cx| s.set_arrange(false, cx)));
     let id = cx.update(|cx| {
         db::shared(cx).update(cx, |db, cx| {
             let draft = TaskDraft {
@@ -1295,4 +1312,289 @@ fn ctrl_c_in_the_input_line_kills_the_typed_command(cx: &mut TestAppContext) {
     assert!(started.elapsed() < Duration::from_secs(30));
     assert!(shell_texts(cx).iter().any(|l| l == "強制終了しました"));
     assert!(read(cx, |s| s.items.is_empty()), "チャットには何も書かない");
+}
+
+fn new_task(cx: &mut TestAppContext, title: &str) -> String {
+    cx.update(|cx| {
+        db::shared(cx).update(cx, |db, cx| {
+            let draft = TaskDraft {
+                title: title.into(),
+                ..Default::default()
+            };
+            let task = db.store.create_task(None, &draft).unwrap();
+            cx.notify();
+            task.id
+        })
+    })
+}
+
+/// タスクを作ると、AI がリンクを読んでタスクを整える。整えている間は印が出る。
+#[gpui_kit::test]
+fn a_new_task_is_arranged_by_the_ai(cx: &mut TestAppContext) {
+    let world = start(cx);
+    world.keys.set(Provider::Claude, "k").unwrap();
+    let (window, view) = open(cx, wide());
+    ui(cx, window, |window, cx| window.click("nav-all", cx));
+    cx.run_until_parked();
+
+    // gh が少しかかる間に、印を見る
+    *world.github.lock().unwrap() = if cfg!(windows) {
+        " & ping -n 2 127.0.0.1 > NUL".into()
+    } else {
+        "; sleep 0.5".into()
+    };
+    let task = new_task(cx, "https://github.com/o/r/pull/7 のレビュー");
+    wait(cx, "AI が動き始める", |s| !s.arranging.is_empty());
+    // 始まったら、タスクの行に印が出る
+    assert_eq!(read(cx, |s| s.arranging.clone()), vec![task.clone()]);
+    ui(cx, window, |window, _| {
+        assert!(window.try_find(("ai-working", 0usize)).is_some());
+    });
+    world.reply(tool_reply(
+        "t1",
+        "update_task",
+        json!({"id": task, "title": "ログインを直す PR のレビュー"}),
+    ));
+    world.reply(text_reply("タイトルを付け直しました。"));
+    wait(cx, "AI が整え終わる", |s| !s.busy);
+
+    let sent = world.sent();
+    assert_eq!(sent.len(), 2);
+    let message = sent[0].2["messages"][0]["content"].as_str().unwrap();
+    assert!(message.contains(&format!("## タスク（id: {task}）")));
+    assert!(message.contains("fetched https://github.com/o/r/pull/7"));
+    // 今見ている画面も伝える
+    let system = sent[0].2["system"].as_str().unwrap();
+    assert!(system.contains("すべてのタスク"), "{system}");
+    assert!(system.contains("のレビュー（ID: "), "{system}");
+    assert_eq!(all_tasks(cx)[0].title, "ログインを直す PR のレビュー");
+    assert!(read(cx, |s| s.arranging.is_empty()));
+    ui(cx, window, |window, _| {
+        assert!(window.try_find(("ai-working", 0usize)).is_none());
+    });
+
+    // AI が書き換えた分では、もう一度動かない
+    cx.run_until_parked();
+    assert_eq!(world.sent().len(), 2);
+    let _ = view;
+}
+
+/// API キーがなければ、どこにも通信しない。理由を出し、キーを入れると動く。
+#[gpui_kit::test]
+fn a_new_task_waits_for_the_key(cx: &mut TestAppContext) {
+    let world = start(cx);
+    let task = new_task(cx, "https://github.com/o/r/issues/3");
+    wait(cx, "理由が出る", |s| !s.arrange_notes.is_empty());
+    assert!(world.sent().is_empty());
+    assert!(read(cx, |s| s.shell.is_empty()));
+    let note = read(cx, |s| s.arrange_notes[&task].clone());
+    assert!(note.contains("API キーがない"), "{note}");
+
+    world.reply(text_reply("そのままにしました。"));
+    let session = session(cx);
+    cx.update(|cx| session.update(cx, |s, cx| s.save_key("k", cx)));
+    wait(cx, "AI が整え終わる", |s| {
+        !s.busy && !s.items.is_empty()
+    });
+    assert_eq!(world.sent().len(), 1);
+    assert!(read(cx, |s| s.arrange_notes.is_empty()));
+}
+
+/// 前からあるタスクと、オフにしている間のタスクは整えない。
+#[gpui_kit::test]
+fn old_tasks_are_left_alone(cx: &mut TestAppContext) {
+    let mut store = Store::open_in_memory().unwrap();
+    let draft = TaskDraft {
+        title: "https://github.com/o/r/issues/1".into(),
+        ..Default::default()
+    };
+    let old = store.create_task(None, &draft).unwrap();
+    let world = start_with(cx, store);
+    world.keys.set(Provider::Claude, "k").unwrap();
+    // 前からあるタスクを書き換えても動かない
+    cx.update(|cx| {
+        db::shared(cx).update(cx, |db, cx| {
+            db.store
+                .set_task_status(&old.id, Status::InProcess)
+                .unwrap();
+            cx.notify();
+        })
+    });
+    cx.run_until_parked();
+    let session = session(cx);
+    cx.update(|cx| session.update(cx, |s, cx| s.set_arrange(false, cx)));
+    new_task(cx, "https://github.com/o/r/issues/2");
+    cx.run_until_parked();
+    cx.update(|cx| session.update(cx, |s, cx| s.set_arrange(true, cx)));
+    cx.run_until_parked();
+    assert!(world.sent().is_empty());
+    assert!(read(cx, |s| s.shell.is_empty() && !s.busy));
+}
+
+/// 入力欄の下のボタンから、その場でサービス・モデル・effort を選べる。
+#[gpui_kit::test]
+fn model_and_effort_are_picked_under_the_input(cx: &mut TestAppContext) {
+    let world = start(cx);
+    world.keys.set(Provider::Claude, "k").unwrap();
+    let (window, view) = open(cx, wide());
+    open_chat(cx, window, &view);
+    ui(cx, window, |window, _| {
+        for id in ["ai-pick-provider", "ai-pick-model", "ai-pick-effort"] {
+            assert!(window.find(id).visible(), "{id}");
+        }
+    });
+    let before = read(cx, |s| (s.effort, s.model().to_owned()));
+    ui(cx, window, |window, cx| window.click("ai-pick-effort", cx));
+    ui(cx, window, |window, cx| {
+        window.press("down", cx);
+        window.press("down", cx);
+        window.press("enter", cx);
+    });
+    assert_eq!(read(cx, |s| s.effort), malakt_ai::Effort::ALL[1]);
+    assert_ne!(read(cx, |s| s.effort), before.0);
+
+    ui(cx, window, |window, cx| window.click("ai-pick-model", cx));
+    ui(cx, window, |window, cx| {
+        window.press("down", cx);
+        window.press("down", cx);
+        window.press("enter", cx);
+    });
+    assert_eq!(
+        read(cx, |s| s.model().to_owned()),
+        Provider::Claude.models()[1]
+    );
+}
+
+/// 続けて実行したツールは 1 行にまとまり、押すと中身が開く。
+#[gpui_kit::test]
+fn tool_runs_fold_into_one_row(cx: &mut TestAppContext) {
+    let world = start(cx);
+    world.keys.set(Provider::Claude, "k").unwrap();
+    let (window, view) = open(cx, wide());
+    let pane = open_chat(cx, window, &view);
+    world.reply(json!({"stop_reason": "tool_use", "content": [
+        {"type": "tool_use", "id": "a", "name": "create_task", "input": {"title": "牛乳を買う"}},
+        {"type": "tool_use", "id": "b", "name": "create_task", "input": {"title": "卵を買う"}},
+    ]}));
+    world.reply(text_reply("2 つ作りました。"));
+    say(cx, window, &pane, "牛乳と卵");
+    ui(cx, window, |window, cx| {
+        assert!(window.find(("ai-tools", 1usize)).visible());
+        assert!(window.try_find(("ai-tool", 1usize)).is_none());
+        window.click(("ai-tools", 1usize), cx);
+    });
+    ui(cx, window, |window, _| {
+        assert!(window.find(("ai-tool", 1usize)).visible());
+        assert!(window.find(("ai-tool", 2usize)).visible());
+    });
+}
+
+fn setting(cx: &mut TestAppContext, key: &str) -> Option<String> {
+    cx.update(|cx| db::shared(cx).read(cx).store.setting(key).unwrap())
+}
+
+/// チャットの開閉、シェルの場所、会話は保存され、次に起動したときに戻る。
+#[gpui_kit::test]
+fn the_chat_comes_back_after_a_restart(cx: &mut TestAppContext) {
+    let world = start(cx);
+    world.keys.set(Provider::Claude, "k").unwrap();
+    let (window, view) = open(cx, wide());
+    let pane = open_chat(cx, window, &view);
+    world.reply(text_reply("はい"));
+    say(cx, window, &pane, "こんにちは");
+    ui(cx, window, |window, cx| window.click("ai-shell-toggle", cx));
+    cx.run_until_parked();
+    let ui_state: Value = serde_json::from_str(&setting(cx, "ai.ui").unwrap()).unwrap();
+    assert_eq!(
+        (&ui_state["open"], &ui_state["chat"], &ui_state["shell"]),
+        (&json!(true), &json!("docked"), &json!("closed"))
+    );
+    let chat: Value = serde_json::from_str(&setting(cx, "ai.chat").unwrap()).unwrap();
+    assert_eq!(chat["items"][0], json!({"k": "user", "t": "こんにちは"}));
+    assert_eq!(chat["items"][1], json!({"k": "assistant", "t": "はい"}));
+    assert_eq!(chat["turns"].as_array().unwrap().len(), 2);
+
+    // 新しいチャットにすると、保存した会話も空になる
+    ui(cx, window, |window, cx| window.click("ai-new-chat", cx));
+    cx.run_until_parked();
+    let chat: Value = serde_json::from_str(&setting(cx, "ai.chat").unwrap()).unwrap();
+    assert_eq!(chat["items"], json!([]));
+}
+
+#[gpui_kit::test]
+fn a_saved_chat_is_shown_at_startup(cx: &mut TestAppContext) {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .set_setting(
+            "ai.ui",
+            Some(r#"{"open":true,"chat":"docked","shell":"closed"}"#),
+        )
+        .unwrap();
+    store
+        .set_setting(
+            "ai.chat",
+            Some(
+                &json!({"id": "c1", "items": [
+                    {"k": "user", "t": "こんにちは"}, {"k": "assistant", "t": "はい"}],
+                    "turns": [{"k": "user", "t": "こんにちは"},
+                        {"k": "assistant", "t": "はい", "calls": []}]})
+                .to_string(),
+            ),
+        )
+        .unwrap();
+    let world = start_with(cx, store);
+    world.keys.set(Provider::Claude, "k").unwrap();
+    let (window, view) = open(cx, wide());
+    cx.run_until_parked();
+    // 押さなくても、チャットが開いていて、前の会話が出ている。シェルは閉じたまま
+    cx.update(|cx| assert!(view.read(cx).ai_open));
+    ui(cx, window, |window, _| {
+        assert!(window.find(("ai-user", 0usize)).visible());
+        assert!(window.find(("ai-assistant", 1usize)).visible());
+        assert!(window.try_find("ai-shell").is_none());
+    });
+    // 続きを送ると、前の会話も AI に渡る
+    let pane = cx.update(|cx| view.read(cx).ai_pane.clone().unwrap());
+    world.reply(text_reply("続きです"));
+    say(cx, window, &pane, "続けて");
+    let messages = world.sent()[0].2["messages"].as_array().unwrap().clone();
+    assert_eq!(messages.len(), 3);
+}
+
+/// 境界で決めたチャットとシェルの幅は保存され、次の起動で戻る。
+#[gpui_kit::test]
+fn pane_widths_are_kept(cx: &mut TestAppContext) {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .set_setting(
+            "ai.ui",
+            Some(r#"{"open":true,"chat":"docked","shell":"docked","cw":500,"sw":300}"#),
+        )
+        .unwrap();
+    start_with(cx, store);
+    let (window, _view) = open(cx, size(px(2400.), px(1125.)));
+    cx.run_until_parked();
+    assert_eq!(read(cx, |s| (s.chat_width, s.shell_width)), (500., 300.));
+    ui(cx, window, |window, _| {
+        // 拡大率 1.25 を掛けた幅で並ぶ
+        let chat = window.find("ai-chat").bounds();
+        let shell = window.find("ai-shell").bounds();
+        // 左の境界の線の分だけ狭い
+        assert!(chat.size.width + shell.size.width >= px(996.));
+        assert!(chat.size.width + shell.size.width <= px(1000.));
+        assert!(shell.size.width >= px(373.) && shell.size.width <= px(375.));
+        assert!(window.find("ai-resize").visible());
+        assert!(window.find("ai-shell-resize").visible());
+    });
+
+    // 範囲の外には出ない。変えた幅は保存される
+    let session = session(cx);
+    cx.update(|cx| session.update(cx, |s, cx| s.set_widths(100., 5000., cx)));
+    cx.run_until_parked();
+    assert_eq!(read(cx, |s| (s.chat_width, s.shell_width)), (320., 900.));
+    let saved: Value = serde_json::from_str(&setting(cx, "ai.ui").unwrap()).unwrap();
+    assert_eq!(
+        (saved["cw"].as_f64(), saved["sw"].as_f64()),
+        (Some(320.), Some(900.))
+    );
 }

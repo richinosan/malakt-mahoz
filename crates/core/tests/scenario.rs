@@ -382,18 +382,20 @@ fn export_and_import_through_files() {
     ));
 }
 
-/// ロックを掛けて閉じ、開き直して解除する。
+/// ロックを掛けて閉じ、開き直してもロックされたまま。無効にすると、開き直しても無効のまま。
 #[test]
 fn lock_survives_restart() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("locked.sqlite3");
     {
         let mut s = Store::open(&db).unwrap();
-        lock::set_passphrase(&mut s, None, "ひみつの言葉").unwrap();
+        lock::enable(&mut s).unwrap();
+    }
+    {
+        let mut s = Store::open(&db).unwrap();
+        assert!(lock::is_enabled(&s).unwrap());
+        lock::disable(&mut s).unwrap();
     }
     let s = Store::open(&db).unwrap();
-    assert!(lock::is_enabled(&s).unwrap());
-    assert!(!lock::unlock(&s, &lock::NoDeviceAuth, None).unwrap());
-    assert!(!lock::unlock(&s, &lock::NoDeviceAuth, Some("ちがう")).unwrap());
-    assert!(lock::unlock(&s, &lock::NoDeviceAuth, Some("ひみつの言葉")).unwrap());
+    assert!(!lock::is_enabled(&s).unwrap());
 }

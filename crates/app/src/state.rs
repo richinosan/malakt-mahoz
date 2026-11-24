@@ -17,9 +17,10 @@ use malakt_core::{
     Scope, Status, Store, Task as Todo, TaskDefaults, TaskDraft, TaskFilter, Workspace,
 };
 
-use crate::ai::{self, Session};
+use crate::ai::{self, Session, ShellPlace};
 use crate::ai_view::{AiPane, PaneMode};
 use crate::db::{self, Db};
+use crate::passkey::{self, Passkey};
 
 /// 左のメニューで選んでいる場所。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,7 +50,6 @@ pub enum Modal {
     History,
     /// 状態の変更（コメントを添えられる）
     Status(Id, Status),
-    Lock,
     /// ワークスペースの基準日と、タスク追加時の既定値
     WorkspaceSettings(Id),
     /// ワークスペースのアイコンと色を選ぶ
@@ -114,8 +114,6 @@ pub struct Inputs {
     pub search: Entity<InputState>,
     pub icon_search: Entity<InputState>,
     pub name: Entity<InputState>,
-    pub passphrase: Entity<InputState>,
-    pub new_passphrase: Entity<InputState>,
     pub title: Entity<InputState>,
     pub subtask: Entity<InputState>,
     pub start: Entity<InputState>,
@@ -243,16 +241,6 @@ impl MainView {
             search: input(window, cx, "キーワード"),
             icon_search: input(window, cx, "アイコンを検索"),
             name: input(window, cx, "名前"),
-            passphrase: cx.new(|cx| {
-                InputState::new(window, cx)
-                    .masked(true)
-                    .placeholder("パスフレーズ")
-            }),
-            new_passphrase: cx.new(|cx| {
-                InputState::new(window, cx)
-                    .masked(true)
-                    .placeholder("新しいパスフレーズ")
-            }),
             title: input(window, cx, "タイトル"),
             subtask: input(window, cx, "サブタスクを追加…"),
             start: input(window, cx, "YYYY-MM-DD"),
@@ -281,6 +269,13 @@ impl MainView {
             cx.observe(&db, |this, _, cx| this.reload(cx)),
             // チャットを別ウィンドウに出した・戻したときに、右の表示を合わせる
             cx.observe(&ai_session, |_, _, cx| cx.notify()),
+            // 今見ている場所を、AI に伝えられるようにしておく
+            cx.observe_self(|this, cx| {
+                let place = this.ai_place();
+                if this.ai_session.read(cx).place != place {
+                    this.ai_session.update(cx, |s, _| s.place = place);
+                }
+            }),
             // 読み直すたびに、まだ出していない通知を OS に出す
             cx.observe_in(&db, window, |this, _, window, cx| {
                 this.deliver_notices(window, cx)
@@ -301,7 +296,6 @@ impl MainView {
         }
         on_enter!(quick_add, submit_quick_add);
         on_enter!(name, submit_name);
-        on_enter!(passphrase, submit_unlock);
         on_enter!(title, save_title);
         // タイトルは、ほかの場所を押したときにも保存する
         subs.push(cx.subscribe_in(
@@ -448,6 +442,39 @@ impl MainView {
             crate::theme::system_changed(window, cx)
         });
         cx.defer_in(window, |this, window, cx| this.deliver_notices(window, cx));
+        // 前に閉じたときの AI チャットとシェルを、最初のウィンドウで戻す
+        if let Some((chat_window, shell_window)) =
+            this.ai_session.update(cx, |s, _| s.restore.take())
+        {
+            if this.ai_session.read(cx).open {
+                this.ai_open = true;
+                let main = cx.weak_entity();
+                this.ai_pane =
+                    Some(cx.new(|cx| AiPane::new(PaneMode::Docked, Some(main), window, cx)));
+            }
+            let session = this.ai_session.clone();
+            cx.defer(move |cx| {
+                for (wanted, mode) in [
+                    (chat_window, PaneMode::ChatWindow),
+                    (shell_window, PaneMode::ShellWindow),
+                ] {
+                    if !wanted {
+                        continue;
+                    }
+                    let opened = crate::open_ai_window(mode, cx);
+                    session.update(cx, |s, cx| {
+                        match (opened, mode) {
+                            (Ok(handle), PaneMode::ChatWindow) => s.chat_window = Some(handle),
+                            (Ok(handle), _) => s.shell_place = ShellPlace::Window(handle),
+                            (Err(e), _) => {
+                                s.error = Some(format!("ウィンドウを開けませんでした: {e}").into())
+                            }
+                        }
+                        cx.notify();
+                    });
+                }
+            });
+        }
         this
     }
 
@@ -1714,60 +1741,80 @@ impl MainView {
         lock::is_enabled(&self.db.read(cx).store).unwrap_or(false)
     }
 
-    pub fn submit_unlock(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // ロックの設定のダイアログでも同じ欄を使うので、ロック画面のときだけ解除する
+    pub fn verifying(&self, cx: &App) -> bool {
+        self.db.read(cx).verifying
+    }
+
+    /// パスキーで本人確認をして、通ったら `done` を実行する。
+    fn with_passkey(
+        &mut self,
+        action: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        done: fn(&mut Self, &mut Context<Self>),
+    ) {
+        if self.verifying(cx) {
+            return;
+        }
+        let verify = cx.global::<Passkey>().0.clone();
+        let request = passkey::Request {
+            app: crate::APP_NAME.into(),
+            action: action.into(),
+            window: passkey::native_window(window),
+        };
+        self.error = None;
+        let db = self.db.clone();
+        db.update(cx, |db, cx| {
+            db.verifying = true;
+            cx.notify();
+        });
+        cx.spawn(async move |this, cx| {
+            // OS のダイアログに答えるまで戻らないので、画面のスレッドでは待たない
+            let result = cx.background_spawn(async move { verify(request) }).await;
+            db.update(cx, |db, cx| {
+                db.verifying = false;
+                cx.notify();
+            });
+            // 待っている間にウィンドウを閉じたなら、結果を出す先がない
+            let _ = this.update(cx, |this, cx| {
+                match result {
+                    Ok(()) => done(this, cx),
+                    Err(failure) => this.error = Some(failure.to_string().into()),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// ロック画面を、パスキーで開く。
+    pub fn request_unlock(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.unlocked(cx) {
             return;
         }
-        let passphrase = Self::take(&self.inputs.passphrase.clone(), window, cx);
-        let ok = lock::unlock(
-            &self.db.read(cx).store,
-            &lock::NoDeviceAuth,
-            Some(&passphrase),
-        );
-        match ok {
-            Ok(true) => {
-                self.error = None;
-                self.db.update(cx, |db, cx| {
-                    db.unlocked = true;
-                    cx.notify();
-                });
+        self.with_passkey("ロックを解除", window, cx, |this, cx| {
+            this.db.update(cx, |db, cx| {
+                db.unlocked = true;
+                cx.notify();
+            });
+        });
+    }
+
+    /// ロックを有効にする。この端末のパスキーで確認できたときだけ有効になる。
+    pub fn enable_lock(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.with_passkey("ロックを有効にする", window, cx, |this, cx| {
+            if this.write(cx, lock::enable).is_some() {
+                this.notice = Some("ロックを有効にしました。".into());
             }
-            Ok(false) => self.error = Some("パスフレーズが違います".into()),
-            Err(error) => self.error = Some(error.to_string().into()),
-        }
-        cx.notify();
-    }
-
-    pub fn open_lock_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        for input in [&self.inputs.passphrase, &self.inputs.new_passphrase] {
-            input.update(cx, |s, cx| s.set_value("", window, cx));
-        }
-        self.modal = Modal::Lock;
-        cx.notify();
-    }
-
-    /// ロックを掛ける（すでに有効なら、パスフレーズを変える）。
-    pub fn save_lock(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let enabled = self.lock_enabled(cx);
-        let current = Self::take(&self.inputs.passphrase.clone(), window, cx);
-        let new = Self::take(&self.inputs.new_passphrase.clone(), window, cx);
-        let current = enabled.then_some(current);
-        if self
-            .write(cx, |s| lock::set_passphrase(s, current.as_deref(), &new))
-            .is_some()
-        {
-            self.modal = Modal::None;
-            self.notice = Some("ロックを有効にしました。".into());
-        }
+        });
     }
 
     pub fn disable_lock(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let current = Self::take(&self.inputs.passphrase.clone(), window, cx);
-        if self.write(cx, |s| lock::disable(s, &current)).is_some() {
-            self.modal = Modal::None;
-            self.notice = Some("ロックを無効にしました。".into());
-        }
+        self.with_passkey("ロックを無効にする", window, cx, |this, cx| {
+            if this.write(cx, lock::disable).is_some() {
+                this.notice = Some("ロックを無効にしました。".into());
+            }
+        });
     }
 
     // ---- 完了チケット ----
@@ -2213,6 +2260,8 @@ impl MainView {
             self.ai_session.update(cx, |s, _| s.chat_window = None);
         }
         self.ai_open = !self.ai_open;
+        let open = self.ai_open;
+        self.ai_session.update(cx, |s, cx| s.set_open(open, cx));
         if self.ai_open {
             let pane = match &self.ai_pane {
                 Some(pane) => pane.clone(),
@@ -2244,13 +2293,53 @@ impl MainView {
                 self.workspace_name(Some(id))
             ),
         };
-        match &self.detail {
-            Some(detail) => format!(
-                "{place}詳細を開いているタスクは「{}」（ID: {}）です。",
-                detail.task.title, detail.task.id
-            ),
-            None => place,
+        let mut place = place;
+        if !matches!(self.nav, Nav::Home) {
+            // 一覧に今出ているもの
+            place.push_str(match self.query.tab {
+                view::Tab::Open => "\n一覧は未完了のタブです。",
+                view::Tab::Closed => "\n一覧は完了のタブです。",
+            });
+            if !self.query.q.trim().is_empty() {
+                place.push_str(&format!("検索の言葉は「{}」です。", self.query.q.trim()));
+            }
+            place.push_str(&format!(
+                "\n一覧に出ているタスク（{} 件）:\n",
+                self.visible.len()
+            ));
+            for &ix in self.visible.iter().take(AI_PLACE_TASKS) {
+                let task = &self.tasks[ix];
+                place.push_str(&format!(
+                    "- {}（ID: {}、{}）\n",
+                    task.title,
+                    task.id,
+                    task.status.label()
+                ));
+            }
         }
+        if !self.selected.is_empty() {
+            let mut ids: Vec<&str> = self.selected.iter().map(String::as_str).collect();
+            ids.sort_unstable();
+            place.push_str(&format!(
+                "\nチェックを付けて選んでいるタスクの ID: {}\n",
+                ids.join("、")
+            ));
+        }
+        if let Some(detail) = &self.detail {
+            place.push_str(&format!(
+                "\n詳細を開いているタスクは「{}」（ID: {}、{}）です。「これ」「このタスク」は、このタスクのことです。\n",
+                detail.task.title,
+                detail.task.id,
+                detail.task.status.label()
+            ));
+            if !detail.task.description.trim().is_empty() {
+                place.push_str(&format!(
+                    "説明: {}\n",
+                    malakt_ai::clip_tail(detail.task.description.trim(), AI_PLACE_CHARS)
+                ));
+            }
+        }
+        place
     }
 
     /// Esc。いちばん手前のものから閉じる。
@@ -2271,6 +2360,11 @@ impl MainView {
         cx.notify();
     }
 }
+
+/// AI に伝える、一覧に出ているタスクの数。
+const AI_PLACE_TASKS: usize = 30;
+/// AI に伝える、開いているタスクの説明の文字数。
+const AI_PLACE_CHARS: usize = 1500;
 
 /// 通知の一覧に出す数。
 const NOTICES_SHOWN: usize = 100;

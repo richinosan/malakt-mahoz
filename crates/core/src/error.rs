@@ -20,6 +20,4 @@ pub enum Error {
     Cycle,
     #[error("対応していないエクスポート形式です（format_version = {0}）")]
     UnsupportedFormat(u32),
-    #[error("パスフレーズが違います")]
-    WrongPassphrase,
 }
