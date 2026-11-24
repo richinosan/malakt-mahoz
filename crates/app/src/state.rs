@@ -97,6 +97,8 @@ pub struct Detail {
     pub changes: Vec<Change>,
     pub subtasks: Vec<Todo>,
     pub parent: Option<Todo>,
+    /// コメントに貼ったリンクが指すタスク。
+    pub linked: Vec<Todo>,
 }
 
 /// ワークスペースのツリーの 1 行。
@@ -508,6 +510,21 @@ impl MainView {
         self.detail = match &self.panel {
             Some(id) => match store.task(id) {
                 Ok(task) => Some(Detail {
+                    linked: {
+                        let comments = store.comments(id)?;
+                        let mut ids: Vec<&str> = Vec::new();
+                        for c in &comments {
+                            for linked in malakt_core::tasklink::find(&c.body) {
+                                if !ids.contains(&linked) {
+                                    ids.push(linked);
+                                }
+                            }
+                        }
+                        // 消したタスクへのリンクは、見つからないものとしてカードに出す
+                        ids.into_iter()
+                            .filter_map(|linked| store.task(linked).ok())
+                            .collect()
+                    },
                     comments: store.comments(id)?,
                     attachments: store.attachments(id)?,
                     changes: store.changes(id)?,
@@ -1493,6 +1510,13 @@ impl MainView {
         self.sidebar_width = SIDEBAR_WIDTH;
         self.sidebar_resizing = true;
         self.finish_sidebar_drag(cx);
+    }
+
+    /// 開いているタスクへのリンクをクリップボードに入れる。
+    pub fn copy_task_link(&mut self, id: &str, cx: &mut Context<Self>) {
+        cx.write_to_clipboard(ClipboardItem::new_string(malakt_core::tasklink::url(id)));
+        self.notice = Some("リンクをコピーしました。".into());
+        cx.notify();
     }
 
     // ---- 表の列 ----

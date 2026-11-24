@@ -1688,3 +1688,61 @@ fn table_columns_resize_reorder_hide_and_sort(cx: &mut TestAppContext) {
         assert_eq!(open, Some(Some(Column::Due)));
     });
 }
+
+/// タスクのリンクをコピーできる。コメントに貼ったリンクはカードになり、押すとそのタスクが開く。
+#[gpui_kit::test]
+fn task_link_is_copied_and_opens_from_a_comment_card(cx: &mut TestAppContext) {
+    start(cx);
+    // コメントまで見える高さにする
+    let (window, view) = open(cx, win(1600., 2400.));
+    let (first, second) = cx.update(|cx| {
+        db::shared(cx).update(cx, |db, _| {
+            let s = &mut db.store;
+            let first = s.add_task_in(None, "会場を決める").unwrap();
+            let second = s.add_task_in(None, "機材を借りる").unwrap();
+            (first, second)
+        })
+    });
+
+    // 詳細の上のボタンで、リンクがクリップボードに入る
+    cx.update(|cx| view.update(cx, |v, cx| v.reload(cx)));
+    ui(cx, window, |window, cx| window.click("nav-all", cx));
+    cx.update(|cx| {
+        window
+            .update(cx, |_, window, cx| {
+                view.update(cx, |v, cx| v.open_panel(&first.id, window, cx))
+            })
+            .unwrap()
+    });
+    ui(cx, window, |window, cx| window.click("copy-link", cx));
+    let url = malakt_core::tasklink::url(&first.id);
+    let copied = cx.update(|cx| cx.read_from_clipboard().and_then(|item| item.text()));
+    assert_eq!(copied.as_deref(), Some(url.as_str()));
+    cx.update(|cx| assert!(view.read(cx).notice.is_some()));
+
+    // もう 1 つのタスクのコメントに貼ると、カードになる。消したタスクへのリンクもカードで知らせる
+    cx.update(|cx| {
+        db::shared(cx).update(cx, |db, _| {
+            let body = format!("先にこれを {url}");
+            db.store.add_comment(&second.id, None, &body).unwrap();
+            let gone = malakt_core::tasklink::url("01NOSUCHTASK");
+            db.store.add_comment(&second.id, None, &gone).unwrap();
+        });
+        window
+            .update(cx, |_, window, cx| {
+                view.update(cx, |v, cx| v.open_panel(&second.id, window, cx))
+            })
+            .unwrap()
+    });
+    cx.update(|cx| {
+        let v = view.read(cx);
+        let linked = &v.detail.as_ref().unwrap().linked;
+        assert_eq!(linked.len(), 1);
+        assert_eq!(linked[0].id, first.id);
+    });
+    ui(cx, window, |window, cx| {
+        assert!(window.try_find(("task-card", 16usize)).is_some());
+        window.click(("task-card", 0usize), cx)
+    });
+    cx.update(|cx| assert_eq!(view.read(cx).panel.as_deref(), Some(first.id.as_str())));
+}

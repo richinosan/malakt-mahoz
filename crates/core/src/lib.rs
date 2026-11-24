@@ -26,6 +26,7 @@ pub mod model;
 pub mod notice;
 mod schema;
 pub mod store;
+pub mod tasklink;
 pub mod text;
 pub mod ticket;
 pub mod view;
