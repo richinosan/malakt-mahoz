@@ -15,8 +15,10 @@ use malakt_core::bulk::{BulkOp, ListMode};
 use malakt_core::view::{self, AssigneeFilter, DueState, Priority as Prio, Sort, Tab};
 use malakt_core::{Comment, DueRule, Role as Raci, Roles, Status, Task as Todo, WORKSPACE_COLORS};
 
+use crate::ai::ShellPlace;
+use crate::ai_view::{docked_width, TASKS_MIN};
 use crate::state::{CommentMode, Detail, Editing, MainView, Modal, Nav};
-use crate::{Dismiss, LockNow, NewWindow};
+use crate::{Dismiss, LockNow, NewWindow, ToggleAi};
 use malakt_core::Id;
 
 /// 参照する寸法（CSS の px）を、画面全体の拡大率に合わせる。
@@ -205,7 +207,7 @@ fn workspace_icon(icon: Option<&str>, color: Option<&str>) -> Icon {
 }
 
 /// 同梱の線画アイコン。
-fn app_icon(name: &str) -> Icon {
+pub(crate) fn app_icon(name: &str) -> Icon {
     Icon::default().path(crate::state::icon_path(name))
 }
 
@@ -687,6 +689,14 @@ impl MainView {
                 .gap_2()
                 .pr_3()
                 .child(self.theme_toggle(cx))
+                .child(
+                    Button::new("ai-toggle")
+                        .icon(app_icon("sparkles"))
+                        .outline()
+                        .rounded(px(999.))
+                        .tooltip("AI チャット")
+                        .on_click(cx.listener(|this, _, window, cx| this.toggle_ai(window, cx))),
+                )
                 .child(
                     div()
                         .relative()
@@ -4020,10 +4030,17 @@ impl MainView {
 impl Render for MainView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
-        let width = window.viewport_size().width;
+        let window_width = window.viewport_size().width;
+        // 右に AI チャットを置いた分、タスクの画面は狭くなる
+        let ai = self.ai_docked(cx).then(|| self.ai_pane.clone()).flatten();
+        let ai_width = ai.as_ref().and_then(|_| {
+            let shell = self.ai_session.read(cx).shell_place == ShellPlace::Docked;
+            docked_width(window_width, shell)
+        });
+        let width = window_width - ai_width.unwrap_or(px(0.));
         let unlocked = self.unlocked(cx);
         // 狭いウィンドウでは左のメニューをたたみ、詳細は全面のシートにする
-        let wide = width >= px(860.);
+        let wide = width >= TASKS_MIN;
         let sidebar = if wide {
             !self.sidebar_hidden
         } else {
@@ -4061,11 +4078,29 @@ impl Render for MainView {
             }
         };
 
+        // 詳細は右から入り、ダイアログはふわっと出る
+        let panel = self.render_panel(sheet, cx).map(|panel| {
+            if !self.motion {
+                return panel.into_any_element();
+            }
+            panel
+                .with_animation("panel-in", appear(180), |panel, t| {
+                    panel.right(px(-48.) * (1. - t)).opacity(t)
+                })
+                .into_any_element()
+        });
+        // 幅が足りないときは、AI チャットをウィンドウの全面に重ねる
+        let (ai_beside, ai_over) = if ai_width.is_some() {
+            (ai, None)
+        } else {
+            (None, ai)
+        };
         let body = div()
             .id("main-view")
             .key_context("MainView")
             .track_focus(&self.focus)
             .on_action(cx.listener(|this, _: &Dismiss, _, cx| this.dismiss(cx)))
+            .on_action(cx.listener(|this, _: &ToggleAi, window, cx| this.toggle_ai(window, cx)))
             .size_full()
             .relative()
             .flex()
@@ -4080,27 +4115,29 @@ impl Render for MainView {
                     .h_full()
                     .child(self.render_header(true, wide, cx))
                     .child(
-                        // 画面を切り替えたときは、少し下から浮かび上がる
-                        div().flex_1().min_h_0().relative().child(
-                            div().absolute().inset_0().child(main).with_animation(
-                                ElementId::Name(format!("page-{:?}", self.nav).into()),
-                                appear(160),
-                                |page, t| page.top(px(8.) * (1. - t)).opacity(t),
-                            ),
-                        ),
+                        // 上のバーの下に、タスクの画面と AI チャットを横に並べる
+                        row()
+                            .flex_1()
+                            .min_h_0()
+                            .items_stretch()
+                            .child(
+                                // 画面を切り替えたときは、少し下から浮かび上がる
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .h_full()
+                                    .relative()
+                                    .child(div().absolute().inset_0().child(main).with_animation(
+                                        ElementId::Name(format!("page-{:?}", self.nav).into()),
+                                        appear(160),
+                                        |page, t| page.top(px(8.) * (1. - t)).opacity(t),
+                                    ))
+                                    .children(panel),
+                            )
+                            .children(ai_beside),
                     ),
             )
-            // 詳細は右から入り、ダイアログはふわっと出る
-            .children(self.render_panel(sheet, cx).map(|panel| {
-                if !self.motion {
-                    return panel.into_any_element();
-                }
-                panel
-                    .with_animation("panel-in", appear(180), |panel, t| {
-                        panel.right(px(-48.) * (1. - t)).opacity(t)
-                    })
-                    .into_any_element()
-            }))
+            .children(ai_over)
             .children(self.render_modal(cx).map(|modal| {
                 if !self.motion {
                     return modal.into_any_element();

@@ -16,6 +16,8 @@ use malakt_core::{
     Scope, Status, Store, Task as Todo, TaskDefaults, TaskDraft, TaskFilter, Workspace,
 };
 
+use crate::ai::{self, Session};
+use crate::ai_view::{AiPane, PaneMode};
 use crate::db::{self, Db};
 
 /// 左のメニューで選んでいる場所。
@@ -191,6 +193,10 @@ pub struct MainView {
     pub error: Option<SharedString>,
     pub notice: Option<SharedString>,
     pub sidebar_open: bool,
+    /// このウィンドウの右に AI チャットを出しているか。
+    pub ai_open: bool,
+    pub ai_pane: Option<Entity<AiPane>>,
+    pub ai_session: Entity<Session>,
     /// 広いウィンドウで、左のメニューを閉じている
     pub sidebar_hidden: bool,
     /// 出入りの動きを付ける。テストでは止めて、すぐ最後の位置に出す
@@ -229,8 +235,8 @@ impl MainView {
             due: input(window, cx, "YYYY-MM-DD"),
             category: input(window, cx, "カテゴリを追加して Enter"),
             description: area(window, cx, "説明"),
-            comment: area(window, cx, "コメントを書く"),
-            status_comment: area(window, cx, "コメントを書く"),
+            comment: area(window, cx, "コメントを追加"),
+            status_comment: area(window, cx, "コメントを追加"),
             ws_date: input(window, cx, "YYYY-MM-DD"),
             def_days: input(window, cx, "例: -7（7 日前）"),
             def_date: input(window, cx, "YYYY-MM-DD"),
@@ -246,8 +252,11 @@ impl MainView {
             nt_description: area(window, cx, "説明"),
         };
 
+        let ai_session = ai::shared(cx);
         let mut subs = vec![
             cx.observe(&db, |this, _, cx| this.reload(cx)),
+            // チャットを別ウィンドウに出した・戻したときに、右の表示を合わせる
+            cx.observe(&ai_session, |_, _, cx| cx.notify()),
             // 読み直すたびに、まだ出していない通知を OS に出す
             cx.observe_in(&db, window, |this, _, window, cx| {
                 this.deliver_notices(window, cx)
@@ -374,6 +383,9 @@ impl MainView {
             error: None,
             notice: None,
             sidebar_open: false,
+            ai_open: false,
+            ai_pane: None,
+            ai_session,
             sidebar_hidden: false,
             motion: true,
             today: view::today(),
@@ -1894,6 +1906,61 @@ impl MainView {
         }
     }
 
+    // ---- AI チャット ----
+
+    /// AI チャットを開く・閉じる。別ウィンドウに出しているときは、そのウィンドウを手前に出す。
+    pub fn toggle_ai(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(handle) = self.ai_session.read(cx).chat_window {
+            if handle
+                .update(cx, |_, window, _| window.activate_window())
+                .is_ok()
+            {
+                return;
+            }
+            // そのウィンドウはもうない
+            self.ai_session.update(cx, |s, _| s.chat_window = None);
+        }
+        self.ai_open = !self.ai_open;
+        if self.ai_open {
+            let pane = match &self.ai_pane {
+                Some(pane) => pane.clone(),
+                None => {
+                    let main = cx.weak_entity();
+                    let pane = cx.new(|cx| AiPane::new(PaneMode::Docked, Some(main), window, cx));
+                    self.ai_pane = Some(pane.clone());
+                    pane
+                }
+            };
+            pane.update(cx, |pane, cx| pane.focus_input(window, cx));
+        }
+        cx.notify();
+    }
+
+    /// このウィンドウの右に、チャットを出すか。
+    pub fn ai_docked(&self, cx: &App) -> bool {
+        self.ai_open && self.ai_session.read(cx).chat_window.is_none()
+    }
+
+    /// AI に伝える、ユーザーが今開いている場所。
+    pub fn ai_place(&self) -> String {
+        let place = match &self.nav {
+            Nav::Home => "ユーザーはホームを開いています。".to_owned(),
+            Nav::All => "ユーザーは「すべてのタスク」を開いています。".to_owned(),
+            Nav::Unfiled => "ユーザーは「未所属」のタスクの一覧を開いています。".to_owned(),
+            Nav::Workspace(id) => format!(
+                "ユーザーはワークスペース「{}」（ID: {id}）を開いています。場所を言わずにタスクを作るよう頼まれたら、ここに作ってください。",
+                self.workspace_name(Some(id))
+            ),
+        };
+        match &self.detail {
+            Some(detail) => format!(
+                "{place}詳細を開いているタスクは「{}」（ID: {}）です。",
+                detail.task.title, detail.task.id
+            ),
+            None => place,
+        }
+    }
+
     /// Esc。いちばん手前のものから閉じる。
     pub fn dismiss(&mut self, cx: &mut Context<Self>) {
         if self.modal != Modal::None {
@@ -2062,9 +2129,19 @@ bundled_icons! {
         "plus",
         "download",
         "upload",
+        "x",
+        "message-square-plus",
+        "picture-in-picture-2",
+        "panel-right",
+        "copy",
+        "eraser",
+        "square",
+        "arrow-up",
+        "refresh-cw",
+        "check",
+        "play",
         "menu",
         "circle-question-mark",
-        "x",
         "monitor",
         "user",
         "circle-dot",
