@@ -537,7 +537,8 @@ fn assignee_roles_and_per_person_completion(cx: &mut TestAppContext) {
     let id = all_tasks(cx).remove(0).id;
     let load = |cx: &mut TestAppContext| store(cx, |s| s.task(&id).unwrap());
 
-    // 2 人を担当にすると、どちらも R から始まる
+    // 担当を押すと選ぶところが開く。2 人を担当にすると、どちらも R から始まる
+    ui(cx, window, |window, cx| window.click("p-assignees", cx));
     ui(cx, window, |window, cx| window.click(("p-as", 0usize), cx));
     ui(cx, window, |window, cx| window.click(("p-as", 1usize), cx));
     let t = load(cx);
