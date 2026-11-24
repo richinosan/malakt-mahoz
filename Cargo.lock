@@ -4283,10 +4283,12 @@ dependencies = [
  "argon2",
  "chrono",
  "criterion 0.5.1",
+ "flate2",
  "rand 0.8.8",
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.21",
  "ulid",
@@ -4301,6 +4303,8 @@ dependencies = [
  "dirs 5.0.1",
  "gpui-kit",
  "malakt-core",
+ "serde",
+ "serde_json",
  "tempfile",
 ]
 

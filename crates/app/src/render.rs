@@ -6,13 +6,15 @@ use gpui_kit::base::TestSupportExt;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::{Input, Textarea};
+use gpui_kit::component::text::TextView;
 use gpui_kit::component::{ActiveTheme, Sizable};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
+use malakt_core::bulk::{BulkOp, ListMode};
 use malakt_core::view::{self, AssigneeFilter, DueState, Priority as Prio, Sort, Tab};
-use malakt_core::{Status, Task as Todo};
+use malakt_core::{Comment, DueRule, Role as Raci, Roles, Status, Task as Todo};
 
-use crate::state::{Editing, MainView, Modal, Nav};
+use crate::state::{CommentMode, Detail, Editing, MainView, Modal, Nav};
 use crate::{Dismiss, LockNow, NewWindow};
 
 const SIDEBAR_WIDTH: Pixels = px(248.);
@@ -91,7 +93,7 @@ impl MainView {
         if !task.status.is_open() {
             return div().text_color(theme.muted_foreground).child(text);
         }
-        match view::due_state(due, &self.today) {
+        match view::due_state(due, &view::now()) {
             DueState::Overdue => div()
                 .text_color(theme.danger)
                 .font_weight(FontWeight::BOLD)
@@ -206,6 +208,21 @@ impl MainView {
                     .font_weight(FontWeight::BOLD)
                     .child("malakt-mahoz"),
             )
+            .child(
+                Button::new("open-notices")
+                    .label(if self.unread_notices == 0 {
+                        "通知".to_owned()
+                    } else {
+                        format!("通知（未読 {}）", self.unread_notices)
+                    })
+                    .ghost()
+                    .small()
+                    .w_full()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.modal = Modal::Notices;
+                        cx.notify();
+                    })),
+            )
             .child(row().child(self.nav_item("nav-home", "ホーム", Nav::Home, None, cx)))
             .child(row().child(self.nav_item("nav-all", "すべてのタスク", Nav::All, None, cx)))
             .child(row().child(self.nav_item("nav-unfiled", "未所属", Nav::Unfiled, None, cx)))
@@ -266,6 +283,12 @@ impl MainView {
                     cx.listener(|this, _, window, cx| this.open_lock_settings(window, cx)),
                 ),
             )
+            .child(
+                action("open-usage", "使用量").on_click(cx.listener(|this, _, _, cx| {
+                    this.modal = Modal::Usage;
+                    cx.notify();
+                })),
+            )
             .when(self.lock_enabled(cx), |d| {
                 d.child(
                     action("lock-now", "今すぐロック")
@@ -295,9 +318,14 @@ impl MainView {
                     .primary()
                     .on_click(cx.listener(|this, _, window, cx| this.submit_quick_add(window, cx))),
             )
+            .child(
+                Button::new("new-task-open")
+                    .label("詳しく入力")
+                    .on_click(cx.listener(|this, _, window, cx| this.open_new_task(window, cx))),
+            )
     }
 
-    fn render_home(&self, cx: &mut Context<Self>) -> Div {
+    fn render_home(&self, roomy: bool, cx: &mut Context<Self>) -> Div {
         let theme = cx.theme().clone();
         let due = self.due.clone();
         let count = due.len();
@@ -364,7 +392,7 @@ impl MainView {
                             count,
                             cx.processor(move |this, range: Range<usize>, _, cx| {
                                 range
-                                    .map(|ix| this.render_due_row(ix, &due[ix], cx))
+                                    .map(|ix| this.render_due_row(ix, &due[ix], roomy, cx))
                                     .collect::<Vec<_>>()
                             }),
                         )
@@ -427,7 +455,13 @@ impl MainView {
             )
     }
 
-    fn render_due_row(&self, ix: usize, task: &Todo, cx: &mut Context<Self>) -> AnyElement {
+    fn render_due_row(
+        &self,
+        ix: usize,
+        task: &Todo,
+        roomy: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let theme = cx.theme();
         let id = task.id.clone();
         row()
@@ -447,23 +481,28 @@ impl MainView {
                     .truncate()
                     .child(task.title.clone()),
             )
-            .child(
-                div()
-                    .w(px(140.))
-                    .truncate()
-                    .text_sm()
-                    .text_color(theme.muted_foreground)
-                    .child(self.workspace_name(task.workspace_id.as_deref())),
-            )
+            // 狭いウィンドウでは、タイトルが読めるように場所と担当を省く
+            .when(roomy, |d| {
+                d.child(
+                    div()
+                        .w(px(140.))
+                        .truncate()
+                        .text_sm()
+                        .text_color(theme.muted_foreground)
+                        .child(self.workspace_name(task.workspace_id.as_deref())),
+                )
+            })
             .child(self.due_label(task, cx).w(px(130.)).text_sm())
             .child(status_badge(task.status, cx).w(px(76.)))
-            .child(
-                div()
-                    .w(px(120.))
-                    .truncate()
-                    .text_sm()
-                    .child(self.assignee_label(&task.assignee_ids)),
-            )
+            .when(roomy, |d| {
+                d.child(
+                    div()
+                        .w(px(120.))
+                        .truncate()
+                        .text_sm()
+                        .child(self.assignee_label(&task.assignee_ids)),
+                )
+            })
             .on_click(
                 cx.listener(move |this, _: &ClickEvent, window, cx| {
                     this.open_panel(&id, window, cx)
@@ -570,6 +609,20 @@ impl MainView {
                 |this| this.query.assignee = AssigneeFilter::Person(id.clone())
             ));
         }
+        let mut my_role = vec![pick!(
+            "f-role-all",
+            "すべて",
+            q.my_role.is_none(),
+            |this| this.query.my_role = None
+        )];
+        for (i, role) in Raci::ALL.into_iter().enumerate() {
+            my_role.push(pick!(
+                ("f-role", i),
+                format!("{}（{}）", role.code(), role.label()),
+                q.my_role == Some(role),
+                |this| this.query.my_role = Some(role)
+            ));
+        }
         let mut priority = vec![pick!(
             "f-pr-all",
             "すべて",
@@ -639,6 +692,7 @@ impl MainView {
             )
             .child(group("状態", status))
             .child(group("担当", assignee))
+            .child(group("自分の役", my_role))
             .child(group("優先度", priority))
             .when(!self.categories.is_empty(), |d| {
                 d.child(group("カテゴリ", category))
@@ -665,7 +719,9 @@ impl MainView {
         for (i, s) in Status::ALL.into_iter().enumerate() {
             bar = bar.child(
                 chip(("bulk-status", i), s.label(), false, cx).on_click(cx.listener(
-                    move |this, _: &ClickEvent, _, cx| this.bulk_edit(cx, |d| d.status = s),
+                    move |this, _: &ClickEvent, _, cx| {
+                        this.bulk_apply(&BulkOp::Status(s), cx);
+                    },
                 )),
             );
         }
@@ -679,10 +735,19 @@ impl MainView {
             bar = bar.child(
                 chip(("bulk-prio", i), p.label(), false, cx).on_click(cx.listener(
                     move |this, _: &ClickEvent, _, cx| {
-                        this.bulk_edit(cx, |d| d.priority = p.value())
+                        this.bulk_apply(&BulkOp::Priority(p.value()), cx);
                     },
                 )),
             );
+        }
+        for (button, label, modal) in [
+            ("bulk-due", "期限", Modal::BulkDue),
+            ("bulk-assignees", "担当", Modal::BulkAssignees),
+            ("bulk-categories", "カテゴリ", Modal::BulkCategories),
+        ] {
+            bar = bar.child(Button::new(button).label(label).small().on_click(
+                cx.listener(move |this, _, window, cx| this.open_bulk(modal.clone(), window, cx)),
+            ));
         }
         bar.child(div().flex_1())
             .child(
@@ -753,7 +818,20 @@ impl MainView {
                 .child(self.list_title()),
         );
         if let Some(id) = workspace_id.clone() {
-            let (a, b, c) = (id.clone(), id.clone(), id);
+            let (a, b, c, d) = (id.clone(), id.clone(), id.clone(), id.clone());
+            if let Some(date) = self
+                .workspaces
+                .iter()
+                .find(|w| w.id == id)
+                .and_then(|w| w.date.as_deref())
+            {
+                header = header.child(
+                    div()
+                        .text_sm()
+                        .text_color(theme.muted_foreground)
+                        .child(format!("基準日 {}", view::format_date(date, &self.today))),
+                );
+            }
             header = header
                 .child(
                     Button::new("ws-add-child")
@@ -771,6 +849,15 @@ impl MainView {
                         .outline()
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.ask_workspace_name(None, Some(b.clone()), window, cx)
+                        })),
+                )
+                .child(
+                    Button::new("ws-settings")
+                        .label("設定")
+                        .small()
+                        .outline()
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.open_workspace_settings(&d, window, cx)
                         })),
                 )
                 .child(
@@ -967,7 +1054,10 @@ impl MainView {
                     .accessibility_label(format!("「{}」を選択", task.title))
                     .checked(self.selected.contains(&task.id))
                     .on_click(
-                        cx.listener(move |this, _: &bool, _, cx| this.toggle_selected(&id, cx)),
+                        // Shift を押しながらなら、前に押した行からの範囲をまとめて選ぶ
+                        cx.listener(move |this, _: &bool, window, cx| {
+                            this.click_select(&id, window.modifiers().shift, cx)
+                        }),
                     ),
             )
         };
@@ -984,7 +1074,16 @@ impl MainView {
                     d.text_color(theme.muted_foreground).line_through()
                 })
                 .when(task.parent_id.is_some(), |d| d.pl_4())
-                .child(task.title.clone())
+                .child(if task.linked_workspace_ids.is_empty() {
+                    task.title.clone()
+                } else {
+                    // ほかのワークスペースにも出しているタスクには、か所の数を添える
+                    format!(
+                        "{}（{} か所に表示）",
+                        task.title,
+                        task.linked_workspace_ids.len() + 1
+                    )
+                })
                 .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                     this.open_panel(&id, window, cx)
                 }))
@@ -1028,10 +1127,16 @@ impl MainView {
                     this.edit_task_by_id(&id, cx, |d| d.priority = next.value())
                 }))
         };
-        let assignees = div()
-            .truncate()
-            .text_sm()
-            .child(self.assignee_label(&task.assignee_ids));
+        let assignees = div().truncate().text_sm().child({
+            // 担当者が複数いるときは、何人が自分の分を終えたかを先に出す
+            let (done, total) = task.done_count();
+            let names = self.assignee_label(&task.assignee_ids);
+            if total > 1 {
+                SharedString::from(format!("{done}/{total} {names}"))
+            } else {
+                names
+            }
+        });
         let due = self.due_label(task, cx).text_sm();
         let updated = div()
             .text_xs()
@@ -1083,6 +1188,152 @@ impl MainView {
     }
 
     // ---- 詳細パネル ----
+
+    /// コメント 1 件。書いた人・時刻・操作と、Markdown の本文。
+    fn render_attachments(&self, detail: &Detail, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let mut list = col().gap_1();
+        for (ix, a) in detail.attachments.iter().enumerate() {
+            let (open_id, save_id, delete_id) = (a.id.clone(), a.id.clone(), a.id.clone());
+            list = list.child(
+                row()
+                    .gap_2()
+                    .items_center()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_sm()
+                            .child(a.name.clone()),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(view::format_bytes(a.size)),
+                    )
+                    .child(
+                        Button::new(("att-open", ix))
+                            .label("開く")
+                            .ghost()
+                            .xsmall()
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.open_attachment(&open_id, cx);
+                            })),
+                    )
+                    .child(
+                        Button::new(("att-save", ix))
+                            .label("保存")
+                            .ghost()
+                            .xsmall()
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.save_attachment(&save_id, window, cx);
+                            })),
+                    )
+                    .child(
+                        Button::new(("att-del", ix))
+                            .label("削除")
+                            .ghost()
+                            .xsmall()
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.write(cx, |s| s.delete_attachment(&delete_id));
+                            })),
+                    ),
+            );
+        }
+        col()
+            .gap_2()
+            .child(
+                row()
+                    .gap_2()
+                    .items_center()
+                    .child(section_title("添付"))
+                    .when(!detail.attachments.is_empty(), |d| {
+                        d.child(
+                            div()
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child(format!("{} 件", detail.attachments.len())),
+                        )
+                    })
+                    .child(div().flex_1())
+                    .child(
+                        Button::new("att-add")
+                            .label("ファイルを追加")
+                            .small()
+                            .on_click(cx.listener(|this, _, window, cx| this.attach(window, cx))),
+                    ),
+            )
+            .child(list)
+    }
+
+    fn render_comment(&self, ix: usize, c: &Comment, now: i64, cx: &mut Context<Self>) -> Div {
+        let theme = cx.theme().clone();
+        let (pin_id, delete_id, edit_id, pinned) =
+            (c.id.clone(), c.id.clone(), c.id.clone(), c.pinned);
+        let author = c
+            .author_id
+            .as_deref()
+            .map_or("", |a| self.person_name(a))
+            .to_owned();
+        // スレッドの中では枠を重ねない
+        let boxed = !c.review && c.reply_to.is_none();
+        col()
+            .gap_1()
+            .when(boxed, |d| {
+                d.p_2().border_1().border_color(theme.border).rounded_md()
+            })
+            .child(
+                row()
+                    .gap_2()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(author)
+                    .child(view::format_relative(c.created_at, now))
+                    .when(c.is_edited(), |d| d.child("（編集済み）"))
+                    .child(div().flex_1())
+                    .child(
+                        Button::new(("edit-comment", ix))
+                            .label("編集")
+                            .ghost()
+                            .xsmall()
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.start_edit_comment(&edit_id, window, cx)
+                            })),
+                    )
+                    // 完了報告は最初から上に固定されているので、留めない
+                    .when(!c.is_completion_report(), |d| {
+                        d.child(
+                            Button::new(("pin", ix))
+                                .label(if pinned {
+                                    "ピン留めを外す"
+                                } else {
+                                    "ピン留め"
+                                })
+                                .ghost()
+                                .xsmall()
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.write(cx, |s| s.set_comment_pinned(&pin_id, !pinned));
+                                })),
+                        )
+                    })
+                    .child(
+                        Button::new(("del-comment", ix))
+                            .label("削除")
+                            .ghost()
+                            .xsmall()
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.write(cx, |s| s.delete_comment(&delete_id));
+                            })),
+                    ),
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .child(TextView::markdown(("comment-body", ix), c.body.clone())),
+            )
+    }
 
     fn property(&self, label: &'static str, cx: &App) -> Div {
         row().gap_2().items_start().child(
@@ -1210,22 +1461,50 @@ impl MainView {
                                 .child("Ctrl/⌘+Enter で保存、Esc でやめます"),
                         ),
                 )
-        } else {
+        } else if task.description.is_empty() {
             div().child(
                 div()
                     .id("detail-description")
                     .cursor_pointer()
                     .text_sm()
-                    .when(task.description.is_empty(), |d| {
-                        d.text_color(theme.muted_foreground).child("説明を追加…")
-                    })
-                    .when(!task.description.is_empty(), |d| {
-                        d.child(task.description.clone())
-                    })
+                    .text_color(theme.muted_foreground)
+                    .child("説明を追加…")
                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                         this.start_editing(Editing::Description, window, cx)
                     })),
             )
+        } else {
+            // Markdown で見せる。文字を選べるので、押して編集にはしない
+            col()
+                .gap_1()
+                .child(
+                    div()
+                        .id("detail-description")
+                        .text_sm()
+                        .child(TextView::new(&self.description_view)),
+                )
+                .child(
+                    row()
+                        .gap_1()
+                        .child(
+                            Button::new("desc-edit")
+                                .label("編集")
+                                .ghost()
+                                .xsmall()
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.start_editing(Editing::Description, window, cx)
+                                })),
+                        )
+                        .child(
+                            Button::new("desc-quote")
+                                .label("選択範囲にコメント")
+                                .ghost()
+                                .xsmall()
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.quote_selection(window, cx)
+                                })),
+                        ),
+                )
         };
 
         let done = detail
@@ -1289,7 +1568,8 @@ impl MainView {
                 )
                 .on_click(
                     cx.listener(move |this, _: &ClickEvent, _, cx| this.toggle_assignee(&id, cx)),
-                ),
+                )
+                .test_support(),
             );
         }
         people = people.child(
@@ -1303,6 +1583,56 @@ impl MainView {
                 .xsmall()
                 .on_click(cx.listener(|this, _, window, cx| this.open_people(window, cx))),
         );
+
+        // 担当者ごとの行: 自分の分の完了と、役（R・A・C・I）
+        let mut people = col().gap_1().child(people);
+        let (finished, total) = task.done_count();
+        if total > 1 {
+            people = people.child(
+                div()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(format!("{finished}/{total} 完了")),
+            );
+        }
+        for (i, person_id) in task.assignee_ids.iter().enumerate() {
+            let roles = task.roles_of(person_id).unwrap_or_default();
+            let mut line = row().gap_1().child(
+                Checkbox::new(("p-done", i))
+                    .checked(task.is_done_by(person_id))
+                    .on_click(cx.listener({
+                        let id = person_id.clone();
+                        move |this, _, _, cx| this.toggle_assignee_done(&id, cx)
+                    })),
+            );
+            line = line.child(
+                div()
+                    .w(px(132.))
+                    .flex_none()
+                    .truncate()
+                    .text_sm()
+                    .child(self.person_name(person_id).to_owned()),
+            );
+            for role in Raci::ALL {
+                let id = person_id.clone();
+                line = line.child(
+                    chip(
+                        ("p-role", i * 4 + role as usize),
+                        role.code(),
+                        roles.contains(role),
+                        cx,
+                    )
+                    .tooltip(move |window, cx| {
+                        gpui_kit::component::tooltip::Tooltip::new(role.label()).build(window, cx)
+                    })
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.toggle_role(&id, role, cx)
+                    }))
+                    .test_support(),
+                );
+            }
+            people = people.child(line);
+        }
 
         let due_buttons = [
             ("今日", Some(0)),
@@ -1383,36 +1713,94 @@ impl MainView {
 
         let workspace = {
             let id = task.id.clone();
-            row()
-                .gap_2()
-                .child(
-                    div()
-                        .text_sm()
-                        .child(self.workspace_name(task.workspace_id.as_deref())),
+            let link_id = task.id.clone();
+            let shared = !task.linked_workspace_ids.is_empty();
+            let mut places =
+                col().gap_1().child(
+                    row()
+                        .gap_2()
+                        .items_center()
+                        .child(
+                            div()
+                                .text_sm()
+                                .child(self.workspace_name(task.workspace_id.as_deref())),
+                        )
+                        .child(Button::new("move-task").label("移動").xsmall().on_click(
+                            cx.listener(move |this, _, _, cx| {
+                                this.modal = Modal::MoveTasks(vec![id.clone()]);
+                                cx.notify();
+                            }),
+                        ))
+                        .when_some(task.workspace_id.clone().filter(|_| shared), |d, home| {
+                            let task_id = task.id.clone();
+                            d.child(
+                                Button::new("unlink-home")
+                                    .label("外す")
+                                    .ghost()
+                                    .xsmall()
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.unlink_task_from(&task_id, &home, cx)
+                                    })),
+                            )
+                        }),
+                );
+            for (ix, linked) in task.linked_workspace_ids.iter().enumerate() {
+                let (task_id, linked_id) = (task.id.clone(), linked.clone());
+                places = places.child(
+                    row()
+                        .gap_2()
+                        .items_center()
+                        .child(div().text_sm().child(self.workspace_name(Some(linked))))
+                        .child(
+                            Button::new(("unlink", ix))
+                                .label("外す")
+                                .ghost()
+                                .xsmall()
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.unlink_task_from(&task_id, &linked_id, cx)
+                                })),
+                        ),
+                );
+            }
+            // どこにも入っていないタスクは「移動」で入れる
+            places.when(task.workspace_id.is_some(), |d| {
+                d.child(
+                    row().child(
+                        Button::new("link-add")
+                            .label("ほかのワークスペースにも表示")
+                            .ghost()
+                            .xsmall()
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.modal = Modal::LinkTask(link_id.clone());
+                                cx.notify();
+                            })),
+                    ),
                 )
-                .child(
-                    Button::new("move-task")
-                        .label("移動")
-                        .xsmall()
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.modal = Modal::MoveTasks(vec![id.clone()]);
-                            cx.notify();
-                        })),
-                )
+            })
         };
 
+        // 返信はルートの下にまとめる。完了報告は上に固定して出すので、ここには出さない
+        let unresolved = detail
+            .comments
+            .iter()
+            .filter(|c| c.is_thread_root() && c.resolved_at.is_none())
+            .count();
         let mut comments = col().gap_2();
         for (ix, c) in detail.comments.iter().enumerate() {
-            let (pin_id, delete_id, pinned) = (c.id.clone(), c.id.clone(), c.pinned);
-            let author = c
-                .author_id
-                .as_deref()
-                .map_or("", |a| self.person_name(a))
-                .to_owned();
-            comments = comments.child(
+            if c.reply_to.is_some() || c.is_completion_report() {
+                continue;
+            }
+            if !c.is_thread_root() {
+                comments = comments.child(self.render_comment(ix, c, now, cx));
+                continue;
+            }
+            let resolved = c.resolved_at.is_some();
+            let open = !resolved || self.expanded_threads.contains(&c.id);
+            let (toggle_id, resolve_id, reply_id) = (c.id.clone(), c.id.clone(), c.id.clone());
+            let mut thread =
                 col()
-                    .p_2()
                     .gap_1()
+                    .p_2()
                     .border_1()
                     .border_color(theme.border)
                     .rounded_md()
@@ -1421,33 +1809,112 @@ impl MainView {
                             .gap_2()
                             .text_xs()
                             .text_color(theme.muted_foreground)
-                            .child(author)
-                            .child(view::format_relative(c.created_at, now))
-                            .child(div().flex_1())
+                            .child(if resolved {
+                                "レビュー（解決済み）"
+                            } else {
+                                "レビュー"
+                            })
+                            .when(!open, |d| {
+                                d.child(
+                                    div().flex_1().min_w_0().truncate().child(
+                                        c.body.lines().next().unwrap_or_default().to_owned(),
+                                    ),
+                                )
+                            })
+                            .when(open, |d| d.child(div().flex_1()))
+                            .when(resolved, |d| {
+                                d.child(
+                                    Button::new(("thread-toggle", ix))
+                                        .label(if open { "たたむ" } else { "開く" })
+                                        .ghost()
+                                        .xsmall()
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.toggle_thread(&toggle_id, cx)
+                                        })),
+                                )
+                            })
                             .child(
-                                Button::new(("pin", ix))
-                                    .label(if pinned {
-                                        "ピン留めを外す"
+                                Button::new(("thread-resolve", ix))
+                                    .label(if resolved {
+                                        "再開する"
                                     } else {
-                                        "ピン留め"
+                                        "解決済みにする"
                                     })
                                     .ghost()
                                     .xsmall()
                                     .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.write(cx, |s| s.set_comment_pinned(&pin_id, !pinned));
-                                    })),
-                            )
-                            .child(
-                                Button::new(("del-comment", ix))
-                                    .label("削除")
-                                    .ghost()
-                                    .xsmall()
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.write(cx, |s| s.delete_comment(&delete_id));
+                                        this.set_thread_resolved(&resolve_id, !resolved, cx)
                                     })),
                             ),
-                    )
-                    .child(div().text_sm().child(c.body.clone())),
+                    );
+            if open {
+                if let Some(anchor) = &c.anchor {
+                    // 引用。説明が書き換わって見つからなくなったら、そう伝える
+                    let found = task.description.contains(anchor.exact.as_str());
+                    thread = thread.child(
+                        col()
+                            .pl_2()
+                            .border_l_2()
+                            .border_color(theme.border)
+                            .text_sm()
+                            .text_color(theme.muted_foreground)
+                            .child(anchor.exact.clone())
+                            .when(!found, |d| {
+                                d.child(
+                                    div()
+                                        .text_xs()
+                                        .child("（説明のこの部分は書き換えられました）"),
+                                )
+                            }),
+                    );
+                }
+                thread = thread.child(self.render_comment(ix, c, now, cx));
+                let mut replies = col().gap_1().pl_4();
+                for (reply_ix, reply) in detail.comments.iter().enumerate() {
+                    if reply.reply_to.as_deref() == Some(c.id.as_str()) {
+                        replies = replies.child(self.render_comment(reply_ix, reply, now, cx));
+                    }
+                }
+                thread = thread.child(replies).child(
+                    row().child(
+                        Button::new(("thread-reply", ix))
+                            .label("返信")
+                            .ghost()
+                            .xsmall()
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.start_reply(&reply_id, window, cx)
+                            })),
+                    ),
+                );
+            }
+            comments = comments.child(thread);
+        }
+        let report_items: Vec<Div> = detail
+            .comments
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.is_completion_report())
+            .map(|(ix, c)| self.render_comment(ix, c, now, cx))
+            .collect();
+
+        // コメント欄の上に、いま何を書いているかを出す
+        let composing: Option<SharedString> = match (&self.comment_mode, &self.pending_anchor) {
+            (CommentMode::Edit(_), _) => Some("コメントを書き直しています".into()),
+            (CommentMode::Reply(_), _) => Some("スレッドに返信します".into()),
+            (CommentMode::New, Some(anchor)) => {
+                Some(format!("「{}」にレビューコメントを付けます", anchor.exact).into())
+            }
+            (CommentMode::New, None) => None,
+        };
+        let is_new = self.comment_mode == CommentMode::New;
+        let mut mention_row = row().gap_1().flex_wrap();
+        for (i, person) in self.mention_candidates(cx).into_iter().enumerate() {
+            mention_row = mention_row.child(
+                chip(("mention", i), format!("@{}", person.name), false, cx)
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        this.complete_mention(&person, window, cx)
+                    }))
+                    .test_support(),
             );
         }
 
@@ -1470,6 +1937,16 @@ impl MainView {
                                     self.workspace_name(task.workspace_id.as_deref())
                                 )),
                         )
+                        .child({
+                            let ticket_task = task.id.clone();
+                            Button::new("ticket-open")
+                                .label("完了チケット")
+                                .ghost()
+                                .xsmall()
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.open_ticket_dialog(&ticket_task, cx)
+                                }))
+                        })
                         .child(
                             Button::new("history")
                                 .label("変更履歴")
@@ -1508,7 +1985,23 @@ impl MainView {
                             .rounded_md()
                             .bg(theme.secondary)
                             .child(section_title("ピン留め"))
-                            .children(pinned.iter().map(|c| div().text_sm().child(c.body.clone()))),
+                            .children(pinned.iter().enumerate().map(|(i, c)| {
+                                div()
+                                    .text_sm()
+                                    .child(TextView::markdown(("pinned-body", i), c.body.clone()))
+                            })),
+                    )
+                })
+                .when(!report_items.is_empty(), |d| {
+                    d.child(
+                        col()
+                            .gap_1()
+                            .p_2()
+                            .rounded_md()
+                            .border_1()
+                            .border_color(theme.border)
+                            .child(section_title("完了報告"))
+                            .children(report_items),
                     )
                 })
                 .child(
@@ -1572,24 +2065,68 @@ impl MainView {
                             )
                         }),
                 )
+                .child(self.render_attachments(detail, cx))
                 .child(
                     col()
                         .gap_2()
-                        .child(section_title("コメント"))
+                        .child(row().gap_2().child(section_title("コメント")).when(
+                            unresolved > 0,
+                            |d| {
+                                d.child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(theme.muted_foreground)
+                                        .child(format!("（未解決のレビュー {unresolved} 件）")),
+                                )
+                            },
+                        ))
                         .child(comments)
+                        .when_some(composing, |d, text| {
+                            d.child(
+                                row()
+                                    .gap_2()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child(div().flex_1().min_w_0().truncate().child(text))
+                                    .child(
+                                        Button::new("comment-cancel")
+                                            .label("やめる")
+                                            .ghost()
+                                            .xsmall()
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.cancel_comment_mode(window, cx)
+                                            })),
+                                    ),
+                            )
+                        })
                         .child(Textarea::new(&self.inputs.comment).h(px(88.)))
+                        .child(mention_row)
                         .child(
                             row()
                                 .gap_2()
                                 .child(
                                     Button::new("comment-submit")
-                                        .label("コメントする")
+                                        .label(match self.comment_mode {
+                                            CommentMode::Edit(_) => "保存",
+                                            CommentMode::Reply(_) => "返信する",
+                                            CommentMode::New => "コメントする",
+                                        })
                                         .primary()
                                         .small()
                                         .on_click(cx.listener(|this, _, window, cx| {
                                             this.submit_comment(window, cx)
                                         })),
                                 )
+                                .when(is_new && self.pending_anchor.is_none(), |d| {
+                                    d.child(
+                                        Button::new("comment-review")
+                                            .label("レビューとしてコメント")
+                                            .small()
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.submit_comment_as(true, window, cx)
+                                            })),
+                                    )
+                                })
                                 .child(
                                     div()
                                         .text_xs()
@@ -1687,6 +2224,7 @@ impl MainView {
                                     .xsmall()
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.modal = Modal::None;
+                                        this.issued_ticket = None;
                                         cx.notify();
                                     })),
                             ),
@@ -1732,6 +2270,7 @@ impl MainView {
                 .label("キャンセル")
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.modal = Modal::None;
+                    this.issued_ticket = None;
                     cx.notify();
                 }))
         };
@@ -1787,14 +2326,36 @@ impl MainView {
                 self.dialog("ワークスペースを削除", body, cx)
             }
             Modal::DeleteTasks(ids) => {
+                // ほかのワークスペースにも出しているタスクは、ここから外すだけにもできる
+                let here = self.current_workspace();
+                let shared = here.is_some()
+                    && self
+                        .tasks
+                        .iter()
+                        .chain(self.detail.as_ref().map(|d| &d.task))
+                        .any(|t| ids.contains(&t.id) && !t.linked_workspace_ids.is_empty());
                 let body = col()
                     .gap_3()
                     .child(muted(format!(
                         "{} 件のタスクを削除します。元に戻せません。",
                         ids.len()
                     )))
+                    .when(shared, |d| {
+                        d.child(muted(
+                            "ほかのワークスペースにも表示しているタスクがあります。削除すると、すべてのワークスペースから消えます。"
+                                .to_owned(),
+                        ))
+                    })
                     .child(
-                        row().gap_2().justify_end().child(cancel(cx)).child(
+                        row().gap_2().justify_end().child(cancel(cx)).when(shared, |d| {
+                            d.child(
+                                Button::new("unlink-here")
+                                    .label("ここから外すだけ")
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| this.unlink_selected_here(cx)),
+                                    ),
+                            )
+                        }).child(
                             Button::new("confirm-delete-tasks")
                                 .label("削除する")
                                 .danger()
@@ -1878,9 +2439,25 @@ impl MainView {
                                 .map(|v| self.person_name(v))
                                 .collect::<Vec<_>>()
                                 .join("、"),
+                            // 「人=R,A」の形
+                            "assignee_roles" => match value.split_once('=') {
+                                Some((person, roles)) => format!(
+                                    "{}（{}）",
+                                    self.person_name(person),
+                                    Roles::parse(roles).labels()
+                                ),
+                                None => value.to_owned(),
+                            },
+                            "assignee_done" if !value.is_empty() => {
+                                format!("{} が完了", self.person_name(value))
+                            }
+                            "assignee_done" => "未完了".to_owned(),
                             "workspace" => self
                                 .workspace_name((!value.is_empty()).then_some(value))
                                 .to_string(),
+                            "link" if !value.is_empty() => {
+                                self.workspace_name(Some(value)).to_string()
+                            }
                             "parent" if !value.is_empty() => "（タスク）".to_owned(),
                             _ => value.to_owned(),
                         }
@@ -1965,6 +2542,715 @@ impl MainView {
                             ),
                     );
                 self.dialog("状態を変更", body, cx)
+            }
+            Modal::Ticket(id) => {
+                let theme = cx.theme().clone();
+                let task = self
+                    .detail
+                    .as_ref()
+                    .map(|d| &d.task)
+                    .filter(|t| &t.id == id);
+                // 自分（タスク全体を完了にする）と、ほかの担当者（その人の分だけ）
+                let mut who = row().gap_1().flex_wrap();
+                let mut options: Vec<(Option<malakt_core::Id>, String)> = Vec::new();
+                match self.people.iter().find(|p| p.is_self) {
+                    Some(me) => options.push((Some(me.id.clone()), format!("{}（自分）", me.name))),
+                    None => options.push((None, "自分".to_owned())),
+                }
+                for p in &self.people {
+                    if !p.is_self && task.is_some_and(|t| t.roles_of(&p.id).is_some()) {
+                        options.push((Some(p.id.clone()), p.name.clone()));
+                    }
+                }
+                for (ix, (person, name)) in options.into_iter().enumerate() {
+                    let active = self.ticket_person == person;
+                    who = who.child(
+                        chip(("ticket-who", ix), name, active, cx)
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                this.ticket_person = person.clone();
+                                this.issued_ticket = None;
+                                cx.notify();
+                            }))
+                            .test_support(),
+                    );
+                }
+                let whole = self
+                    .ticket_person
+                    .as_ref()
+                    .is_none_or(|id| self.self_id.as_ref() == Some(id));
+                let active = self.active_tickets(id, cx);
+                let body = col()
+                    .gap_3()
+                    .child(muted(
+                        "完了チケットは、アプリを開かずに、あとでこのタスクを完了報告つきで完了にするための引換券です。コマンドや自動の処理に渡して使います。"
+                            .to_owned(),
+                    ))
+                    .child(
+                        col()
+                            .gap_1()
+                            .child(div().text_sm().font_weight(FontWeight::BOLD).child("だれの分として"))
+                            .child(who)
+                            .child(muted(if whole {
+                                "引き換えると、タスク全体が完了になります。".to_owned()
+                            } else {
+                                "引き換えると、その人の分だけが完了になります。全員の分がそろうと、タスクが完了になります。"
+                                    .to_owned()
+                            })),
+                    )
+                    .when_some(self.issued_ticket.as_ref(), |d, ticket| {
+                        d.child(
+                            col()
+                                .gap_1()
+                                .p_2()
+                                .rounded_md()
+                                .bg(theme.secondary)
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .font_weight(FontWeight::BOLD)
+                                        .child("発行しました。この文字列は、いましか表示されません。"),
+                                )
+                                .child(
+                                    div()
+                                        .id("ticket-secret")
+                                        .text_sm()
+                                        .font_family(theme.mono_font_family.clone())
+                                        .child(ticket.secret.clone()),
+                                )
+                                .child(muted(format!(
+                                    "使い方: malakt-mahoz redeem <チケット> --message \"完了報告\"　（{} まで有効）",
+                                    view::format_datetime(ticket.expires_at)
+                                )))
+                                .child(
+                                    row().child(
+                                        Button::new("ticket-copy")
+                                            .label("コピー")
+                                            .small()
+                                            .on_click(cx.listener(|this, _, _, cx| this.copy_ticket(cx))),
+                                    ),
+                                ),
+                        )
+                    })
+                    .when_some(self.error.clone(), |d, error| {
+                        d.child(div().text_sm().text_color(theme.danger).child(error))
+                    })
+                    .child(
+                        row()
+                            .gap_2()
+                            .items_center()
+                            .child(muted(format!("引き換えていないチケット: {active} 枚")))
+                            .child(div().flex_1())
+                            .when(active > 0, |d| {
+                                d.child(
+                                    Button::new("ticket-revoke")
+                                        .label("すべて取り消す")
+                                        .small()
+                                        .on_click(
+                                            cx.listener(|this, _, _, cx| this.revoke_tickets(cx)),
+                                        ),
+                                )
+                            })
+                            .child(
+                                Button::new("ticket-issue")
+                                    .label("発行")
+                                    .primary()
+                                    .on_click(cx.listener(|this, _, _, cx| this.issue_ticket(cx))),
+                            ),
+                    );
+                self.dialog("完了チケット", body, cx)
+            }
+            Modal::Notices => {
+                let theme = cx.theme().clone();
+                let now = malakt_core::now_ms();
+                let mut list = col().gap_1();
+                for (ix, n) in self.notices.iter().enumerate() {
+                    let id = n.id.clone();
+                    list = list.child(
+                        col()
+                            .id(("notice", ix))
+                            .gap_0p5()
+                            .p_2()
+                            .rounded_md()
+                            .cursor_pointer()
+                            .hover(|s| s.bg(theme.secondary_hover))
+                            .when(n.is_unread(), |d| d.bg(theme.secondary))
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .when(n.is_unread(), |d| d.font_weight(FontWeight::BOLD))
+                                    .child(n.headline()),
+                            )
+                            .when(!n.excerpt.is_empty(), |d| {
+                                d.child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(theme.muted_foreground)
+                                        .truncate()
+                                        .child(n.excerpt.clone()),
+                                )
+                            })
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child(view::format_relative(n.created_at, now)),
+                            )
+                            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                                this.open_notice(&id, window, cx)
+                            }))
+                            .test_support(),
+                    );
+                }
+                let body = col()
+                    .gap_3()
+                    .min_h_0()
+                    .when(self.notices.is_empty(), |d| {
+                        d.child(muted(
+                            "通知はまだありません。期限が今日のタスクや、ほかの人からの完了報告がここに出ます。"
+                                .to_owned(),
+                        ))
+                    })
+                    .child(
+                        div()
+                            .id("notices-scroll")
+                            .flex_1()
+                            .min_h_0()
+                            .max_h(px(420.))
+                            .overflow_y_scroll()
+                            .child(list),
+                    )
+                    .when(self.unread_notices > 0, |d| {
+                        d.child(
+                            row().justify_end().child(
+                                Button::new("notices-read-all")
+                                    .label("すべて既読にする")
+                                    .small()
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| this.mark_all_notices_read(cx)),
+                                    ),
+                            ),
+                        )
+                    });
+                self.dialog("通知", body, cx)
+            }
+            Modal::BulkDue => {
+                let count = self.selected_ids().len();
+                let body =
+                    col()
+                        .gap_3()
+                        .child(muted(format!(
+                            "選んだ {count} 件の期限を、まとめて決めます。"
+                        )))
+                        .child(
+                            Input::new(&self.inputs.bulk_due)
+                                .id("bulk-due-input")
+                                .aria_label("期限"),
+                        )
+                        .when_some(self.error.clone(), |d, error| {
+                            d.child(div().text_sm().text_color(cx.theme().danger).child(error))
+                        })
+                        .child(
+                            row()
+                                .gap_2()
+                                .justify_end()
+                                .child(cancel(cx))
+                                .child(
+                                    Button::new("bulk-due-clear")
+                                        .label("期限をなくす")
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.submit_bulk_due(true, cx)
+                                        })),
+                                )
+                                .child(
+                                    Button::new("bulk-due-submit")
+                                        .label("決める")
+                                        .primary()
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.submit_bulk_due(false, cx)
+                                        })),
+                                ),
+                        );
+                self.dialog("期限をまとめて変更", body, cx)
+            }
+            Modal::BulkAssignees => {
+                let count = self.selected_ids().len();
+                let mut modes = row().gap_1();
+                for (ix, mode) in ListMode::ALL.into_iter().enumerate() {
+                    modes = modes.child(
+                        chip(("bulk-mode", ix), mode.label(), self.bulk_mode == mode, cx)
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                this.bulk_mode = mode;
+                                cx.notify();
+                            }))
+                            .test_support(),
+                    );
+                }
+                let mut people = row().gap_1().flex_wrap();
+                for (ix, p) in self.people.iter().enumerate() {
+                    let pid = p.id.clone();
+                    people = people.child(
+                        chip(
+                            ("bulk-person", ix),
+                            p.name.clone(),
+                            self.bulk_people.contains(&p.id),
+                            cx,
+                        )
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            this.toggle_bulk_person(&pid, cx)
+                        }))
+                        .test_support(),
+                    );
+                }
+                let hint = match self.bulk_mode {
+                    ListMode::Add => "選んだ人を、いまの担当者に足します。",
+                    ListMode::Remove => "選んだ人を、担当者から外します。",
+                    ListMode::Set => {
+                        "担当者を、選んだ人だけにします。誰も選ばなければ、担当者なしにします。"
+                    }
+                };
+                let body = col()
+                    .gap_3()
+                    .child(muted(format!(
+                        "選んだ {count} 件の担当者を、まとめて変えます。"
+                    )))
+                    .child(modes)
+                    .child(muted(hint.to_owned()))
+                    .child(people)
+                    .when_some(self.error.clone(), |d, error| {
+                        d.child(div().text_sm().text_color(cx.theme().danger).child(error))
+                    })
+                    .child(
+                        row().gap_2().justify_end().child(cancel(cx)).child(
+                            Button::new("bulk-assignees-submit")
+                                .label("変更する")
+                                .primary()
+                                .on_click(
+                                    cx.listener(|this, _, _, cx| this.submit_bulk_assignees(cx)),
+                                ),
+                        ),
+                    );
+                self.dialog("担当者をまとめて変更", body, cx)
+            }
+            Modal::BulkCategories => {
+                let count = self.selected_ids().len();
+                let mut modes = row().gap_1();
+                for (ix, (text, add)) in [("追加", true), ("外す", false)].into_iter().enumerate()
+                {
+                    modes = modes.child(
+                        chip(
+                            ("bulk-cat-mode", ix),
+                            text,
+                            self.bulk_category_add == add,
+                            cx,
+                        )
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            this.bulk_category_add = add;
+                            cx.notify();
+                        }))
+                        .test_support(),
+                    );
+                }
+                let body = col()
+                    .gap_3()
+                    .child(muted(format!(
+                        "選んだ {count} 件のカテゴリを、まとめて変えます。"
+                    )))
+                    .child(modes)
+                    .child(
+                        Input::new(&self.inputs.bulk_categories)
+                            .id("bulk-categories-input")
+                            .aria_label("カテゴリ"),
+                    )
+                    .when_some(self.error.clone(), |d, error| {
+                        d.child(div().text_sm().text_color(cx.theme().danger).child(error))
+                    })
+                    .child(
+                        row().gap_2().justify_end().child(cancel(cx)).child(
+                            Button::new("bulk-categories-submit")
+                                .label("変更する")
+                                .primary()
+                                .on_click(
+                                    cx.listener(|this, _, _, cx| this.submit_bulk_categories(cx)),
+                                ),
+                        ),
+                    );
+                self.dialog("カテゴリをまとめて変更", body, cx)
+            }
+            Modal::NewTask => {
+                let theme = cx.theme().clone();
+                let label =
+                    |text: &'static str| div().text_sm().font_weight(FontWeight::BOLD).child(text);
+                let mut priority = row().gap_1().flex_wrap();
+                for (ix, p) in Prio::ALL.into_iter().enumerate() {
+                    priority = priority.child(
+                        chip(
+                            ("nt-prio", ix),
+                            p.label(),
+                            Prio::of(self.new_task.priority) == p,
+                            cx,
+                        )
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            this.set_new_task_priority(p.value(), cx)
+                        }))
+                        .test_support(),
+                    );
+                }
+                let mut assignees = row().gap_1().flex_wrap();
+                for (ix, p) in self.people.iter().enumerate() {
+                    let pid = p.id.clone();
+                    assignees = assignees.child(
+                        chip(
+                            ("nt-as", ix),
+                            p.name.clone(),
+                            self.new_task.assignee_ids.contains(&p.id),
+                            cx,
+                        )
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            this.toggle_new_task_assignee(&pid, cx)
+                        }))
+                        .test_support(),
+                    );
+                }
+                let field = |text: &'static str, input: Input| {
+                    col().gap_1().child(label(text)).child(input)
+                };
+                let form = col()
+                    .gap_3()
+                    .child(field(
+                        "タイトル",
+                        Input::new(&self.inputs.nt_title)
+                            .id("nt-title")
+                            .aria_label("タイトル"),
+                    ))
+                    .child(
+                        col()
+                            .gap_1()
+                            .child(label("説明"))
+                            .child(Textarea::new(&self.inputs.nt_description).h(px(96.))),
+                    )
+                    .child(col().gap_1().child(label("優先度")).child(priority))
+                    .when(!self.people.is_empty(), |d| {
+                        d.child(col().gap_1().child(label("担当者")).child(assignees))
+                    })
+                    .child(field(
+                        "開始",
+                        Input::new(&self.inputs.nt_start)
+                            .id("nt-start")
+                            .aria_label("開始"),
+                    ))
+                    .child(field(
+                        "期限",
+                        Input::new(&self.inputs.nt_due)
+                            .id("nt-due")
+                            .aria_label("期限"),
+                    ))
+                    .child(field(
+                        "カテゴリ",
+                        Input::new(&self.inputs.nt_categories)
+                            .id("nt-categories")
+                            .aria_label("カテゴリ"),
+                    ));
+                let place = self.workspace_name(self.current_workspace());
+                let body = col()
+                    .gap_3()
+                    .min_h_0()
+                    .child(muted(format!(
+                        "「{place}」に作ります。状態は未着手で始まります。"
+                    )))
+                    .child(
+                        div()
+                            .id("new-task-scroll")
+                            .flex_1()
+                            .min_h_0()
+                            .overflow_y_scroll()
+                            .child(form),
+                    )
+                    .when_some(self.error.clone(), |d, error| {
+                        d.child(div().text_sm().text_color(theme.danger).child(error))
+                    })
+                    .child(
+                        row().gap_2().justify_end().child(cancel(cx)).child(
+                            Button::new("new-task-submit")
+                                .label("作成")
+                                .primary()
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.submit_new_task(window, cx)
+                                })),
+                        ),
+                    );
+                self.dialog("新しいタスク", body, cx)
+            }
+            Modal::LinkTask(id) => {
+                let task = self
+                    .detail
+                    .as_ref()
+                    .map(|d| &d.task)
+                    .filter(|t| &t.id == id);
+                // 基準日が同じワークスペースを先に出す（同じ日の催しに出すことが多い）
+                let date_of = |ws: Option<&str>| {
+                    self.workspaces
+                        .iter()
+                        .find(|w| Some(w.id.as_str()) == ws)
+                        .and_then(|w| w.date.clone())
+                };
+                let home_date = date_of(task.and_then(|t| t.workspace_id.as_deref()));
+                let mut same = col().gap_1();
+                let mut others = col().gap_1();
+                let (mut any_same, mut any_other) = (false, false);
+                for (ix, ws) in self.workspaces.iter().enumerate() {
+                    if task.is_none_or(|t| t.is_in(&ws.id)) {
+                        continue;
+                    }
+                    let target = ws.id.clone();
+                    let item = chip(("link-to", ix), ws.name.clone(), false, cx)
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            this.link_task_to(&target, cx)
+                        }))
+                        .test_support();
+                    if home_date.is_some() && ws.date == home_date {
+                        any_same = true;
+                        same = same.child(item);
+                    } else {
+                        any_other = true;
+                        others = others.child(item);
+                    }
+                }
+                let body = col()
+                    .gap_3()
+                    .child(muted(
+                        "選んだワークスペースの一覧にも、このタスクが出ます。どこから開いても同じタスクです。"
+                            .to_owned(),
+                    ))
+                    .when(!any_same && !any_other, |d| {
+                        d.child(muted("表示できるワークスペースは、ほかにありません。".to_owned()))
+                    })
+                    .child(
+                        div()
+                            .id("link-options")
+                            .max_h(px(320.))
+                            .overflow_y_scroll()
+                            .child(
+                                col()
+                                    .gap_2()
+                                    .when(any_same, |d| {
+                                        d.child(muted("基準日が同じ".to_owned())).child(same)
+                                    })
+                                    .when(any_same && any_other, |d| {
+                                        d.child(muted("そのほか".to_owned()))
+                                    })
+                                    .child(others),
+                            ),
+                    );
+                self.dialog("ほかのワークスペースにも表示", body, cx)
+            }
+            Modal::WorkspaceSettings(id) => {
+                let theme = cx.theme().clone();
+                let draft = &self.defaults_draft;
+                let label =
+                    |text: &'static str| div().text_sm().font_weight(FontWeight::BOLD).child(text);
+                let mut assignees = row().gap_1().flex_wrap();
+                for (ix, p) in self.people.iter().enumerate() {
+                    let pid = p.id.clone();
+                    assignees = assignees.child(
+                        chip(
+                            ("def-as", ix),
+                            p.name.clone(),
+                            draft.assignee_ids.contains(&p.id),
+                            cx,
+                        )
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            this.toggle_default_assignee(&pid, cx)
+                        }))
+                        .test_support(),
+                    );
+                }
+                if self.people.is_empty() {
+                    assignees = assignees.child(muted(
+                        "担当者はまだいません。左のメニューの「担当者」から足せます。".to_owned(),
+                    ));
+                }
+                let due_kinds = [
+                    ("def-due-none", "入れない", DueRule::None),
+                    (
+                        "def-due-relative",
+                        "基準日から",
+                        DueRule::Relative { days: 0 },
+                    ),
+                    (
+                        "def-due-fixed",
+                        "決まった日",
+                        DueRule::Fixed {
+                            date: String::new(),
+                        },
+                    ),
+                ];
+                let mut due = row().gap_1().flex_wrap();
+                for (chip_id, text, rule) in due_kinds {
+                    let active =
+                        std::mem::discriminant(&draft.due) == std::mem::discriminant(&rule);
+                    due = due.child(
+                        chip(chip_id, text, active, cx)
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                this.set_default_due(rule.clone(), cx)
+                            }))
+                            .test_support(),
+                    );
+                }
+                let due_detail = match &draft.due {
+                    DueRule::None => col(),
+                    DueRule::Relative { .. } => col()
+                        .gap_1()
+                        .child(muted(
+                            "基準日から何日ずらすか。前なら -7 のように入れます。基準日がないときは、親のワークスペースの基準日を使います。"
+                                .to_owned(),
+                        ))
+                        .child(Input::new(&self.inputs.def_days).id("def-days").aria_label("日数"))
+                        .child(Input::new(&self.inputs.def_time).id("def-time").aria_label("時刻")),
+                    DueRule::Fixed { .. } => col()
+                        .gap_1()
+                        .child(Input::new(&self.inputs.def_date).id("def-date").aria_label("日付"))
+                        .child(Input::new(&self.inputs.def_time).id("def-time").aria_label("時刻")),
+                };
+                let mut priority = row().gap_1().flex_wrap();
+                for (ix, (text, value)) in [
+                    ("指定しない", None),
+                    ("高", Some(1u8)),
+                    ("中", Some(5)),
+                    ("低", Some(9)),
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    priority = priority.child(
+                        chip(("def-prio", ix), text, draft.priority == value, cx)
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                this.set_default_priority(value, cx)
+                            }))
+                            .test_support(),
+                    );
+                }
+                let mut links = row().gap_1().flex_wrap();
+                let mut any_link = false;
+                for (ix, w) in self.workspaces.iter().enumerate() {
+                    if &w.id == id {
+                        continue;
+                    }
+                    any_link = true;
+                    let wid = w.id.clone();
+                    links = links.child(
+                        chip(
+                            ("def-link", ix),
+                            w.name.clone(),
+                            draft.link_workspace_ids.contains(&w.id),
+                            cx,
+                        )
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            this.toggle_default_link(&wid, cx)
+                        }))
+                        .test_support(),
+                    );
+                }
+                let form = col()
+                    .gap_3()
+                    .child(
+                        col()
+                            .gap_1()
+                            .child(label("基準日（開催日など）"))
+                            .child(Input::new(&self.inputs.ws_date).id("ws-date").aria_label("基準日")),
+                    )
+                    .child(div().h(px(1.)).bg(theme.border))
+                    .child(muted(
+                        "ここから下は、このワークスペースでタスクを足すときに最初から入れる値です。すでにあるタスクは変わりません。"
+                            .to_owned(),
+                    ))
+                    .child(col().gap_1().child(label("担当者")).child(assignees))
+                    .child(col().gap_1().child(label("期限")).child(due).child(due_detail))
+                    .child(col().gap_1().child(label("優先度")).child(priority))
+                    .child(
+                        col().gap_1().child(label("カテゴリ")).child(
+                            Input::new(&self.inputs.def_categories)
+                                .id("def-categories")
+                                .aria_label("カテゴリ"),
+                        ),
+                    )
+                    .child(
+                        col()
+                            .gap_1()
+                            .child(label("説明の雛形"))
+                            .child(Textarea::new(&self.inputs.def_description).h(px(96.))),
+                    )
+                    .when(any_link, |d| {
+                        d.child(
+                            col()
+                                .gap_1()
+                                .child(label("一緒に表示するワークスペース"))
+                                .child(links),
+                        )
+                    });
+                let body = col()
+                    .gap_3()
+                    .min_h_0()
+                    .child(
+                        div()
+                            .id("ws-settings-scroll")
+                            .flex_1()
+                            .min_h_0()
+                            .overflow_y_scroll()
+                            .child(form),
+                    )
+                    .when_some(self.error.clone(), |d, error| {
+                        d.child(div().text_sm().text_color(theme.danger).child(error))
+                    })
+                    .child(
+                        row().gap_2().justify_end().child(cancel(cx)).child(
+                            Button::new("ws-settings-save")
+                                .label("保存")
+                                .primary()
+                                .on_click(
+                                    cx.listener(|this, _, _, cx| this.save_workspace_settings(cx)),
+                                ),
+                        ),
+                    );
+                self.dialog(
+                    format!("「{}」の設定", self.workspace_name(Some(id))),
+                    body,
+                    cx,
+                )
+            }
+            Modal::Usage => {
+                let usage = self.usage(cx);
+                let line = |label: &'static str, bytes: u64| {
+                    row()
+                        .gap_2()
+                        .text_sm()
+                        .child(div().flex_1().child(label))
+                        .child(view::format_bytes(bytes))
+                };
+                let body = col()
+                    .gap_3()
+                    .child(muted(
+                        "このアプリがディスクに置くのはデータベースだけです。添付ファイルもその中に、同じ中身は 1 つだけ、縮むものは圧縮して入れます。ログやキャッシュは書きません。"
+                            .to_owned(),
+                    ))
+                    .child(
+                        col()
+                            .gap_1()
+                            .child(line("データベース", usage.database_bytes))
+                            .child(line("うち、添付ファイル", usage.attachment_bytes))
+                            .child(line("うち、整理すると空く分", usage.reclaimable_bytes)),
+                    )
+                    .child(muted(
+                        "消したデータの跡は、アプリを閉じるときに自動で整理します。".to_owned(),
+                    ))
+                    .child(
+                        row().child(
+                            Button::new("usage-compact")
+                                .label("いま整理する")
+                                .small()
+                                .on_click(cx.listener(|this, _, _, cx| this.compact(cx))),
+                        ),
+                    );
+                self.dialog("使用量", body, cx)
             }
             Modal::Lock => {
                 let enabled = self.lock_enabled(cx);
@@ -2064,10 +3350,10 @@ impl Render for MainView {
 
         let main = if !wide && sidebar {
             // 狭い画面でメニューを開いているあいだは、メニューだけを見せる
-            div()
+            self.render_sidebar(cx).w_full().flex_1().min_h_0()
         } else {
             match self.nav {
-                Nav::Home => self.render_home(cx),
+                Nav::Home => self.render_home(table, cx),
                 _ => self.render_list(table, cx),
             }
         };
@@ -2083,9 +3369,7 @@ impl Render for MainView {
             .flex_row()
             .bg(theme.background)
             .text_color(theme.foreground)
-            .when(sidebar, |d| {
-                d.child(self.render_sidebar(cx).when(!wide, |s| s.w_full()))
-            })
+            .when(wide, |d| d.child(self.render_sidebar(cx)))
             .child(
                 col()
                     .flex_1()
