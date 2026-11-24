@@ -4,6 +4,7 @@ pub mod ai;
 pub mod ai_view;
 pub mod cli;
 pub mod db;
+pub mod icons;
 mod render;
 pub mod state;
 pub mod theme;
@@ -24,8 +25,10 @@ actions!(
 
 /// 画面に出すアプリの名前。
 pub const APP_NAME: &str = "Malakt Mahoz";
-/// 画面全体の拡大率。文字（rem）と、px で決めた寸法の両方に掛ける。
+/// 寸法（px で決めた幅・高さ）の拡大率。
 pub const UI_SCALE: f32 = 1.25;
+/// 文字（rem）の拡大率。寸法より控えめにする。
+pub const TEXT_SCALE: f32 = 1.1;
 /// OS がウィンドウや通知をこのアプリのものと見分けるための名前。
 pub const APP_ID: &str = "io.github.richinosan.malakt-mahoz";
 

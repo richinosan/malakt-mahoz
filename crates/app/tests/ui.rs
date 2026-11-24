@@ -1491,3 +1491,48 @@ fn theme_buttons_switch_the_colors(cx: &mut TestAppContext) {
     ui(cx, window, |window, cx| window.click(("theme", 2usize), cx));
     assert_eq!(saved(cx).as_deref(), Some("system"));
 }
+
+/// アイコンは検索して選べる。日本語でも探せ、見つからなければその旨が出る。
+#[gpui_kit::test]
+fn workspace_icon_is_found_by_search(cx: &mut TestAppContext) {
+    start(cx);
+    let ws = cx.update(|cx| {
+        db::shared(cx).update(cx, |db, cx| {
+            let ws = db.store.create_workspace(None, "旅行").unwrap();
+            cx.notify();
+            ws.id
+        })
+    });
+    let (window, view) = open(cx, wide());
+    // 開いているワークスペースの行には「…」が出ている
+    cx.update(|cx| view.update(cx, |v, cx| v.go(Nav::Workspace(ws.clone()), cx)));
+    ui(cx, window, |window, cx| {
+        window.click(("ws-more", 0usize), cx)
+    });
+    ui(cx, window, |window, cx| window.press("down", cx));
+    ui(cx, window, |window, cx| window.press("enter", cx));
+    cx.update(|cx| assert_eq!(view.read(cx).modal, Modal::WorkspaceIcon(ws.clone())));
+
+    // 同梱の 48 個にない「飛行機の離陸」を名前で探して選ぶ
+    ui(cx, window, |window, cx| {
+        window.click("icon-search", cx);
+        window.input("plane-takeoff", cx);
+    });
+    ui(cx, window, |window, cx| {
+        window.click(("ws-icon", 0usize), cx)
+    });
+    let saved = store(cx, |s| s.workspace(&ws).unwrap());
+    assert_eq!(saved.icon.as_deref(), Some("plane-takeoff"));
+
+    // 日本語でも探せる
+    ui(cx, window, |window, cx| {
+        window.click("icon-search", cx);
+        window.press("ctrl-a", cx);
+        window.input("猫", cx);
+    });
+    ui(cx, window, |window, cx| {
+        window.click(("ws-icon", 0usize), cx)
+    });
+    let saved = store(cx, |s| s.workspace(&ws).unwrap());
+    assert_eq!(saved.icon.as_deref(), Some("cat"));
+}

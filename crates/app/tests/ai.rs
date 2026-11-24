@@ -120,7 +120,8 @@ fn open(cx: &mut TestAppContext, window_size: Size<Pixels>) -> (AnyWindowHandle,
 }
 
 fn wide() -> Size<Pixels> {
-    size(px(1600.), px(900.))
+    // 設定欄の下まで入るよう、高さは画面の拡大率に合わせる
+    size(px(1600.), px(900. * malakt_mahoz::UI_SCALE))
 }
 
 fn ui(

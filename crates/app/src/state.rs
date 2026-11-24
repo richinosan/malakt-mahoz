@@ -109,6 +109,7 @@ pub struct TreeRow {
 pub struct Inputs {
     pub quick_add: Entity<InputState>,
     pub search: Entity<InputState>,
+    pub icon_search: Entity<InputState>,
     pub name: Entity<InputState>,
     pub passphrase: Entity<InputState>,
     pub new_passphrase: Entity<InputState>,
@@ -218,6 +219,7 @@ impl MainView {
         let inputs = Inputs {
             quick_add: input(window, cx, "タスクを追加…"),
             search: input(window, cx, "キーワード"),
+            icon_search: input(window, cx, "アイコンを検索"),
             name: input(window, cx, "名前"),
             passphrase: cx.new(|cx| {
                 InputState::new(window, cx)
@@ -293,6 +295,15 @@ impl MainView {
         on_enter!(start, save_start);
         on_enter!(due, save_due);
         on_enter!(category, submit_category);
+        subs.push(cx.subscribe_in(
+            &inputs.icon_search,
+            window,
+            |_, _, event: &InputEvent, _, cx| {
+                if matches!(event, InputEvent::Change) {
+                    cx.notify();
+                }
+            },
+        ));
         subs.push(cx.subscribe_in(
             &inputs.search,
             window,
@@ -2188,8 +2199,9 @@ impl AssetSource for Assets {
         match own {
             // 取り込んだデータに知らない名前があっても、既定のアイコンで出す
             Some(name) => Ok(icon_svg(name)
-                .or_else(|| icon_svg(DEFAULT_WORKSPACE_ICON))
-                .map(Into::into)),
+                .map(Into::into)
+                .or_else(|| crate::icons::svg(name).map(Into::into))
+                .or_else(|| icon_svg(DEFAULT_WORKSPACE_ICON).map(Into::into))),
             None => gpui_kit::assets::Assets.load(path),
         }
     }
