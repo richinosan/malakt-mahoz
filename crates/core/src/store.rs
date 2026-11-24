@@ -13,7 +13,7 @@ use crate::{schema, Error, Result};
 ///
 /// 書き込みはすべてトランザクションで行う。複数ウィンドウからは 1 つの `Store` を共有する。
 pub struct Store {
-    conn: Connection,
+    pub(crate) conn: Connection,
 }
 
 /// ディスクの使用量（バイト）。
@@ -23,6 +23,8 @@ pub struct Usage {
     pub database_bytes: u64,
     /// そのうち、消したデータの跡で、整理すると返せる分。
     pub reclaimable_bytes: u64,
+    /// そのうち、添付ファイルの中身（圧縮後、重複なし）。
+    pub attachment_bytes: u64,
 }
 
 const AUTO_VACUUM_INCREMENTAL: i64 = 2;
@@ -68,6 +70,7 @@ impl Store {
         Ok(Usage {
             database_bytes: get("page_count")? * page,
             reclaimable_bytes: get("freelist_count")? * page,
+            attachment_bytes: self.blob_bytes()?,
         })
     }
 
@@ -1066,11 +1069,17 @@ impl Store {
             tasks,
             comments,
             changes,
+            attachments: self.all_attachments()?,
         })
     }
 
     /// ID が同じものは上書き、なければ追加する。全体を 1 つのトランザクションで行う。
-    pub(crate) fn merge(&mut self, data: &crate::archive::Data) -> Result<()> {
+    /// 添付の中身は、まだ持っていないものだけ `fetch` にハッシュを渡して受け取る。
+    pub(crate) fn merge(
+        &mut self,
+        data: &crate::archive::Data,
+        fetch: &mut dyn FnMut(&str) -> Result<Vec<u8>>,
+    ) -> Result<()> {
         let tx = self.conn.transaction()?;
         // 親より先に子が来ても入るように、検査をコミットまで遅らせる。
         tx.pragma_update(None, "defer_foreign_keys", "ON")?;
@@ -1122,6 +1131,22 @@ impl Store {
                 c.new_value,
                 c.created_at
             ])?;
+        }
+        for a in &data.attachments {
+            let known: bool = tx
+                .prepare_cached("SELECT EXISTS(SELECT 1 FROM blobs WHERE hash = ?1)")?
+                .query_row(params![a.hash], |r| r.get(0))?;
+            if !known {
+                let bytes = fetch(&a.hash)?;
+                if bytes.len() as u64 != a.size || crate::attachment::hash_of(&bytes) != a.hash {
+                    return Err(Error::Invalid(format!(
+                        "添付「{}」の中身が壊れています",
+                        a.name
+                    )));
+                }
+                crate::attachment::put_blob(&tx, &a.hash, &bytes)?;
+            }
+            crate::attachment::insert(&tx, a)?;
         }
         // 取り込んだ結果、親子が輪になっていないか確かめる。
         let reachable: i64 = tx.query_row(
@@ -2419,7 +2444,9 @@ mod raci_tests {
         s.set_assignee_done(&task.id, &ids[1], true).unwrap();
         let expect = s.task(&task.id).unwrap();
         let mut other = Store::open_in_memory().unwrap();
-        other.merge(&s.dump().unwrap()).unwrap();
+        other
+            .merge(&s.dump().unwrap(), &mut |hash| s.blob(hash))
+            .unwrap();
         assert_eq!(other.task(&task.id).unwrap(), expect);
     }
 }
@@ -2735,7 +2762,9 @@ mod comment_tests {
         let expect = s.comments(&task.id).unwrap();
         assert_eq!(expect[0].mentions, [sato.id.clone()]);
         let mut other = Store::open_in_memory().unwrap();
-        other.merge(&s.dump().unwrap()).unwrap();
+        other
+            .merge(&s.dump().unwrap(), &mut |hash| s.blob(hash))
+            .unwrap();
         assert_eq!(other.comments(&task.id).unwrap(), expect);
     }
 }

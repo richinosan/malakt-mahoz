@@ -40,6 +40,9 @@ pub struct Counts {
     pub tasks: usize,
     pub comments: usize,
     pub changes: usize,
+    /// 古い書き出しにはない。
+    #[serde(default)]
+    pub attachments: usize,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -49,6 +52,8 @@ pub struct Data {
     pub tasks: Vec<Task>,
     pub comments: Vec<Comment>,
     pub changes: Vec<Change>,
+    /// 添付の名前や大きさ。中身は zip の `files/<ハッシュ>` に 1 つずつ入る。
+    pub attachments: Vec<Attachment>,
 }
 
 impl Data {
@@ -59,6 +64,7 @@ impl Data {
             tasks: self.tasks.len(),
             comments: self.comments.len(),
             changes: self.changes.len(),
+            attachments: self.attachments.len(),
         }
     }
 
@@ -84,6 +90,9 @@ impl Data {
         }
         for c in &mut self.comments {
             c.body = normalize(&c.body);
+        }
+        for a in &mut self.attachments {
+            a.name = crate::attachment::clean_name(&a.name);
         }
         for c in &mut self.changes {
             c.old_value = normalize(&c.old_value);
@@ -121,8 +130,24 @@ impl Data {
                 return bad("タスク");
             }
         }
+        // ハッシュは zip の中のファイル名になるので、16 進 64 桁だけを通す
+        if self.attachments.iter().any(|a| {
+            a.id.is_empty()
+                || a.size > MAX_ATTACHMENT_BYTES
+                || a.hash.len() != 64
+                || !a
+                    .hash
+                    .bytes()
+                    .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        }) {
+            return bad("添付");
+        }
         Ok(())
     }
+}
+
+fn file_entry(hash: &str) -> String {
+    format!("files/{hash}")
 }
 
 /// すべてのデータを zip に書き出す。
@@ -153,6 +178,17 @@ pub fn export<W: Write + Seek>(store: &Store, out: W) -> Result<Manifest> {
     put("data/tasks.json", serde_json::to_vec(&data.tasks)?)?;
     put("data/comments.json", serde_json::to_vec(&data.comments)?)?;
     put("data/changes.json", serde_json::to_vec(&data.changes)?)?;
+    put(
+        "data/attachments.json",
+        serde_json::to_vec(&data.attachments)?,
+    )?;
+    // 中身は 1 つずつ読んで書く（全部を一度にメモリへ載せない）。同じ中身は 1 回だけ
+    let mut written = std::collections::HashSet::new();
+    for a in &data.attachments {
+        if written.insert(a.hash.as_str()) {
+            put(&file_entry(&a.hash), store.blob(&a.hash)?)?;
+        }
+    }
     zip.finish()?.flush()?;
     Ok(manifest)
 }
@@ -178,8 +214,11 @@ pub fn export_to_path(store: &Store, path: impl AsRef<Path>) -> Result<Manifest>
 /// zip を読んで取り込む。ID が同じものは上書きし、ないものは追加する。
 /// 途中で失敗したら何も変えない。
 pub fn import<R: Read + Seek>(store: &mut Store, input: R) -> Result<Manifest> {
-    let (manifest, data) = read(input)?;
-    store.merge(&data)?;
+    let mut zip = ZipArchive::new(input)?;
+    let (manifest, data) = read_zip(&mut zip)?;
+    store.merge(&data, &mut |hash| {
+        read_entry(&mut zip, &file_entry(hash), MAX_ATTACHMENT_BYTES)
+    })?;
     Ok(manifest)
 }
 
@@ -189,8 +228,11 @@ pub fn import_from_path(store: &mut Store, path: impl AsRef<Path>) -> Result<Man
 
 /// zip を読んで確かめるだけで、取り込まない。
 pub fn read<R: Read + Seek>(input: R) -> Result<(Manifest, Data)> {
-    let mut zip = ZipArchive::new(input)?;
-    let manifest: Manifest = read_json(&mut zip, "manifest.json")?;
+    read_zip(&mut ZipArchive::new(input)?)
+}
+
+fn read_zip<R: Read + Seek>(zip: &mut ZipArchive<R>) -> Result<(Manifest, Data)> {
+    let manifest: Manifest = read_json(zip, "manifest.json")?;
     if manifest.format != FORMAT {
         return Err(Error::Invalid(
             "malakt-mahoz のエクスポートではありません".into(),
@@ -199,15 +241,30 @@ pub fn read<R: Read + Seek>(input: R) -> Result<(Manifest, Data)> {
     if manifest.format_version != FORMAT_VERSION {
         return Err(Error::UnsupportedFormat(manifest.format_version));
     }
+    // 添付は、添付の機能ができる前の書き出しにはない
+    let attachments = if zip.index_for_name("data/attachments.json").is_some() {
+        read_json(zip, "data/attachments.json")?
+    } else {
+        Vec::new()
+    };
     let mut data = Data {
-        workspaces: read_json(&mut zip, "data/workspaces.json")?,
-        people: read_json(&mut zip, "data/people.json")?,
-        tasks: read_json(&mut zip, "data/tasks.json")?,
-        comments: read_json(&mut zip, "data/comments.json")?,
-        changes: read_json(&mut zip, "data/changes.json")?,
+        workspaces: read_json(zip, "data/workspaces.json")?,
+        people: read_json(zip, "data/people.json")?,
+        tasks: read_json(zip, "data/tasks.json")?,
+        comments: read_json(zip, "data/comments.json")?,
+        changes: read_json(zip, "data/changes.json")?,
+        attachments,
     };
     data.normalize();
     data.validate()?;
+    for a in &data.attachments {
+        if zip.index_for_name(&file_entry(&a.hash)).is_none() {
+            return Err(Error::Invalid(format!(
+                "添付「{}」の中身がありません",
+                a.name
+            )));
+        }
+    }
     Ok((manifest, data))
 }
 
@@ -215,18 +272,23 @@ fn read_json<R: Read + Seek, T: for<'de> Deserialize<'de>>(
     zip: &mut ZipArchive<R>,
     name: &str,
 ) -> Result<T> {
+    let bytes = read_entry(zip, name, MAX_ENTRY_BYTES)?;
+    Ok(serde_json::from_str(decode_utf8(&bytes)?)?)
+}
+
+fn read_entry<R: Read + Seek>(zip: &mut ZipArchive<R>, name: &str, limit: u64) -> Result<Vec<u8>> {
     let entry = zip.by_name(name).map_err(|e| match e {
         zip::result::ZipError::FileNotFound => Error::Invalid(format!("{name} がありません")),
         e => Error::Zip(e),
     })?;
-    if entry.size() > MAX_ENTRY_BYTES {
+    if entry.size() > limit {
         return Err(Error::Invalid(format!("{name} が大きすぎます")));
     }
     let mut bytes = Vec::with_capacity(entry.size() as usize);
     // 申告されたサイズが嘘でも、上限までしか読まない。
-    entry.take(MAX_ENTRY_BYTES + 1).read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > MAX_ENTRY_BYTES {
+    entry.take(limit + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > limit {
         return Err(Error::Invalid(format!("{name} が大きすぎます")));
     }
-    Ok(serde_json::from_str(decode_utf8(&bytes)?)?)
+    Ok(bytes)
 }

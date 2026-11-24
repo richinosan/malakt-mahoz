@@ -767,3 +767,92 @@ fn usage_dialog_shows_size_and_compacts(cx: &mut TestAppContext) {
         assert_eq!(view.usage(cx).reclaimable_bytes, 0);
     });
 }
+
+/// ファイルを添付し、保存し、消せる。大きすぎるファイルは断る。
+#[gpui_kit::test]
+fn attachments_add_save_and_delete(cx: &mut TestAppContext) {
+    start(cx);
+    let (window, view) = open(cx, size(px(1280.), px(2400.)));
+    cx.update(|cx| {
+        view.update(cx, |v, cx| {
+            v.write(cx, |s| {
+                s.create_task(
+                    None,
+                    &malakt_core::TaskDraft {
+                        title: "見積もりを取る".into(),
+                        ..Default::default()
+                    },
+                )
+            })
+            .unwrap()
+        })
+    });
+    ui(cx, window, |window, cx| window.click("nav-all", cx));
+    ui(cx, window, |window, cx| window.click(("title", 0usize), cx));
+    let id = all_tasks(cx).remove(0).id;
+
+    let dir = tempfile::tempdir().unwrap();
+    let estimate = dir.path().join("見積もり.txt");
+    std::fs::write(&estimate, "合計 12,000 円\n".repeat(200)).unwrap();
+    let copy = dir.path().join("控え.txt");
+    std::fs::copy(&estimate, &copy).unwrap();
+    let huge = dir.path().join("huge.bin");
+    std::fs::File::create(&huge)
+        .unwrap()
+        .set_len(malakt_core::MAX_ATTACHMENT_BYTES + 1)
+        .unwrap();
+    cx.update(|cx| {
+        view.update(cx, |v, cx| {
+            v.attach_paths(&[estimate.clone(), copy.clone(), huge.clone()], cx)
+        })
+    });
+    cx.run_until_parked();
+    // 大きすぎるものだけ断り、ほかは入る
+    let attachments = store(cx, |s| s.attachments(&id).unwrap());
+    assert_eq!(
+        attachments
+            .iter()
+            .map(|a| a.name.as_str())
+            .collect::<Vec<_>>(),
+        ["見積もり.txt", "控え.txt"]
+    );
+    cx.update(|cx| {
+        let view = view.read(cx);
+        assert!(view.error.as_ref().is_some_and(|e| e.contains("huge.bin")));
+        assert_eq!(view.detail.as_ref().unwrap().attachments.len(), 2);
+        // 同じ中身は 1 つ分、しかも圧縮されている
+        let used = view.usage(cx).attachment_bytes;
+        assert!(used > 0 && used < attachments[0].size / 2, "{used}");
+    });
+
+    // 保存すると、元と同じ中身が出てくる
+    let saved = dir.path().join("saved.txt");
+    cx.update(|cx| {
+        view.update(cx, |v, cx| {
+            v.save_attachment_to(&attachments[0].id, &saved, cx)
+        })
+    });
+    assert_eq!(
+        std::fs::read(&saved).unwrap(),
+        std::fs::read(&estimate).unwrap()
+    );
+
+    // 開くための写しは一時フォルダーに出し、まとめて消せる
+    let opened = cx.update(|cx| view.read(cx).opened_copy(&attachments[0].id, cx).unwrap());
+    assert_eq!(opened.file_name().unwrap(), "見積もり.txt");
+    assert_eq!(
+        std::fs::read(&opened).unwrap(),
+        std::fs::read(&estimate).unwrap()
+    );
+    cx.update(|cx| db::shared(cx).read(cx).clear_opened());
+    assert!(!opened.exists());
+
+    ui(cx, window, |window, cx| {
+        window.click(("att-del", 0usize), cx)
+    });
+    ui(cx, window, |window, cx| {
+        window.click(("att-del", 0usize), cx)
+    });
+    assert!(store(cx, |s| s.attachments(&id).unwrap()).is_empty());
+    cx.update(|cx| assert_eq!(view.read(cx).usage(cx).attachment_bytes, 0));
+}

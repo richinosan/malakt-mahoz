@@ -13,7 +13,7 @@ use gpui_kit::*;
 use malakt_core::view::{self, AssigneeFilter, DueState, Priority as Prio, Sort, Tab};
 use malakt_core::{Comment, Role as Raci, Roles, Status, Task as Todo};
 
-use crate::state::{CommentMode, Editing, MainView, Modal, Nav};
+use crate::state::{CommentMode, Detail, Editing, MainView, Modal, Nav};
 use crate::{Dismiss, LockNow, NewWindow};
 
 const SIDEBAR_WIDTH: Pixels = px(248.);
@@ -1124,6 +1124,84 @@ impl MainView {
     // ---- 詳細パネル ----
 
     /// コメント 1 件。書いた人・時刻・操作と、Markdown の本文。
+    fn render_attachments(&self, detail: &Detail, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let mut list = col().gap_1();
+        for (ix, a) in detail.attachments.iter().enumerate() {
+            let (open_id, save_id, delete_id) = (a.id.clone(), a.id.clone(), a.id.clone());
+            list = list.child(
+                row()
+                    .gap_2()
+                    .items_center()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_sm()
+                            .child(a.name.clone()),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(view::format_bytes(a.size)),
+                    )
+                    .child(
+                        Button::new(("att-open", ix))
+                            .label("開く")
+                            .ghost()
+                            .xsmall()
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.open_attachment(&open_id, cx);
+                            })),
+                    )
+                    .child(
+                        Button::new(("att-save", ix))
+                            .label("保存")
+                            .ghost()
+                            .xsmall()
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.save_attachment(&save_id, window, cx);
+                            })),
+                    )
+                    .child(
+                        Button::new(("att-del", ix))
+                            .label("削除")
+                            .ghost()
+                            .xsmall()
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.write(cx, |s| s.delete_attachment(&delete_id));
+                            })),
+                    ),
+            );
+        }
+        col()
+            .gap_2()
+            .child(
+                row()
+                    .gap_2()
+                    .items_center()
+                    .child(section_title("添付"))
+                    .when(!detail.attachments.is_empty(), |d| {
+                        d.child(
+                            div()
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child(format!("{} 件", detail.attachments.len())),
+                        )
+                    })
+                    .child(div().flex_1())
+                    .child(
+                        Button::new("att-add")
+                            .label("ファイルを追加")
+                            .small()
+                            .on_click(cx.listener(|this, _, window, cx| this.attach(window, cx))),
+                    ),
+            )
+            .child(list)
+    }
+
     fn render_comment(&self, ix: usize, c: &Comment, now: i64, cx: &mut Context<Self>) -> Div {
         let theme = cx.theme().clone();
         let (pin_id, delete_id, edit_id, pinned) =
@@ -1863,6 +1941,7 @@ impl MainView {
                             )
                         }),
                 )
+                .child(self.render_attachments(detail, cx))
                 .child(
                     col()
                         .gap_2()
@@ -2325,13 +2404,14 @@ impl MainView {
                 let body = col()
                     .gap_3()
                     .child(muted(
-                        "このアプリがディスクに置くのはデータベースだけです。ログやキャッシュは書きません。"
+                        "このアプリがディスクに置くのはデータベースだけです。添付ファイルもその中に、同じ中身は 1 つだけ、縮むものは圧縮して入れます。ログやキャッシュは書きません。"
                             .to_owned(),
                     ))
                     .child(
                         col()
                             .gap_1()
                             .child(line("データベース", usage.database_bytes))
+                            .child(line("うち、添付ファイル", usage.attachment_bytes))
                             .child(line("うち、整理すると空く分", usage.reclaimable_bytes)),
                     )
                     .child(muted(

@@ -97,6 +97,32 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE comments ADD COLUMN mentions TEXT NOT NULL DEFAULT '';
     CREATE INDEX comments_reply ON comments(reply_to);
     "#,
+    // 4: 添付ファイル。中身は内容のハッシュごとに 1 つだけ持ち、
+    //    どの添付からも指されなくなったら消す
+    r#"
+    CREATE TABLE blobs (
+        hash TEXT PRIMARY KEY NOT NULL,
+        size INTEGER NOT NULL,
+        compressed INTEGER NOT NULL,
+        data BLOB NOT NULL
+    ) STRICT;
+    CREATE TABLE attachments (
+        id TEXT PRIMARY KEY NOT NULL,
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        author_id TEXT REFERENCES people(id) ON DELETE SET NULL,
+        name TEXT NOT NULL,
+        size INTEGER NOT NULL,
+        hash TEXT NOT NULL REFERENCES blobs(hash),
+        created_at INTEGER NOT NULL
+    ) STRICT;
+    CREATE INDEX attachments_task ON attachments(task_id, created_at);
+    CREATE INDEX attachments_hash ON attachments(hash);
+    CREATE TRIGGER attachments_drop_blob AFTER DELETE ON attachments
+    WHEN NOT EXISTS (SELECT 1 FROM attachments WHERE hash = OLD.hash)
+    BEGIN
+        DELETE FROM blobs WHERE hash = OLD.hash;
+    END;
+    "#,
 ];
 
 pub(crate) fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
