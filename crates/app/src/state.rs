@@ -4,11 +4,12 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
+use gpui_kit::component::text::TextViewState;
 use gpui_kit::*;
 use malakt_core::view::{self, ListQuery};
 use malakt_core::{
-    archive, lock, Change, Comment, Id, Person, Scope, Status, Store, Task as Todo, TaskDraft,
-    TaskFilter, Workspace,
+    archive, lock, mention, Anchor, Change, Comment, Id, NewComment, Person, Scope, Status, Store,
+    Task as Todo, TaskDraft, TaskFilter, Workspace,
 };
 
 use crate::db::{self, Db};
@@ -49,6 +50,18 @@ pub enum Modal {
 pub enum Editing {
     Title,
     Description,
+}
+
+/// コメント欄でいま書いているもの。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum CommentMode {
+    /// 新しいコメント
+    #[default]
+    New,
+    /// スレッドへの返信（ルートのコメント）
+    Reply(Id),
+    /// 書いたコメントの書き直し
+    Edit(Id),
 }
 
 /// 詳細パネルに出すタスクと、その周りのデータ。
@@ -107,6 +120,14 @@ pub struct MainView {
     pub panel: Option<Id>,
     pub detail: Option<Detail>,
     pub editing: Option<Editing>,
+    pub comment_mode: CommentMode,
+    /// 次のコメントを付ける、説明の選択範囲。
+    pub pending_anchor: Option<Anchor>,
+    /// 開いて見せている、解決済みのスレッド。
+    pub expanded_threads: HashSet<Id>,
+    /// 説明の表示。文字を選んでレビューコメントを付けられる。
+    pub description_view: Entity<TextViewState>,
+    description_shown: String,
     pub modal: Modal,
     pub error: Option<SharedString>,
     pub notice: Option<SharedString>,
@@ -204,6 +225,16 @@ impl MainView {
         }
         on_secondary_enter!(description, save_description);
         on_secondary_enter!(comment, submit_comment);
+        // `@` の候補を、打つたびに出し直す
+        subs.push(cx.subscribe_in(
+            &inputs.comment,
+            window,
+            |_, _, event: &InputEvent, _, cx| {
+                if matches!(event, InputEvent::Change) {
+                    cx.notify();
+                }
+            },
+        ));
         on_secondary_enter!(status_comment, submit_status);
 
         let mut this = Self {
@@ -229,6 +260,11 @@ impl MainView {
             panel: None,
             detail: None,
             editing: None,
+            comment_mode: CommentMode::New,
+            pending_anchor: None,
+            expanded_threads: HashSet::new(),
+            description_view: cx.new(|cx| TextViewState::markdown("", cx).selectable(true)),
+            description_shown: String::new(),
             modal: Modal::None,
             error: None,
             notice: None,
@@ -253,6 +289,15 @@ impl MainView {
         let result = self.load(cx);
         if let Err(error) = result {
             self.error = Some(error.to_string().into());
+        }
+        let description = self
+            .detail
+            .as_ref()
+            .map_or("", |d| d.task.description.as_str());
+        if self.description_shown != description {
+            self.description_shown = description.to_owned();
+            self.description_view
+                .update(cx, |view, cx| view.set_text(description, cx));
         }
         self.refilter();
         cx.notify();
@@ -444,6 +489,11 @@ impl MainView {
     }
 
     pub fn open_panel(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.panel.as_deref() != Some(id) {
+            self.comment_mode = CommentMode::New;
+            self.pending_anchor = None;
+            self.expanded_threads.clear();
+        }
         self.panel = Some(id.to_owned());
         self.editing = None;
         self.reload(cx);
@@ -463,6 +513,8 @@ impl MainView {
         self.panel = None;
         self.detail = None;
         self.editing = None;
+        self.comment_mode = CommentMode::New;
+        self.pending_anchor = None;
         cx.notify();
     }
 
@@ -627,18 +679,152 @@ impl MainView {
     }
 
     pub fn submit_comment(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.submit_comment_as(false, window, cx);
+    }
+
+    /// コメント欄の内容を送る。返信・書き直しの途中ならそれを、
+    /// 選択範囲があるか `review` ならレビューコメントを書く。
+    pub fn submit_comment_as(&mut self, review: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(id) = self.panel.clone() else { return };
         let body = self.inputs.comment.read(cx).value().to_string();
         if body.trim().is_empty() {
             return;
         }
         let author = self.self_id.clone();
-        if self
-            .write(cx, |s| s.add_comment(&id, author.as_deref(), &body))
-            .is_some()
-        {
+        let mode = self.comment_mode.clone();
+        let anchor = self.pending_anchor.clone();
+        let done = self.write(cx, |s| match mode {
+            CommentMode::Edit(comment_id) => s.update_comment(&comment_id, &body),
+            CommentMode::Reply(root) => s.add_comment_with(
+                &id,
+                author.as_deref(),
+                &NewComment {
+                    body,
+                    reply_to: Some(root),
+                    ..Default::default()
+                },
+            ),
+            CommentMode::New => s.add_comment_with(
+                &id,
+                author.as_deref(),
+                &NewComment {
+                    body,
+                    review,
+                    anchor,
+                    ..Default::default()
+                },
+            ),
+        });
+        if done.is_some() {
+            Self::take_area(&self.inputs.comment.clone(), window, cx);
+            self.comment_mode = CommentMode::New;
+            self.pending_anchor = None;
+        }
+    }
+
+    /// 説明で選んでいる文字列に、次のコメントを付ける。
+    pub fn quote_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(detail) = &self.detail else { return };
+        let source = detail.task.description.as_str();
+        let view = self.description_view.read(cx);
+        let range = view
+            .selected_source_range()
+            .filter(|r| r.start < r.end && r.end <= source.len())
+            .filter(|r| source.is_char_boundary(r.start) && source.is_char_boundary(r.end));
+        let Some(range) = range else {
+            self.error = Some("説明の文章を選んでから押してください。".into());
+            cx.notify();
+            return;
+        };
+        self.set_pending_anchor(anchor_at(source, range), window, cx);
+    }
+
+    pub fn set_pending_anchor(
+        &mut self,
+        anchor: Anchor,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.pending_anchor = Some(anchor);
+        self.comment_mode = CommentMode::New;
+        self.error = None;
+        self.inputs.comment.update(cx, |s, cx| s.focus(window, cx));
+        cx.notify();
+    }
+
+    pub fn start_reply(&mut self, root: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.comment_mode = CommentMode::Reply(root.to_owned());
+        self.pending_anchor = None;
+        self.inputs.comment.update(cx, |s, cx| s.focus(window, cx));
+        cx.notify();
+    }
+
+    pub fn start_edit_comment(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(body) = self
+            .detail
+            .as_ref()
+            .and_then(|d| d.comments.iter().find(|c| c.id == id))
+            .map(|c| c.body.clone())
+        else {
+            return;
+        };
+        self.comment_mode = CommentMode::Edit(id.to_owned());
+        self.pending_anchor = None;
+        self.inputs.comment.update(cx, |s, cx| {
+            s.set_value(body, window, cx);
+            s.focus(window, cx);
+        });
+        cx.notify();
+    }
+
+    /// 返信・書き直し・選択範囲の指定をやめる。
+    pub fn cancel_comment_mode(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(self.comment_mode, CommentMode::Edit(_)) {
             Self::take_area(&self.inputs.comment.clone(), window, cx);
         }
+        self.comment_mode = CommentMode::New;
+        self.pending_anchor = None;
+        cx.notify();
+    }
+
+    pub fn set_thread_resolved(&mut self, id: &str, resolved: bool, cx: &mut Context<Self>) {
+        self.expanded_threads.remove(id);
+        self.write(cx, |s| s.set_comment_resolved(id, resolved));
+    }
+
+    pub fn toggle_thread(&mut self, id: &str, cx: &mut Context<Self>) {
+        if !self.expanded_threads.remove(id) {
+            self.expanded_threads.insert(id.to_owned());
+        }
+        cx.notify();
+    }
+
+    /// 書きかけの `@` に合う人。
+    pub fn mention_candidates(&self, cx: &App) -> Vec<Person> {
+        let text = self.inputs.comment.read(cx).value();
+        match mention::pending(&text) {
+            Some(query) => mention::candidates(query, &self.people)
+                .into_iter()
+                .take(8)
+                .cloned()
+                .collect(),
+            None => Vec::new(),
+        }
+    }
+
+    pub fn complete_mention(
+        &mut self,
+        person: &Person,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let text = self.inputs.comment.read(cx).value().to_string();
+        let next = mention::complete(&text, person);
+        self.inputs.comment.update(cx, |s, cx| {
+            s.set_value(next, window, cx);
+            s.focus(window, cx);
+        });
+        cx.notify();
     }
 
     /// 状態を変える前に、コメントを添えるダイアログを出す。
@@ -675,9 +861,16 @@ impl MainView {
         let body = self.inputs.status_comment.read(cx).value().to_string();
         let author = self.self_id.clone();
         let done = self.write(cx, |s| {
-            s.set_task_status(&id, status)?;
-            if !body.trim().is_empty() {
-                s.add_comment(&id, author.as_deref(), &body)?;
+            if body.trim().is_empty() {
+                s.set_task_status(&id, status)?;
+            } else {
+                // 状態つきのコメント。完了なら完了報告として残る
+                let new = NewComment {
+                    body,
+                    status: Some(status),
+                    ..Default::default()
+                };
+                s.add_comment_with(&id, author.as_deref(), &new)?;
             }
             Ok(())
         });
@@ -983,6 +1176,27 @@ impl MainView {
         }
         self.error = None;
         cx.notify();
+    }
+}
+
+/// 選んだ範囲と、その前後の文脈（探し直すための手がかり）。
+pub fn anchor_at(source: &str, range: std::ops::Range<usize>) -> Anchor {
+    const CONTEXT: usize = 32;
+    let before = &source[..range.start];
+    let after = &source[range.end..];
+    let prefix_start = before
+        .char_indices()
+        .rev()
+        .nth(CONTEXT - 1)
+        .map_or(0, |(i, _)| i);
+    let suffix_end = after
+        .char_indices()
+        .nth(CONTEXT)
+        .map_or(after.len(), |(i, _)| i);
+    Anchor {
+        exact: source[range].to_owned(),
+        prefix: before[prefix_start..].to_owned(),
+        suffix: after[..suffix_end].to_owned(),
     }
 }
 

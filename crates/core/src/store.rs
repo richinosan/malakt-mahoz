@@ -772,41 +772,177 @@ impl Store {
         author_id: Option<&str>,
         body: &str,
     ) -> Result<Comment> {
-        let body = normalize(body).trim().to_owned();
+        self.add_comment_with(
+            task_id,
+            author_id,
+            &NewComment {
+                body: body.to_owned(),
+                ..Default::default()
+            },
+        )
+    }
+
+    /// コメントを書く。状態の変更、レビューコメント、返信もここから。
+    ///
+    /// - `status` があれば、同時にタスクの状態を変える（完了なら完了報告）
+    /// - `review` か `anchor` があれば、返信と解決ができるスレッドのルートになる
+    /// - `reply_to` はスレッドのルートだけを指せる。解決済みのスレッドに返信すると未解決に戻る
+    pub fn add_comment_with(
+        &mut self,
+        task_id: &str,
+        author_id: Option<&str>,
+        new: &NewComment,
+    ) -> Result<Comment> {
+        let body = normalize(&new.body).trim().to_owned();
         if body.is_empty() {
             return Err(Error::Invalid("コメントが空です".into()));
         }
+        let review = new.review || new.anchor.is_some();
+        let kinds = usize::from(review)
+            + usize::from(new.reply_to.is_some())
+            + usize::from(new.status.is_some());
+        if kinds > 1 {
+            return Err(Error::Invalid(
+                "レビューコメント、返信、状態の変更は同時に指定できません".into(),
+            ));
+        }
+        let anchor = match &new.anchor {
+            Some(a) => {
+                let exact = normalize(&a.exact);
+                if exact.trim().is_empty() {
+                    return Err(Error::Invalid("選択範囲が空です".into()));
+                }
+                Some(Anchor {
+                    exact,
+                    prefix: normalize(&a.prefix),
+                    suffix: normalize(&a.suffix),
+                })
+            }
+            None => None,
+        };
         self.task(task_id)?;
+        if let Some(root_id) = new.reply_to.as_deref() {
+            let root = self.comment(root_id)?;
+            if root.task_id != task_id || !root.is_thread_root() {
+                return Err(Error::Invalid(
+                    "返信できるのは、同じタスクのレビューコメントだけです".into(),
+                ));
+            }
+        }
+        if let Some(status) = new.status {
+            self.set_task_status(task_id, status)?;
+        }
         let now = now_ms();
         let comment = Comment {
             id: new_id(),
             task_id: task_id.to_owned(),
             author_id: author_id.map(str::to_owned),
+            mentions: crate::mention::find(&body, &self.people()?),
             body,
             pinned: false,
             created_at: now,
             updated_at: now,
+            status: new.status,
+            review,
+            anchor,
+            reply_to: new.reply_to.clone(),
+            resolved_at: None,
         };
-        insert_comment(&self.conn, &comment)?;
+        let tx = self.conn.transaction()?;
+        insert_comment(&tx, &comment)?;
+        if let Some(root_id) = &comment.reply_to {
+            tx.execute(
+                "UPDATE comments SET resolved_at = NULL WHERE id = ?1",
+                params![root_id],
+            )?;
+        }
+        tx.commit()?;
         Ok(comment)
+    }
+
+    pub fn comment(&self, id: &str) -> Result<Comment> {
+        let sql = format!("SELECT {COMMENT_COLUMNS} FROM comments WHERE id = ?1");
+        self.conn
+            .prepare_cached(&sql)?
+            .query_row(params![id], comment_from_row)
+            .optional()?
+            .ok_or_else(|| Error::NotFound(format!("コメント {id}")))
     }
 
     /// ピン留めが先、あとは古い順。
     pub fn comments(&self, task_id: &str) -> Result<Vec<Comment>> {
-        let mut stmt = self.conn.prepare_cached(
-            "SELECT id, task_id, author_id, body, pinned, created_at, updated_at \
-             FROM comments WHERE task_id = ?1 ORDER BY pinned DESC, created_at, id",
-        )?;
+        let sql = format!(
+            "SELECT {COMMENT_COLUMNS} FROM comments WHERE task_id = ?1 \
+             ORDER BY pinned DESC, created_at, id"
+        );
+        let mut stmt = self.conn.prepare_cached(&sql)?;
         let rows = stmt.query_map(params![task_id], comment_from_row)?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// 本文を書き直す。メンションも読み直す。
+    pub fn update_comment(&mut self, id: &str, body: &str) -> Result<Comment> {
+        let body = normalize(body).trim().to_owned();
+        if body.is_empty() {
+            return Err(Error::Invalid("コメントが空です".into()));
+        }
+        let old = self.comment(id)?;
+        if old.body == body {
+            return Ok(old);
+        }
+        let mentions = crate::mention::find(&body, &self.people()?);
+        self.conn.execute(
+            "UPDATE comments SET body = ?2, mentions = ?3, updated_at = ?4 WHERE id = ?1",
+            params![id, body, mentions.join(","), now_ms()],
+        )?;
+        self.comment(id)
+    }
+
+    /// ピン留めする・外す。1 つのタスクに 10 件まで。
+    /// 完了報告は最初から目立つ場所に出るので、留める対象にしない。
     pub fn set_comment_pinned(&mut self, id: &str, pinned: bool) -> Result<()> {
-        let n = self.conn.execute(
+        let comment = self.comment(id)?;
+        if comment.pinned == pinned {
+            return Ok(());
+        }
+        if pinned {
+            if comment.is_completion_report() {
+                return Err(Error::Invalid("完了報告はピン留めできません".into()));
+            }
+            let count: usize = self.conn.query_row(
+                "SELECT COUNT(*) FROM comments WHERE task_id = ?1 AND pinned = 1",
+                params![comment.task_id],
+                |r| r.get(0),
+            )?;
+            if count >= MAX_PINNED_COMMENTS {
+                return Err(Error::Invalid(format!(
+                    "ピン留めできるのは {MAX_PINNED_COMMENTS} 件までです"
+                )));
+            }
+        }
+        self.conn.execute(
             "UPDATE comments SET pinned = ?2 WHERE id = ?1",
             params![id, pinned],
         )?;
-        found(n, "コメント", id)
+        Ok(())
+    }
+
+    /// レビューコメントのスレッドを解決済みにする・再開する。何度呼んでも同じ。
+    pub fn set_comment_resolved(&mut self, id: &str, resolved: bool) -> Result<Comment> {
+        let comment = self.comment(id)?;
+        if !comment.is_thread_root() {
+            return Err(Error::Invalid(
+                "解決済みにできるのはレビューコメントだけです".into(),
+            ));
+        }
+        if comment.resolved_at.is_some() == resolved {
+            return Ok(comment);
+        }
+        self.conn.execute(
+            "UPDATE comments SET resolved_at = ?2 WHERE id = ?1",
+            params![id, resolved.then(now_ms)],
+        )?;
+        self.comment(id)
     }
 
     pub fn delete_comment(&mut self, id: &str) -> Result<()> {
@@ -854,10 +990,9 @@ impl Store {
         self.fill_links(&mut tasks)?;
         let comments = self
             .conn
-            .prepare(
-                "SELECT id, task_id, author_id, body, pinned, created_at, updated_at \
-                 FROM comments ORDER BY id",
-            )?
+            .prepare(&format!(
+                "SELECT {COMMENT_COLUMNS} FROM comments ORDER BY id"
+            ))?
             .query_map([], comment_from_row)?
             .collect::<rusqlite::Result<_>>()?;
         let changes = self
@@ -1134,10 +1269,14 @@ fn insert_assignees(
 
 fn insert_comment(conn: &Connection, c: &Comment) -> rusqlite::Result<usize> {
     conn.prepare_cached(
-        "INSERT INTO comments(id, task_id, author_id, body, pinned, created_at, updated_at) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
+        "INSERT INTO comments(id, task_id, author_id, body, pinned, created_at, updated_at, \
+         status, review, anchor, reply_to, resolved_at, mentions) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13) \
          ON CONFLICT(id) DO UPDATE SET body = excluded.body, pinned = excluded.pinned, \
-         author_id = excluded.author_id, updated_at = excluded.updated_at",
+         author_id = excluded.author_id, updated_at = excluded.updated_at, \
+         status = excluded.status, review = excluded.review, anchor = excluded.anchor, \
+         reply_to = excluded.reply_to, resolved_at = excluded.resolved_at, \
+         mentions = excluded.mentions",
     )?
     .execute(params![
         c.id,
@@ -1146,7 +1285,15 @@ fn insert_comment(conn: &Connection, c: &Comment) -> rusqlite::Result<usize> {
         c.body,
         c.pinned,
         c.created_at,
-        c.updated_at
+        c.updated_at,
+        c.status.map(Status::as_str),
+        c.review,
+        c.anchor
+            .as_ref()
+            .map(|a| serde_json::to_string(a).expect("文字列だけの構造体")),
+        c.reply_to,
+        c.resolved_at,
+        c.mentions.join(",")
     ])
 }
 
@@ -1220,8 +1367,26 @@ fn comment_from_row(r: &Row<'_>) -> rusqlite::Result<Comment> {
         pinned: r.get(4)?,
         created_at: r.get(5)?,
         updated_at: r.get(6)?,
+        status: r.get_ref(7)?.as_str_or_null()?.and_then(Status::parse),
+        review: r.get(8)?,
+        anchor: r
+            .get_ref(9)?
+            .as_str_or_null()?
+            .and_then(|json| serde_json::from_str(json).ok()),
+        reply_to: r.get(10)?,
+        resolved_at: r.get(11)?,
+        mentions: r
+            .get_ref(12)?
+            .as_str()?
+            .split(',')
+            .filter(|id| !id.is_empty())
+            .map(str::to_owned)
+            .collect(),
     })
 }
+
+const COMMENT_COLUMNS: &str = "id, task_id, author_id, body, pinned, created_at, updated_at, \
+     status, review, anchor, reply_to, resolved_at, mentions";
 
 fn change_from_row(r: &Row<'_>) -> rusqlite::Result<Change> {
     Ok(Change {
@@ -2199,5 +2364,321 @@ mod raci_tests {
         let mut other = Store::open_in_memory().unwrap();
         other.merge(&s.dump().unwrap()).unwrap();
         assert_eq!(other.task(&task.id).unwrap(), expect);
+    }
+}
+
+#[cfg(test)]
+mod comment_tests {
+    use super::Store;
+    use crate::model::*;
+    use crate::Error;
+
+    fn setup() -> (Store, Task) {
+        let mut s = Store::open_in_memory().unwrap();
+        let task = s
+            .create_task(
+                None,
+                &TaskDraft {
+                    title: "記事を書く".into(),
+                    description: "導入を書く。本文を書く。".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        (s, task)
+    }
+
+    fn review(body: &str) -> NewComment {
+        NewComment {
+            body: body.into(),
+            review: true,
+            ..Default::default()
+        }
+    }
+
+    fn reply(root: &Comment, body: &str) -> NewComment {
+        NewComment {
+            body: body.into(),
+            reply_to: Some(root.id.clone()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn status_comment_changes_the_task_and_is_a_completion_report() {
+        let (mut s, task) = setup();
+        let c = s
+            .add_comment_with(
+                &task.id,
+                None,
+                &NewComment {
+                    body: "公開しました".into(),
+                    status: Some(Status::Completed),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert!(c.is_completion_report());
+        assert_eq!(s.task(&task.id).unwrap().status, Status::Completed);
+        assert_eq!(s.comments(&task.id).unwrap(), [c.clone()]);
+        // 完了報告はピン留めできない
+        assert!(matches!(
+            s.set_comment_pinned(&c.id, true),
+            Err(Error::Invalid(_))
+        ));
+        // 状態つきでも、完了でなければ完了報告ではない
+        let c = s
+            .add_comment_with(
+                &task.id,
+                None,
+                &NewComment {
+                    body: "やり直します".into(),
+                    status: Some(Status::InProcess),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert!(!c.is_completion_report());
+        assert_eq!(s.task(&task.id).unwrap().status, Status::InProcess);
+        s.set_comment_pinned(&c.id, true).unwrap();
+    }
+
+    #[test]
+    fn empty_status_comment_changes_nothing() {
+        let (mut s, task) = setup();
+        let result = s.add_comment_with(
+            &task.id,
+            None,
+            &NewComment {
+                body: "  \n".into(),
+                status: Some(Status::Completed),
+                ..Default::default()
+            },
+        );
+        assert!(matches!(result, Err(Error::Invalid(_))));
+        assert_eq!(s.task(&task.id).unwrap().status, Status::NeedsAction);
+    }
+
+    #[test]
+    fn pins_are_limited_per_task() {
+        let (mut s, task) = setup();
+        let ids: Vec<Id> = (0..=MAX_PINNED_COMMENTS)
+            .map(|i| {
+                s.add_comment(&task.id, None, &format!("メモ {i}"))
+                    .unwrap()
+                    .id
+            })
+            .collect();
+        for id in &ids[..MAX_PINNED_COMMENTS] {
+            s.set_comment_pinned(id, true).unwrap();
+        }
+        // すでに留めてあるものをもう一度留めても数えない
+        s.set_comment_pinned(&ids[0], true).unwrap();
+        assert!(matches!(
+            s.set_comment_pinned(&ids[MAX_PINNED_COMMENTS], true),
+            Err(Error::Invalid(_))
+        ));
+        // 1 つ外せば留められる
+        s.set_comment_pinned(&ids[0], false).unwrap();
+        s.set_comment_pinned(&ids[MAX_PINNED_COMMENTS], true)
+            .unwrap();
+        let pinned = s
+            .comments(&task.id)
+            .unwrap()
+            .iter()
+            .filter(|c| c.pinned)
+            .count();
+        assert_eq!(pinned, MAX_PINNED_COMMENTS);
+        // 別のタスクの数は別
+        let other = s
+            .create_task(
+                None,
+                &TaskDraft {
+                    title: "別".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let c = s.add_comment(&other.id, None, "メモ").unwrap();
+        s.set_comment_pinned(&c.id, true).unwrap();
+    }
+
+    #[test]
+    fn editing_updates_body_time_and_mentions() {
+        let (mut s, task) = setup();
+        let sato = s.create_person("佐藤", false).unwrap();
+        let tanaka = s.create_person("田中", false).unwrap();
+        let c = s
+            .add_comment(&task.id, None, "@佐藤 確認お願いします")
+            .unwrap();
+        assert_eq!(c.mentions, [sato.id.clone()]);
+        assert!(!c.is_edited());
+        // 同じ本文なら何も変わらない
+        assert_eq!(
+            s.update_comment(&c.id, "@佐藤 確認お願いします\n").unwrap(),
+            c
+        );
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let edited = s.update_comment(&c.id, "@田中 に変更します").unwrap();
+        assert_eq!(edited.body, "@田中 に変更します");
+        assert_eq!(edited.mentions, [tanaka.id.clone()]);
+        assert!(edited.is_edited());
+        assert_eq!(edited.created_at, c.created_at);
+        assert!(matches!(
+            s.update_comment(&c.id, " "),
+            Err(Error::Invalid(_))
+        ));
+        assert!(matches!(
+            s.update_comment("ない", "本文"),
+            Err(Error::NotFound(_))
+        ));
+        assert_eq!(s.comments(&task.id).unwrap(), [edited]);
+    }
+
+    #[test]
+    fn review_threads_reply_resolve_and_reopen() {
+        let (mut s, task) = setup();
+        let root = s
+            .add_comment_with(&task.id, None, &review("全体に見出しがほしい"))
+            .unwrap();
+        assert!(root.is_thread_root());
+        let first = s
+            .add_comment_with(&task.id, None, &reply(&root, "足します"))
+            .unwrap();
+        assert_eq!(first.reply_to.as_deref(), Some(root.id.as_str()));
+        assert!(!first.is_thread_root());
+
+        let resolved = s.set_comment_resolved(&root.id, true).unwrap();
+        assert!(resolved.resolved_at.is_some());
+        // 何度呼んでも同じ
+        assert_eq!(s.set_comment_resolved(&root.id, true).unwrap(), resolved);
+        // 解決済みのスレッドに返信すると未解決に戻る
+        s.add_comment_with(&task.id, None, &reply(&root, "まだでした"))
+            .unwrap();
+        assert_eq!(s.comment(&root.id).unwrap().resolved_at, None);
+        s.set_comment_resolved(&root.id, true).unwrap();
+        let reopened = s.set_comment_resolved(&root.id, false).unwrap();
+        assert_eq!(reopened.resolved_at, None);
+
+        // ルートを消すと返信も消える
+        s.delete_comment(&root.id).unwrap();
+        assert!(s.comments(&task.id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn anchored_review_keeps_the_selection() {
+        let (mut s, task) = setup();
+        let c = s
+            .add_comment_with(
+                &task.id,
+                None,
+                &NewComment {
+                    body: "ここを詳しく".into(),
+                    anchor: Some(Anchor {
+                        exact: "本文を書く".into(),
+                        prefix: "導入を書く。".into(),
+                        suffix: "。".into(),
+                    }),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        // 選択範囲があればレビューコメントになる
+        assert!(c.review && c.is_thread_root());
+        let loaded = s.comment(&c.id).unwrap();
+        assert_eq!(loaded, c);
+        assert_eq!(loaded.anchor.unwrap().exact, "本文を書く");
+        let empty = NewComment {
+            body: "x".into(),
+            anchor: Some(Anchor::default()),
+            ..Default::default()
+        };
+        assert!(matches!(
+            s.add_comment_with(&task.id, None, &empty),
+            Err(Error::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn thread_rules_are_enforced() {
+        let (mut s, task) = setup();
+        let plain = s.add_comment(&task.id, None, "ふつうのコメント").unwrap();
+        let root = s
+            .add_comment_with(&task.id, None, &review("レビュー"))
+            .unwrap();
+        let child = s
+            .add_comment_with(&task.id, None, &reply(&root, "返信"))
+            .unwrap();
+        let invalid = |s: &mut Store, task_id: &str, new: &NewComment| {
+            assert!(matches!(
+                s.add_comment_with(task_id, None, new),
+                Err(Error::Invalid(_))
+            ));
+        };
+        // ふつうのコメントや返信には返信できない（スレッドは 1 段）
+        invalid(&mut s, &task.id, &reply(&plain, "x"));
+        invalid(&mut s, &task.id, &reply(&child, "x"));
+        // 別のタスクのスレッドには返信できない
+        let other = s
+            .create_task(
+                None,
+                &TaskDraft {
+                    title: "別".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        invalid(&mut s, &other.id, &reply(&root, "x"));
+        // レビュー、返信、状態の変更は同時に指定できない
+        let mut both = reply(&root, "x");
+        both.review = true;
+        invalid(&mut s, &task.id, &both);
+        let mut with_status = review("x");
+        with_status.status = Some(Status::Completed);
+        invalid(&mut s, &task.id, &with_status);
+        assert_eq!(s.task(&task.id).unwrap().status, Status::NeedsAction);
+        // 解決済みにできるのはルートだけ
+        for id in [&plain.id, &child.id] {
+            assert!(matches!(
+                s.set_comment_resolved(id, true),
+                Err(Error::Invalid(_))
+            ));
+        }
+        assert_eq!(s.comments(&task.id).unwrap().len(), 3);
+    }
+
+    #[test]
+    fn threads_and_mentions_round_trip_through_dump_and_merge() {
+        let (mut s, task) = setup();
+        let sato = s.create_person("佐藤", false).unwrap();
+        let anchored = NewComment {
+            body: "@佐藤 ここ".into(),
+            anchor: Some(Anchor {
+                exact: "導入".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let root = s
+            .add_comment_with(&task.id, Some(&sato.id), &anchored)
+            .unwrap();
+        s.add_comment_with(&task.id, None, &reply(&root, "直しました"))
+            .unwrap();
+        s.set_comment_resolved(&root.id, true).unwrap();
+        s.add_comment_with(
+            &task.id,
+            None,
+            &NewComment {
+                body: "完了".into(),
+                status: Some(Status::Completed),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let expect = s.comments(&task.id).unwrap();
+        assert_eq!(expect[0].mentions, [sato.id.clone()]);
+        let mut other = Store::open_in_memory().unwrap();
+        other.merge(&s.dump().unwrap()).unwrap();
+        assert_eq!(other.comments(&task.id).unwrap(), expect);
     }
 }

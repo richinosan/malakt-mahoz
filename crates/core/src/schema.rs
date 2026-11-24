@@ -87,6 +87,16 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE task_assignees ADD COLUMN roles TEXT NOT NULL DEFAULT 'R';
     ALTER TABLE task_assignees ADD COLUMN completed_at INTEGER;
     "#,
+    // 3: 状態つきのコメント、レビューコメントのスレッド、メンション
+    r#"
+    ALTER TABLE comments ADD COLUMN status TEXT;
+    ALTER TABLE comments ADD COLUMN review INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE comments ADD COLUMN anchor TEXT;
+    ALTER TABLE comments ADD COLUMN reply_to TEXT REFERENCES comments(id) ON DELETE CASCADE;
+    ALTER TABLE comments ADD COLUMN resolved_at INTEGER;
+    ALTER TABLE comments ADD COLUMN mentions TEXT NOT NULL DEFAULT '';
+    CREATE INDEX comments_reply ON comments(reply_to);
+    "#,
 ];
 
 pub(crate) fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {

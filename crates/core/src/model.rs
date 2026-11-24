@@ -264,7 +264,69 @@ pub struct Comment {
     pub pinned: bool,
     pub created_at: i64,
     pub updated_at: i64,
+    /// このコメントと一緒に変えたタスクの状態。完了なら「完了報告」。
+    #[serde(default)]
+    pub status: Option<Status>,
+    /// レビューコメント（スレッドのルート）か。
+    #[serde(default)]
+    pub review: bool,
+    /// 説明の文章のどこに付けたレビューコメントか。
+    #[serde(default)]
+    pub anchor: Option<Anchor>,
+    /// 返信なら、スレッドのルートのコメント。
+    #[serde(default)]
+    pub reply_to: Option<Id>,
+    /// スレッドを解決済みにした時刻。ルートだけが持つ。
+    #[serde(default)]
+    pub resolved_at: Option<i64>,
+    /// 本文で `@名前` と書かれた人。
+    #[serde(default)]
+    pub mentions: Vec<Id>,
 }
+
+impl Comment {
+    /// 返信を付けられ、解決済みにできるコメントか。
+    pub fn is_thread_root(&self) -> bool {
+        self.review && self.reply_to.is_none()
+    }
+
+    pub fn is_edited(&self) -> bool {
+        self.updated_at != self.created_at
+    }
+
+    pub fn is_completion_report(&self) -> bool {
+        self.status == Some(Status::Completed)
+    }
+}
+
+/// レビューコメントを付けた場所。選んだ文字列と、その前後の文脈。
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct Anchor {
+    pub exact: String,
+    #[serde(default)]
+    pub prefix: String,
+    #[serde(default)]
+    pub suffix: String,
+}
+
+/// これから書くコメント。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct NewComment {
+    pub body: String,
+    /// 一緒にタスクの状態を変える。
+    pub status: Option<Status>,
+    /// レビューコメントにする。
+    pub review: bool,
+    /// 説明の文章の選択範囲に付ける（レビューコメントになる）。
+    pub anchor: Option<Anchor>,
+    /// このスレッドへの返信にする。
+    pub reply_to: Option<Id>,
+}
+
+/// 1 つのタスクにピン留めできるコメントの数。
+pub const MAX_PINNED_COMMENTS: usize = 10;
+/// 1 つのコメントでメンションできる人数。
+pub const MAX_MENTIONS: usize = 50;
 
 /// タスクの変更履歴 1 件。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
