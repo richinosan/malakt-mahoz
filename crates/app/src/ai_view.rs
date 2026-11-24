@@ -58,6 +58,24 @@ fn term_color(color: Color) -> Hsla {
     .into()
 }
 
+/// プロンプトに出す場所。長いときは、終わりの 2 つだけにして入力する幅を残す。
+fn short_path(path: &str) -> String {
+    if path.chars().count() <= 24 {
+        return path.to_owned();
+    }
+    let parts: Vec<&str> = path.split('/').filter(|part| !part.is_empty()).collect();
+    let tail = &parts[parts.len().saturating_sub(2)..];
+    let short = format!("…/{}", tail.join("/"));
+    if short.chars().count() <= 24 {
+        short
+    } else {
+        // フォルダーの名前そのものが長い
+        let name: Vec<char> = parts.last().copied().unwrap_or(path).chars().collect();
+        let keep = &name[name.len().saturating_sub(22)..];
+        format!("…{}", keep.iter().collect::<String>())
+    }
+}
+
 /// 現れるときの動き。
 fn appear() -> Animation {
     Animation::new(Duration::from_millis(160)).with_easing(ease_out_quint())
@@ -1172,7 +1190,7 @@ impl AiPane {
         let theme = cx.theme().clone();
         let session = self.session.read(cx);
         let running = session.command_running();
-        let prompt: SharedString = format!("{} $", session.cwd_label()).into();
+        let prompt: SharedString = format!("{} $", short_path(&session.cwd_label())).into();
         let count = self.shell_rows.len();
         let detached = self.mode == PaneMode::ShellWindow;
         let pane = cx.entity();
@@ -1493,7 +1511,19 @@ impl Render for AiPane {
 
 #[cfg(test)]
 mod tests {
-    use super::{docked_width, px};
+    use super::{docked_width, px, short_path};
+
+    #[test]
+    fn a_long_place_is_shortened_in_the_prompt() {
+        assert_eq!(short_path("~/work/app"), "~/work/app");
+        assert_eq!(
+            short_path("/private/var/folders/ab/cdefghijk/T/build"),
+            "…/T/build"
+        );
+        let long = short_path("/a/とても長い名前のフォルダーとても長い名前のフォルダーです");
+        assert_eq!(long.chars().count(), 23);
+        assert!(long.starts_with('…') && long.ends_with("フォルダーです"));
+    }
 
     #[test]
     fn the_pane_fits_the_window() {
