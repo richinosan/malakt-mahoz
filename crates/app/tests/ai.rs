@@ -120,7 +120,7 @@ fn open(cx: &mut TestAppContext, window_size: Size<Pixels>) -> (AnyWindowHandle,
 }
 
 fn wide() -> Size<Pixels> {
-    size(px(1600.), px(900.))
+    size(px(2000.), px(1125.))
 }
 
 fn ui(
@@ -171,11 +171,26 @@ fn open_chat(
 
 /// 入力欄に書いて、送信を押す。
 fn say(cx: &mut TestAppContext, window: AnyWindowHandle, pane: &Entity<AiPane>, text: &str) {
+    // 設定を開いている間は入力欄が出ないので、開いていれば閉じる
+    if cx.update(|cx| pane.read(cx).settings_open) {
+        ui(cx, window, |window, cx| {
+            window.click("ai-settings-toggle", cx)
+        });
+    }
     ui(cx, window, |window, cx| {
         pane.update(cx, |pane, cx| pane.focus_input(window, cx));
         window.input(text, cx);
         window.click("ai-send", cx);
     });
+}
+
+/// 設定を開く（開いていればそのまま）。
+fn open_settings(cx: &mut TestAppContext, window: AnyWindowHandle, pane: &Entity<AiPane>) {
+    if !cx.update(|cx| pane.read(cx).settings_open) {
+        ui(cx, window, |window, cx| {
+            window.click("ai-settings-toggle", cx)
+        });
+    }
 }
 
 fn text_reply(text: &str) -> Value {
@@ -604,6 +619,7 @@ fn provider_model_and_effort_are_chosen_in_settings(cx: &mut TestAppContext) {
     assert_eq!(body["fallbacks"], "default");
 
     // モデルの ID を入力して選ぶ
+    open_settings(cx, window, &pane);
     ui(cx, window, |window, cx| {
         window.click("ai-model-input", cx);
         window.press("secondary-a", cx);
@@ -613,6 +629,7 @@ fn provider_model_and_effort_are_chosen_in_settings(cx: &mut TestAppContext) {
     assert_eq!(read(cx, |s| s.model().to_owned()), "claude-haiku-5-5");
 
     // OpenCode Go に切り替える。送り先はモデルの一覧から決まる
+    open_settings(cx, window, &pane);
     ui(cx, window, |window, cx| {
         window.click(("ai-provider", Provider::OpenCodeGo as usize), cx)
     });
@@ -645,6 +662,7 @@ fn provider_model_and_effort_are_chosen_in_settings(cx: &mut TestAppContext) {
     );
 
     // このモデルで選べない effort は、送る前にエラーになる
+    open_settings(cx, window, &pane);
     ui(cx, window, |window, cx| {
         window.click(("ai-effort", Effort::Medium as usize), cx)
     });
@@ -739,13 +757,13 @@ fn chat_and_shell_detach_into_their_own_windows(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn the_task_screen_stays_usable_beside_the_chat(cx: &mut TestAppContext) {
     start(cx);
-    let (window, view) = open(cx, size(px(1180.), px(760.)));
+    let (window, view) = open(cx, size(px(1475.), px(950.)));
     open_chat(cx, window, &view);
     ui(cx, window, |window, _| {
         let chat = window.find("ai-chat").bounds();
-        // 右の 320（左の罫線 1 を含む）がチャット
-        assert_eq!(chat.origin.x, px(861.));
-        assert_eq!(chat.size.width, px(319.));
+        // 右の 400（左の罫線 1 を含む）がチャット。寸法は 1.25 倍の拡大後の値
+        assert_eq!(chat.origin.x, px(1076.));
+        assert_eq!(chat.size.width, px(399.));
         // シェルはチャットの下に入る
         let shell = window.find("ai-shell").bounds();
         assert_eq!(shell.origin.x, chat.origin.x);
@@ -765,9 +783,9 @@ fn the_shell_sits_right_of_the_chat_in_a_wide_window(cx: &mut TestAppContext) {
     ui(cx, window, |window, _| {
         let chat = window.find("ai-chat").bounds();
         let shell = window.find("ai-shell").bounds();
-        assert_eq!(chat.origin.x, px(861.));
-        assert_eq!(shell.origin.x + shell.size.width, px(1600.));
-        assert_eq!(shell.size.width, px(359.));
+        assert_eq!(chat.origin.x, px(1076.));
+        assert_eq!(shell.origin.x + shell.size.width, px(2000.));
+        assert_eq!(shell.size.width, px(449.));
         assert_eq!(shell.origin.y, chat.origin.y);
         assert!(window.find("nav-home").visible());
     });
@@ -777,11 +795,11 @@ fn the_shell_sits_right_of_the_chat_in_a_wide_window(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn the_chat_covers_a_narrow_window_and_closes(cx: &mut TestAppContext) {
     start(cx);
-    let (window, view) = open(cx, size(px(900.), px(700.)));
+    let (window, view) = open(cx, size(px(1125.), px(875.)));
     open_chat(cx, window, &view);
     ui(cx, window, |window, cx| {
         let chat = window.find("ai-chat").bounds();
-        assert_eq!(chat.size.width, px(900.));
+        assert_eq!(chat.size.width, px(1125.));
         window.click("ai-close", cx);
     });
     cx.update(|cx| assert!(!view.read(cx).ai_open));
@@ -1106,6 +1124,7 @@ fn auto_run_skips_the_confirmations(cx: &mut TestAppContext) {
             .unwrap()
     });
     assert_eq!(saved.as_deref(), Some("1"));
+    open_settings(cx, window, &pane);
     ui(cx, window, |window, cx| window.click("ai-auto", cx));
     ui(cx, window, |window, _| {
         assert!(window.try_find("ai-auto-badge").is_none());

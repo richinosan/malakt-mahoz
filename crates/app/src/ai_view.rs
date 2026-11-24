@@ -25,11 +25,19 @@ use crate::render::app_icon;
 use crate::state::MainView;
 use crate::{ClearShell, StopAi};
 
+/// 参照する寸法を、画面全体の拡大率に合わせる。
+const fn px(value: f32) -> Pixels {
+    gpui_kit::px(value * crate::UI_SCALE)
+}
+
 const CHAT_WIDTH: Pixels = px(380.);
 const SHELL_WIDTH: Pixels = px(360.);
 const SHELL_ROW: Pixels = px(20.);
 const TERM_PAD: Pixels = px(12.);
-const TERM_FONT: Pixels = px(13.);
+/// ターミナルの文字の大きさ。画面の文字の大きさ（テーマ）に対する比で決める。
+fn term_font(cx: &App) -> Pixels {
+    cx.theme().font_size * (13. / 16.)
+}
 /// ターミナルの色。画面のテーマが明るくても暗くても同じ。
 const TERM_BG: u32 = 0x0f1115;
 const TERM_FG: u32 = 0xd4d7dd;
@@ -377,10 +385,11 @@ impl AiPane {
     /// シェルの幅から、1 行に入る桁数を決める。
     fn set_shell_width(&mut self, width: Pixels, window: &mut Window, cx: &mut Context<Self>) {
         let family = cx.theme().mono_font_family.clone();
+        let size = term_font(cx);
         let text = window.text_system();
         let cell = text
-            .ch_advance(text.resolve_font(&font(family)), TERM_FONT)
-            .unwrap_or(TERM_FONT * 0.6);
+            .ch_advance(text.resolve_font(&font(family)), size)
+            .unwrap_or(size * 0.6);
         // 全角の字が 2 桁より少し広い書体でも、はみ出さないように 1 桁あける
         let cols = (((width - TERM_PAD * 2.) / cell).floor() as usize)
             .saturating_sub(1)
@@ -832,7 +841,7 @@ impl AiPane {
                     }),
             )
             .overflow_y_scroll()
-            .flex_shrink(1.)
+            .flex_1()
             .min_h_0()
             .with_animation("ai-settings-in", appear(), |el, delta| el.opacity(delta))
             .into_any_element()
@@ -1139,6 +1148,8 @@ impl AiPane {
             .child(
                 div()
                     .id("ai-messages")
+                    // 設定を開いている間は、設定がチャットの場所を全部使う
+                    .when(self.settings_open, |d| d.hidden())
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
@@ -1150,6 +1161,7 @@ impl AiPane {
                 row()
                     .flex_none()
                     .items_end()
+                    .when(self.settings_open, |d| d.hidden())
                     .gap_2()
                     .p_3()
                     .border_t_1()
@@ -1340,7 +1352,7 @@ impl AiPane {
                     .bg(rgb(TERM_BG))
                     .text_color(rgb(TERM_FG))
                     .font_family(theme.mono_font_family.clone())
-                    .text_size(TERM_FONT)
+                    .text_size(term_font(cx))
                     .cursor_text()
                     // どこをクリックしても、入力行に打てる
                     .on_click(cx.listener(|this, _, window, cx| {
