@@ -108,6 +108,25 @@ struct SavedUi {
     open: bool,
     chat_window: bool,
     shell: String,
+    chat_width: Option<f32>,
+    shell_width: Option<f32>,
+    bounds: [Option<[f32; 4]>; 2],
+}
+
+/// 右に置くチャットとシェルの、最初の幅と選べる範囲（拡大率を掛ける前の値）。
+pub const CHAT_WIDTH: f32 = 380.;
+pub const SHELL_WIDTH: f32 = 360.;
+pub const CHAT_MIN_WIDTH: f32 = 320.;
+pub const SHELL_MIN_WIDTH: f32 = 240.;
+pub const PANE_MAX_WIDTH: f32 = 900.;
+
+fn saved_bounds(v: &Value) -> Option<[f32; 4]> {
+    let list = v.as_array()?;
+    let mut out = [0.; 4];
+    for (slot, value) in out.iter_mut().zip(list) {
+        *slot = value.as_f64()? as f32;
+    }
+    (list.len() == 4 && out[2] >= 200. && out[3] >= 200.).then_some(out)
 }
 
 /// 新しいタスクを AI が整えるとき、1 回で扱うタスクの数。
@@ -320,6 +339,13 @@ pub struct Session {
     /// 保存してある表示の状態と会話。同じなら書き込まない。
     saved_ui: String,
     saved_chat: (usize, usize, String),
+    /// 右に置くチャットとシェルの幅（拡大率を掛ける前の値）。境界をドラッグして変える。
+    pub chat_width: f32,
+    pub shell_width: f32,
+    /// 境界をドラッグしている間。終わるまで保存しない。
+    pub resizing: bool,
+    /// 別ウィンドウ（チャット、シェル）の位置と大きさ。x, y, 幅, 高さ。
+    pub window_bounds: [Option<[f32; 4]>; 2],
     /// ユーザーが今見ている場所（ワークスペースや開いているタスク）。画面が書き込む。
     pub place: String,
     _subscriptions: Vec<Subscription>,
@@ -377,6 +403,12 @@ impl Session {
                     open: v["open"].as_bool().unwrap_or(false),
                     chat_window: v["chat"] == "window",
                     shell: v["shell"].as_str().unwrap_or("docked").to_owned(),
+                    chat_width: v["cw"].as_f64().map(|w| w as f32),
+                    shell_width: v["sw"].as_f64().map(|w| w as f32),
+                    bounds: [
+                        saved_bounds(&v["chat_bounds"]),
+                        saved_bounds(&v["shell_bounds"]),
+                    ],
                 })
                 .unwrap_or_default();
             chat = read(CHAT_SETTING).and_then(|v| serde_json::from_str::<Value>(&v).ok());
@@ -442,6 +474,16 @@ impl Session {
                 .then_some((ui.open && ui.chat_window, ui.shell == "window")),
             saved_ui: String::new(),
             saved_chat: (0, 0, String::new()),
+            chat_width: ui
+                .chat_width
+                .unwrap_or(CHAT_WIDTH)
+                .clamp(CHAT_MIN_WIDTH, PANE_MAX_WIDTH),
+            shell_width: ui
+                .shell_width
+                .unwrap_or(SHELL_WIDTH)
+                .clamp(SHELL_MIN_WIDTH, PANE_MAX_WIDTH),
+            resizing: false,
+            window_bounds: ui.bounds,
             place: String::new(),
             _subscriptions: Vec::new(),
         };
@@ -475,6 +517,17 @@ impl Session {
         }
     }
 
+    /// ドラッグ中の幅。範囲に収める。
+    pub fn set_widths(&mut self, chat: f32, shell: f32, cx: &mut Context<Self>) {
+        let chat = chat.clamp(CHAT_MIN_WIDTH, PANE_MAX_WIDTH).round();
+        let shell = shell.clamp(SHELL_MIN_WIDTH, PANE_MAX_WIDTH).round();
+        if (chat, shell) != (self.chat_width, self.shell_width) {
+            self.chat_width = chat;
+            self.shell_width = shell;
+            cx.notify();
+        }
+    }
+
     fn ui_json(&self) -> String {
         serde_json::json!({
             "open": self.open || self.chat_window.is_some(),
@@ -484,6 +537,10 @@ impl Session {
                 ShellPlace::Docked => "docked",
                 ShellPlace::Window(_) => "window",
             },
+            "cw": self.chat_width,
+            "sw": self.shell_width,
+            "chat_bounds": self.window_bounds[0],
+            "shell_bounds": self.window_bounds[1],
         })
         .to_string()
     }
@@ -502,7 +559,7 @@ impl Session {
             return;
         }
         // 起動してすぐ、別ウィンドウを開き直す前の状態では上書きしない
-        if self.restore.is_none() {
+        if self.restore.is_none() && !self.resizing {
             let ui = self.ui_json();
             if ui != self.saved_ui && self.save_setting(UI_SETTING, &ui, cx) {
                 self.saved_ui = ui;

@@ -31,8 +31,6 @@ const fn px(value: f32) -> Pixels {
     gpui_kit::px(value * crate::UI_SCALE)
 }
 
-const CHAT_WIDTH: Pixels = px(380.);
-const SHELL_WIDTH: Pixels = px(360.);
 const SHELL_ROW: Pixels = px(20.);
 const TERM_PAD: Pixels = px(12.);
 /// ターミナルの文字の大きさ。画面の文字の大きさ（テーマ）に対する比で決める。
@@ -124,15 +122,24 @@ const CHAT_MIN: Pixels = px(320.);
 ///
 /// タスクの画面に `TASKS_MIN` を残せる範囲で広げる。シェルは、チャットの右に
 /// 並べる幅があれば右に、なければチャットの下に置く。
-pub fn docked_width(window_width: Pixels, shell_docked: bool) -> Option<Pixels> {
+pub fn docked_width(
+    window_width: Pixels,
+    shell_docked: bool,
+    (chat, shell): (f32, f32),
+) -> Option<Pixels> {
     let room = window_width - TASKS_MIN;
     if room < CHAT_MIN {
         None
-    } else if shell_docked && room >= CHAT_MIN + SHELL_WIDTH {
-        Some(room.min(CHAT_WIDTH + SHELL_WIDTH))
+    } else if side_by_side(window_width, shell_docked, shell) {
+        Some(room.min(px(chat) + px(shell)))
     } else {
-        Some(room.min(CHAT_WIDTH))
+        Some(room.min(px(chat)))
     }
+}
+
+/// シェルをチャットの右に並べる幅があるか。
+fn side_by_side(window_width: Pixels, shell_docked: bool, shell: f32) -> bool {
+    shell_docked && window_width - TASKS_MIN >= CHAT_MIN + px(shell)
 }
 
 /// どこに出しているか。
@@ -163,6 +170,8 @@ pub struct AiPane {
     /// 設定で、モデルの一覧を開いている。
     model_open: bool,
     pub settings_open: bool,
+    /// ドラッグしている境界。
+    resize: Option<Resize>,
     /// 開いて見せている、ツール実行のまとまり（最初の行の番号）。
     open_tools: std::collections::HashSet<usize>,
     chat_scroll: ScrollHandle,
@@ -223,6 +232,15 @@ fn chip(
                 .hover(|s| s.bg(theme.secondary_hover).border_color(theme.primary))
         })
         .child(label.into())
+}
+
+/// ドラッグで動かす境界。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Resize {
+    /// タスクの画面とチャットの間
+    Chat,
+    /// チャットとシェルの間
+    Shell,
 }
 
 impl AiPane {
@@ -326,6 +344,30 @@ impl AiPane {
                 });
             }),
         ];
+        // 別ウィンドウの位置と大きさを覚えて、次に開くときに戻す
+        let slot = match mode {
+            PaneMode::ChatWindow => Some(0),
+            PaneMode::ShellWindow => Some(1),
+            PaneMode::Docked => None,
+        };
+        if let Some(slot) = slot {
+            cx.observe_window_bounds(window, move |this, window, cx| {
+                let b = window.bounds();
+                let now = Some([
+                    f32::from(b.origin.x),
+                    f32::from(b.origin.y),
+                    f32::from(b.size.width),
+                    f32::from(b.size.height),
+                ]);
+                this.session.update(cx, |s, cx| {
+                    if s.window_bounds[slot] != now {
+                        s.window_bounds[slot] = now;
+                        cx.notify();
+                    }
+                });
+            })
+            .detach();
+        }
         // キーがあるかを調べる（キーチェーンを読むだけで、通信はしない）
         if mode != PaneMode::ShellWindow && session.read(cx).key == KeyState::Unknown {
             session.update(cx, |s, cx| s.refresh_key(cx));
@@ -344,6 +386,7 @@ impl AiPane {
             watch_input,
             model_open: false,
             settings_open: false,
+            resize: None,
             open_tools: std::collections::HashSet::new(),
             chat_scroll: ScrollHandle::new(),
             shell_scroll: UniformListScrollHandle::new(),
@@ -356,6 +399,50 @@ impl AiPane {
             copied: false,
             seen,
             _subscriptions: subscriptions,
+        }
+    }
+
+    /// 境界のドラッグ。`from_right` は、ウィンドウの右端からマウスまでの幅。
+    fn drag_resize(
+        &mut self,
+        what: Resize,
+        from_right: f32,
+        window_width: Pixels,
+        cx: &mut Context<Self>,
+    ) {
+        self.session.update(cx, |s, cx| {
+            let together = side_by_side(
+                window_width,
+                s.shell_place == ShellPlace::Docked,
+                s.shell_width,
+            );
+            // タスクの画面に残す幅より先には広げない
+            let room = f32::from(window_width - TASKS_MIN) / crate::UI_SCALE;
+            match what {
+                // 左の境界。シェルが右に並んでいれば、その分を引いたのがチャットの幅
+                Resize::Chat => {
+                    let shell = if together { s.shell_width } else { 0. };
+                    let (chat, shell_width) = (from_right.min(room) - shell, s.shell_width);
+                    s.set_widths(chat, shell_width, cx);
+                }
+                // チャットとシェルの境界。全体の幅は変えずに、分け方を変える
+                Resize::Shell => {
+                    let total = s.chat_width + s.shell_width;
+                    let shell = from_right.clamp(ai::SHELL_MIN_WIDTH, total - ai::CHAT_MIN_WIDTH);
+                    s.set_widths(total - shell, shell, cx);
+                }
+            }
+        });
+    }
+
+    /// ドラッグを終える。幅はここで保存される。
+    fn finish_resize(&mut self, cx: &mut Context<Self>) {
+        if self.resize.take().is_some() {
+            self.session.update(cx, |s, cx| {
+                s.resizing = false;
+                cx.notify();
+            });
+            cx.notify();
         }
     }
 
@@ -1914,8 +2001,48 @@ impl Render for AiPane {
                     .into_any_element()
             }
             PaneMode::Docked => {
-                let docked = docked_width(width, shell_docked);
-                let side_by_side = docked.is_some_and(|w| w > CHAT_WIDTH);
+                let widths = {
+                    let s = self.session.read(cx);
+                    (s.chat_width, s.shell_width)
+                };
+                let docked = docked_width(width, shell_docked, widths);
+                let side_by_side = docked.is_some() && side_by_side(width, shell_docked, widths.1);
+                let resize = self.resize;
+                let pane = cx.entity().downgrade();
+                let edge_pane = pane.clone();
+                let edge = |id: &'static str, what: Resize| {
+                    div()
+                        .id(id)
+                        .absolute()
+                        .top_0()
+                        .bottom_0()
+                        .left(px(-3.))
+                        .w(px(6.))
+                        .cursor_col_resize()
+                        .when(resize == Some(what), |d| d.bg(theme.ring))
+                        .hover(|s| s.bg(theme.ring))
+                        .on_mouse_down(MouseButton::Left, {
+                            let pane = edge_pane.clone();
+                            move |event: &MouseDownEvent, _, cx| {
+                                cx.stop_propagation();
+                                let twice = event.click_count >= 2;
+                                // チャットを閉じたあとなら、変える先がない
+                                let _ = pane.update(cx, |this, cx| {
+                                    if twice {
+                                        // ダブルクリックで最初の幅に戻す
+                                        this.session.update(cx, |s, cx| {
+                                            s.set_widths(ai::CHAT_WIDTH, ai::SHELL_WIDTH, cx)
+                                        });
+                                    } else {
+                                        this.resize = Some(what);
+                                        this.session.update(cx, |s, _| s.resizing = true);
+                                        cx.notify();
+                                    }
+                                });
+                            }
+                        })
+                        .test_support()
+                };
                 base.h_full()
                     .flex_none()
                     .occlude()
@@ -1928,7 +2055,7 @@ impl Render for AiPane {
                             .top_0()
                             .bottom_0()
                             .right_0()
-                            .w(CHAT_WIDTH)
+                            .w(px(widths.0))
                             .max_w_full()
                             .border_l_1()
                             .border_color(theme.border)
@@ -1936,6 +2063,50 @@ impl Render for AiPane {
                     })
                     .when(side_by_side, |d| d.flex_row())
                     .when(!side_by_side, |d| d.flex_col())
+                    .relative()
+                    // 左の境界をドラッグして幅を変える
+                    .child(edge("ai-resize", Resize::Chat))
+                    // ドラッグしている間は、ウィンドウのどこにマウスがあっても幅を追う
+                    .when_some(resize, |d, what| {
+                        d.child(
+                            canvas(
+                                |_, _, _| (),
+                                move |_, _, window, _| {
+                                    let moved = pane.clone();
+                                    window.on_mouse_event(
+                                        move |event: &MouseMoveEvent, _, window, cx| {
+                                            let window_width = window.viewport_size().width;
+                                            let from_right =
+                                                f32::from(window_width - event.position.x)
+                                                    / crate::UI_SCALE;
+                                            let held =
+                                                event.pressed_button == Some(MouseButton::Left);
+                                            // チャットを閉じたあとなら、変える先がない
+                                            let _ = moved.update(cx, |this, cx| {
+                                                if held {
+                                                    this.drag_resize(
+                                                        what,
+                                                        from_right,
+                                                        window_width,
+                                                        cx,
+                                                    );
+                                                } else {
+                                                    this.finish_resize(cx);
+                                                }
+                                            });
+                                        },
+                                    );
+                                    let released = pane.clone();
+                                    window.on_mouse_event(move |_: &MouseUpEvent, _, _, cx| {
+                                        let _ =
+                                            released.update(cx, |this, cx| this.finish_resize(cx));
+                                    });
+                                },
+                            )
+                            .absolute()
+                            .size_0(),
+                        )
+                    })
                     .child(self.render_chat(cx))
                     .when(shell_docked, |d| {
                         d.child(
@@ -1943,11 +2114,14 @@ impl Render for AiPane {
                                 .flex()
                                 .flex_col()
                                 .when(side_by_side, |d| {
-                                    d.w(SHELL_WIDTH)
+                                    d.w(px(widths.1))
                                         .flex_none()
                                         .h_full()
+                                        .relative()
                                         .border_l_1()
                                         .border_color(theme.border)
+                                        // チャットとシェルの境界
+                                        .child(edge("ai-shell-resize", Resize::Shell))
                                 })
                                 .when(!side_by_side, |d| {
                                     d.h(relative(0.38))
@@ -1984,15 +2158,15 @@ mod tests {
     #[test]
     fn the_pane_fits_the_window() {
         // 狭ければタスクの画面の右に重ねる
-        assert_eq!(docked_width(px(800.), true), None);
-        assert_eq!(docked_width(px(1179.), false), None);
+        assert_eq!(docked_width(px(800.), true, (380., 360.)), None);
+        assert_eq!(docked_width(px(1179.), false, (380., 360.)), None);
         // 最初のウィンドウの幅（1180）でも、タスクの画面に 860 が残る
-        assert_eq!(docked_width(px(1180.), true), Some(px(320.)));
-        assert_eq!(docked_width(px(1300.), true), Some(px(380.)));
+        assert_eq!(docked_width(px(1180.), true, (380., 360.)), Some(px(320.)));
+        assert_eq!(docked_width(px(1300.), true, (380., 360.)), Some(px(380.)));
         // 広ければ、シェルをチャットの右に並べる
-        assert_eq!(docked_width(px(1539.), true), Some(px(380.)));
-        assert_eq!(docked_width(px(1540.), true), Some(px(680.)));
-        assert_eq!(docked_width(px(1700.), true), Some(px(740.)));
-        assert_eq!(docked_width(px(1700.), false), Some(px(380.)));
+        assert_eq!(docked_width(px(1539.), true, (380., 360.)), Some(px(380.)));
+        assert_eq!(docked_width(px(1540.), true, (380., 360.)), Some(px(680.)));
+        assert_eq!(docked_width(px(1700.), true, (380., 360.)), Some(px(740.)));
+        assert_eq!(docked_width(px(1700.), false, (380., 360.)), Some(px(380.)));
     }
 }
