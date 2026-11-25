@@ -38,11 +38,6 @@ pub enum Nav {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Modal {
     None,
-    /// ワークスペースの作成（`rename` があれば名前の変更）
-    WorkspaceName {
-        parent: Option<Id>,
-        rename: Option<Id>,
-    },
     DeleteWorkspace(Id),
     DeleteTasks(Vec<Id>),
     /// 移動先のワークスペースを選ぶ
@@ -72,6 +67,17 @@ pub enum Modal {
     /// 書体と色
     Appearance,
 }
+
+/// 左のメニューで、その場で名前を書いているワークスペース。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceNaming {
+    pub id: Id,
+    /// 追加したばかりで、最初の名前を書いている
+    pub created: bool,
+}
+
+/// 追加したばかりのワークスペースの名前。
+pub const NEW_WORKSPACE_NAME: &str = "新規ワークスペース";
 
 /// ダイアログの上に、もう 1 枚重ねて出すダイアログ。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -123,6 +129,7 @@ pub struct Inputs {
     pub quick_add: Entity<InputState>,
     pub search: Entity<InputState>,
     pub icon_search: Entity<InputState>,
+    pub workspace_name: Entity<InputState>,
     pub font_search: Entity<InputState>,
     pub name: Entity<InputState>,
     pub title: Entity<InputState>,
@@ -155,6 +162,8 @@ pub struct MainView {
     pub nav: Nav,
     pub collapsed: HashSet<Id>,
     pub include_descendants: bool,
+    /// 左のメニューで名前を書いているワークスペース。
+    pub workspace_naming: Option<WorkspaceNaming>,
     /// アイコンを選ぶ画面で選んでいるカテゴリ。
     pub icon_category: Option<crate::icons::Category>,
     pub workspaces: Vec<Workspace>,
@@ -290,6 +299,7 @@ impl MainView {
             quick_add: input(window, cx, "タスクを追加…"),
             search: input(window, cx, "キーワード"),
             icon_search: input(window, cx, "アイコンを検索"),
+            workspace_name: input(window, cx, "ワークスペース名"),
             font_search: input(window, cx, "フォントを検索"),
             name: input(window, cx, "名前"),
             title: input(window, cx, "タイトル"),
@@ -388,6 +398,17 @@ impl MainView {
                 }
             },
         ));
+        on_enter!(workspace_name, save_workspace_name);
+        // ワークスペースの名前も、ほかの場所を押したときに保存する
+        subs.push(cx.subscribe_in(
+            &inputs.workspace_name,
+            window,
+            |this, _, event: &InputEvent, window, cx| {
+                if matches!(event, InputEvent::Blur) && this.workspace_naming.is_some() {
+                    this.save_workspace_name(window, cx);
+                }
+            },
+        ));
         on_enter!(subtask, submit_subtask);
         on_enter!(start, save_start);
         on_enter!(due, save_due);
@@ -475,6 +496,7 @@ impl MainView {
             collapsed: HashSet::new(),
             include_descendants: true,
             icon_category: None,
+            workspace_naming: None,
             workspaces: Vec::new(),
             tree: Vec::new(),
             open_counts: HashMap::new(),
@@ -1669,50 +1691,97 @@ impl MainView {
 
     // ---- ワークスペースと担当者 ----
 
-    pub fn ask_workspace_name(
+    /// 「新規ワークスペース」という名前で追加して、左のメニューでそのまま名前を書けるようにする。
+    pub fn add_workspace(
         &mut self,
         parent: Option<Id>,
-        rename: Option<Id>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let current = rename
-            .as_ref()
-            .and_then(|id| self.workspaces.iter().find(|w| &w.id == id))
-            .map(|w| w.name.clone())
-            .unwrap_or_default();
-        self.inputs.name.update(cx, |s, cx| {
-            s.set_value(current, window, cx);
-            s.focus(window, cx);
+        let Some(workspace) = self.write(cx, |s| {
+            s.create_workspace(parent.as_deref(), NEW_WORKSPACE_NAME)
+        }) else {
+            return;
+        };
+        if let Some(parent) = &parent {
+            self.collapsed.remove(parent);
+        }
+        // 名前を書く行が見えるように、左のメニューを出す
+        self.sidebar_hidden = false;
+        self.sidebar_open = true;
+        self.go(Nav::Workspace(workspace.id.clone()), cx);
+        self.name_workspace(workspace.id, true, window, cx);
+    }
+
+    /// 左のメニューの行で、ワークスペースの名前を書き直す。
+    pub fn rename_workspace(&mut self, id: Id, window: &mut Window, cx: &mut Context<Self>) {
+        self.name_workspace(id, false, window, cx);
+    }
+
+    fn name_workspace(
+        &mut self,
+        id: Id,
+        created: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let name = self.workspace_name(Some(&id));
+        self.inputs
+            .workspace_name
+            .update(cx, |s, cx| s.set_value(name, window, cx));
+        self.workspace_naming = Some(WorkspaceNaming { id, created });
+        // メニューから始めたときは、メニューが閉じてからフォーカスを移す。
+        // すぐ打ち替えられるように、名前を全部選んでおく
+        let input = self.inputs.workspace_name.clone();
+        cx.defer_in(window, move |this, window, cx| {
+            if this.workspace_naming.is_none() {
+                return;
+            }
+            input.update(cx, |s, cx| {
+                s.focus(window, cx);
+                s.select_all(window, cx);
+            });
         });
-        self.modal = Modal::WorkspaceName { parent, rename };
         cx.notify();
     }
 
-    /// 名前の入力欄で Enter。開いているダイアログに応じて、作成・名前の変更・担当者の追加をする。
+    /// 書いた名前を保存する。Enter か、ほかの場所を押したとき。
+    /// 追加したばかりのワークスペースに名前を付けたら、AI にアイコンを選ばせる。
+    pub fn save_workspace_name(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(naming) = self.workspace_naming.clone() else {
+            return;
+        };
+        let name = self
+            .inputs
+            .workspace_name
+            .read(cx)
+            .value()
+            .trim()
+            .to_owned();
+        let current = self.workspace_name(Some(&naming.id));
+        // 空にしたときと変えていないときは、今の名前のままにする
+        if !name.is_empty() && name != current {
+            if self
+                .write(cx, |s| s.rename_workspace(&naming.id, &name))
+                .is_none()
+            {
+                return;
+            }
+            if naming.created {
+                self.ai_session.update(cx, |session, cx| {
+                    session.suggest_icon(naming.id.clone(), name.clone(), cx)
+                });
+            }
+        }
+        self.workspace_naming = None;
+        self.focus.focus(window, cx);
+        cx.notify();
+    }
+
+    /// 名前の入力欄で Enter。担当者を追加する。
     pub fn submit_name(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let name = self.inputs.name.read(cx).value().to_string();
         match self.modal.clone() {
-            Modal::WorkspaceName { parent, rename } => {
-                let done = match rename {
-                    Some(id) => self
-                        .write(cx, |s| s.rename_workspace(&id, &name))
-                        .map(|_| None),
-                    None => self
-                        .write(cx, |s| s.create_workspace(parent.as_deref(), &name))
-                        .map(Some),
-                };
-                if let Some(created) = done {
-                    Self::take(&self.inputs.name.clone(), window, cx);
-                    self.modal = Modal::None;
-                    if let Some(parent) = &parent {
-                        self.collapsed.remove(parent);
-                    }
-                    if let Some(workspace) = created {
-                        self.go(Nav::Workspace(workspace.id), cx);
-                    }
-                }
-            }
             Modal::People if self.write(cx, |s| s.create_person(&name, false)).is_some() => {
                 Self::take(&self.inputs.name.clone(), window, cx);
             }
@@ -2735,6 +2804,8 @@ impl MainView {
         } else if self.modal != Modal::None {
             self.modal = Modal::None;
             self.issued_ticket = None;
+        } else if self.workspace_naming.take().is_some() {
+            // 書きかけの名前を捨てる
         } else {
             // 今のペインで開いているものを閉じ、何もなければ拡大表示を戻す
             let closed = match self.focused_child() {
