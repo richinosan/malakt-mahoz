@@ -33,6 +33,8 @@ fn main() {
         .run(move |cx| {
             malakt_mahoz::db::clear_stale_opened();
             malakt_mahoz::init(store, cx);
+            // ターミナルで動かす Claude Code から、このアプリのタスクを読み書きできるようにする
+            malakt_mahoz::term::shared(cx).update(cx, |terms, _| terms.register_mcp = true);
             malakt_mahoz::reminders::connect_system(cx);
             malakt_mahoz::update::connect_system(cx);
             malakt_mahoz::db::watch(cx);

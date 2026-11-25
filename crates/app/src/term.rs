@@ -118,6 +118,10 @@ pub struct Terms {
     pub error: Option<SharedString>,
     /// 開いたターミナルに、キーの入力先を移す。
     pub focus_wanted: bool,
+    /// ターミナルを開いたときに、そこの Claude Code へ MCP サーバーを登録する。
+    pub register_mcp: bool,
+    /// このアプリを起動してから登録を確かめたシェル。
+    registered: std::collections::HashSet<String>,
 }
 
 pub struct SharedTerms(pub Entity<Terms>);
@@ -151,6 +155,8 @@ impl Terms {
             next: 1,
             error: None,
             focus_wanted: false,
+            register_mcp: false,
+            registered: std::collections::HashSet::new(),
         }
     }
 
@@ -274,6 +280,7 @@ impl Terms {
         if let Some(locale) = default_locale(|name| std::env::var(name).ok()) {
             options.env.push(("LANG".to_owned(), locale.to_owned()));
         }
+        self.register_claude(&found, &options.env, cx);
         let (tx, rx) = async_channel::unbounded();
         let terminal = match Terminal::spawn(&options, move |event| {
             // ターミナルを閉じたあとは、送れなくてよい
@@ -354,6 +361,41 @@ impl Terms {
             self.focus_wanted = self.active.is_some();
         }
         cx.notify();
+    }
+
+    /// このシェルの Claude Code に、MCP サーバーを登録する。シェルごとに、起動してから 1 回だけ確かめる。
+    fn register_claude(
+        &mut self,
+        profile: &Profile,
+        env: &[(String, String)],
+        cx: &mut Context<Self>,
+    ) {
+        if !self.register_mcp || self.registered.contains(&profile.id) {
+            return;
+        }
+        let Some((_, exe)) = env.iter().find(|(name, _)| name == crate::mcp::ENV_BIN) else {
+            return;
+        };
+        self.registered.insert(profile.id.clone());
+        let steps = crate::mcp_register::steps(profile, exe, cfg!(windows));
+        let env = env.to_vec();
+        let name = profile.name.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { crate::mcp_register::register(&steps, &env) })
+                .await;
+            if let Err(reason) = result {
+                // アプリが終わっていれば、渡す先がない
+                let _ = this.update(cx, |this, cx| {
+                    this.fail(
+                        format!("{name} の Claude Code に MCP を登録できませんでした: {reason}"),
+                        cx,
+                    );
+                });
+            }
+        })
+        .detach();
     }
 
     fn fail(&mut self, text: String, cx: &mut Context<Self>) {
