@@ -155,6 +155,8 @@ pub struct MainView {
     pub nav: Nav,
     pub collapsed: HashSet<Id>,
     pub include_descendants: bool,
+    /// アイコンを選ぶ画面で選んでいるカテゴリ。
+    pub icon_category: Option<crate::icons::Category>,
     pub workspaces: Vec<Workspace>,
     pub tree: Vec<TreeRow>,
     pub open_counts: HashMap<Id, u32>,
@@ -472,6 +474,7 @@ impl MainView {
             nav: Nav::Home,
             collapsed: HashSet::new(),
             include_descendants: true,
+            icon_category: None,
             workspaces: Vec::new(),
             tree: Vec::new(),
             open_counts: HashMap::new(),

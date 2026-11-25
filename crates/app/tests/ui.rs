@@ -1736,6 +1736,60 @@ fn workspace_icon_is_found_by_search(cx: &mut TestAppContext) {
     });
     let saved = store(cx, |s| s.workspace(&ws).unwrap());
     assert_eq!(saved.icon.as_deref(), Some("cat"));
+
+    // カテゴリで絞る。「動物・自然」の中で、ひらがなで探して絵文字のペンギンを選ぶ
+    ui(cx, window, |window, cx| {
+        window.click(("icon-category", 0usize), cx)
+    });
+    cx.update(|cx| {
+        assert_eq!(
+            view.read(cx).icon_category,
+            Some(malakt_mahoz::icons::Category::Nature)
+        )
+    });
+    ui(cx, window, |window, cx| {
+        window.click("icon-search", cx);
+        window.press("ctrl-a", cx);
+        window.input("ぺんぎん", cx);
+    });
+    ui(cx, window, |window, cx| {
+        window.click(("ws-icon", 0usize), cx)
+    });
+    let saved = store(cx, |s| s.workspace(&ws).unwrap());
+    assert_eq!(saved.icon.as_deref(), Some("emoji-penguin"));
+    // ほかのカテゴリに切り替える
+    ui(cx, window, |window, cx| {
+        window.click(("icon-category", 1usize), cx)
+    });
+    cx.update(|cx| {
+        assert_eq!(
+            view.read(cx).icon_category,
+            Some(malakt_mahoz::icons::Category::Food)
+        )
+    });
+    // もう一度押すとカテゴリが外れる
+    ui(cx, window, |window, cx| {
+        window.click(("icon-category", 1usize), cx)
+    });
+    cx.update(|cx| assert_eq!(view.read(cx).icon_category, None));
+    // どのカテゴリのボタンも押せて、その中の先頭のアイコンを選べる
+    ui(cx, window, |window, cx| {
+        window.click("icon-search", cx);
+        window.press("ctrl-a", cx);
+        window.press("backspace", cx);
+    });
+    for (ix, category) in malakt_mahoz::icons::Category::ALL.into_iter().enumerate() {
+        ui(cx, window, |window, cx| {
+            window.click(("icon-category", ix), cx)
+        });
+        cx.update(|cx| assert_eq!(view.read(cx).icon_category, Some(category)));
+        ui(cx, window, |window, cx| {
+            window.click(("ws-icon", 0usize), cx)
+        });
+        let saved = store(cx, |s| s.workspace(&ws).unwrap());
+        let first = malakt_mahoz::icons::search("", Some(category), &[], 1);
+        assert_eq!(saved.icon.as_deref(), first.first().copied());
+    }
 }
 
 /// 上のバーのメニューのボタンで左のメニューを閉じて開ける。境界で変えた幅は保存される。

@@ -4488,6 +4488,7 @@ dependencies = [
  "async-channel",
  "dirs 5.0.1",
  "embed-resource",
+ "flate2",
  "gpui-kit",
  "image",
  "malakt-ai",
