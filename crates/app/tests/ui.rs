@@ -1569,6 +1569,130 @@ fn theme_buttons_switch_the_colors(cx: &mut TestAppContext) {
     assert_eq!(saved(cx).as_deref(), Some("system"));
 }
 
+/// 設定の「フォントとカラー」で、書体と色がその場で変わり、保存される。開き直しても残り、標準に戻せる。
+#[gpui_kit::test]
+fn font_and_colors_are_chosen_in_settings(cx: &mut TestAppContext) {
+    use gpui_kit::component::{ActiveTheme, Theme};
+    use malakt_mahoz::state::SubModal;
+    use malakt_mahoz::theme::{self, Color, Slot};
+    start(cx);
+    let (window, view) = open(cx, wide());
+    let saved = |cx: &mut TestAppContext, key: &str| store(cx, |s| s.setting(key).unwrap());
+    let font = |cx: &mut TestAppContext| cx.update(|cx| cx.theme().font_family.to_string());
+    let stock = cx.update(|cx| (cx.theme().primary, cx.theme().background));
+    assert_eq!(font(cx), "LINE Seed JP");
+
+    // 設定のダイアログの上に、書体の一覧が重なって開く
+    ui(cx, window, |window, cx| {
+        view.update(cx, |v, cx| v.open_appearance(window, cx))
+    });
+    ui(cx, window, |window, cx| window.click("font-open", cx));
+    cx.update(|cx| {
+        view.update(cx, |v, cx| {
+            assert_eq!(v.sub_modal, Some(SubModal::Font));
+            assert_eq!(v.fonts[0], "LINE Seed JP");
+            // この PC に入っている書体の代わり
+            v.fonts = ["LINE Seed JP", "Noto Sans", "Noto Serif"]
+                .map(String::from)
+                .to_vec();
+            cx.notify();
+        })
+    });
+    // 検索で絞って選ぶ
+    ui(cx, window, |window, cx| window.input("serif", cx));
+    ui(cx, window, |window, cx| {
+        assert!(window.try_find(("font", 1usize)).is_none());
+        window.click(("font", 0usize), cx)
+    });
+    assert_eq!(font(cx), "Noto Serif");
+    assert_eq!(saved(cx, "font.family").as_deref(), Some("Noto Serif"));
+
+    // Esc は重ねたほうだけを閉じ、もう一度で設定を閉じる
+    ui(cx, window, |window, cx| window.press("escape", cx));
+    assert!(cx.update(|cx| {
+        let v = view.read(cx);
+        v.sub_modal.is_none() && v.modal == Modal::Appearance
+    }));
+    ui(cx, window, |window, cx| window.press("escape", cx));
+    assert!(cx.update(|cx| view.read(cx).modal == Modal::None));
+
+    // 色を選ぶと、ライトとダークの両方に使われる
+    ui(cx, window, |window, cx| {
+        view.update(cx, |v, cx| v.open_appearance(window, cx))
+    });
+    let pick = |cx: &mut TestAppContext, slot: usize, hex: &str| {
+        let color = Color::parse(hex).unwrap();
+        // 色の見本を押すと、色を選ぶところが開く
+        ui(cx, window, |window, cx| {
+            window.click(("color-open", slot), cx)
+        });
+        assert!(cx.update(|cx| view.read(cx).color_pickers[slot].read(cx).is_open()));
+        ui(cx, window, |window, cx| {
+            let picker = view.read(cx).color_pickers[slot].clone();
+            picker.update(cx, |p, cx| p.select_color(color.into(), window, cx));
+        });
+    };
+    pick(cx, 0, "#1d4ed8");
+    pick(cx, 1, "#fdf6e3");
+    pick(cx, 2, "#002b36");
+    assert_eq!(saved(cx, "color.accent").as_deref(), Some("#1d4ed8"));
+    assert_eq!(
+        saved(cx, "color.background.light").as_deref(),
+        Some("#fdf6e3")
+    );
+    assert_eq!(
+        saved(cx, "color.background.dark").as_deref(),
+        Some("#002b36")
+    );
+    let hex = |color: gpui_kit::Hsla| Color::from(color).hex();
+    ui(cx, window, |window, cx| {
+        theme::set(theme::Choice::Light, window, cx).unwrap()
+    });
+    let light = cx.update(|cx| (cx.theme().primary, cx.theme().background));
+    assert_eq!(hex(light.0), "#1d4ed8");
+    assert_eq!(hex(light.1), "#fdf6e3");
+    ui(cx, window, |window, cx| {
+        theme::set(theme::Choice::Dark, window, cx).unwrap()
+    });
+    let dark = cx.update(|cx| (cx.theme().primary, cx.theme().background));
+    assert_eq!(hex(dark.1), "#002b36");
+    // 暗い地では、同じ青を見える明るさまで上げて使う
+    assert_ne!(dark.0, light.0);
+
+    // 起動し直しても残る
+    cx.update(|cx| {
+        Theme::global_mut(cx).font_family = "x".into();
+        theme::init(cx);
+    });
+    assert_eq!(font(cx), "Noto Serif");
+    assert_eq!(hex(cx.update(|cx| cx.theme().background)), "#002b36");
+
+    // 標準に戻すボタンで、同梱の書体と色に戻る
+    for id in ["font-reset", "accent-reset", "light-reset", "dark-reset"] {
+        ui(cx, window, |window, cx| window.click(id, cx));
+    }
+    for key in [
+        "font.family",
+        "color.accent",
+        "color.background.light",
+        "color.background.dark",
+    ] {
+        assert_eq!(saved(cx, key), None, "{key}");
+    }
+    assert_eq!(font(cx), "LINE Seed JP");
+    ui(cx, window, |window, cx| {
+        theme::set(theme::Choice::Light, window, cx).unwrap()
+    });
+    assert_eq!(
+        cx.update(|cx| (cx.theme().primary, cx.theme().background)),
+        stock
+    );
+    assert_eq!(
+        cx.update(|cx| theme::shown(Slot::Accent, cx).hex()),
+        "#86600f"
+    );
+}
+
 /// アイコンは検索して選べる。日本語でも探せ、見つからなければその旨が出る。
 #[gpui_kit::test]
 fn workspace_icon_is_found_by_search(cx: &mut TestAppContext) {

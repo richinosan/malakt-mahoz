@@ -2,9 +2,10 @@
 
 use std::ops::Range;
 
-use gpui_kit::base::TestSupportExt;
+use gpui_kit::base::{Disableable, TestSupportExt};
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants};
 use gpui_kit::component::checkbox::Checkbox;
+use gpui_kit::component::color_picker::ColorPicker;
 use gpui_kit::component::input::{Input, Textarea};
 use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu, PopupMenu, PopupMenuItem};
 use gpui_kit::component::scroll::ScrollableElement;
@@ -20,7 +21,9 @@ use malakt_core::{Comment, DueRule, Role as Raci, Roles, Status, Task as Todo, W
 use crate::ai::ShellPlace;
 use crate::ai_view::{docked_width, TASKS_MIN};
 use crate::shadow::{Elevate, Elevation};
-use crate::state::{Column, CommentMode, Detail, DropTarget, Editing, MainView, Modal, Nav};
+use crate::state::{
+    Column, CommentMode, Detail, DropTarget, Editing, MainView, Modal, Nav, SubModal,
+};
 use crate::{Dismiss, LockNow, NewWindow, PanePrefix, ToggleAi};
 use malakt_core::Id;
 
@@ -1018,6 +1021,9 @@ impl MainView {
                             let menu = menu
                                 .item(item("担当者", |this, window, cx| {
                                     this.open_people(window, cx)
+                                }))
+                                .item(item("フォントとカラー", |this, window, cx| {
+                                    this.open_appearance(window, cx)
                                 }))
                                 .separator()
                                 .item(item("エクスポート", |this, window, cx| {
@@ -3709,6 +3715,18 @@ impl MainView {
         body: Div,
         cx: &mut Context<Self>,
     ) -> Div {
+        self.dialog_as("dialog", px(460.), title, body, cx)
+    }
+
+    /// 下に敷いたダイアログは `dialog-under`、いちばん上のものは `dialog` と名付ける。
+    fn dialog_as(
+        &self,
+        id: &'static str,
+        width: Pixels,
+        title: impl Into<SharedString>,
+        body: Div,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let theme = cx.theme().clone();
         div()
             .absolute()
@@ -3720,8 +3738,8 @@ impl MainView {
             .occlude()
             .child(
                 col()
-                    .id("dialog")
-                    .w(px(460.))
+                    .id(id)
+                    .w(width)
                     .max_w(relative(0.94))
                     .max_h(relative(0.9))
                     .p_4()
@@ -3739,8 +3757,12 @@ impl MainView {
                                     .label("閉じる")
                                     .ghost()
                                     .xsmall()
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        // ペインのキーの一覧やプリセットは、いちばん上に出ている
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        // 重ねたダイアログと、ペインのキーの一覧やプリセットは、いちばん上に出ている
+                                        if this.sub_modal.is_some() {
+                                            this.dismiss_in(window, cx);
+                                            return;
+                                        }
                                         if this.pane_overlay.take().is_some() {
                                             cx.notify();
                                             return;
@@ -3754,6 +3776,176 @@ impl MainView {
                     .child(body)
                     .test_support(),
             )
+    }
+
+    /// 書体と色。書体の一覧は、この上にもう 1 枚重ねて出す。
+    fn render_appearance(&self, cx: &mut Context<Self>) -> Div {
+        let theme = cx.theme().clone();
+        let look = crate::theme::look(cx);
+        let font = self.current_font(cx);
+        let reset = |id: &'static str, shown: bool| {
+            Button::new(id)
+                .icon(app_icon("rotate-ccw"))
+                .ghost()
+                .small()
+                .tooltip("標準に戻す")
+                // 場所は取っておき、標準のままのときは見せない
+                .when(!shown, |b| b.invisible().disabled(true))
+        };
+        let label = |text: &'static str| {
+            div()
+                .w(px(112.))
+                .flex_none()
+                .text_sm()
+                .text_color(theme.muted_foreground)
+                .child(text)
+        };
+        let mut body = col().gap_2().child(
+            row()
+                .gap_2()
+                .child(label("フォント"))
+                .child(
+                    row()
+                        .id("font-open")
+                        .flex_1()
+                        .min_w_0()
+                        .h_8()
+                        .px_3()
+                        .gap_2()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(theme.input)
+                        .cursor_pointer()
+                        .hover(|s| s.bg(theme.accent))
+                        .active(|s| s.bg(theme.primary.opacity(0.4)))
+                        .child(div().flex_1().truncate().child(font))
+                        .child(
+                            app_icon("chevron-right")
+                                .small()
+                                .text_color(theme.muted_foreground),
+                        )
+                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                            this.open_font_picker(window, cx)
+                        }))
+                        .test_support(),
+                )
+                .child(
+                    reset("font-reset", look.font.is_some())
+                        .on_click(cx.listener(|this, _, _, cx| this.set_font(None, cx))),
+                ),
+        );
+        for (ix, slot) in crate::theme::Slot::ALL.into_iter().enumerate() {
+            let id = ["accent-reset", "light-reset", "dark-reset"][ix];
+            body = body.child(
+                row()
+                    .gap_2()
+                    .child(label(slot.label()))
+                    .child(
+                        div().flex_1().flex().child(
+                            div()
+                                .id(("color-open", ix))
+                                .child(
+                                    ColorPicker::new(&self.color_pickers[ix])
+                                        .accessibility_label(slot.label())
+                                        .small(),
+                                )
+                                .test_support(),
+                        ),
+                    )
+                    .child(reset(id, look.color(slot).is_some()).on_click(cx.listener(
+                        move |this, _, window, cx| this.set_color(slot, None, window, cx),
+                    ))),
+            );
+        }
+        let body = body.when_some(self.error.clone(), |d, error| {
+            d.child(div().text_sm().text_color(theme.danger).child(error))
+        });
+        let Some(SubModal::Font) = self.sub_modal else {
+            return self.dialog("フォントとカラー", body, cx);
+        };
+        let current = self.current_font(cx);
+        let found = self.found_fonts(cx);
+        let none_found = found.is_empty();
+        let count = found.len();
+        let list = uniform_list(
+            "font-list",
+            count,
+            cx.processor(move |_, range: Range<usize>, _, cx| {
+                let theme = cx.theme().clone();
+                range
+                    .map(|ix| {
+                        let name = found[ix].clone();
+                        let selected = name == current;
+                        row()
+                            .id(("font", ix))
+                            .w_full()
+                            .h(px(40.))
+                            .px_3()
+                            .gap_2()
+                            .rounded_md()
+                            .cursor_pointer()
+                            .when(selected, |d| d.bg(theme.accent))
+                            .hover(|s| s.bg(theme.accent.opacity(0.6)))
+                            .active(|s| s.bg(theme.primary.opacity(0.4)))
+                            // 名前は、その書体で出す
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .truncate()
+                                    .font_family(name.clone())
+                                    .child(name.clone()),
+                            )
+                            .when(selected, |d| {
+                                d.child(app_icon("check").small().text_color(theme.primary))
+                            })
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                this.set_font(Some(&name), cx)
+                            }))
+                            .test_support()
+                    })
+                    .collect::<Vec<_>>()
+            }),
+        )
+        .track_scroll(&self.font_scroll)
+        // 右の端はスクロールバーの場所
+        .pr_4()
+        .size_full();
+        let picker = col()
+            .gap_3()
+            .child(
+                Input::new(&self.inputs.font_search)
+                    .id("font-search")
+                    .aria_label("フォントを検索")
+                    .prefix(app_icon("search").small())
+                    .cleanable(true),
+            )
+            .child(
+                div()
+                    .relative()
+                    .h(px(360.))
+                    .child(list)
+                    .vertical_scrollbar(&self.font_scroll)
+                    .when(none_found, |d| {
+                        d.child(
+                            div()
+                                .text_sm()
+                                .text_color(theme.muted_foreground)
+                                .child("見つかりません。"),
+                        )
+                    }),
+            );
+        let over = self.dialog_as("dialog", px(400.), "フォント", picker, cx);
+        let over = if self.motion {
+            over.with_animation("sub-modal-in", appear(140), |d, t| d.opacity(t))
+                .into_any_element()
+        } else {
+            over.into_any_element()
+        };
+        div()
+            .absolute()
+            .inset_0()
+            .child(self.dialog_as("dialog-under", px(460.), "フォントとカラー", body, cx))
+            .child(over)
     }
 
     fn workspace_options(&self, cx: &mut Context<Self>) -> Div {
@@ -3929,6 +4121,7 @@ impl MainView {
                 let title = format!("「{}」のアイコン", self.workspace_name(Some(id)));
                 self.dialog(title, body, cx)
             }
+            Modal::Appearance => self.render_appearance(cx),
             Modal::DeleteWorkspace(id) => {
                 let name = self.workspace_name(Some(id));
                 let body = col()
@@ -5093,7 +5286,13 @@ impl Render for MainView {
             .id("main-view")
             .key_context("MainView")
             .track_focus(&self.focus)
-            .on_action(cx.listener(|this, _: &Dismiss, _, cx| this.dismiss(cx)))
+            .on_action(cx.listener(|this, _: &Dismiss, window, cx| this.dismiss_in(window, cx)))
+            // 色を選ぶところにフォーカスがあると、Esc はそちらの取り消しとして届く
+            .on_action(
+                cx.listener(|this, _: &gpui_kit::base::actions::Cancel, window, cx| {
+                    this.dismiss_in(window, cx)
+                }),
+            )
             .on_action(cx.listener(|this, _: &ToggleAi, window, cx| this.toggle_ai(window, cx)))
             .on_action(cx.listener(|this, _: &PanePrefix, _, cx| {
                 this.pane_prefix = true;

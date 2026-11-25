@@ -3,6 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
+use gpui_kit::component::color_picker::{ColorPickerEvent, ColorPickerState};
 use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
 use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
 use gpui_kit::component::text::TextViewState;
@@ -68,6 +69,15 @@ pub enum Modal {
     Notices,
     /// 完了チケットの発行
     Ticket(Id),
+    /// 書体と色
+    Appearance,
+}
+
+/// ダイアログの上に、もう 1 枚重ねて出すダイアログ。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubModal {
+    /// 書体を選ぶ
+    Font,
 }
 
 /// 詳細パネルで編集中の項目。
@@ -113,6 +123,7 @@ pub struct Inputs {
     pub quick_add: Entity<InputState>,
     pub search: Entity<InputState>,
     pub icon_search: Entity<InputState>,
+    pub font_search: Entity<InputState>,
     pub name: Entity<InputState>,
     pub title: Entity<InputState>,
     pub subtask: Entity<InputState>,
@@ -250,6 +261,13 @@ pub struct MainView {
     pub task_drag: Option<TaskDrag>,
     /// 詳細で、担当者と役を選ぶところを開いている。
     pub assignee_picker: bool,
+    /// ダイアログの上に重ねて出しているダイアログ。
+    pub sub_modal: Option<SubModal>,
+    /// 書体を選ぶ一覧に出す名前（この PC に入っている書体）。
+    pub fonts: Vec<String>,
+    pub font_scroll: UniformListScrollHandle,
+    /// アクセント、背景（ライト）、背景（ダーク）の色を選ぶところ。
+    pub color_pickers: [Entity<ColorPickerState>; 3],
     /// 出入りの動きを付ける。テストでは止めて、すぐ最後の位置に出す
     pub motion: bool,
     pub today: String,
@@ -270,6 +288,7 @@ impl MainView {
             quick_add: input(window, cx, "タスクを追加…"),
             search: input(window, cx, "キーワード"),
             icon_search: input(window, cx, "アイコンを検索"),
+            font_search: input(window, cx, "フォントを検索"),
             name: input(window, cx, "名前"),
             title: input(window, cx, "タイトル"),
             subtask: input(window, cx, "サブタスクを追加…"),
@@ -371,6 +390,28 @@ impl MainView {
         on_enter!(start, save_start);
         on_enter!(due, save_due);
         on_enter!(category, submit_category);
+        subs.push(cx.subscribe_in(
+            &inputs.font_search,
+            window,
+            |this, _, event: &InputEvent, _, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.font_scroll.scroll_to_item(0, ScrollStrategy::Top);
+                    cx.notify();
+                }
+            },
+        ));
+        let color_pickers = crate::theme::Slot::ALL.map(|slot| {
+            let picker = cx.new(|cx| ColorPickerState::new(window, cx));
+            subs.push(cx.subscribe_in(
+                &picker,
+                window,
+                move |this, _, event: &ColorPickerEvent, window, cx| {
+                    let ColorPickerEvent::Change(color) = event;
+                    this.set_color(slot, color.map(Into::into), window, cx);
+                },
+            ));
+            picker
+        });
         subs.push(cx.subscribe_in(
             &inputs.icon_search,
             window,
@@ -497,6 +538,10 @@ impl MainView {
             pane_resize: false,
             pane_keys: Default::default(),
             pane_overlay: None,
+            sub_modal: None,
+            fonts: Vec::new(),
+            font_scroll: UniformListScrollHandle::new(),
+            color_pickers,
             pane_presets: Vec::new(),
             border_drag: None,
             window_place: None,
@@ -1686,6 +1731,88 @@ impl MainView {
         self.db.read(cx).store.usage().unwrap_or_default()
     }
 
+    // ---- 書体と色 ----
+
+    pub fn open_appearance(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.sync_color_pickers(window, cx);
+        // メニューから開くとフォーカスがなくなるので、Esc を受けられるように戻す
+        self.focus.focus(window, cx);
+        self.sub_modal = None;
+        self.modal = Modal::Appearance;
+        cx.notify();
+    }
+
+    /// 色を選ぶところに、今の画面の色を出す。
+    fn sync_color_pickers(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        for (slot, picker) in crate::theme::Slot::ALL.into_iter().zip(&self.color_pickers) {
+            let color = crate::theme::shown(slot, cx);
+            picker.update(cx, |picker, cx| picker.set_value(color, window, cx));
+        }
+    }
+
+    pub fn open_font_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.fonts = crate::theme::fonts(cx);
+        self.inputs.font_search.update(cx, |s, cx| {
+            s.set_value("", window, cx);
+            s.focus(window, cx);
+        });
+        // 今の書体が見えるところから始める
+        let current = self.current_font(cx);
+        let at = self.fonts.iter().position(|name| *name == current);
+        self.font_scroll
+            .scroll_to_item(at.unwrap_or(0), ScrollStrategy::Center);
+        self.sub_modal = Some(SubModal::Font);
+        cx.notify();
+    }
+
+    /// 今使っている書体の名前。
+    pub fn current_font(&self, cx: &App) -> String {
+        crate::theme::look(cx)
+            .font
+            .unwrap_or_else(|| crate::theme::DEFAULT_FONT.to_owned())
+    }
+
+    /// 検索に合う書体。
+    pub fn found_fonts(&self, cx: &App) -> Vec<String> {
+        let query = self.inputs.font_search.read(cx).value().to_lowercase();
+        self.fonts
+            .iter()
+            .filter(|name| name.to_lowercase().contains(query.trim()))
+            .cloned()
+            .collect()
+    }
+
+    /// 書体を変える。`None` は同梱の書体。
+    pub fn set_font(&mut self, font: Option<&str>, cx: &mut Context<Self>) {
+        match crate::theme::set_font(font, cx) {
+            Ok(()) => self.error = None,
+            Err(error) => {
+                self.error = Some(format!("フォントを保存できませんでした。{error}").into())
+            }
+        }
+        cx.notify();
+    }
+
+    /// 色を変える。`None` は同梱の配色の色。
+    pub fn set_color(
+        &mut self,
+        slot: crate::theme::Slot,
+        color: Option<crate::theme::Color>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match crate::theme::set_color(slot, color, cx) {
+            Ok(()) => self.error = None,
+            Err(error) => {
+                self.error =
+                    Some(format!("{}の色を保存できませんでした。{error}", slot.label()).into())
+            }
+        }
+        // 保存できなかったときも、色を選ぶところは今の画面の色に合わせる
+        self.sync_color_pickers(window, cx);
+        cx.notify();
+    }
+
     pub fn open_people(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.inputs.name.update(cx, |s, cx| {
             s.set_value("", window, cx);
@@ -2582,12 +2709,22 @@ impl MainView {
         place
     }
 
-    /// Esc。いちばん手前のものから閉じる。
+    /// Esc。重ねたダイアログを閉じたときは、下のダイアログが次の Esc を受けられるようにする
+    /// （重ねたほうの入力欄がなくなると、フォーカスの行き先がなくなる）。
+    pub fn dismiss_in(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let over = self.sub_modal.is_some();
+        self.dismiss(cx);
+        if over {
+            self.focus.focus(window, cx);
+        }
+    }
+
     /// Esc。今開いているものを 1 つだけ閉じる。
     pub fn dismiss(&mut self, cx: &mut Context<Self>) {
         self.error = None;
         cx.notify();
-        if self.pane_overlay.is_some() {
+        if self.sub_modal.take().is_some() {
+        } else if self.pane_overlay.is_some() {
             self.pane_overlay = None;
         } else if self.pane_prefix || self.pane_resize {
             self.pane_prefix = false;
@@ -2611,7 +2748,8 @@ impl MainView {
     pub fn dismiss_own(&mut self, cx: &mut Context<Self>) -> bool {
         self.error = None;
         cx.notify();
-        if self.modal != Modal::None {
+        if self.sub_modal.take().is_some() {
+        } else if self.modal != Modal::None {
             self.modal = Modal::None;
             self.issued_ticket = None;
         } else if self.editing.is_some() {
@@ -2995,6 +3133,7 @@ bundled_icons! {
         "arrow-left",
         "maximize-2",
         "rotate-ccw-clock",
+        "rotate-ccw",
         "circle-x",
         "paperclip",
         "chevron-down",
