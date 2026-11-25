@@ -226,7 +226,7 @@ fn glass(color: Hsla, cx: &App) -> Hsla {
     }
 }
 
-/// 「テーマ」のダイアログと、テーマの見本の幅。見本は 1 行に 5 つ並ぶ。
+/// 「カスタマイズ」のダイアログと、テーマの見本の幅。見本は 1 行に 5 つ並ぶ。
 const APPEARANCE_WIDTH: Pixels = px(680.);
 const PRESET_WIDTH: Pixels = px(124.);
 
@@ -1398,7 +1398,7 @@ impl MainView {
                                 .item(item("担当者", |this, window, cx| {
                                     this.open_people(window, cx)
                                 }))
-                                .item(item("テーマ", |this, window, cx| {
+                                .item(item("カスタマイズ", |this, window, cx| {
                                     this.open_appearance(window, cx)
                                 }))
                                 .separator()
@@ -4911,7 +4911,7 @@ impl MainView {
                             .pr_4()
                             .track_scroll(&self.appearance_scroll)
                             .overflow_y_scroll()
-                            .child(heading("プリセット"))
+                            .child(heading("テーマ"))
                             .child(presets)
                             .child(heading("レイアウト"))
                             .child(layouts)
@@ -4925,7 +4925,7 @@ impl MainView {
                 d.child(div().text_sm().text_color(theme.danger).child(error))
             });
         let (title, width, over) = match self.sub_modal {
-            None => return self.dialog_as("dialog", APPEARANCE_WIDTH, "テーマ", body, cx),
+            None => return self.dialog_as("dialog", APPEARANCE_WIDTH, "カスタマイズ", body, cx),
             Some(SubModal::Font) => ("フォント", px(400.), self.font_picker(cx)),
             Some(SubModal::Scene) => ("背景の画像", px(680.), self.scene_picker(cx)),
         };
@@ -4939,7 +4939,7 @@ impl MainView {
         div()
             .absolute()
             .inset_0()
-            .child(self.dialog_as("dialog-under", APPEARANCE_WIDTH, "テーマ", body, cx))
+            .child(self.dialog_as("dialog-under", APPEARANCE_WIDTH, "カスタマイズ", body, cx))
             .child(over)
     }
 

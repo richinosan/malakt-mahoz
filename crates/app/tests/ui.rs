@@ -1927,7 +1927,7 @@ fn font_and_colors_are_chosen_in_settings(cx: &mut TestAppContext) {
     );
 }
 
-/// 設定の「テーマ」で、背景の画像・透明度・ぼかし・カード表示を変えられ、開き直しても残る。
+/// 設定の「カスタマイズ」で、背景の画像・透明度・ぼかし・カード表示を変えられ、開き直しても残る。
 #[gpui_kit::test]
 fn backdrop_and_cards_are_chosen_in_settings(cx: &mut TestAppContext) {
     use gpui_kit::component::ActiveTheme;
@@ -2083,7 +2083,7 @@ fn backdrop_and_cards_are_chosen_in_settings(cx: &mut TestAppContext) {
     assert_eq!(primary(cx), "#86600f");
 }
 
-/// 「テーマ」のいちばん上でテーマを選ぶと、画像・色・カードがまとめて変わる。
+/// 「カスタマイズ」のいちばん上でテーマを選ぶと、画像・色・カードがまとめて変わる。
 /// 今の見た目は自分のテーマとして保存でき、名前を変えられ、消せる。
 #[gpui_kit::test]
 fn themes_are_chosen_and_saved_in_settings(cx: &mut TestAppContext) {
@@ -2214,7 +2214,7 @@ fn themes_are_chosen_and_saved_in_settings(cx: &mut TestAppContext) {
     assert_eq!(hex(cx.update(|cx| cx.theme().background)), "#fdf1f5");
 }
 
-/// 「テーマ」でレイアウトを選ぶと、詳細の出し方・一覧の形・パネルの形・AI チャットの並びが変わる。
+/// 「カスタマイズ」でレイアウトを選ぶと、詳細の出し方・一覧の形・パネルの形・AI チャットの並びが変わる。
 #[gpui_kit::test]
 fn layouts_are_chosen_in_settings(cx: &mut TestAppContext) {
     use malakt_mahoz::theme::{self, Layout};
@@ -2284,7 +2284,7 @@ fn layouts_are_chosen_in_settings(cx: &mut TestAppContext) {
     choose(cx, "3 カラム");
     assert_eq!(saved(cx, "panels.float"), None);
     assert!(cx.update(|cx| view.read(cx).ai_docked(cx)));
-    // チャットを開いても、Esc は「テーマ」を閉じる
+    // チャットを開いても、Esc は「カスタマイズ」を閉じる
     assert!(cx.update(|cx| view.read(cx).modal == Modal::Appearance));
     choose(cx, "一覧と詳細");
     assert!(!cx.update(|cx| view.read(cx).ai_docked(cx)));
@@ -2428,7 +2428,7 @@ fn density_and_editor_themes(cx: &mut TestAppContext) {
     assert_eq!(row(cx), standard);
 }
 
-/// 乗せたとき・押したときの描き方（ホバー）は「テーマ」の詳細で選べ、テーマにも含まれる。
+/// 乗せたとき・押したときの描き方（ホバー）は「カスタマイズ」の詳細で選べ、テーマにも含まれる。
 #[gpui_kit::test]
 fn hover_feel_follows_the_theme(cx: &mut TestAppContext) {
     use malakt_mahoz::theme::{self, Feel, Preset};
