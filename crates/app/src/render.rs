@@ -3541,6 +3541,19 @@ impl MainView {
                                 this.chat_about_task(&id, window, cx);
                             })),
                     )
+                    .child(
+                        Button::new("task-terminal")
+                            .icon(app_icon("terminal"))
+                            .ghost()
+                            .xsmall()
+                            .tooltip("このタスクでターミナルを開く")
+                            .on_click(cx.listener({
+                                let id = task.id.clone();
+                                move |this, _, window, cx| {
+                                    this.open_task_terminal(&id, window, cx);
+                                }
+                            })),
+                    )
                     .when(!runs.is_empty(), |d| {
                         d.child(
                             row()
@@ -6236,6 +6249,13 @@ impl MainView {
                                 .id("ws-context")
                                 .child(Textarea::new(&self.inputs.ws_context).h(px(56.)))
                                 .test_support(),
+                        ),
+                    )
+                    .child(
+                        col().gap_1().child(label("ターミナルのフォルダー")).child(
+                            Input::new(&self.inputs.ws_term_dir)
+                                .id("ws-term-dir")
+                                .aria_label("ターミナルのフォルダー"),
                         ),
                     )
                     .when(any_link, |d| {

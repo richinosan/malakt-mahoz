@@ -37,6 +37,7 @@
 - **自動アップデート**: GitHub Releases の新しい版に入れ替え（[docs/update.md](docs/update.md)）
 - **完了チケット**: コマンドからタスクを完了にする（[docs/tickets.md](docs/tickets.md)）
 - **AI チャット**: `Ctrl/⌘ + J`（[docs/ai.md](docs/ai.md)）
+- **ターミナル**: アプリの中で WSL や zsh を開き、Claude Code などをそのまま動かす（[docs/terminal.md](docs/terminal.md)）
 - **MCP サーバー**: Claude Code などのエージェントからタスクを読み書き（[docs/mcp.md](docs/mcp.md)）
 
 ## 起動とビルド
@@ -74,6 +75,7 @@ mise run mutants    # ミューテーションテスト（cargo-mutants が必�
 
 - [完了チケット](docs/tickets.md)
 - [AI チャット](docs/ai.md)
+- [ターミナル](docs/terminal.md)
 - [Claude Code などから使う（MCP）](docs/mcp.md)
 - [リマインダーとの連携](docs/reminders.md)
 - [自動アップデート](docs/update.md)
