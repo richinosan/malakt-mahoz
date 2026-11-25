@@ -187,10 +187,41 @@ fn claude_has_fallbacks(model: &str) -> bool {
     .contains(&model)
 }
 
+/// モデルの ID から、画面に出す名前を作る。`claude-opus-5-5` なら「Claude Opus 5.5」。
+/// Claude のモデルでなければ、ID のまま。
+pub fn display_name(id: &str) -> String {
+    if !id.starts_with("claude-") {
+        return id.to_owned();
+    }
+    let mut out = String::new();
+    let mut after_number = false;
+    for part in id.split('-') {
+        let number = !part.is_empty() && part.chars().all(|c| c.is_ascii_digit());
+        // 終わりに付く日付（20251101 など）は出さない
+        if number && part.len() == 8 {
+            continue;
+        }
+        if number && after_number {
+            out.push('.');
+        } else if !out.is_empty() {
+            out.push(' ');
+        }
+        let mut chars = part.chars();
+        if let Some(first) = chars.next() {
+            out.extend(first.to_uppercase());
+            out.push_str(chars.as_str());
+        }
+        after_number = number;
+    }
+    out
+}
+
 /// OpenCode のモデル 1 つ。モデルの一覧（`/v1/models`）から読む。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CatalogModel {
     pub id: String,
+    /// 画面に出す名前。一覧に書いてあるときだけ。
+    pub name: Option<String>,
     /// このアプリから呼べる形式と、そのベース URL。呼べない形式（Gemini など）なら `None`。
     pub api: Option<(Wire, String)>,
     /// 選べる effort。空なら effort を指定できない。
@@ -239,7 +270,13 @@ pub fn parse_catalog(response: &serde_json::Value) -> Result<Vec<CatalogModel>, 
                     .collect()
             })
             .unwrap_or_default();
-        models.push(CatalogModel { id, api, efforts });
+        let name = text(model, "display_name").or_else(|| text(model, "name"));
+        models.push(CatalogModel {
+            id,
+            name,
+            api,
+            efforts,
+        });
     }
     Ok(models)
 }
@@ -326,6 +363,31 @@ pub fn endpoint(provider: Provider, model: &str, key: &str) -> Result<Endpoint, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn model_ids_become_readable_names() {
+        assert_eq!(display_name("claude-opus-5-5"), "Claude Opus 5.5");
+        assert_eq!(display_name("claude-fable-5-2"), "Claude Fable 5.2");
+        assert_eq!(display_name("claude-opus-5"), "Claude Opus 5");
+        assert_eq!(
+            display_name("claude-haiku-4-5-20251001"),
+            "Claude Haiku 4.5"
+        );
+        // ほかのサービスのモデルは、ID のまま
+        assert_eq!(display_name("glm-5.3"), "glm-5.3");
+        assert_eq!(display_name(""), "");
+    }
+
+    #[test]
+    fn the_catalog_name_is_read() {
+        let models = parse_catalog(&serde_json::json!({"data": [
+            {"id": "glm-5.3", "name": "GLM 5.3"},
+            {"id": "kimi-k3"},
+        ]}))
+        .unwrap();
+        assert_eq!(models[0].name.as_deref(), Some("GLM 5.3"));
+        assert_eq!(models[1].name, None);
+    }
 
     #[test]
     fn names_round_trip() {
