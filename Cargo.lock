@@ -4536,6 +4536,7 @@ dependencies = [
  "malakt-reminders",
  "malakt-term",
  "malakt-update",
+ "objc2 0.6.5",
  "raw-window-handle",
  "resvg 0.45.1",
  "serde",

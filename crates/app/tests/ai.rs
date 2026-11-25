@@ -15,7 +15,7 @@ use malakt_ai::shell::Spec;
 use malakt_ai::{Effort, Provider};
 use malakt_core::{Scope, Status, Store, TaskDraft, TaskFilter};
 use malakt_mahoz::ai::{
-    self, Item, KeyState, LineKind, RunKind, Session, ShellPlace, ToolState, Watch,
+    self, GithubAccount, Item, KeyState, LineKind, RunKind, Session, ShellPlace, ToolState, Watch,
     DEFAULT_WATCH_INSTRUCTION, MAX_CHATS,
 };
 use malakt_mahoz::{db, AiConfig, AiPane, MainView};
@@ -33,6 +33,8 @@ struct World {
     github: Arc<Mutex<String>>,
     /// Slack CLI の様子。"missing" は入っていない、"not_authed" は断られた。ほかは本文に付け足す文字。
     slack: Arc<Mutex<String>>,
+    /// gh にログインしているアカウント。`None` はログインしていない。
+    account: Arc<Mutex<Option<String>>>,
     replies: Arc<Mutex<VecDeque<Result<Value, String>>>>,
     fetched: Arc<Mutex<Vec<String>>>,
 }
@@ -63,6 +65,7 @@ fn start_with(cx: &mut TestAppContext, store: Store) -> World {
         sent: Sent::default(),
         github: Arc::default(),
         slack: Arc::default(),
+        account: Arc::default(),
         replies: Arc::default(),
         fetched: Arc::default(),
     };
@@ -73,6 +76,7 @@ fn start_with(cx: &mut TestAppContext, store: Store) -> World {
     );
     let github = world.github.clone();
     let slack = world.slack.clone();
+    let account = world.account.clone();
     let config = AiConfig {
         keys: world.keys.clone(),
         env: Arc::new(|_| None),
@@ -134,6 +138,10 @@ fn start_with(cx: &mut TestAppContext, store: Store) -> World {
                     ),
                 ],
             }
+        }),
+        whoami: Arc::new(move |_| match &*account.lock().unwrap() {
+            Some(login) => vec![Spec::shell("exit 1"), Spec::shell(&format!("echo {login}"))],
+            None => vec![Spec::shell("exit 1")],
         }),
     };
     cx.update(|cx| malakt_mahoz::init_with(store, config, cx));
@@ -585,6 +593,41 @@ fn the_stop_button_cancels_a_pending_confirmation(cx: &mut TestAppContext) {
     ui(cx, window, |window, cx| window.click("ai-stop", cx));
     assert!(read(cx, |s| !s.busy && s.pending.is_none()));
     assert!(read(cx, |s| s.shell.is_empty()), "コマンドは動いていない");
+}
+
+/// gh にログインしているアカウントを読み、設定に出して、AI に伝える。
+#[gpui_kit::test]
+fn the_github_account_is_read_from_gh(cx: &mut TestAppContext) {
+    let world = start(cx);
+    world.keys.set(Provider::Claude, "k").unwrap();
+    let (window, view) = open(cx, wide());
+    let pane = open_chat(cx, window, &view);
+    open_settings(cx, window, &pane);
+
+    // ログインしていない
+    ui(cx, window, |window, cx| window.click("ai-github-read", cx));
+    wait(cx, "アカウントを読み終わる", |s| {
+        *s.github() == GithubAccount::Missing
+    });
+    ui(cx, window, |window, _| {
+        assert!(window.find("ai-github-account").visible());
+    });
+
+    // ログインしたあとに読み直すと、名前が出る。先に失敗したコマンドの次を試している
+    *world.account.lock().unwrap() = Some("octo-cat".into());
+    ui(cx, window, |window, cx| window.click("ai-github-read", cx));
+    wait(cx, "アカウントを読み終わる", |s| {
+        *s.github() == GithubAccount::Login("octo-cat".into())
+    });
+    // シェルには出さない
+    assert_eq!(read(cx, |s| s.shell.len()), 0);
+
+    // AI には、メッセージの補足で伝える
+    world.reply(text_reply("はい"));
+    say(cx, window, &pane, "自分のレビュー待ちは？");
+    wait(cx, "返事が来る", |s| !s.busy);
+    let body = world.sent()[0].2.to_string();
+    assert!(body.contains("ユーザーの GitHub アカウントは octo-cat です"));
 }
 
 /// メッセージに GitHub のリンクがあると、gh で中身を取ってきて AI に渡す。
@@ -2212,6 +2255,47 @@ fn a_task_has_its_own_chat(cx: &mut TestAppContext) {
     ui(cx, window, |window, cx| window.click("ai-task-chat", cx));
     assert_eq!(read(cx, |s| s.items.len()), 2);
     assert_eq!(read(cx, |s| s.chats.len()), 1);
+}
+
+/// 入力欄に貼ったタスクのリンクは、ドラッグしたときと同じように入力欄に添えられる。
+#[gpui_kit::test]
+fn a_pasted_task_link_is_attached(cx: &mut TestAppContext) {
+    let world = start(cx);
+    world.keys.set(Provider::Claude, "k").unwrap();
+    let (window, view) = open(cx, wide());
+    let task = new_task(cx, "会場を予約する");
+    world.reply(text_reply("そのままにしました。"));
+    wait(cx, "AI が整え終わる", |s| {
+        !s.busy && !s.runs.is_empty()
+    });
+    let pane = open_chat(cx, window, &view);
+
+    // タスクが見つからないリンクは、文字のまま残る
+    world.reply(text_reply("予約の手順です"));
+    say(
+        cx,
+        window,
+        &pane,
+        &format!("malakt-mahoz://task/{task} malakt-mahoz://task/nothing どう進める？"),
+    );
+    wait(cx, "返事が来る", |s| !s.busy && s.items.len() >= 2);
+    assert_eq!(
+        read(cx, |s| s.items[0].clone()),
+        Item::User("「会場を予約する」\nmalakt-mahoz://task/nothing どう進める？".into())
+    );
+    let sent = world.sent();
+    let message = sent.last().unwrap().2["messages"][0]["content"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        message.contains("[添えたタスク「会場を予約する」]"),
+        "{message}"
+    );
+    assert!(
+        !message.contains(&format!("malakt-mahoz://task/{task}")),
+        "{message}"
+    );
 }
 
 /// モデルは名前で出す。サービスの一覧にあった名前は、次の起動でも使う。

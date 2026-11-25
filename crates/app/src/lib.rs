@@ -239,8 +239,70 @@ pub(crate) fn open_window_with(
             view
         })
     })?;
-    session::set_main(opened.1.entity_id(), opened.0, cx);
+    if session::set_main(opened.1.entity_id(), opened.0, cx) {
+        // メインを最小化したら、ほかのウィンドウも最小化する。元に戻したら、一緒に戻す
+        opened.0.update(cx, |_, window, _| {
+            window
+                .observe_window_visibility(|_, window, cx| follow_main(window, cx))
+                .detach();
+        })?;
+    }
     Ok(opened)
+}
+
+/// ウィンドウを最小化しているか。
+fn is_minimized(window: &Window) -> bool {
+    // macOS では、ほかのウィンドウに隠れたときも「見えていない」になるので、ウィンドウに直接聞く
+    #[cfg(target_os = "macos")]
+    {
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        let Ok(handle) = HasWindowHandle::window_handle(window) else {
+            return false;
+        };
+        let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
+            return false;
+        };
+        let view = handle.ns_view.as_ptr().cast::<objc2::runtime::AnyObject>();
+        // SAFETY: `view` は、このウィンドウが開いている間ずっと生きている NSView。メインスレッドで呼ぶ
+        unsafe {
+            let native: *mut objc2::runtime::AnyObject = objc2::msg_send![view, window];
+            !native.is_null() && objc2::msg_send![native, isMiniaturized]
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        !window.is_visible()
+    }
+}
+
+/// メインのウィンドウの最小化と復帰に、ほかのウィンドウを合わせる。
+fn follow_main(main: &mut Window, cx: &mut App) {
+    let main_handle = main.window_handle();
+    if is_minimized(main) {
+        let mut shown = Vec::new();
+        for window in cx.windows() {
+            // 自分で最小化してあるウィンドウは、メインを戻すときに戻さない
+            let open = window.update(cx, |_, window, _| !is_minimized(window));
+            if window != main_handle && open.unwrap_or(false) {
+                shown.push(window);
+            }
+        }
+        for window in session::tuck(shown, cx) {
+            // 調べたあとに閉じたウィンドウは、そのままでよい
+            let _ = window.update(cx, |_, window, _| window.minimize_window());
+        }
+    } else {
+        let tucked = session::untuck(cx);
+        if tucked.is_empty() {
+            return;
+        }
+        for window in tucked {
+            // 覚えたあとに閉じたウィンドウは、そのままでよい
+            let _ = window.update(cx, |_, window, _| window.activate_window());
+        }
+        // 最後にメインを手前に戻す
+        main.activate_window();
+    }
 }
 
 /// メインのウィンドウ（最初に開いた 1 枚）を閉じたら、ほかのウィンドウ（追加のウィンドウ、

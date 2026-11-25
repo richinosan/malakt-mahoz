@@ -9,7 +9,7 @@
 //! ロックが有効なときは、アプリがロックを解除している間だけ動く（[`malakt_core::lock::allows_outside`]）。
 
 use std::io::{BufRead, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use malakt_ai::tools;
 use malakt_core::{lock, Store};
@@ -173,6 +173,105 @@ pub fn write_config(path: &Path, exe: &Path, db: Option<&Path>) -> std::io::Resu
         std::fs::create_dir_all(dir)?;
     }
     std::fs::write(path, text)
+}
+
+/// アプリが動いている間、ロックしておくファイル。
+pub fn running_file(db: &Path) -> PathBuf {
+    let mut name = db.file_name().unwrap_or_default().to_os_string();
+    name.push(".running");
+    db.with_file_name(name)
+}
+
+/// アプリが動いている印。持っている間、[`running_file`] をロックする。
+/// 捨てるか、アプリのプロセスが終わる（落ちたときも）と、ロックが外れる。
+pub struct Running(#[allow(dead_code)] std::fs::File);
+
+/// アプリが動いている印を付ける。MCP サーバーが確かめている一瞬とぶつかったら、少し待ってやり直す。
+pub fn mark_running(db: &Path) -> std::io::Result<Running> {
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(running_file(db))?;
+    for _ in 0..50 {
+        match file.try_lock() {
+            Ok(()) => return Ok(Running(file)),
+            Err(std::fs::TryLockError::WouldBlock) => {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(std::fs::TryLockError::Error(error)) => return Err(error),
+        }
+    }
+    Err(std::io::Error::other("ほかのアプリがロックしています"))
+}
+
+/// このデータベースを使うアプリが動いているか。
+pub fn app_running(db: &Path) -> bool {
+    let Ok(file) = std::fs::OpenOptions::new()
+        .read(true)
+        .open(running_file(db))
+    else {
+        // 印のファイルがなければ、アプリを起動したことがない
+        return false;
+    };
+    match file.try_lock_shared() {
+        // ロックできたなら、アプリは持っていない
+        Ok(()) => false,
+        Err(std::fs::TryLockError::WouldBlock) => true,
+        // ロックを確かめられない場所では、動いているものとして扱う（サーバーを勝手に終わらせない）
+        Err(std::fs::TryLockError::Error(_)) => true,
+    }
+}
+
+/// アプリが閉じられたら、この MCP サーバーのプロセスを終わらせる。入力を待っている間も見張る。
+/// 動いたままだと、実行ファイルをつかんだままになり、アプリを新しい版に入れ替えられない。
+pub fn exit_when_app_closes(db: PathBuf) {
+    std::thread::spawn(move || loop {
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        if !app_running(&db) {
+            std::process::exit(0);
+        }
+    });
+}
+
+static RUNNING: std::sync::Mutex<Option<Running>> = std::sync::Mutex::new(None);
+static RUNNING_DB: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// アプリが動いている印を付けて、アプリを閉じるまで持っておく。
+pub fn hold_running(db: &Path) -> std::io::Result<()> {
+    let running = mark_running(db)?;
+    *RUNNING.lock().unwrap_or_else(|e| e.into_inner()) = Some(running);
+    // 2 回目からは同じ場所なので、そのままでよい
+    let _ = RUNNING_DB.set(db.to_owned());
+    Ok(())
+}
+
+/// アプリを閉じるときに呼ぶ。印を外すので、動いている MCP サーバーが終わる。印を持っていたら true。
+pub fn quitting() -> bool {
+    RUNNING
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take()
+        .is_some()
+}
+
+/// 新しい版に入れ替える前に呼ぶ。印を外し、MCP サーバーが終わって実行ファイルを放すまで待つ。
+/// 印を持っていたら true。入れ替えに失敗したら [`resume`] で付け直す。
+pub fn release_for_install() -> bool {
+    let held = quitting();
+    if held {
+        // サーバーは 0.3 秒ごとに印を見る
+        std::thread::sleep(std::time::Duration::from_millis(800));
+    }
+    held
+}
+
+/// 外した印を付け直す。アプリを閉じずに続けるときに呼ぶ。
+pub fn resume() -> std::io::Result<()> {
+    match RUNNING_DB.get() {
+        Some(db) => hold_running(db),
+        None => Ok(()),
+    }
 }
 
 pub struct Server<F> {
@@ -566,6 +665,27 @@ mod tests {
             let text = line["result"]["content"][0]["text"].as_str().unwrap();
             assert!(text.contains("データベースを開けませんでした"), "{text}");
         }
+    }
+
+    #[test]
+    fn the_running_mark_is_seen_until_the_app_lets_go() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("data.sqlite3");
+        assert_eq!(running_file(&db), dir.path().join("data.sqlite3.running"));
+        // アプリを起動したことがなければ、動いていない
+        assert!(!app_running(&db));
+        let running = mark_running(&db).unwrap();
+        assert!(app_running(&db));
+        // 何度確かめても、印は付いたまま
+        assert!(app_running(&db));
+        // もう 1 つのアプリは、印を付けられない
+        assert!(mark_running(&db).is_err());
+        drop(running);
+        assert!(!app_running(&db));
+        // 次に起動したアプリが、また印を付けられる
+        let again = mark_running(&db).unwrap();
+        assert!(app_running(&db));
+        drop(again);
     }
 
     #[test]

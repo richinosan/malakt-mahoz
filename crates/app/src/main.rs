@@ -11,6 +11,14 @@ fn main() {
     if malakt_mahoz::cli::is_command(&args) {
         // Windows のリリース版はコンソールを持たないので、呼び出したターミナルに出力をつなぐ
         malakt_term::console::attach();
+        if args == ["mcp"] {
+            // MCP サーバーは、アプリが動いている間だけ動かす。動いたままだと実行ファイルをつかんだままになる
+            if !malakt_mahoz::mcp::app_running(&path) {
+                eprintln!("malakt-mahoz のアプリが起動していません。アプリを起動してから、もう一度つないでください。");
+                std::process::exit(1);
+            }
+            malakt_mahoz::mcp::exit_when_app_closes(path.clone());
+        }
         let code = malakt_mahoz::cli::run(
             &args,
             || malakt_core::Store::open(&path),
@@ -35,11 +43,17 @@ fn main() {
         .run(move |cx| {
             malakt_mahoz::db::clear_stale_opened();
             malakt_mahoz::init(store, cx);
+            // 動いている印を付ける。MCP サーバーはこれを見て、アプリを閉じると一緒に終わる
+            if let Err(error) = malakt_mahoz::mcp::hold_running(&malakt_mahoz::database_path()) {
+                eprintln!("アプリが動いている印を付けられませんでした: {error}");
+            }
             // ターミナルで動かす Claude Code から、このアプリのタスクを読み書きできるようにする
             malakt_mahoz::term::shared(cx).update(cx, |terms, _| {
                 terms.register_mcp = true;
                 terms.cursor_home = dirs::home_dir();
             });
+            // GitHub のアカウントは、gh にログインしているものを使う
+            malakt_mahoz::ai::shared(cx).update(cx, |ai, cx| ai.read_github(cx));
             malakt_mahoz::reminders::connect_system(cx);
             malakt_mahoz::update::connect_system(cx);
             malakt_mahoz::db::watch(cx);
