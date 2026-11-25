@@ -1935,6 +1935,10 @@ fn backdrop_and_cards_are_chosen_in_settings(cx: &mut TestAppContext) {
     ui(cx, window, |window, cx| window.click("accent-reset", cx));
     assert_eq!(primary(cx), "#1f6fd0");
 
+    // 透明度とぼかしの行が増えたので、下の行まで送る
+    ui(cx, window, |_, cx| {
+        view.read(cx).appearance_scroll.scroll_to_bottom()
+    });
     // カードで表示にすると、広い画面でも表の見出しがなくなる
     ui(cx, window, |window, cx| {
         assert!(window.try_find(("col-head", 0usize)).is_some());
@@ -2143,6 +2147,90 @@ fn themes_are_chosen_and_saved_in_settings(cx: &mut TestAppContext) {
     assert_eq!(saved(cx, "presets"), None);
     assert!(cx.update(|cx| view.read(cx).own_presets.is_empty()));
     assert_eq!(hex(cx.update(|cx| cx.theme().background)), "#fdf1f5");
+}
+
+/// 「見た目」でレイアウトを選ぶと、詳細の出し方・一覧の形・パネルの形・AI チャットの並びが変わる。
+#[gpui_kit::test]
+fn layouts_are_chosen_in_settings(cx: &mut TestAppContext) {
+    use malakt_mahoz::theme::{self, Layout};
+    start(cx);
+    let task = cx.update(|cx| {
+        db::shared(cx).update(cx, |db, cx| {
+            let task = db.store.add_task_in(None, "切符を買う").unwrap();
+            cx.notify();
+            task.id
+        })
+    });
+    let (window, view) = open(cx, wide());
+    let saved = |cx: &mut TestAppContext, key: &str| store(cx, |s| s.setting(key).unwrap());
+    let list = |cx: &mut TestAppContext| {
+        ui(cx, window, |_, _| ());
+        cx.update(|cx| view.read(cx).list_width)
+    };
+    cx.update(|cx| view.update(cx, |v, cx| v.go(Nav::All, cx)));
+    let full = list(cx);
+    ui(cx, window, |window, cx| {
+        view.update(cx, |v, cx| v.open_panel(&task, window, cx))
+    });
+    // 最初は、詳細が一覧の右のカラムで、一覧はその分せまくなる
+    let beside = list(cx);
+    assert!(beside < full);
+    assert!(cx.update(|cx| Layout::PATTERNS[0].shown(false, cx)));
+
+    ui(cx, window, |window, cx| {
+        view.update(cx, |v, cx| v.open_appearance(window, cx))
+    });
+    let choose = |cx: &mut TestAppContext, name: &str| {
+        let ix = Layout::PATTERNS
+            .iter()
+            .position(|l| l.name == name)
+            .unwrap();
+        ui(cx, window, |window, cx| window.click(("layout", ix), cx));
+        let chat = cx.update(|cx| view.read(cx).ai_docked(cx));
+        assert!(
+            cx.update(|cx| Layout::PATTERNS[ix].shown(chat, cx)),
+            "{name}"
+        );
+    };
+
+    // 重ねる詳細: 一覧は全幅のままで、詳細がその上に乗る
+    choose(cx, "重ねる詳細");
+    assert_eq!(saved(cx, "panel.overlay").as_deref(), Some("1"));
+    assert_eq!(list(cx), full);
+    // テーマを選んでも、詳細の出し方は変わらない
+    ui(cx, window, |window, cx| {
+        window.click(("preset", 1usize), cx)
+    });
+    assert_eq!(saved(cx, "panel.overlay").as_deref(), Some("1"));
+    ui(cx, window, |window, cx| {
+        window.click(("preset", 0usize), cx)
+    });
+
+    choose(cx, "カード");
+    assert_eq!(saved(cx, "panel.overlay"), None);
+    assert_eq!(saved(cx, "list.cards").as_deref(), Some("1"));
+    assert_eq!(list(cx), beside);
+
+    choose(cx, "浮いたパネル");
+    assert_eq!(saved(cx, "list.cards"), None);
+    assert_eq!(saved(cx, "panels.float").as_deref(), Some("1"));
+
+    // 3 カラムは AI チャットも右に並べ、「一覧と詳細」はチャットを閉じる
+    choose(cx, "3 カラム");
+    assert_eq!(saved(cx, "panels.float"), None);
+    assert!(cx.update(|cx| view.read(cx).ai_docked(cx)));
+    // チャットを開いても、Esc は「見た目」を閉じる
+    assert!(cx.update(|cx| view.read(cx).modal == Modal::Appearance));
+    choose(cx, "一覧と詳細");
+    assert!(!cx.update(|cx| view.read(cx).ai_docked(cx)));
+    ui(cx, window, |window, cx| window.press("escape", cx));
+    assert!(cx.update(|cx| view.read(cx).modal == Modal::None));
+
+    // 起動し直しても残る
+    cx.update(|cx| theme::apply_layout(&Layout::PATTERNS[2], cx).unwrap());
+    cx.update(theme::init);
+    assert_eq!(saved(cx, "panel.overlay").as_deref(), Some("1"));
+    assert!(cx.update(|cx| theme::overlay(cx)));
 }
 
 /// アイコンは検索して選べる。日本語でも探せ、見つからなければその旨が出る。

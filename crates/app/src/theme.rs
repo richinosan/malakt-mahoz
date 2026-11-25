@@ -23,6 +23,7 @@ const SCENE_BLUR: &str = "scene.blur";
 const CARDS: &str = "list.cards";
 const FLOAT: &str = "panels.float";
 const PRESETS: &str = "presets";
+const OVERLAY: &str = "panel.overlay";
 /// 背景の画像を出したときの、面の透明度とぼかしの最初の値（0〜100）。
 pub const DEFAULT_CLEAR: u8 = 40;
 pub const DEFAULT_BLUR: u8 = 30;
@@ -317,6 +318,74 @@ impl Preset {
             floating: value["floating"].as_bool()?,
         })
     }
+}
+
+/// 画面の並べ方（レイアウト）。詳細の出し方、一覧の形、パネルの形をまとめて切り替える。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Layout {
+    pub name: &'static str,
+    /// 詳細を一覧の上に重ねる。`false` は一覧の右のカラム。
+    pub overlay: bool,
+    pub cards: bool,
+    pub floating: bool,
+    /// AI チャットを右に並べるか。`None` は今のまま。
+    pub chat: Option<bool>,
+}
+
+impl Layout {
+    /// 選べるレイアウト。先頭は、何も変えていないときの並べ方。
+    pub const PATTERNS: [Layout; 5] = [
+        Layout::new("一覧と詳細", false, false, false, Some(false)),
+        Layout::new("3 カラム", false, false, false, Some(true)),
+        Layout::new("重ねる詳細", true, false, false, None),
+        Layout::new("カード", false, true, false, None),
+        Layout::new("浮いたパネル", false, false, true, None),
+    ];
+
+    const fn new(
+        name: &'static str,
+        overlay: bool,
+        cards: bool,
+        floating: bool,
+        chat: Option<bool>,
+    ) -> Self {
+        Layout {
+            name,
+            overlay,
+            cards,
+            floating,
+            chat,
+        }
+    }
+
+    /// 今の画面がこのレイアウトか。`chat` は、今 AI チャットを右に並べているか。
+    pub fn shown(&self, chat: bool, cx: &App) -> bool {
+        (self.overlay, self.cards, self.floating) == (overlay(cx), cards(cx), floating(cx))
+            && self.chat.is_none_or(|wanted| wanted == chat)
+    }
+}
+
+/// 詳細を一覧の上に重ねる。
+pub fn overlay(cx: &App) -> bool {
+    let store = &db::shared(cx).read(cx).store;
+    store.setting(OVERLAY).ok().flatten().as_deref() == Some("1")
+}
+
+/// レイアウトを使う（AI チャットの開け閉めは、呼んだ側がする）。
+pub fn apply_layout(layout: &Layout, cx: &mut App) -> malakt_core::Result<()> {
+    let flag = |on: bool| on.then_some("1");
+    let values = [
+        (OVERLAY, flag(layout.overlay)),
+        (CARDS, flag(layout.cards)),
+        (FLOAT, flag(layout.floating)),
+    ];
+    let saved = db::shared(cx).update(cx, |db, _| {
+        values
+            .iter()
+            .try_for_each(|(key, value)| db.store.set_setting(key, *value))
+    });
+    cx.refresh_windows();
+    saved
 }
 
 /// 透けていない色（sRGB、0〜1）。
