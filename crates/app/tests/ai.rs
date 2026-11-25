@@ -2691,3 +2691,44 @@ fn edits_made_during_an_update_are_not_undone(cx: &mut TestAppContext) {
     let now = all_tasks(cx).remove(0);
     assert_eq!((now.percent, now.due.as_deref()), (0, Some("2026-12-24")));
 }
+
+/// メインのウィンドウと一緒に閉じたチャットとシェルのウィンドウは、別ウィンドウのまま覚えていて、
+/// 次の起動で同じ位置と大きさに開く。
+#[gpui_kit::test]
+fn windows_closed_with_the_main_window_are_remembered(cx: &mut TestAppContext) {
+    let world = start(cx);
+    world.keys.set(Provider::Claude, "k").unwrap();
+    cx.update(malakt_mahoz::quit_when_main_closes);
+    let (window, view) = cx.update(|cx| malakt_mahoz::open_main_window(cx).unwrap());
+    open_chat(cx, window, &view);
+    ui(cx, window, |window, cx| window.click("ai-shell-detach", cx));
+    let shell_window = match read(cx, |s| s.shell_place) {
+        ShellPlace::Window(handle) => handle,
+        other => panic!("シェルが別ウィンドウに出る: {other:?}"),
+    };
+    menu(cx, window, 2);
+    let chat_window = read(cx, |s| s.chat_window).expect("チャットが別ウィンドウに出る");
+    cx.run_until_parked();
+    assert_eq!(cx.update(|cx| cx.windows().len()), 3);
+    let bounds = read(cx, |s| s.window_bounds);
+
+    // メインを閉じると、チャットとシェルのウィンドウも閉じる
+    cx.update_window(window, |_, window, _| window.remove_window())
+        .unwrap();
+    cx.run_until_parked();
+    assert_eq!(cx.update(|cx| cx.windows().len()), 0);
+    assert!(cx.update_window(chat_window, |_, _, _| ()).is_err());
+    assert!(cx.update_window(shell_window, |_, _, _| ()).is_err());
+
+    // 別ウィンドウのまま、位置と大きさも一緒に残っている
+    let saved = cx.update(|cx| {
+        let store = &db::shared(cx).read(cx).store;
+        store.setting("ai.ui").unwrap().expect("画面の状態が残る")
+    });
+    let saved: Value = serde_json::from_str(&saved).unwrap();
+    assert_eq!(saved["open"], true);
+    assert_eq!(saved["chat"], "window");
+    assert_eq!(saved["shell"], "window");
+    assert_eq!(saved["chat_bounds"], json!(bounds[0]));
+    assert_eq!(saved["shell_bounds"], json!(bounds[1]));
+}
