@@ -114,7 +114,7 @@ struct SavedUi {
 }
 
 /// 右に置くチャットとシェルの、最初の幅と選べる範囲（拡大率を掛ける前の値）。
-pub const CHAT_WIDTH: f32 = 380.;
+pub const CHAT_WIDTH: f32 = 440.;
 pub const SHELL_WIDTH: f32 = 360.;
 pub const CHAT_MIN_WIDTH: f32 = 320.;
 pub const SHELL_MIN_WIDTH: f32 = 240.;
