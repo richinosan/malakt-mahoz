@@ -70,6 +70,12 @@ const NEVER: &[&str] = &[
 
 /// フォントとカラーの設定で、必ず押すもの。
 const MUST: &[&str] = &[
+    "preset",
+    "preset-save",
+    "own-preset",
+    "own-preset-name",
+    "own-preset-delete",
+    "details-toggle",
     "font-open",
     "font",
     "font-reset",
@@ -118,6 +124,10 @@ const QUIET: &[(&str, &str)] = &[
     ("ticket-who#0", "今選んでいる人"),
     ("font#0", "今選んでいるフォント"),
     ("scene#0", "今選んでいる背景の画像"),
+    ("見た目 > preset#0", "今選んでいるテーマ"),
+    ("見た目の詳細 > preset#0", "今選んでいるテーマ"),
+    ("自分のテーマがある見た目 > preset#0", "今選んでいるテーマ"),
+    ("own-preset#0", "今選んでいるテーマ"),
     ("scene-file", "OS のファイル選択を開く"),
     // 入力が空のときは送らない
     ("pane-keys#0", "今選んでいるキーの割り当て"),
@@ -479,6 +489,7 @@ fn fingerprint(cx: &mut TestAppContext, world: &World) -> String {
             "scene.blur",
             "list.cards",
             "panels.float",
+            "presets",
         ] {
             data.push_str(&format!("{:?}", store.setting(key).unwrap()));
         }
@@ -591,6 +602,19 @@ fn screens() -> Vec<(&'static str, Size<Pixels>, Setup)> {
         ("見た目", wide, |cx, w| {
             with_view(cx, w, |v, window, cx| v.open_appearance(window, cx))
         }),
+        ("自分のテーマがある見た目", wide, |cx, w| {
+            with_view(cx, w, |v, window, cx| {
+                v.open_appearance(window, cx);
+                v.save_preset(window, cx);
+                v.save_preset_name(window, cx);
+            })
+        }),
+        ("見た目の詳細", wide, |cx, w| {
+            with_view(cx, w, |v, window, cx| {
+                v.open_appearance(window, cx);
+                v.toggle_appearance_details(cx);
+            })
+        }),
         ("見た目を変えたところ", wide, |cx, w| {
             use malakt_mahoz::theme::{Color, Slot};
             with_view(cx, w, |v, window, cx| {
@@ -603,7 +627,8 @@ fn screens() -> Vec<(&'static str, Size<Pixels>, Setup)> {
                     v.set_color(slot, Color::parse(hex), window, cx);
                 }
                 v.set_scene(malakt_mahoz::theme::Scene::Sky, window, cx);
-                v.open_appearance(window, cx)
+                v.open_appearance(window, cx);
+                v.toggle_appearance_details(cx);
             })
         }),
         ("背景の画像の一覧", wide, |cx, w| {
