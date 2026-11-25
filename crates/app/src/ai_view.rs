@@ -340,7 +340,11 @@ impl AiPane {
                 // Enter で送り、Shift+Enter で改行する
                 match event {
                     InputEvent::PressEnter { shift: false, .. } => this.submit(window, cx),
-                    InputEvent::Change => this.absorb_task_links(window, cx),
+                    InputEvent::Change => {
+                        this.absorb_task_links(window, cx);
+                        // 考え中は、入力があるかで送信と停止を出し分ける
+                        cx.notify();
+                    }
                     _ => {}
                 }
             }),
@@ -857,6 +861,48 @@ impl AiPane {
             );
         }
 
+        // 考え中に送ったメッセージを、続きか並列かに振り分けるモデル
+        let coordinators = {
+            let pane = cx.entity().downgrade();
+            let set = session
+                .coordinator_set()
+                .then(|| session.coordinator_model());
+            let shown: SharedString = match &set {
+                Some(id) => session.model_label(id),
+                None => "今のモデル".into(),
+            };
+            let models: Vec<(String, SharedString)> = provider
+                .models()
+                .iter()
+                .map(|m| (m.to_string(), session.model_label(m)))
+                .collect();
+            Button::new("ai-coordinator")
+                .label(shown)
+                .outline()
+                .small()
+                .dropdown_caret(true)
+                .dropdown_menu_with_anchor(Anchor::TopLeft, move |mut menu, _, _| {
+                    let choices = std::iter::once((None, SharedString::from("今のモデル"))).chain(
+                        models
+                            .iter()
+                            .map(|(id, name)| (Some(id.clone()), name.clone())),
+                    );
+                    for (id, name) in choices {
+                        let pane = pane.clone();
+                        let checked = id == set;
+                        menu = menu.item(PopupMenuItem::new(name).checked(checked).on_click(
+                            move |_, _, cx| {
+                                // チャットを閉じたあとなら、反映する先がない
+                                let _ = pane.update(cx, |this, cx| {
+                                    this.session
+                                        .update(cx, |s, cx| s.set_coordinator(id.as_deref(), cx));
+                                });
+                            },
+                        ));
+                    }
+                    menu
+                })
+        };
         let mut efforts = row().gap_1().flex_wrap();
         for e in Effort::ALL {
             // 今のモデルで選べない値は、薄くして押せなくする
@@ -1031,6 +1077,9 @@ impl AiPane {
                     })
                     .when(provider.supports_effort(), |d| {
                         d.child(label("effort")).child(efforts)
+                    })
+                    .when(provider != Provider::Cursor, |d| {
+                        d.child(label("振り分けのモデル")).child(row().child(coordinators))
                     }),
             )
             .child(
@@ -1270,7 +1319,23 @@ impl AiPane {
             .take(3)
             .cloned()
             .collect();
-        if running.is_none() && failed.is_empty() {
+        let routing = session.routing.clone();
+        let queued: Vec<SharedString> = session
+            .queued
+            .iter()
+            .map(|q| q.text.clone().into())
+            .collect();
+        let parallel: Vec<(SharedString, bool, Option<SharedString>)> = session
+            .parallel
+            .iter()
+            .map(|p| (p.title.clone(), p.done, p.error.clone()))
+            .collect();
+        if running.is_none()
+            && failed.is_empty()
+            && routing.is_empty()
+            && queued.is_empty()
+            && parallel.is_empty()
+        {
             return None;
         }
         let line = || {
@@ -1299,6 +1364,110 @@ impl AiPane {
                         }
                     }))
                     .test_support(),
+            );
+        }
+        let one_line = |t: &SharedString| -> SharedString {
+            t.lines().next().unwrap_or_default().to_owned().into()
+        };
+        for text in &routing {
+            tray = tray.child(
+                line()
+                    .bg(theme.muted)
+                    .text_color(theme.muted_foreground)
+                    .child(Spinner::new().small())
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .child(format!("振り分け中: {}", one_line(text))),
+                    ),
+            );
+        }
+        for (ix, text) in queued.iter().enumerate() {
+            tray = tray.child(
+                line()
+                    .id(("ai-queued", ix))
+                    .bg(theme.muted)
+                    .text_color(theme.muted_foreground)
+                    .child(app_icon("chevron-right").size_3p5())
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .child(format!("続き: {}", one_line(text))),
+                    )
+                    .child(feel::gloss(
+                        Button::new(("ai-queued-remove", ix))
+                            .icon(app_icon("x"))
+                            .ghost()
+                            .xsmall()
+                            .tooltip("取り消す")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.session.update(cx, |s, cx| s.unqueue(ix, cx));
+                            })),
+                    ))
+                    .test_support(),
+            );
+        }
+        for (ix, (title, done, error)) in parallel.into_iter().enumerate() {
+            let failed = error.is_some();
+            let mut body = row()
+                .id(("ai-parallel", ix))
+                .flex_1()
+                .min_w_0()
+                .gap_2()
+                .items_center()
+                .child(if done {
+                    div()
+                        .flex_none()
+                        .text_color(if failed { theme.danger } else { theme.success })
+                        .child(
+                            app_icon(if failed { "circle-x" } else { "circle-check" }).size_3p5(),
+                        )
+                        .into_any_element()
+                } else {
+                    Spinner::new().small().into_any_element()
+                })
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .child(format!("並列: {title}")),
+                );
+            if done {
+                body = body
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.session.update(cx, |s, cx| s.open_parallel(ix, cx));
+                    }));
+            }
+            if let Some(detail) = error {
+                body = body.tooltip(move |window, cx| {
+                    gpui_kit::component::tooltip::Tooltip::new(detail.clone()).build(window, cx)
+                });
+            }
+            tray = tray.child(
+                line()
+                    .bg(if failed {
+                        theme.danger.opacity(0.12)
+                    } else {
+                        theme.muted
+                    })
+                    .text_color(theme.muted_foreground)
+                    .child(body.test_support())
+                    .child(feel::gloss(
+                        Button::new(("ai-parallel-dismiss", ix))
+                            .icon(app_icon("x"))
+                            .ghost()
+                            .xsmall()
+                            .tooltip(if done { "表示を消す" } else { "停止" })
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.session.update(cx, |s, cx| s.dismiss_parallel(ix, cx));
+                            })),
+                    )),
             );
         }
         for (ix, run) in failed.into_iter().enumerate() {
@@ -2022,6 +2191,7 @@ impl AiPane {
         let theme = cx.theme().clone();
         let session = self.session.read(cx);
         let busy = session.busy;
+        let typed = !self.input.read(cx).value().trim().is_empty();
         let auto_run = session.auto_run;
         let shell_label = match session.shell_place {
             ShellPlace::Closed => "シェルを開く",
@@ -2439,7 +2609,7 @@ impl AiPane {
                                             .child(Textarea::new(&self.input).appearance(false))
                                             .test_support(),
                                     )
-                                    .when(busy, |d| {
+                                    .when(busy && !typed, |d| {
                                         d.child(feel::gloss(
                                             icon_button("ai-stop", "square", "停止（Ctrl+C）")
                                                 .danger()
@@ -2448,7 +2618,7 @@ impl AiPane {
                                                 ),
                                         ))
                                     })
-                                    .when(!busy, |d| {
+                                    .when(!busy || typed, |d| {
                                         d.child(feel::gloss(
                                             icon_button("ai-send", "arrow-up", "送信（Enter）")
                                                 .primary()

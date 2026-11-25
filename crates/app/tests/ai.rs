@@ -37,6 +37,9 @@ struct World {
     account: Arc<Mutex<Option<String>>>,
     replies: Arc<Mutex<VecDeque<Result<Value, String>>>>,
     fetched: Arc<Mutex<Vec<String>>>,
+    /// 振り分け役の答え（CONTINUE か NEW）と、振り分け役に送られた本文。
+    routes: Arc<Mutex<VecDeque<String>>>,
+    routed: Arc<Mutex<Vec<Value>>>,
 }
 
 impl World {
@@ -46,6 +49,10 @@ impl World {
 
     fn fail(&self, error: &str) {
         self.replies.lock().unwrap().push_back(Err(error.into()));
+    }
+
+    fn route(&self, answer: &str) {
+        self.routes.lock().unwrap().push_back(answer.into());
     }
 
     fn sent(&self) -> Vec<Request> {
@@ -68,7 +75,10 @@ fn start_with(cx: &mut TestAppContext, store: Store) -> World {
         account: Arc::default(),
         replies: Arc::default(),
         fetched: Arc::default(),
+        routes: Arc::default(),
+        routed: Arc::default(),
     };
+    let (routes, routed) = (world.routes.clone(), world.routed.clone());
     let (sent, replies, fetched) = (
         world.sent.clone(),
         world.replies.clone(),
@@ -81,6 +91,14 @@ fn start_with(cx: &mut TestAppContext, store: Store) -> World {
         keys: world.keys.clone(),
         env: Arc::new(|_| None),
         post: Arc::new(move |url, headers, body| {
+            // 振り分け役への問い合わせは、会話の返事とは別に答える
+            if body["system"].to_string().contains("振り分け役") {
+                routed.lock().unwrap().push(body.clone());
+                let answer = routes.lock().unwrap().pop_front();
+                return answer
+                    .map(|a| text_reply(&a))
+                    .ok_or_else(|| "テストに振り分けの答えが用意されていません".into());
+            }
             let headers = headers
                 .iter()
                 .map(|(k, v)| (k.to_string(), v.clone()))
@@ -2968,4 +2986,139 @@ fn windows_closed_with_the_main_window_are_remembered(cx: &mut TestAppContext) {
     assert_eq!(saved["shell"], "window");
     assert_eq!(saved["chat_bounds"], json!(bounds[0]));
     assert_eq!(saved["shell_bounds"], json!(bounds[1]));
+}
+
+/// 確認を待っている（考え中の）会話を作る。
+fn busy_chat(cx: &mut TestAppContext) -> (World, AnyWindowHandle, Entity<AiPane>) {
+    let mut store = Store::open_in_memory().unwrap();
+    let task = store
+        .create_task(
+            None,
+            &TaskDraft {
+                title: "消さないで".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let world = start_with(cx, store);
+    world.keys.set(Provider::Claude, "k").unwrap();
+    let (window, view) = open(cx, wide());
+    let pane = open_chat(cx, window, &view);
+    world.reply(tool_reply("t1", "delete_task", json!({"id": task.id})));
+    say(cx, window, &pane, "全部消して");
+    assert!(read(cx, |s| s.busy && s.pending.is_some()), "考え中のまま");
+    (world, window, pane)
+}
+
+/// 考え中でも送れて、別の依頼は並列の会話で動き、終わると会話の一覧に入る。
+#[gpui_kit::test]
+fn a_new_request_while_thinking_runs_in_parallel(cx: &mut TestAppContext) {
+    let (world, window, pane) = busy_chat(cx);
+    world.route("NEW");
+    world.reply(text_reply("牛乳は 200 円です。"));
+    say(cx, window, &pane, "牛乳の値段は？");
+    wait(cx, "並列の会話が終わる", |s| {
+        s.parallel.len() == 1 && s.parallel[0].done
+    });
+
+    // 振り分け役には、今の会話と次のメッセージが渡る
+    let routed = world.routed.lock().unwrap().clone();
+    assert_eq!(routed.len(), 1);
+    let asked = routed[0]["messages"][0].to_string();
+    assert!(asked.contains("全部消して") && asked.contains("牛乳の値段は？"));
+
+    // 今の会話はそのまま確認を待っている
+    let (busy, items) = read(cx, |s| (s.pending.is_some(), s.items.clone()));
+    assert!(busy);
+    assert!(!items.contains(&Item::User("牛乳の値段は？".into())));
+    // 並列の会話は一覧に入り、開くと中身が出る
+    let chats = read(cx, |s| {
+        s.chats
+            .iter()
+            .map(|c| c.title.to_string())
+            .collect::<Vec<_>>()
+    });
+    assert!(chats.contains(&"牛乳の値段は？".to_owned()), "{chats:?}");
+    ui(cx, window, |window, cx| window.click("ai-deny", cx));
+    world.reply(text_reply("削除しませんでした。"));
+    wait(cx, "今の会話が終わる", |s| !s.busy);
+    ui(cx, window, |window, cx| {
+        window.click(("ai-parallel", 0usize), cx)
+    });
+    let items = read(cx, |s| s.items.clone());
+    assert!(items.contains(&Item::Assistant("牛乳は 200 円です。".into())));
+    assert!(read(cx, |s| s.parallel.is_empty()));
+}
+
+/// 今の会話の続きなら、答え終わってから同じ会話に送る。
+#[gpui_kit::test]
+fn a_follow_up_while_thinking_waits_for_the_answer(cx: &mut TestAppContext) {
+    let (world, window, pane) = busy_chat(cx);
+    world.route("CONTINUE");
+    say(cx, window, &pane, "やっぱり残して");
+    wait(cx, "続きとして待つ", |s| s.queued.len() == 1);
+    assert!(read(cx, |s| s.parallel.is_empty()));
+
+    world.reply(text_reply("削除しませんでした。"));
+    world.reply(text_reply("残しておきます。"));
+    ui(cx, window, |window, cx| window.click("ai-deny", cx));
+    wait(cx, "続きも答え終わる", |s| {
+        !s.busy && s.queued.is_empty()
+    });
+    let items = read(cx, |s| s.items.clone());
+    let at = |i: &Item| items.iter().position(|x| x == i).unwrap();
+    assert!(
+        at(&Item::Assistant("削除しませんでした。".into()))
+            < at(&Item::User("やっぱり残して".into()))
+    );
+    assert!(items.contains(&Item::Assistant("残しておきます。".into())));
+}
+
+/// 振り分けに失敗したら、エラーを出して続きとして送る。待っている続きは取り消せる。
+#[gpui_kit::test]
+fn a_failed_routing_falls_back_to_a_follow_up(cx: &mut TestAppContext) {
+    let (_world, window, pane) = busy_chat(cx);
+    say(cx, window, &pane, "やっぱり残して");
+    wait(cx, "続きとして待つ", |s| s.queued.len() == 1);
+    let error = read(cx, |s| s.error.clone()).expect("エラーが出る");
+    assert!(error.contains("振り分けられなかった"), "{error}");
+    ui(cx, window, |window, cx| {
+        window.click(("ai-queued-remove", 0usize), cx)
+    });
+    assert!(read(cx, |s| s.queued.is_empty()));
+}
+
+/// 振り分けのモデルは設定で選べ、選ばなければ今のモデルを使う。
+#[gpui_kit::test]
+fn the_coordinator_model_is_chosen_in_settings(cx: &mut TestAppContext) {
+    let (world, window, pane) = busy_chat(cx);
+    let current = read(cx, |s| s.model().to_owned());
+    assert_eq!(read(cx, |s| s.coordinator_model()), current);
+    open_settings(cx, window, &pane);
+    // メニューの 1 番目は「今のモデル」、2 番目から各モデル
+    let pick = |cx: &mut TestAppContext, n: usize| {
+        ui(cx, window, |window, cx| window.click("ai-coordinator", cx));
+        ui(cx, window, |window, cx| {
+            for _ in 0..n {
+                window.press("down", cx);
+            }
+            window.press("enter", cx);
+        });
+    };
+    pick(cx, 2);
+    let chosen = Provider::Claude.models()[0].to_owned();
+    assert_eq!(read(cx, |s| s.coordinator_model()), chosen);
+    assert_eq!(
+        setting(cx, "ai.coordinator.claude").as_deref(),
+        Some(chosen.as_str())
+    );
+
+    world.route("CONTINUE");
+    say(cx, window, &pane, "やっぱり残して");
+    wait(cx, "続きとして待つ", |s| s.queued.len() == 1);
+    assert_eq!(world.routed.lock().unwrap()[0]["model"], chosen.as_str());
+
+    open_settings(cx, window, &pane);
+    pick(cx, 1);
+    assert_eq!(read(cx, |s| s.coordinator_model()), current);
 }

@@ -130,6 +130,36 @@ const MAX_RUN_ITEMS: usize = 30;
 const MAX_RUN_CHARS: usize = 2000;
 const MAX_TITLE_CHARS: usize = 40;
 
+/// 並列で同時に動かせる会話の数。
+pub const MAX_PARALLEL: usize = 3;
+
+/// 振り分け役への指示。
+const ROUTE_PROMPT: &str = "あなたは、タスク管理アプリの AI チャットの振り分け役です。\n\
+ユーザーは AI と話している途中で、AI が答え終わる前に次のメッセージを送りました。\n\
+次のメッセージが、今の会話の続き（今の話題への追加、訂正、補足、質問）なら CONTINUE、\n\
+今の会話と関係のない別の依頼なら NEW とだけ答えてください。ほかのことは書かないでください。";
+
+fn coordinator_key(provider: Provider) -> String {
+    format!("ai.coordinator.{}", provider.as_str())
+}
+
+/// 考え中に送られて、今の会話の続きとして待っているメッセージ。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Queued {
+    pub text: String,
+    place: String,
+    attached: Vec<(String, SharedString)>,
+}
+
+/// 並列で動かしている、別の会話。
+pub struct Parallel {
+    pub session: Entity<Session>,
+    pub title: SharedString,
+    pub done: bool,
+    pub error: Option<SharedString>,
+    _watch: Subscription,
+}
+
 fn chat_key(id: &str) -> String {
     format!("ai.chat.{id}")
 }
@@ -683,6 +713,16 @@ pub struct Session {
     pub attached: Vec<(String, SharedString)>,
     /// ユーザーが今開いているワークスペース。画面が書き込む。
     pub workspace: Option<String>,
+    /// 並列の会話を動かすための、裏の会話。保存も自動の処理もしない。
+    worker: bool,
+    /// 振り分けに使うモデル（サービスごと）。なければ今のモデル。
+    coordinators: HashMap<Provider, String>,
+    /// 振り分けを待っているメッセージ。
+    pub routing: Vec<SharedString>,
+    /// 今の会話の続きとして、答え終わるのを待っているメッセージ。
+    pub queued: Vec<Queued>,
+    /// 並列で動かしている会話。
+    pub parallel: Vec<Parallel>,
     /// 保存してある会話。新しいものが前。
     pub chats: Vec<ChatInfo>,
     /// 今の会話を始めたタスク（ID と題）。
@@ -723,6 +763,10 @@ fn setting_key(provider: Provider) -> String {
 
 impl Session {
     fn new(db: Entity<Db>, config: AiConfig, cx: &mut Context<Self>) -> Self {
+        Self::create(db, config, false, cx)
+    }
+
+    fn create(db: Entity<Db>, config: AiConfig, worker: bool, cx: &mut Context<Self>) -> Self {
         let mut error = None;
         let watch;
         let auto_run;
@@ -736,7 +780,7 @@ impl Session {
         let arrange;
         let track;
         let context;
-        let (provider, effort, models) = {
+        let (provider, effort, models, coordinators) = {
             let store = &db.read(cx).store;
             let mut read = |key: &str| match store.setting(key) {
                 Ok(value) => value,
@@ -754,6 +798,14 @@ impl Session {
             let models = Provider::ALL
                 .into_iter()
                 .filter_map(|p| read(&setting_key(p)).map(|m| (p, m)))
+                .collect();
+            let coordinators = Provider::ALL
+                .into_iter()
+                .filter_map(|p| {
+                    read(&coordinator_key(p))
+                        .filter(|m| !m.is_empty())
+                        .map(|m| (p, m))
+                })
                 .collect();
             ui = read(UI_SETTING)
                 .and_then(|v| serde_json::from_str::<Value>(&v).ok())
@@ -850,7 +902,7 @@ impl Session {
                     .filter(|v| !v.trim().is_empty())
                     .unwrap_or(defaults.instruction),
             };
-            (provider, effort, models)
+            (provider, effort, models, coordinators)
         };
         let mut this = Self {
             db,
@@ -925,6 +977,11 @@ impl Session {
             place: String::new(),
             attached: Vec::new(),
             workspace: None,
+            worker,
+            coordinators,
+            routing: Vec::new(),
+            queued: Vec::new(),
+            parallel: Vec::new(),
             chats,
             chat_task: None,
             legacy_chat,
@@ -937,6 +994,9 @@ impl Session {
             runs_dirty: false,
             _subscriptions: Vec::new(),
         };
+        if worker {
+            return this;
+        }
         this._subscriptions = vec![
             cx.observe(&this.db.clone(), |this, _, cx| {
                 this.tasks_changed(cx);
@@ -947,6 +1007,19 @@ impl Session {
                 if this.arrange_retry && !this.busy {
                     this.arrange_retry = false;
                     this.tasks_changed(cx);
+                }
+            }),
+            cx.observe_self(|this, cx| {
+                // 答え終わったら、続きとして待っているメッセージを送る
+                if !this.busy && !this.queued.is_empty() {
+                    let mut next = this.queued.remove(0);
+                    next.attached.append(&mut this.attached);
+                    this.attached = next.attached;
+                    if !this.send(&next.text, next.place, cx) && this.error.is_none() {
+                        this.error = Some(
+                            format!("「{}」を送れませんでした", clip_chars(&next.text, 20)).into(),
+                        );
+                    }
                 }
             }),
             cx.observe_self(|this, cx| {
@@ -1124,7 +1197,17 @@ impl Session {
                 updated: malakt_core::now_ms(),
             },
         );
-        // 古い会話から消すので、増え続けない
+        if !self.trim_chats(cx) {
+            return false;
+        }
+        if self.legacy_chat && self.remove_setting(CHAT_SETTING, cx) {
+            self.legacy_chat = false;
+        }
+        self.save_index(cx)
+    }
+
+    /// 古い会話から消すので、増え続けない。
+    fn trim_chats(&mut self, cx: &mut Context<Self>) -> bool {
         while self.chats.len() > MAX_CHATS {
             let last = self.chats[self.chats.len() - 1].id.clone();
             if !self.remove_setting(&chat_key(&last), cx) {
@@ -1132,10 +1215,258 @@ impl Session {
             }
             self.chats.pop();
         }
-        if self.legacy_chat && self.remove_setting(CHAT_SETTING, cx) {
-            self.legacy_chat = false;
+        true
+    }
+
+    /// 振り分けのモデルを設定してあるか。
+    pub fn coordinator_set(&self) -> bool {
+        self.coordinators.contains_key(&self.provider)
+    }
+
+    /// 振り分けに使うモデル。設定していなければ、今のモデル。
+    pub fn coordinator_model(&self) -> String {
+        self.coordinators
+            .get(&self.provider)
+            .cloned()
+            .unwrap_or_else(|| self.model().to_owned())
+    }
+
+    /// 振り分けに使うモデルを設定する。`None` なら、今のモデルを使う。
+    pub fn set_coordinator(&mut self, model: Option<&str>, cx: &mut Context<Self>) {
+        let key = coordinator_key(self.provider);
+        if !self.save_setting(&key, model.unwrap_or_default(), cx) {
+            return;
         }
-        self.save_index(cx)
+        match model {
+            Some(model) => self.coordinators.insert(self.provider, model.to_owned()),
+            None => self.coordinators.remove(&self.provider),
+        };
+        cx.notify();
+    }
+
+    /// 考え中に送られたメッセージを、今の会話の続きにするか、並列の別の会話にするか、AI に決めさせる。
+    fn route(&mut self, queued: Queued, cx: &mut Context<Self>) {
+        let text: SharedString = queued.text.clone().into();
+        self.routing.push(text.clone());
+        // 今の会話の終わりのほうを、振り分けの手がかりに渡す
+        let mut recent: Vec<String> = self
+            .shown_items()
+            .iter()
+            .rev()
+            .filter_map(|item| match item {
+                Item::User(t) => Some(format!("ユーザー: {}", clip_chars(t, 300))),
+                Item::Assistant(t) => Some(format!("AI: {}", clip_chars(t, 300))),
+                _ => None,
+            })
+            .take(6)
+            .collect();
+        recent.reverse();
+        let (provider, model, config) =
+            (self.provider, self.coordinator_model(), self.config.clone());
+        cx.spawn(async move |this, cx| {
+            let result = Self::route_run(
+                &this,
+                &config,
+                provider,
+                &model,
+                &recent.join("\n"),
+                &queued.text,
+                cx,
+            )
+            .await;
+            // チャットがもうなければ、送る先もない
+            let _ = this.update(cx, |this, cx| {
+                if let Some(at) = this.routing.iter().position(|t| *t == text) {
+                    this.routing.remove(at);
+                }
+                match result {
+                    Ok(true) if this.running_parallel() < MAX_PARALLEL => {
+                        this.start_parallel(queued, cx)
+                    }
+                    Ok(_) => this.queued.push(queued),
+                    Err(error) => {
+                        this.error = Some(
+                            format!("振り分けられなかったので、続きとして送ります: {error}").into(),
+                        );
+                        this.queued.push(queued);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// 振り分け役に聞く。別の会話にするなら `true`。
+    async fn route_run(
+        this: &WeakEntity<Self>,
+        config: &AiConfig,
+        provider: Provider,
+        model: &str,
+        recent: &str,
+        text: &str,
+        cx: &mut AsyncApp,
+    ) -> Result<bool, String> {
+        let found = {
+            let config = config.clone();
+            cx.background_executor()
+                .spawn(async move { keys::lookup(&*config.keys, provider, |n| (config.env)(n)) })
+                .await?
+        };
+        let Some((key, _)) = found else {
+            return Err("API キーが設定されていません".into());
+        };
+        let turns = [Turn::User(format!(
+            "今の会話:\n{recent}\n\n次のメッセージ:\n{text}"
+        ))];
+        let request = wire::Request {
+            model,
+            effort: Effort::Default,
+            system: ROUTE_PROMPT,
+            turns: &turns,
+            tools: &[],
+            fallbacks: false,
+        };
+        let conversation = malakt_core::new_id();
+        let (_, reply) =
+            Self::request(this, config, provider, &key, &conversation, request, cx).await?;
+        if let Some(notice) = reply.notice {
+            return Err(notice);
+        }
+        Ok(reply.text.to_uppercase().contains("NEW"))
+    }
+
+    /// 動いている並列の会話の数。
+    pub fn running_parallel(&self) -> usize {
+        self.parallel.iter().filter(|p| !p.done).count()
+    }
+
+    /// 別の会話を裏で始める。終わったら、会話の一覧に足す。
+    fn start_parallel(&mut self, queued: Queued, cx: &mut Context<Self>) {
+        let (db, config) = (self.db.clone(), self.config.clone());
+        let copy = (
+            self.provider,
+            self.models.clone(),
+            self.effort,
+            self.key.clone(),
+            self.context.clone(),
+            self.github.clone(),
+            self.workspace.clone(),
+            self.catalog.clone(),
+            self.model_names.clone(),
+        );
+        let worker = cx.new(|cx| {
+            let mut w = Session::create(db, config, true, cx);
+            (
+                w.provider,
+                w.models,
+                w.effort,
+                w.key,
+                w.context,
+                w.github,
+                w.workspace,
+                w.catalog,
+                w.model_names,
+            ) = copy;
+            w.attached = queued.attached.clone();
+            w
+        });
+        let sent = worker.update(cx, |w, cx| w.send(&queued.text, queued.place.clone(), cx));
+        if !sent {
+            let why = worker.read(cx).error.clone();
+            self.error = Some(
+                format!(
+                    "「{}」を並列で送れませんでした{}",
+                    clip_chars(&queued.text, 20),
+                    why.map(|e| format!(": {e}")).unwrap_or_default()
+                )
+                .into(),
+            );
+            return;
+        }
+        let watch = cx.observe(&worker, |this, worker, cx| {
+            this.parallel_changed(&worker, cx)
+        });
+        self.parallel.push(Parallel {
+            session: worker,
+            title: clip_chars(
+                queued.text.lines().next().unwrap_or_default(),
+                MAX_TITLE_CHARS,
+            )
+            .into(),
+            done: false,
+            error: None,
+            _watch: watch,
+        });
+    }
+
+    /// 並列の会話が答え終わったら、会話の一覧に足す。
+    fn parallel_changed(&mut self, worker: &Entity<Session>, cx: &mut Context<Self>) {
+        let Some(ix) = self
+            .parallel
+            .iter()
+            .position(|p| p.session == *worker && !p.done)
+        else {
+            return;
+        };
+        let w = worker.read(cx);
+        if w.busy {
+            return;
+        }
+        let (id, json) = (w.conversation.clone(), w.chat_json());
+        let error = w.items.iter().rev().find_map(|item| match item {
+            Item::Error(e) => Some(e.clone()),
+            _ => None,
+        });
+        let title = self.parallel[ix].title.clone();
+        if self.save_setting(&chat_key(&id), &json, cx) {
+            self.chats.retain(|c| c.id != id);
+            self.chats.insert(
+                0,
+                ChatInfo {
+                    id,
+                    title,
+                    task: None,
+                    updated: malakt_core::now_ms(),
+                },
+            );
+            if self.trim_chats(cx) {
+                self.save_index(cx);
+            }
+        }
+        let p = &mut self.parallel[ix];
+        p.done = true;
+        p.error = error;
+        cx.notify();
+    }
+
+    /// 終わった並列の会話を開く。
+    pub fn open_parallel(&mut self, ix: usize, cx: &mut Context<Self>) {
+        let Some(p) = self.parallel.get(ix).filter(|p| p.done) else {
+            return;
+        };
+        let id = p.session.read(cx).conversation.clone();
+        self.parallel.remove(ix);
+        self.open_chat(&id, cx);
+    }
+
+    /// 並列の会話の表示を消す。動いている途中なら止める。
+    pub fn dismiss_parallel(&mut self, ix: usize, cx: &mut Context<Self>) {
+        if ix < self.parallel.len() {
+            let p = self.parallel.remove(ix);
+            if !p.done {
+                p.session.update(cx, |s, cx| s.stop(cx));
+            }
+            cx.notify();
+        }
+    }
+
+    /// 続きとして待っているメッセージを取り消す。
+    pub fn unqueue(&mut self, ix: usize, cx: &mut Context<Self>) {
+        if ix < self.queued.len() {
+            self.queued.remove(ix);
+            cx.notify();
+        }
     }
 
     /// 今の会話の ID。
@@ -2660,7 +2991,26 @@ impl Session {
     /// 送信する。`place` は、ユーザーが今開いている場所の説明。
     pub fn send(&mut self, text: &str, place: String, cx: &mut Context<Self>) -> bool {
         let text = text.trim().to_owned();
-        if self.busy || text.is_empty() || !self.db.read(cx).unlocked {
+        if text.is_empty() || !self.db.read(cx).unlocked {
+            return false;
+        }
+        // 考え中でも送れる。今の会話の続きか、並列の別の会話かを振り分ける
+        if self.busy && !self.worker {
+            let queued = Queued {
+                text,
+                place,
+                attached: std::mem::take(&mut self.attached),
+            };
+            // 自動の処理やシェルのコマンドの間、Cursor のときは、終わるのを待って送る
+            if self.auto || self.own_command || self.provider == Provider::Cursor {
+                self.queued.push(queued);
+            } else {
+                self.route(queued, cx);
+            }
+            cx.notify();
+            return true;
+        }
+        if self.busy {
             return false;
         }
         // 添えたタスクの中身を読む。読めないものがあれば、送らずにそのことを出す
@@ -2708,6 +3058,7 @@ impl Session {
 
     /// 止める。実行中のコマンドも強制終了する。
     pub fn stop(&mut self, cx: &mut Context<Self>) {
+        self.queued.clear();
         let killed = self.kill_command();
         // 自分で打ったコマンドは、止まればそのまま終わる。チャットには何も書かない
         if !self.busy || self.own_command {
@@ -3173,7 +3524,10 @@ impl Session {
         cx: &mut AsyncApp,
     ) -> Result<Result<String, ToolError>, String> {
         let name = call.name.as_str();
-        let auto = this.read_with(cx, |s, _| s.auto).map_err(gone)?;
+        // 並列の会話では、確認が要る操作をしない（確認を出す場所がない）
+        let auto = this
+            .read_with(cx, |s, _| s.auto || s.worker)
+            .map_err(gone)?;
         if auto && tools::needs_confirmation(name) {
             // 確認に答える人がいないので、定期チェックからは実行しない
             return Ok(Err(ToolError::Failed(
