@@ -2014,19 +2014,38 @@ fn backdrop_and_cards_are_chosen_in_settings(cx: &mut TestAppContext) {
         assert!(window.try_find(("col-head", 0usize)).is_none())
     });
 
-    // パネルを浮かせても、ボタンや一覧の場所は変わらない（カードは中身の後ろに敷くだけ）
+    // パネルを浮かせても、設定のスイッチと一覧の場所は変わらない（カードは中身の後ろに敷くだけ）
     let place = |cx: &mut TestAppContext| {
         cx.update_window(window, |_, window, _| {
-            ["cards-switch", "float-switch", "open-menu", "nav-home"]
-                .map(|id| window.find(id).bounds())
+            ["cards-switch", "float-switch", "nav-home"].map(|id| window.find(id).bounds())
+        })
+        .unwrap()
+    };
+    // 上のバーのボタンは、どれも同じ高さに並ぶ（縦の中央にそろう）
+    let bar_centers = |cx: &mut TestAppContext| {
+        cx.update_window(window, |_, window, _| {
+            [
+                window.find("toggle-sidebar").bounds(),
+                window.find(("theme", 0usize)).bounds(),
+                window.find("pane-split").bounds(),
+                window.find("ai-toggle").bounds(),
+                window.find("open-notices").bounds(),
+                window.find("open-menu").bounds(),
+            ]
+            .map(|bounds| bounds.center().y)
         })
         .unwrap()
     };
     let flat = place(cx);
+    let centers = bar_centers(cx);
+    assert!(centers.iter().all(|y| *y == centers[0]), "{centers:?}");
     ui(cx, window, |window, cx| window.click("float-switch", cx));
     assert_eq!(saved(cx, "panels.float").as_deref(), Some("1"));
     assert!(cx.update(|cx| theme::floating(cx)));
     assert_eq!(place(cx), flat);
+    // 浮かせると、バーの中身はカードの内側に収まる。そこでも同じ高さに並ぶ
+    let centers = bar_centers(cx);
+    assert!(centers.iter().all(|y| *y == centers[0]), "{centers:?}");
     ui(cx, window, |window, cx| window.click("float-switch", cx));
     assert_eq!(saved(cx, "panels.float"), None);
     ui(cx, window, |window, cx| window.click("float-switch", cx));
