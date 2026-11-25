@@ -16,8 +16,8 @@
 | ![ペイン](docs/images/panes.png)<br><sub>ペイン</sub> | ![AI チャット](docs/images/ai.png)<br><sub>AI チャット</sub> |
 | ![ターミナル](docs/images/terminal.png)<br><sub>ターミナル</sub> | ![すべてのタスク](docs/images/all.png)<br><sub>すべてのタスク</sub> |
 
-![テーマ](docs/images/themes.png)
-<sub>テーマの一覧</sub>
+![カスタマイズ](docs/images/themes.png)
+<sub>カスタマイズ</sub>
 
 ## 機能
 
