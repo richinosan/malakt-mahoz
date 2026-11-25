@@ -20,6 +20,7 @@ pub const MAX_BYTES: i64 = 32 * 1024 * 1024;
 const TABLES: &[&str] = &[
     "workspaces",
     "people",
+    "person_workspaces",
     "tasks",
     "task_categories",
     "task_assignees",

@@ -29,7 +29,7 @@ use crate::state::{
     Column, CommentMode, Detail, DropTarget, Editing, MainView, Modal, Nav, SubModal, When,
 };
 use crate::{Dismiss, LockNow, NewWindow, PanePrefix, ToggleAi};
-use malakt_core::Id;
+use malakt_core::{Id, Person};
 
 /// 参照する寸法（CSS の px）を、画面全体の拡大率に合わせる。
 const fn px(value: f32) -> Pixels {
@@ -326,6 +326,70 @@ fn status_items(
                 let _ = view.update(cx, |this, cx| this.ask_status(&task, window, cx));
             }),
         )
+}
+
+/// 担当者を登録するメニューの中身。ほかのワークスペースの担当者を選ぶと、このワークスペースでも
+/// 使えるようになって担当に入る。いちばん下から、新しい担当者をその場で足す。
+fn person_items(
+    mut menu: PopupMenu,
+    view: &WeakEntity<MainView>,
+    others: &[(Id, SharedString)],
+) -> PopupMenu {
+    for (id, name) in others {
+        let (view, id) = (view.clone(), id.clone());
+        menu = menu.item(PopupMenuItem::new(name.clone()).on_click(move |_, _, cx| {
+            // ウィンドウを閉じたあとなら、反映する先がない
+            let _ = view.update(cx, |this, cx| this.register_assignee(&id, cx));
+        }));
+    }
+    if !others.is_empty() {
+        menu = menu.separator();
+    }
+    let view = view.clone();
+    menu.item(
+        PopupMenuItem::new("新規担当として登録").on_click(move |_, window, cx| {
+            // ウィンドウを閉じたあとなら、反映する先がない
+            let _ = view.update(cx, |this, cx| this.add_assignee_person(window, cx));
+        }),
+    )
+}
+
+/// 担当者を使うワークスペースを選ぶメニューの中身。
+fn person_workspace_items(
+    menu: PopupMenu,
+    view: &WeakEntity<MainView>,
+    person: &Id,
+    current: &[Id],
+    roots: &[(Id, SharedString)],
+) -> PopupMenu {
+    let mut menu = menu.item({
+        let (view, person) = (view.clone(), person.clone());
+        PopupMenuItem::new("すべてのワークスペース")
+            .checked(current.is_empty())
+            .on_click(move |_, _, cx| {
+                // ウィンドウを閉じたあとなら、反映する先がない
+                let _ = view.update(cx, |this, cx| {
+                    this.set_person_workspaces(&person, Vec::new(), cx)
+                });
+            })
+    });
+    if !roots.is_empty() {
+        menu = menu.separator();
+    }
+    for (id, name) in roots {
+        let (view, person, id) = (view.clone(), person.clone(), id.clone());
+        menu = menu.item(
+            PopupMenuItem::new(name.clone())
+                .checked(current.contains(&id))
+                .on_click(move |_, _, cx| {
+                    // ウィンドウを閉じたあとなら、反映する先がない
+                    let _ = view.update(cx, |this, cx| {
+                        this.toggle_person_workspace(&person, &id, cx)
+                    });
+                }),
+        );
+    }
+    menu
 }
 
 /// 優先度。棒の本数と色で見分ける。
@@ -1717,7 +1781,7 @@ impl MainView {
                 AssigneeFilter::Unassigned,
             ),
         ];
-        for p in &self.people {
+        for p in self.people_here() {
             let value = AssigneeFilter::Person(p.id.clone());
             assignee.push((p.name.clone().into(), q.assignee == value, value));
         }
@@ -2429,9 +2493,15 @@ impl MainView {
             .collect()
     }
 
-    fn assignee_options(&self, ids: &[Id]) -> Vec<(SharedString, bool, Id)> {
+    /// そのワークスペースで選べる担当者と、もう担当になっている人。
+    fn assignee_options(
+        &self,
+        workspace: Option<&str>,
+        ids: &[Id],
+    ) -> Vec<(SharedString, bool, Id)> {
         self.people
             .iter()
+            .filter(|p| ids.contains(&p.id) || self.person_is_in(p, workspace))
             .map(|p| (p.name.clone().into(), ids.contains(&p.id), p.id.clone()))
             .collect()
     }
@@ -2724,7 +2794,7 @@ impl MainView {
             self.value_menu(
                 ("assignee", ix),
                 self.assignee_cell(&task.assignee_ids, cx),
-                self.assignee_options(&task.assignee_ids),
+                self.assignee_options(task.workspace_id.as_deref(), &task.assignee_ids),
                 move |this, person: Id, cx| {
                     this.edit_task_by_id(&id, cx, |d| {
                         if let Some(i) = d.assignee_ids.iter().position(|a| a == &person) {
@@ -2914,7 +2984,7 @@ impl MainView {
         let assignees = self.value_menu(
             "quick-assignee",
             self.assignee_cell(&quick.assignee_ids, cx),
-            self.assignee_options(&quick.assignee_ids),
+            self.assignee_options(self.current_workspace(), &quick.assignee_ids),
             |this, person: Id, cx| {
                 this.quick_touched = true;
                 if let Some(i) = this.quick.assignee_ids.iter().position(|a| a == &person) {
@@ -3339,7 +3409,17 @@ impl MainView {
             .border_1()
             .border_color(theme.border)
             .bg(theme.background);
-        for (i, p) in self.people.iter().enumerate() {
+        let workspace = task.workspace_id.as_deref();
+        // このワークスペースで選べる人と、もう担当になっている人
+        let (here, others): (Vec<&Person>, Vec<&Person>) = self
+            .people
+            .iter()
+            .partition(|p| task.assignee_ids.contains(&p.id) || self.person_is_in(p, workspace));
+        let naming = self
+            .person_naming
+            .as_ref()
+            .filter(|_| self.modal == Modal::None);
+        for (i, p) in here.into_iter().enumerate() {
             let row_ix = task.assignee_ids.iter().position(|a| a == &p.id);
             let id = p.id.clone();
             let mut item = col()
@@ -3371,7 +3451,33 @@ impl MainView {
                                 .when(row_ix.is_none(), |d| d.border_color(theme.input)),
                         )
                         .child(avatar(&p.name, cx))
-                        .child(div().min_w_0().truncate().text_sm().child(p.name.clone()))
+                        .map(|d| {
+                            if naming == Some(&p.id) {
+                                // その場で名前を書く。Enter かほかの場所を押すと保存、Esc で取り消し
+                                d.child(
+                                    div()
+                                        .id("p-as-name")
+                                        .flex_1()
+                                        .min_w_0()
+                                        .on_mouse_down_out(cx.listener(|this, _, window, cx| {
+                                            this.save_person_name(window, cx)
+                                        }))
+                                        // 名前の欄を押しても、担当から外さない
+                                        .on_click(|_, _, cx| cx.stop_propagation())
+                                        .child(
+                                            Input::new(&self.inputs.name)
+                                                .id("person-input")
+                                                .aria_label("名前")
+                                                .text_sm()
+                                                .bg(theme.background)
+                                                .border_color(theme.ring)
+                                                .px_2(),
+                                        ),
+                                )
+                            } else {
+                                d.child(div().min_w_0().truncate().text_sm().child(p.name.clone()))
+                            }
+                        })
                         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                             this.toggle_assignee(&id, cx)
                         }))
@@ -3420,15 +3526,20 @@ impl MainView {
             }
             list = list.child(item);
         }
+        let view = cx.entity().downgrade();
+        let others: Vec<(Id, SharedString)> = others
+            .into_iter()
+            .map(|p| (p.id.clone(), p.name.clone().into()))
+            .collect();
         col().gap_1().child(list).child(
-            row().child(feel::gloss(
+            row().child(
                 Button::new("p-add-person")
                     .icon(app_icon("user-plus"))
                     .label("担当者を登録")
                     .ghost()
                     .small()
-                    .on_click(cx.listener(|this, _, window, cx| this.open_people(window, cx))),
-            )),
+                    .dropdown_menu(move |menu, _, _| person_items(menu, &view, &others)),
+            ),
         )
     }
 
@@ -5644,8 +5755,43 @@ impl MainView {
             }
             Modal::People => {
                 let mut list = col().gap_1();
+                let view = cx.entity().downgrade();
+                let roots: Vec<(Id, SharedString)> = self
+                    .workspaces
+                    .iter()
+                    .filter(|w| w.parent_id.is_none())
+                    .map(|w| (w.id.clone(), w.name.clone().into()))
+                    .collect();
                 for (ix, p) in self.people.iter().enumerate() {
                     let id = p.id.clone();
+                    // 使うワークスペース。「自分」は、すべてのワークスペースで使う
+                    let scope = (!p.is_self).then(|| {
+                        let (view, person, roots) = (view.clone(), p.id.clone(), roots.clone());
+                        // いちばん上の親に直して、メニューの印と合わせる
+                        let current: Vec<Id> = p
+                            .workspace_ids
+                            .iter()
+                            .map(|w| self.root_of(w).to_owned())
+                            .collect();
+                        let label: SharedString = match current.as_slice() {
+                            [] => "すべてのワークスペース".into(),
+                            [one] => self.workspace_name(Some(one)),
+                            many => format!(
+                                "{} ほか {}",
+                                self.workspace_name(Some(&many[0])),
+                                many.len() - 1
+                            )
+                            .into(),
+                        };
+                        Button::new(("person-scope", ix))
+                            .icon(app_icon(if p.is_global() { "globe" } else { "folder" }))
+                            .ghost()
+                            .xsmall()
+                            .tooltip(label)
+                            .dropdown_menu(move |menu, _, _| {
+                                person_workspace_items(menu, &view, &person, &current, &roots)
+                            })
+                    });
                     let name =
                         if self.person_naming.as_ref() == Some(&p.id) {
                             // その場で名前を書く。Enter かほかの場所を押すと保存、Esc で取り消し
@@ -5694,6 +5840,7 @@ impl MainView {
                             .when(p.is_self, |d| {
                                 d.child(div().text_xs().text_color(theme.primary).child("自分"))
                             })
+                            .children(scope)
                             .child(feel::gloss(
                                 Button::new(("del-person", ix))
                                     .label("削除")
@@ -6058,7 +6205,7 @@ impl MainView {
                     );
                 }
                 let mut people = row().gap_1().flex_wrap();
-                for (ix, p) in self.people.iter().enumerate() {
+                for (ix, p) in self.people_here().into_iter().enumerate() {
                     let pid = p.id.clone();
                     people = people.child(
                         chip(
@@ -6206,7 +6353,7 @@ impl MainView {
                 let draft = &self.defaults_draft;
                 let label = |text: &'static str| div().text_sm().child(text);
                 let mut assignees = row().gap_1().flex_wrap();
-                for (ix, p) in self.people.iter().enumerate() {
+                for (ix, p) in self.people_in(Some(id.as_str())).into_iter().enumerate() {
                     let pid = p.id.clone();
                     assignees = assignees.child(
                         chip(

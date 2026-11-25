@@ -114,6 +114,17 @@ pub struct Person {
     pub note: String,
     pub created_at: i64,
     pub updated_at: i64,
+    /// この担当者を使うワークスペース（いちばん上の親）。そのサブワークスペースでも使う。
+    /// 空なら、すべてのワークスペースで使う。古い書き出しにはない。
+    #[serde(default)]
+    pub workspace_ids: Vec<Id>,
+}
+
+impl Person {
+    /// すべてのワークスペースで使う担当者か。
+    pub fn is_global(&self) -> bool {
+        self.workspace_ids.is_empty()
+    }
 }
 
 /// iCalendar の VTODO の STATUS と同じ 4 つ。
