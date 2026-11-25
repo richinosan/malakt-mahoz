@@ -130,6 +130,10 @@ fn saved_bounds(v: &Value) -> Option<[f32; 4]> {
 }
 
 /// 新しいタスクを AI が整えるとき、1 回で扱うタスクの数。
+/// いつも AI に伝える前提と指示の保存先と、長さの上限。
+const CONTEXT_SETTING: &str = "ai.context";
+pub const MAX_CONTEXT_CHARS: usize = 4000;
+
 const MAX_ARRANGE_TASKS: usize = 5;
 /// 新しいタスクを整えるとき、タスク 1 つで読みに行くリンクの数。
 const MAX_ARRANGE_LINKS: usize = 3;
@@ -324,6 +328,8 @@ pub struct Session {
     auto: bool,
     /// 新しいタスクを AI が整える。標準はオン（API キーがなければ動かない）。
     pub arrange: bool,
+    /// ユーザーが書いた、いつも AI に伝える前提と指示。
+    pub context: String,
     /// AI が今整えているタスクの ID。
     pub arranging: Vec<String>,
     /// タスクを整えられなかった理由。タスクの ID ごと。
@@ -378,6 +384,7 @@ impl Session {
         let ui: SavedUi;
         let chat: Option<Value>;
         let arrange;
+        let context;
         let (provider, effort, models) = {
             let store = &db.read(cx).store;
             let mut read = |key: &str| match store.setting(key) {
@@ -414,6 +421,7 @@ impl Session {
             chat = read(CHAT_SETTING).and_then(|v| serde_json::from_str::<Value>(&v).ok());
             auto_run = read("ai.auto_run").as_deref() == Some("1");
             arrange = read("ai.arrange").as_deref() != Some("0");
+            context = read(CONTEXT_SETTING).unwrap_or_default();
             let defaults = Watch::default();
             watch = Watch {
                 enabled: read("ai.watch.enabled").as_deref() == Some("1"),
@@ -465,6 +473,7 @@ impl Session {
             watch_timer: None,
             auto: false,
             arrange,
+            context,
             arranging: Vec::new(),
             arrange_notes: HashMap::new(),
             known: None,
@@ -681,6 +690,25 @@ impl Session {
         if let Some(id) = chat["id"].as_str().filter(|id| !id.is_empty()) {
             self.conversation = id.to_owned();
         }
+    }
+
+    /// いつも AI に伝える前提と指示を保存する。
+    pub fn set_context(&mut self, text: &str, cx: &mut Context<Self>) {
+        let text = text.trim();
+        let count = text.chars().count();
+        if count > MAX_CONTEXT_CHARS {
+            self.error = Some(
+                format!("いつも伝えることは {MAX_CONTEXT_CHARS} 文字までです（今は {count} 文字）")
+                    .into(),
+            );
+            cx.notify();
+            return;
+        }
+        if text == self.context || !self.save_setting(CONTEXT_SETTING, text, cx) {
+            return;
+        }
+        self.context = text.to_owned();
+        cx.notify();
     }
 
     // ---- 新しいタスクを整える ----
@@ -1582,7 +1610,8 @@ impl Session {
         })?
         .0;
 
-        let system = tools::system_prompt(&malakt_core::view::today(), place);
+        let context = this.read_with(cx, |s, _| s.context.clone()).map_err(gone)?;
+        let system = tools::system_prompt(&malakt_core::view::today(), place, &context);
         for _ in 0..MAX_ROUNDS {
             let (wire, reply) = Self::complete(
                 this,

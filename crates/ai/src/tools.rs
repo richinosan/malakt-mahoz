@@ -409,9 +409,18 @@ pub fn shell_name() -> &'static str {
 }
 
 /// AI への最初の指示。`place` は、ユーザーが今開いている場所の説明。
-pub fn system_prompt(today: &str, place: &str) -> String {
+/// `context` は、ユーザーが設定に書いた、いつも伝える前提と指示。
+pub fn system_prompt(today: &str, place: &str, context: &str) -> String {
     let shell = shell_name();
-    format!(
+    let context = if context.trim().is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\n\nユーザーが設定に書いた前提と指示です。いつも従ってください。\n{}",
+            context.trim()
+        )
+    };
+    let prompt = format!(
         "あなたは、タスク管理アプリ malakt-mahoz の中で動くアシスタントです。\
          ツールを使って、ユーザーのタスク、ワークスペース、担当者を読み書きできます。\n\
          - 今日は {today} です。日付は YYYY-MM-DD で渡します。\n\
@@ -423,7 +432,8 @@ pub fn system_prompt(today: &str, place: &str) -> String {
          - タスクの追加、書き換え、整理のように元に戻せる操作は、「〜しましょうか」と聞き返さずに実行し、結果だけを伝えてください。聞き返すのは、頼まれたことが 2 通り以上に読めて、どちらかで結果が大きく変わるときだけです。\n\
          - ツールが失敗したら、やり方を変えてやり直してください。返事には最後の結果だけを書き、途中の失敗、その原因、ツールやシェルの事情は書かないでください。どうしてもできなかったときだけ、できなかったことと、ユーザーにしてほしいことを 1 文で書いてください。\n\
          - 返事は短く、ユーザーの言葉（ふつうは日本語）で書いてください。記法は使わず、ふつうの文章で書いてください。"
-    )
+    );
+    prompt + &context
 }
 
 #[cfg(test)]
@@ -617,7 +627,7 @@ mod tests {
 
     #[test]
     fn system_prompt_carries_today_and_place() {
-        let prompt = system_prompt("2026-11-24", "ユーザーは「家」を開いています。");
+        let prompt = system_prompt("2026-11-24", "ユーザーは「家」を開いています。", "");
         assert!(prompt.contains("2026-11-24"));
         assert!(prompt.contains("「家」"));
         assert!(prompt.contains("github_fetch"));
@@ -625,5 +635,8 @@ mod tests {
         assert!(prompt.contains(shell_name()));
         assert!(prompt.contains("聞き返さずに実行"));
         assert!(prompt.contains("途中の失敗"));
+        assert!(!prompt.contains("前提と指示"));
+        let prompt = system_prompt("2026-11-24", "", " PR は必ずレビューする \n");
+        assert!(prompt.ends_with("いつも従ってください。\nPR は必ずレビューする"));
     }
 }
