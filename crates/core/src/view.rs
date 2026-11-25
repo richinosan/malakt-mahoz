@@ -254,6 +254,14 @@ pub fn add_days(date: &str, days: i64) -> String {
     }
 }
 
+/// `date` に、`from` の時刻があればそれを付ける。日付だけを変えるときに時刻を残すのに使う。
+pub fn with_time_of(date: &str, from: Option<&str>) -> String {
+    match from.and_then(crate::time_of) {
+        Some(time) => format!("{date} {time}"),
+        None => date.to_owned(),
+    }
+}
+
 /// いまの日時（端末の時刻帯）。`YYYY-MM-DD HH:MM`。
 pub fn now() -> String {
     chrono::Local::now().format("%Y-%m-%d %H:%M").to_string()

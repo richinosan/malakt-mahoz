@@ -1332,16 +1332,12 @@ fn clean_draft(draft: &TaskDraft) -> Result<TaskDraft> {
     let due = match draft.due.as_deref().map(str::trim) {
         None | Some("") => None,
         Some(d) if is_valid_when(d) => Some(d.to_owned()),
-        Some(d) => return Err(Error::Invalid(format!("期限の日付が正しくありません: {d}"))),
+        Some(d) => return Err(Error::Invalid(format!("期限が正しくありません: {d}"))),
     };
     let start = match draft.start.as_deref().map(str::trim) {
         None | Some("") => None,
         Some(d) if is_valid_when(d) => Some(d.to_owned()),
-        Some(d) => {
-            return Err(Error::Invalid(format!(
-                "開始日の日付が正しくありません: {d}"
-            )))
-        }
+        Some(d) => return Err(Error::Invalid(format!("開始日が正しくありません: {d}"))),
     };
     if draft.percent > 100 {
         return Err(Error::Invalid("進捗は 0 から 100 です".into()));
