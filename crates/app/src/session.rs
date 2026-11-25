@@ -92,6 +92,12 @@ pub fn saved(cx: &App) -> Vec<WindowState> {
 /// 終了を始める。このあと閉じるウィンドウは、次の起動で戻す。
 pub fn quitting(cx: &mut App) {
     crate::db::close_open_mark(cx);
+    // 動いているシェルと、その中のプログラムを終わらせる
+    if let Some(terms) = cx.try_global::<crate::term::SharedTerms>() {
+        terms.0.clone().update(cx, |terms, cx| terms.close_all(cx));
+    }
+    // Claude Code や Cursor が起こした MCP サーバーを終わらせる
+    let _held = crate::mcp::quitting();
     cx.default_global::<Sessions>().quitting = true;
 }
 

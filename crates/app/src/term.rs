@@ -379,6 +379,13 @@ impl Terms {
         }
     }
 
+    /// すべてのターミナルを閉じる。アプリを閉じるときに、動いているシェルとその中のプログラムを終わらせる。
+    pub fn close_all(&mut self, cx: &mut Context<Self>) {
+        self.tabs.clear();
+        self.active = None;
+        cx.notify();
+    }
+
     /// ターミナルを閉じる。動いているシェルも終わる。
     pub fn close(&mut self, id: u64, cx: &mut Context<Self>) {
         let Some(at) = self.tabs.iter().position(|tab| tab.id == id) else {

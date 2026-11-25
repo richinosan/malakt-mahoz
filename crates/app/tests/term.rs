@@ -224,6 +224,45 @@ fn a_full_screen_program_takes_the_screen_and_gives_it_back(cx: &mut TestAppCont
     assert!(screen(cx).text().contains("before"));
 }
 
+/// アプリを閉じると、ターミナルで動いているプログラムも終わる。
+#[cfg(target_os = "linux")]
+#[gpui_kit::test]
+fn quitting_ends_what_runs_in_the_terminals(cx: &mut TestAppContext) {
+    let (window, _view) = start(cx);
+    open_terminal(cx, window);
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("pid");
+    run(
+        cx,
+        window,
+        &format!("sh -c 'echo $$ > {}; sleep 300'", file.display()),
+    );
+    let started = std::time::Instant::now();
+    let pid = loop {
+        cx.run_until_parked();
+        let text = std::fs::read_to_string(&file).unwrap_or_default();
+        if text.ends_with('\n') {
+            break text.trim().to_owned();
+        }
+        assert!(started.elapsed().as_secs() < 10, "プログラムが始まらない");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    // 終わったあと、親が引き取るまでの間は Z（ゾンビ）で残る
+    let alive = || {
+        std::fs::read_to_string(format!("/proc/{pid}/stat"))
+            .is_ok_and(|stat| !stat.contains(") Z "))
+    };
+    assert!(alive());
+    cx.update(malakt_mahoz::session::quitting);
+    assert_eq!(terms(cx, |t| t.tabs.len()), 0);
+    assert_eq!(terms(cx, |t| t.active), None);
+    let started = std::time::Instant::now();
+    while alive() {
+        assert!(started.elapsed().as_secs() < 10, "プログラムが残っている");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
 /// シェルを選んで開くと、次の「＋」でも同じシェルが開く。タブで切り替え、× で閉じる。
 #[gpui_kit::test]
 fn shells_are_chosen_and_tabs_switch_and_close(cx: &mut TestAppContext) {
