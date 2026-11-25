@@ -209,6 +209,8 @@ pub struct MainView {
     pub header_pressed: bool,
     /// 表の列。並び順どおり。幅と、隠しているかを持つ。
     pub columns: Vec<TableColumn>,
+    /// 一覧に使える幅（拡大率を掛ける前の値）。描くたびに、ウィンドウかペインの幅から決める
+    pub list_width: f32,
     /// 幅を変えている列と、押し始めた位置・そのときの幅。
     pub column_resize: Option<(Column, f32, f32)>,
     /// タスクの一覧と、期限が近いタスクの一覧のスクロール位置。
@@ -454,6 +456,7 @@ impl MainView {
             header_pressed: false,
             assignee_picker: false,
             columns: Column::ALL.map(TableColumn::new).to_vec(),
+            list_width: f32::INFINITY,
             column_resize: None,
             column_menu: None,
             list_scroll: UniformListScrollHandle::new(),
@@ -1730,9 +1733,13 @@ impl MainView {
         cx.notify();
     }
 
-    /// 今出している列。
+    /// 今出している列。タイトルに `TITLE_MIN` の幅が残らないときは、右の列から出さない。
     pub fn shown_columns(&self) -> impl Iterator<Item = &TableColumn> {
-        self.columns.iter().filter(|c| !c.hidden)
+        let mut room = self.list_width - TABLE_FIXED - TITLE_MIN;
+        self.columns.iter().filter(|c| !c.hidden).filter(move |c| {
+            room -= c.width + COLUMN_GAP;
+            room >= 0.
+        })
     }
 
     /// 列の左の境界を押して、幅を変え始める。`x` はウィンドウの中の位置。
@@ -2640,6 +2647,13 @@ impl Column {
         }
     }
 }
+
+/// 表でタイトルに必ず残す幅。最初の列幅なら、表にするいちばん狭い幅でも全部の列が入る。
+pub const TITLE_MIN: f32 = 140.;
+/// 列と列の間。
+const COLUMN_GAP: f32 = 12.;
+/// 表の左右の余白と、選択のチェックボックスの幅。
+const TABLE_FIXED: f32 = 48. + 2. + 24. + 24.;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TableColumn {
