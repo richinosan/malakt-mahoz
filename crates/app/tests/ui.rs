@@ -580,7 +580,6 @@ fn every_screen_renders_at_any_size(cx: &mut TestAppContext) {
             Modal::BulkDue,
             Modal::BulkAssignees,
             Modal::BulkCategories,
-            Modal::NewTask,
             Modal::Notices,
             Modal::Ticket(task.clone()),
         ];
@@ -1264,51 +1263,69 @@ fn bulk_changes_and_full_new_task_form(cx: &mut TestAppContext) {
     ui(cx, window, |window, cx| window.click("bulk-due-clear", cx));
     assert_eq!(due(cx, &shown[0]), None);
 
-    // 書きかけのタイトルを引き継いで、項目を入れて作る
+    // 書きかけのタイトルがあれば、ダイアログなしでそのタイトルで作り、詳細を開く
     set(cx, |v| &v.inputs.quick_add, "見積もりを取る");
     ui(cx, window, |window, cx| window.click("new-task-open", cx));
-    cx.update(|cx| {
-        let view = view.read(cx);
-        assert_eq!(view.modal, Modal::NewTask);
-        assert_eq!(
-            view.inputs.nt_title.read(cx).value().as_ref(),
-            "見積もりを取る"
-        );
-    });
-    set(cx, |v| &v.inputs.nt_due, "2026年12月1日");
-    set(cx, |v| &v.inputs.nt_start, "2026.11.30 9時");
-    set(cx, |v| &v.inputs.nt_categories, "経理");
-    ui(cx, window, |window, cx| {
-        window.click(("nt-prio", 1usize), cx)
-    });
-    ui(cx, window, |window, cx| window.click(("nt-as", 1usize), cx));
-    ui(cx, window, |window, cx| window.click("new-task-submit", cx));
     let made = all_tasks(cx)
         .into_iter()
         .find(|t| t.title == "見積もりを取る")
         .unwrap();
-    assert_eq!(made.due.as_deref(), Some("2026-12-01"));
-    assert_eq!(made.start.as_deref(), Some("2026-11-30 09:00"));
-    assert_eq!(made.categories, ["経理"]);
-    assert_eq!(made.assignee_ids, std::slice::from_ref(&sato));
-    assert_eq!(made.priority, 1);
     cx.update(|cx| {
         let view = view.read(cx);
         assert_eq!(view.modal, Modal::None);
-        // 作ったタスクの詳細が開く
         assert_eq!(view.panel.as_deref(), Some(made.id.as_str()));
+        assert_eq!(view.editing, None);
+        assert_eq!(view.inputs.quick_add.read(cx).value().as_ref(), "");
     });
 
-    // タイトルが空なら作らない（詳細は入力欄に重なるので、先に閉じる）
+    // 何も書いていなければ「新規タスク」で作り、詳細でそのままタイトルを書く
+    // （詳細は入力欄に重なるので、先に閉じる）
     cx.update(|cx| view.update(cx, |v, cx| v.dismiss(cx)));
     cx.run_until_parked();
     ui(cx, window, |window, cx| window.click("new-task-open", cx));
-    ui(cx, window, |window, cx| window.click("new-task-submit", cx));
+    let added = all_tasks(cx)
+        .into_iter()
+        .find(|t| t.title == malakt_mahoz::state::NEW_TASK_TITLE)
+        .expect("新規タスク");
     cx.update(|cx| {
         let view = view.read(cx);
-        assert_eq!(view.modal, Modal::NewTask);
-        assert!(view.error.is_some());
+        assert_eq!(view.modal, Modal::None);
+        assert_eq!(view.panel.as_deref(), Some(added.id.as_str()));
+        assert_eq!(view.editing, Some(malakt_mahoz::state::Editing::Title));
+        assert_eq!(view.naming_task.as_deref(), Some(added.id.as_str()));
     });
+    // タイトルは全部選ばれているので、打つと置き換わる
+    ui(cx, window, |window, cx| {
+        window.input("領収書をまとめる", cx);
+        window.press("enter", cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        store(cx, |s| s.task(&added.id).unwrap()).title,
+        "領収書をまとめる"
+    );
+    cx.update(|cx| {
+        let view = view.read(cx);
+        assert_eq!(view.editing, None);
+        assert_eq!(view.naming_task, None);
+    });
+    // 書き終えたあとも Esc を受けられて、詳細が閉じる
+    ui(cx, window, |window, cx| window.press("escape", cx));
+    cx.update(|cx| assert_eq!(view.read(cx).panel, None));
+
+    // Esc で取り消すと、「新規タスク」のまま残る
+    ui(cx, window, |window, cx| window.click("new-task-open", cx));
+    ui(cx, window, |window, cx| window.input("捨てるタイトル", cx));
+    ui(cx, window, |window, cx| window.press("escape", cx));
+    cx.run_until_parked();
+    cx.update(|cx| {
+        let view = view.read(cx);
+        assert_eq!(view.editing, None);
+        assert_eq!(view.naming_task, None);
+    });
+    let titles: Vec<String> = all_tasks(cx).into_iter().map(|t| t.title).collect();
+    assert!(titles.contains(&malakt_mahoz::state::NEW_TASK_TITLE.to_owned()));
+    assert!(!titles.contains(&"捨てるタイトル".to_owned()));
 }
 
 /// 期限が今日のタスクは、通知の一覧と OS の通知に 1 回だけ出る。
