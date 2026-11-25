@@ -1,34 +1,198 @@
-//! ワークスペースに付けられるアイコン。Lucide の全アイコンを 1 つのデータにまとめて同梱し、
-//! 名前とタグで探せるようにする。
+//! ワークスペースに付けられるアイコン。Lucide の全アイコンと、単色の絵文字（動物・食べ物・乗り物など）を
+//! データにまとめて同梱し、名前・タグ・カテゴリで探せるようにする。
 
 use std::collections::HashMap;
+use std::io::Read;
 use std::sync::OnceLock;
 
 /// 1 行に 1 アイコン。「名前、タグ（空白区切り）、SVG の中身」をタブで区切ってある。
 static DATA: &str = include_str!("../assets/icons/lucide.tsv");
 
+/// 絵文字のアイコン（gzip）。1 行に「名前、カテゴリ、タグ（日本語）、SVG の中身」。
+/// `scripts/emoji-icons.py` で作る。
+static EMOJI: &[u8] = include_bytes!("../assets/icons/emoji.tsv.gz");
+
 const SVG_HEAD: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">"#;
+
+const EMOJI_HEAD: &str =
+    r#"<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32">"#;
+
+/// アイコンを選ぶ画面で絞り込めるカテゴリ。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Category {
+    Nature,
+    Food,
+    Travel,
+    Activity,
+    Object,
+}
+
+impl Category {
+    pub const ALL: [Category; 5] = [
+        Category::Nature,
+        Category::Food,
+        Category::Travel,
+        Category::Activity,
+        Category::Object,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Category::Nature => "動物・自然",
+            Category::Food => "食べ物・飲み物",
+            Category::Travel => "乗り物・場所",
+            Category::Activity => "趣味・スポーツ",
+            Category::Object => "もの",
+        }
+    }
+
+    /// カテゴリのボタンに出すアイコン。
+    pub fn icon(self) -> &'static str {
+        match self {
+            Category::Nature => "paw-print",
+            Category::Food => "utensils",
+            Category::Travel => "car",
+            Category::Activity => "trophy",
+            Category::Object => "lightbulb",
+        }
+    }
+
+    fn key(self) -> &'static str {
+        match self {
+            Category::Nature => "nature",
+            Category::Food => "food",
+            Category::Travel => "travel",
+            Category::Activity => "activity",
+            Category::Object => "object",
+        }
+    }
+
+    /// Lucide のアイコンは、タグにこの言葉のどれかがあればこのカテゴリに入れる。
+    fn words(self) -> &'static [&'static str] {
+        match self {
+            Category::Nature => &[
+                "animal", "animals", "pet", "bird", "fish", "insect", "plant", "plants", "tree",
+                "flower", "forest", "garden",
+            ],
+            Category::Food => &[
+                "food",
+                "drink",
+                "beverage",
+                "fruit",
+                "vegetable",
+                "meal",
+                "restaurant",
+                "cooking",
+                "kitchen",
+            ],
+            Category::Travel => &[
+                "transportation",
+                "transport",
+                "vehicle",
+                "travel",
+                "trip",
+                "flight",
+                "journey",
+                "building",
+                "buildings",
+                "city",
+                "map",
+            ],
+            Category::Activity => &[
+                "sport",
+                "sports",
+                "game",
+                "games",
+                "gaming",
+                "music",
+                "hobby",
+                "toy",
+                "party",
+                "celebration",
+                "art",
+                "movie",
+            ],
+            Category::Object => &[
+                "tool",
+                "tools",
+                "device",
+                "office",
+                "stationery",
+                "clothing",
+                "clothes",
+                "furniture",
+                "household",
+                "hardware",
+            ],
+        }
+    }
+}
 
 pub struct Entry {
     pub name: &'static str,
+    /// 絵文字のカテゴリ。Lucide のアイコンにはなく、タグから決める。
+    category: Option<&'static str>,
     tags: &'static str,
     body: &'static str,
 }
 
-/// 名前の順に並んだ全アイコン。
+impl Entry {
+    fn is_in(&self, category: Category) -> bool {
+        match self.category {
+            Some(key) => key == category.key(),
+            None => self
+                .tags
+                .split(' ')
+                .any(|tag| category.words().contains(&tag)),
+        }
+    }
+}
+
+/// ひらがなをカタカナにする。「ねこ」でも「ネコ」でも同じものが見つかるようにする。
+fn katakana(text: &str) -> String {
+    text.chars()
+        .map(|c| match c {
+            'ぁ'..='ゖ' => char::from_u32(c as u32 + 0x60).unwrap_or(c),
+            _ => c,
+        })
+        .collect()
+}
+
+/// 絵文字のデータを展開したもの。アプリが動いている間、持ち続ける。
+fn emoji_data() -> &'static str {
+    static TEXT: OnceLock<String> = OnceLock::new();
+    TEXT.get_or_init(|| {
+        let mut text = String::new();
+        flate2::read::GzDecoder::new(EMOJI)
+            .read_to_string(&mut text)
+            .expect("同梱の絵文字アイコンのデータを展開できません");
+        katakana(&text)
+    })
+}
+
+/// 全アイコン。Lucide を名前の順に、そのあとに絵文字を並べる。
 pub fn all() -> &'static [Entry] {
     static ALL: OnceLock<Vec<Entry>> = OnceLock::new();
     ALL.get_or_init(|| {
-        DATA.lines()
-            .filter_map(|line| {
-                let mut parts = line.splitn(3, '\t');
-                Some(Entry {
-                    name: parts.next()?,
-                    tags: parts.next()?,
-                    body: parts.next()?,
-                })
+        let lucide = DATA.lines().filter_map(|line| {
+            let mut parts = line.splitn(3, '\t');
+            Some(Entry {
+                name: parts.next()?,
+                category: None,
+                tags: parts.next()?,
+                body: parts.next()?,
             })
-            .collect()
+        });
+        let emoji = emoji_data().lines().filter_map(|line| {
+            let mut parts = line.splitn(4, '\t');
+            Some(Entry {
+                name: parts.next()?,
+                category: Some(parts.next()?),
+                tags: parts.next()?,
+                body: parts.next()?,
+            })
+        });
+        lucide.chain(emoji).collect()
     })
 }
 
@@ -40,7 +204,12 @@ fn by_name() -> &'static HashMap<&'static str, &'static Entry> {
 /// その名前のアイコンの SVG。
 pub fn svg(name: &str) -> Option<Vec<u8>> {
     let entry = by_name().get(name)?;
-    Some(format!("{SVG_HEAD}{}</svg>", entry.body).into_bytes())
+    let head = if entry.category.is_some() {
+        EMOJI_HEAD
+    } else {
+        SVG_HEAD
+    };
+    Some(format!("{head}{}</svg>", entry.body).into_bytes())
 }
 
 /// 日本語で探すときの言い換え。タグは英語なので、よく使う言葉だけ対応させる。
@@ -180,21 +349,31 @@ const JAPANESE: &[(&str, &str)] = &[
     ("タスク", "list-todo check"),
 ];
 
-/// 探す言葉に合うアイコンの名前。空なら `first`、その次に残りを名前の順で返す。
-pub fn search(query: &str, first: &[&'static str], limit: usize) -> Vec<&'static str> {
+/// 探す言葉とカテゴリに合うアイコンの名前。言葉が空でカテゴリもなければ `first`、その次に残りを返す。
+pub fn search(
+    query: &str,
+    category: Option<Category>,
+    first: &[&'static str],
+    limit: usize,
+) -> Vec<&'static str> {
     let query = query.trim().to_lowercase();
+    let within = |entry: &&Entry| category.is_none_or(|category| entry.is_in(category));
     if query.is_empty() {
-        let rest = all()
-            .iter()
-            .map(|entry| entry.name)
-            .filter(|name| !first.contains(name));
+        let rest = all().iter().filter(within).map(|entry| entry.name);
+        if category.is_some() {
+            // カテゴリの中は絵文字を先に出す。動物なら、種類の多い絵文字が上に並ぶ
+            let (emoji, lucide): (Vec<_>, Vec<_>) =
+                rest.partition(|name| name.starts_with("emoji-"));
+            return emoji.into_iter().chain(lucide).take(limit).collect();
+        }
+        let rest = rest.filter(|name| !first.contains(name));
         return first.iter().copied().chain(rest).take(limit).collect();
     }
     // 空白で区切った言葉のすべてに合うものを出す。日本語は、対応する英語のどれかに合えばよい
     let words: Vec<Vec<String>> = query
         .split_whitespace()
         .map(|word| {
-            let mut terms = vec![word.to_owned()];
+            let mut terms = vec![katakana(word)];
             for (japanese, english) in JAPANESE {
                 if japanese.contains(word) || word.contains(japanese) {
                     terms.extend(english.split(' ').map(str::to_owned));
@@ -203,7 +382,7 @@ pub fn search(query: &str, first: &[&'static str], limit: usize) -> Vec<&'static
             terms
         })
         .collect();
-    let matches = |entry: &Entry| {
+    let matches = |entry: &&Entry| {
         words.iter().all(|terms| {
             terms.iter().any(|term| {
                 entry.name.contains(term.as_str()) || entry.tags.contains(term.as_str())
@@ -212,7 +391,7 @@ pub fn search(query: &str, first: &[&'static str], limit: usize) -> Vec<&'static
     };
     // 名前に合うものを先に、タグだけに合うものを後に並べる
     let (mut named, mut tagged) = (Vec::new(), Vec::new());
-    for entry in all().iter().filter(|entry| matches(entry)) {
+    for entry in all().iter().filter(within).filter(matches) {
         let in_name = words
             .iter()
             .all(|terms| terms.iter().any(|term| entry.name.contains(term.as_str())));
@@ -225,13 +404,41 @@ pub fn search(query: &str, first: &[&'static str], limit: usize) -> Vec<&'static
     named.into_iter().chain(tagged).take(limit).collect()
 }
 
+/// 言葉の並びから、いちばん合うアイコンを 1 つ選ぶ。前の言葉ほど優先する。
+/// 名前がその言葉と同じものがあればそれを、なければ探して最初に見つかったものを返す。
+pub fn pick(words: &[&str]) -> Option<&'static str> {
+    let words: Vec<String> = words
+        .iter()
+        .map(|word| {
+            word.trim()
+                .trim_matches(|c: char| !c.is_alphanumeric())
+                .to_lowercase()
+                .replace([' ', '_'], "-")
+        })
+        .filter(|word| !word.is_empty())
+        .collect();
+    let exact = words.iter().find_map(|word| {
+        let emoji = format!("emoji-{word}");
+        let lucide = by_name().get(word.as_str());
+        lucide
+            .or_else(|| by_name().get(emoji.as_str()))
+            .map(|entry| entry.name)
+    });
+    exact.or_else(|| {
+        words
+            .iter()
+            .find_map(|word| search(word, None, &[], 1).into_iter().next())
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn every_icon_is_a_valid_svg_with_a_short_name() {
-        assert!(all().len() > 2000);
+        assert!(all().len() > 2900);
+        assert_eq!(all().len(), by_name().len(), "名前が重なっています");
         for entry in all() {
             // データベースに入れられる名前（英小文字・数字・ハイフン、40 文字まで）
             assert!(entry.name.len() <= 40, "{}", entry.name);
@@ -254,21 +461,65 @@ mod tests {
     fn search_finds_by_name_tag_and_japanese() {
         let first = ["folder", "rocket"];
         // 空なら、よく使うものを先に
-        assert_eq!(search("", &first, 3), ["folder", "rocket", "a-arrow-down"]);
+        assert_eq!(
+            search("", None, &first, 3),
+            ["folder", "rocket", "a-arrow-down"]
+        );
         // 名前に合うものが先
-        assert_eq!(search("rocket", &first, 10)[0], "rocket");
+        assert_eq!(search("rocket", None, &first, 10)[0], "rocket");
         // タグでも見つかる（house のタグに home がある）
-        assert!(search("home", &first, 200).contains(&"house"));
+        assert!(search("home", None, &first, 200).contains(&"house"));
         // 日本語
-        assert!(search("音楽", &first, 200).contains(&"music"));
-        assert!(search("猫", &first, 200).contains(&"cat"));
+        assert!(search("音楽", None, &first, 200).contains(&"music"));
+        assert!(search("猫", None, &first, 200).contains(&"cat"));
         // 2 語はどちらにも合うものだけ
-        let both = search("calendar check", &first, 200);
+        let both = search("calendar check", None, &first, 200);
         assert!(both.contains(&"calendar-check"));
         assert!(!both.contains(&"calendar"));
         // 合うものがなければ空
-        assert!(search("zzzzqqq", &first, 10).is_empty());
+        assert!(search("zzzzqqq", None, &first, 10).is_empty());
+        // ひらがなでもカタカナでも、絵文字のアイコンが見つかる
+        assert!(search("ぺんぎん", None, &first, 200).contains(&"emoji-penguin"));
+        assert!(search("ペンギン", None, &first, 200).contains(&"emoji-penguin"));
+        assert!(search("penguin", None, &first, 200).contains(&"emoji-penguin"));
         // 上限を守る
-        assert_eq!(search("a", &first, 5).len(), 5);
+        assert_eq!(search("a", None, &first, 5).len(), 5);
+    }
+
+    #[test]
+    fn pick_takes_the_first_word_that_has_an_icon() {
+        // 同じ名前の線画が先、なければ絵文字
+        assert_eq!(pick(&["cat", "dog"]), Some("cat"));
+        assert_eq!(pick(&["penguin", "bird"]), Some("emoji-penguin"));
+        assert_eq!(pick(&["zzzzqqq", " Rocket. "]), Some("rocket"));
+        // 同じ名前がなければ、探して見つかったもの
+        assert_eq!(pick(&["zzzzqqq", "takeoff"]), Some("plane-takeoff"));
+        assert_eq!(pick(&["zzzzqqq"]), None);
+        assert_eq!(pick(&[]), None);
+    }
+
+    #[test]
+    fn categories_narrow_the_list() {
+        let first = ["folder", "rocket"];
+        for category in Category::ALL {
+            let found = search("", Some(category), &first, 10_000);
+            assert!(found.len() > 80, "{category:?}: {}", found.len());
+            // カテゴリのボタンのアイコンがある
+            assert!(svg(category.icon()).is_some(), "{category:?}");
+        }
+        let nature = search("", Some(Category::Nature), &first, 10_000);
+        // 絵文字の動物が先、Lucide の動物があと
+        assert!(nature.contains(&"cat") && nature.contains(&"emoji-elephant"));
+        assert_eq!(nature[0], "emoji-monkey-face");
+        assert!(
+            nature.iter().position(|n| *n == "emoji-cat") < nature.iter().position(|n| *n == "cat")
+        );
+        assert!(!nature.contains(&"folder") && !nature.contains(&"emoji-pizza"));
+        // カテゴリの中で探す
+        assert!(search("pizza", Some(Category::Food), &first, 100).contains(&"emoji-pizza"));
+        assert!(search("pizza", Some(Category::Nature), &first, 100).is_empty());
+        // 絵文字の SVG は 32 の枠で、塗りで描く
+        let svg = String::from_utf8(svg("emoji-penguin").unwrap()).unwrap();
+        assert!(svg.contains(r#"viewBox="0 0 32 32""#) && svg.ends_with("</svg>"));
     }
 }

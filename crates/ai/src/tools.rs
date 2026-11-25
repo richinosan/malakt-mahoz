@@ -29,8 +29,8 @@ fn task_fields() -> Value {
         "status": {"type": "string", "enum": ["needs_action", "in_process", "completed", "cancelled"],
                    "description": "未着手 / 進行中 / 完了 / 中止"},
         "priority": {"type": "string", "enum": ["none", "high", "mid", "low"]},
-        "start": {"type": ["string", "null"], "description": "開始日 YYYY-MM-DD。null でなくす"},
-        "due": {"type": ["string", "null"], "description": "期限 YYYY-MM-DD。null でなくす"},
+        "start": {"type": ["string", "null"], "description": "開始日 YYYY-MM-DD。時刻つきなら YYYY-MM-DD HH:MM。null でなくす"},
+        "due": {"type": ["string", "null"], "description": "期限 YYYY-MM-DD。時刻つきなら YYYY-MM-DD HH:MM。null でなくす"},
         "percent": {"type": "integer", "minimum": 0, "maximum": 100, "description": "進捗"},
         "parent_id": {"type": ["string", "null"], "description": "親のタスクの ID（サブタスクにする）"},
         "assignee_ids": {"type": "array", "items": {"type": "string"}, "description": "担当者の ID"},
@@ -193,6 +193,8 @@ fn apply_fields(draft: &mut TaskDraft, args: &Value) -> Result<(), String> {
         .value();
     }
     // 日付と親は、null か空の文字列で「なし」にできる
+    // 日付は「2026-12-01T18:00」や「明日 14時」のような書き方も読む
+    let now = malakt_core::view::now();
     for (key, slot) in [
         ("start", &mut draft.start),
         ("due", &mut draft.due),
@@ -201,6 +203,9 @@ fn apply_fields(draft: &mut TaskDraft, args: &Value) -> Result<(), String> {
         match args.get(key) {
             Some(Value::Null) => *slot = None,
             Some(Value::String(s)) if s.is_empty() => *slot = None,
+            Some(Value::String(s)) if key != "parent_id" => {
+                *slot = Some(malakt_core::when::resolve(s, &now, slot.as_deref()))
+            }
             Some(Value::String(s)) => *slot = Some(s.clone()),
             Some(other) => return Err(format!("{key} が正しくありません: {other}")),
             None => {}
@@ -402,7 +407,7 @@ pub fn summary(name: &str, args: &Value) -> String {
 /// ユーザーのメッセージの最後に添える、今日の日付と今の画面。
 /// `extra` は、今開いているワークスペースについての前提と指示。
 pub fn turn_note(today: &str, place: &str, extra: &str) -> String {
-    let mut note = format!("\n\n（アプリからの補足）\n今日は {today} です。");
+    let mut note = format!("\n\n（アプリからの補足）\n今は {today} です。");
     for part in [place, extra] {
         if !part.trim().is_empty() {
             note.push('\n');
@@ -437,7 +442,8 @@ pub fn system_prompt(context: &str) -> String {
     let prompt = format!(
         "あなたは、タスク管理アプリ malakt-mahoz の中で動くアシスタントです。\
          ツールを使って、ユーザーのタスク、ワークスペース、担当者を読み書きできます。\n\
-         - 日付は YYYY-MM-DD で渡します。今日の日付と、ユーザーが今開いている画面は、ユーザーのメッセージの最後にアプリが添えます。\n\
+         - 日付は YYYY-MM-DD、時刻つきなら YYYY-MM-DD HH:MM で渡します。時刻が分かる期限には時刻も入れてください。今の日時と、ユーザーが今開いている画面は、ユーザーのメッセージの最後にアプリが添えます。
+\
          - 頼まれた操作は、確認を取らずにツールで実行してください。タスクの削除とシェルのコマンドは、アプリが実行の前にユーザーへ確認を出します。\n\
          - ID はツールで調べてから使ってください。ID を作らないでください。\n\
          - GitHub のリンクの中身は、必ず {GITHUB_FETCH} で取ってきてください（アプリが、ユーザーのログイン済みの gh で読みます）。{RUN_SHELL} で gh を呼ぶのは、{GITHUB_FETCH} で読めない種類のものだけにしてください。\n\
@@ -514,6 +520,20 @@ mod tests {
         assert_eq!(task["status"], "needs_action");
         assert_eq!(task["priority"], "high");
         assert_eq!(task["due"], "2026-12-01");
+        // 時刻つきの期限。ISO の書き方で渡されても読む
+        let timed = run(
+            &mut store,
+            "update_task",
+            json!({"id": task["id"], "due": "2026-12-01T18:30:00", "start": "2026/11/30 9時"}),
+        );
+        assert_eq!(timed["due"], "2026-12-01 18:30");
+        assert_eq!(timed["start"], "2026-11-30 09:00");
+        let back = run(
+            &mut store,
+            "update_task",
+            json!({"id": task["id"], "due": "2026-12-01", "start": null}),
+        );
+        assert_eq!(back["due"], "2026-12-01");
         assert_eq!(task["workspace_id"], inner["id"]);
         let id = task["id"].as_str().unwrap().to_owned();
 
@@ -618,7 +638,8 @@ mod tests {
             fail("create_task", json!({"title": "a", "categories": [1]})).contains("categories")
         );
         assert!(
-            fail("create_task", json!({"title": "a", "due": "12/01"})).contains("正しくありません")
+            fail("create_task", json!({"title": "a", "due": "そのうち"}))
+                .contains("正しくありません")
         );
         assert!(fail("update_task", json!({"id": "none"})).contains("見つかりません"));
         assert!(fail("list_tasks", json!({"workspace_id": "none"})).contains("見つかりません"));

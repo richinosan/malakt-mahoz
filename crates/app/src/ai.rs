@@ -195,6 +195,73 @@ fn task_links(store: &malakt_core::Store) -> Result<Vec<(NewTask, bool)>, String
         .collect())
 }
 
+/// コメントが書かれてから、AI がタスクを更新し始めるまでの待ち時間。続けて書いた分をまとめる。
+pub const TRACK_DELAY: std::time::Duration = std::time::Duration::from_secs(3);
+/// コメントからタスクを更新するとき、1 回で扱うタスクの数。
+const MAX_TRACK_TASKS: usize = 5;
+/// コメントからタスクを更新するとき、タスク 1 つで AI に渡すコメントの数と文字数。
+const MAX_TRACK_COMMENTS: usize = 12;
+const MAX_TRACK_CHARS: usize = 4000;
+/// 元に戻せるように覚えておくタスクの数。
+const MAX_TRACK_UNDO: usize = 50;
+
+/// 今あるコメントをすべて「もう見た」とする目印。いちばん新しい時刻と、その時刻のコメントの ID。
+fn comment_mark(store: &malakt_core::Store) -> Option<(i64, Vec<String>)> {
+    let latest = store.latest_comment_time().ok()?;
+    let seen = store.comments_changed_since(latest).ok()?;
+    Some((latest, seen.into_iter().map(|(id, _, _)| id).collect()))
+}
+
+/// AI がコメントから更新したタスクの、前と後。元に戻すときに使う。
+pub struct Tracked {
+    before: malakt_core::Task,
+    after: malakt_core::Task,
+    /// 何を変えたか（「25% → 60%」など）。
+    pub label: SharedString,
+}
+
+/// AI が変えたところを短い言葉にする。変えていなければ `None`。
+fn tracked_label(before: &malakt_core::Task, after: &malakt_core::Task) -> Option<String> {
+    let mut parts = Vec::new();
+    if before.percent != after.percent {
+        parts.push(format!("{}% → {}%", before.percent, after.percent));
+    }
+    if before.status != after.status {
+        parts.push(after.status.label().to_owned());
+    }
+    if before.due != after.due {
+        parts.push(match &after.due {
+            Some(due) => format!("期限 {due}"),
+            None => "期限なし".to_owned(),
+        });
+    }
+    if before.start != after.start {
+        parts.push(match &after.start {
+            Some(start) => format!("開始 {start}"),
+            None => "開始日なし".to_owned(),
+        });
+    }
+    if before.priority != after.priority {
+        parts.push(format!(
+            "優先度 {}",
+            malakt_core::view::Priority::of(after.priority).label()
+        ));
+    }
+    (!parts.is_empty()).then(|| parts.join("・"))
+}
+
+/// コメントからの更新で AI が呼べるツールか。タスクを読むことと、対象のタスクの更新だけができる。
+fn track_allows(name: &str, args: &Value, tracking: &[String]) -> bool {
+    match name {
+        "update_task" => args
+            .get("id")
+            .and_then(Value::as_str)
+            .is_some_and(|id| tracking.iter().any(|t| t == id)),
+        "get_task" | "list_tasks" | "list_workspaces" | "list_people" => true,
+        _ => false,
+    }
+}
+
 type Headers = [(&'static str, String)];
 /// 環境変数を読む。
 pub type EnvFn = dyn Fn(&str) -> Option<String> + Send + Sync;
@@ -202,6 +269,11 @@ pub type EnvFn = dyn Fn(&str) -> Option<String> + Send + Sync;
 pub type PostFn = dyn Fn(&str, &Headers, &Value) -> Result<Value, String> + Send + Sync;
 /// GET して、本文を受け取る。
 pub type GetFn = dyn Fn(&str, &Headers) -> Result<String, String> + Send + Sync;
+
+/// ワークスペースのアイコンを選ぶときの、AI への指示。
+const ICON_PROMPT: &str = "ワークスペース（タスクをまとめるフォルダ）の名前を受け取り、その名前に合うアイコンを探すための英単語を答えます。\n\
+- 具体的な物や生き物を表す、小文字の英語の名詞を 5 つまで、合う順にコンマで区切って書く（例: cat, plane, book, wrench, house）。\n\
+- 英単語のほかには何も書かない。";
 
 /// 外とのやり取り。テストでは差し替える。
 #[derive(Clone)]
@@ -360,8 +432,25 @@ pub struct Session {
     pub arranging: Vec<String>,
     /// タスクを整えられなかった理由。タスクの ID ごと。
     pub arrange_notes: HashMap<String, SharedString>,
+    /// コメントが書かれたら、AI が進捗などを更新する。標準はオン（API キーがなければ動かない）。
+    pub track: bool,
+    /// AI が今コメントから更新しているタスクの ID。
+    pub tracking: Vec<String>,
+    /// コメントから更新できなかった理由。タスクの ID ごと。
+    pub track_notes: HashMap<String, SharedString>,
+    /// AI がコメントから更新したタスクの、前と後。タスクの ID ごと。
+    pub tracked: HashMap<String, Tracked>,
+    /// コメントが書かれて、更新を待っているタスクの ID。
+    track_waiting: Vec<String>,
+    /// この時刻までのコメントは、もう見た。同じ時刻のコメントは ID で見分ける。
+    comment_mark: Option<(i64, Vec<String>)>,
+    track_timer: Option<Task<()>>,
+    /// 手が空いたら、待っているタスクを更新する。
+    track_retry: bool,
     /// もう見たタスクと、そのリンク。ここにないタスクやリンクが新しいもの。
     known: Option<HashMap<String, Vec<String>>>,
+    /// ユーザーが最初のタイトルを書いている途中のタスク。書き終えるまで整えない。
+    holding: Vec<String>,
     /// 手が空いたら、新しいタスクを探し直す。
     arrange_retry: bool,
     /// チャットを出している（メインのウィンドウの右か、別ウィンドウ）。次の起動で戻す。
@@ -412,6 +501,7 @@ impl Session {
         let ui: SavedUi;
         let chat: Option<Value>;
         let arrange;
+        let track;
         let context;
         let (provider, effort, models) = {
             let store = &db.read(cx).store;
@@ -449,6 +539,7 @@ impl Session {
             chat = read(CHAT_SETTING).and_then(|v| serde_json::from_str::<Value>(&v).ok());
             auto_run = read("ai.auto_run").as_deref() == Some("1");
             arrange = read("ai.arrange").as_deref() != Some("0");
+            track = read("ai.track").as_deref() != Some("0");
             context = read(CONTEXT_SETTING).unwrap_or_default();
             let defaults = Watch::default();
             watch = Watch {
@@ -504,7 +595,16 @@ impl Session {
             context,
             arranging: Vec::new(),
             arrange_notes: HashMap::new(),
+            track,
+            tracking: Vec::new(),
+            track_notes: HashMap::new(),
+            tracked: HashMap::new(),
+            track_waiting: Vec::new(),
+            comment_mark: None,
+            track_timer: None,
+            track_retry: false,
             known: None,
+            holding: Vec::new(),
             arrange_retry: false,
             open: ui.open,
             restore: (ui.open || ui.shell == "window")
@@ -526,12 +626,21 @@ impl Session {
             _subscriptions: Vec::new(),
         };
         this._subscriptions = vec![
-            cx.observe(&this.db.clone(), |this, _, cx| this.tasks_changed(cx)),
+            cx.observe(&this.db.clone(), |this, _, cx| {
+                this.tasks_changed(cx);
+                this.comments_changed(cx);
+            }),
             cx.observe_self(|this, cx| this.persist(cx)),
             cx.observe_self(|this, cx| {
                 if this.arrange_retry && !this.busy {
                     this.arrange_retry = false;
                     this.tasks_changed(cx);
+                }
+            }),
+            cx.observe_self(|this, cx| {
+                if this.track_retry && !this.busy {
+                    this.track_retry = false;
+                    this.track_flush(cx);
                 }
             }),
         ];
@@ -543,6 +652,7 @@ impl Session {
         this.restart_watch(cx);
         // 今あるタスクは、もう見たものにする
         this.tasks_changed(cx);
+        this.comments_changed(cx);
         this
     }
 
@@ -787,6 +897,22 @@ impl Session {
         cx.notify();
     }
 
+    /// 追加したばかりのタスクを、ユーザーがタイトルを書き終えるまで整えずに待つ。
+    pub fn hold(&mut self, id: String) {
+        if !self.holding.contains(&id) {
+            self.holding.push(id);
+        }
+    }
+
+    /// タイトルを書き終えたタスクを、整える対象に戻す。
+    pub fn release(&mut self, id: &str, cx: &mut Context<Self>) {
+        let before = self.holding.len();
+        self.holding.retain(|held| held != id);
+        if before != self.holding.len() {
+            self.tasks_changed(cx);
+        }
+    }
+
     /// まだ見ていないタスクと、新しくリンクが書かれたタスク。
     fn new_tasks(&self, all: Vec<(NewTask, bool)>) -> Vec<NewTask> {
         let Some(known) = &self.known else {
@@ -795,6 +921,7 @@ impl Session {
         all.into_iter()
             .filter(|(task, open)| {
                 *open
+                    && !self.holding.contains(&task.id)
                     && known.get(&task.id).is_none_or(|seen| {
                         task.links.iter().any(|link| !seen.contains(&link.url()))
                     })
@@ -941,7 +1068,7 @@ impl Session {
              次のタスクが新しく作られたか、新しいリンクが書かれました。それぞれのタスクを update_task で整えてください。\n\
              - タイトルは、中身が一目で分かる短い言葉にする。URL が入っているタイトルは、リンク先の題を元に付け直す（「〜のレビュー」のようにユーザーが書いた目的は残す）。\n\
              - 説明には、リンクの URL と要点を書く。ユーザーが書いた文は消さない。\n\
-             - 中身から分かる範囲で、優先度や期限を入れる。\n\
+             - 中身から分かる範囲で、優先度や期限を入れる。期限の時刻が分かるときは、時刻も入れる。\n\
              - 直すところがなければ、何も変えない。\n\
              - タスクを新しく作らない。消さない。\n\
              - タイトルと説明には、タスクの中身だけを書く。読めなかったリンクや、確かめられなかったことについての注記を書かない。\n",
@@ -1003,6 +1130,382 @@ impl Session {
         )
         .await?;
         Ok(notes)
+    }
+
+    // ---- コメントからタスクを更新する ----
+
+    pub fn set_track(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.track == on || !self.save_setting("ai.track", if on { "1" } else { "0" }, cx) {
+            return;
+        }
+        self.track = on;
+        // オンにしたときは、今あるコメントをもう見たものにして、次に書かれたものから始める
+        self.comment_mark = None;
+        self.track_waiting.clear();
+        self.track_timer = None;
+        self.track_notes.clear();
+        self.comments_changed(cx);
+        cx.notify();
+    }
+
+    /// AI がコメントから更新して、そのままになっているタスクなら、その記録。
+    pub fn tracked_for(&self, task: &malakt_core::Task) -> Option<&Tracked> {
+        self.tracked.get(&task.id).filter(|t| {
+            let after = &t.after;
+            (task.status, task.percent, task.priority)
+                == (after.status, after.percent, after.priority)
+                && task.due == after.due
+                && task.start == after.start
+        })
+    }
+
+    /// 更新できなかったタスクを、もう一度コメントから更新する。
+    pub fn retry_track(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.track_notes.remove(id);
+        if !self.track_waiting.iter().any(|t| t == id) {
+            self.track_waiting.push(id.to_owned());
+        }
+        self.track_timer = None;
+        self.track_flush(cx);
+        cx.notify();
+    }
+
+    /// AI がコメントから変えたところを、前の値に戻す。そのあとにユーザーが変えたところは残す。
+    pub fn undo_track(&mut self, id: &str, cx: &mut Context<Self>) {
+        let Some(tracked) = self.tracked.remove(id) else {
+            return;
+        };
+        let (before, after) = (&tracked.before, &tracked.after);
+        let result = self.db.update(cx, |db, cx| {
+            let now = db.store.task(id)?;
+            let mut draft = malakt_core::TaskDraft::from(&now);
+            if now.status == after.status {
+                draft.status = before.status;
+            }
+            if now.percent == after.percent {
+                draft.percent = before.percent;
+            }
+            if now.due == after.due {
+                draft.due = before.due.clone();
+            }
+            if now.start == after.start {
+                draft.start = before.start.clone();
+            }
+            if now.priority == after.priority {
+                draft.priority = before.priority;
+            }
+            let task = db.store.update_task(id, &draft);
+            cx.notify();
+            task
+        });
+        if let Err(e) = result {
+            self.error = Some(format!("元に戻せませんでした: {e}").into());
+            self.tracked.insert(id.to_owned(), tracked);
+        }
+        cx.notify();
+    }
+
+    /// 新しく書かれた・書き直されたコメントを見つけたら、少し待ってから AI にタスクを更新させる。
+    fn comments_changed(&mut self, cx: &mut Context<Self>) {
+        if !self.track {
+            self.comment_mark = None;
+            return;
+        }
+        let db = self.db.read(cx);
+        if !db.unlocked {
+            return;
+        }
+        let Some((mark, seen)) = &self.comment_mark else {
+            // 今あるコメントは、もう見たものにする
+            self.comment_mark = comment_mark(&db.store);
+            return;
+        };
+        let Ok(mut changed) = db.store.comments_changed_since(*mark) else {
+            return;
+        };
+        changed.retain(|(id, _, at)| at > mark || !seen.contains(id));
+        let Some(latest) = changed.iter().map(|(_, _, at)| *at).max() else {
+            return;
+        };
+        let mut seen = if latest == *mark {
+            seen.clone()
+        } else {
+            Vec::new()
+        };
+        for (id, task, at) in changed {
+            if at == latest {
+                seen.push(id);
+            }
+            if !self.track_waiting.contains(&task) {
+                self.track_waiting.push(task);
+            }
+        }
+        self.comment_mark = Some((latest, seen));
+        // 続けて書いている間は待ち、手が止まってから 1 回だけ送る
+        self.track_timer = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(TRACK_DELAY).await;
+            // チャットがなくなっていれば、更新する先もない
+            let _ = this.update(cx, |this, cx| this.track_flush(cx));
+        }));
+    }
+
+    /// 待っているタスクを AI に渡す。API キーがなければ通信しない。
+    fn track_flush(&mut self, cx: &mut Context<Self>) {
+        if self.track_waiting.is_empty() {
+            return;
+        }
+        if self.busy {
+            self.track_retry = true;
+            return;
+        }
+        match &self.key {
+            // 調べ終わったら、もう一度ここに来る
+            KeyState::Unknown => self.refresh_key(cx),
+            KeyState::Missing | KeyState::Failed(_) => self.track_waiting.clear(),
+            KeyState::Present { .. } => {
+                let take = self.track_waiting.len().min(MAX_TRACK_TASKS);
+                let ids: Vec<String> = self.track_waiting.drain(..take).collect();
+                self.track_retry = !self.track_waiting.is_empty();
+                self.track_tasks(ids, cx);
+            }
+        }
+    }
+
+    fn track_tasks(&mut self, ids: Vec<String>, cx: &mut Context<Self>) {
+        // 未完了のタスクだけを見る。消えたタスクは飛ばす
+        let tasks: Vec<(malakt_core::Task, Vec<malakt_core::Comment>)> = {
+            let store = &self.db.read(cx).store;
+            ids.iter()
+                .filter_map(|id| {
+                    let task = store.task(id).ok().filter(|t| t.status.is_open())?;
+                    let comments = store.comments(id).ok().filter(|c| !c.is_empty())?;
+                    Some((task, comments))
+                })
+                .collect()
+        };
+        if tasks.is_empty() {
+            return;
+        }
+        self.busy = true;
+        self.auto = true;
+        self.tracking = tasks.iter().map(|(task, _)| task.id.clone()).collect();
+        for id in &self.tracking {
+            self.track_notes.remove(id);
+        }
+        let ids = self.tracking.clone();
+        self.task = Some(cx.spawn(async move |this, cx| {
+            let before: Vec<malakt_core::Task> = tasks.iter().map(|(t, _)| t.clone()).collect();
+            let result = Self::track_run(&this, tasks, cx).await;
+            // チャットがなくなっていれば、知らせる先もない
+            let _ = this.update(cx, |this, cx| {
+                // 途中で失敗しても、そこまでに変えた分は元に戻せるようにする
+                for before in before {
+                    let Ok(after) = this.db.read(cx).store.task(&before.id) else {
+                        continue;
+                    };
+                    // 続けて更新したときは、最初の値まで戻せるようにする
+                    let before = match this.tracked.remove(&before.id) {
+                        Some(old) if old.after.updated_at == before.updated_at => old.before,
+                        _ => before,
+                    };
+                    if let Some(label) = tracked_label(&before, &after) {
+                        let label = label.into();
+                        this.tracked.insert(
+                            after.id.clone(),
+                            Tracked {
+                                before,
+                                after,
+                                label,
+                            },
+                        );
+                    }
+                }
+                // 覚えておく数には上限を付け、古い更新から忘れる
+                while this.tracked.len() > MAX_TRACK_UNDO {
+                    let oldest = this
+                        .tracked
+                        .iter()
+                        .min_by_key(|(_, t)| t.after.updated_at)
+                        .map(|(id, _)| id.clone());
+                    match oldest {
+                        Some(id) => this.tracked.remove(&id),
+                        None => break,
+                    };
+                }
+                if let Err(error) = result {
+                    let note: SharedString =
+                        format!("AI がコメントからタスクを更新できませんでした: {error}").into();
+                    this.items.push(Item::Error(note.clone()));
+                    for id in ids {
+                        this.track_notes.insert(id, note.clone());
+                    }
+                }
+                this.finish();
+                cx.notify();
+            });
+        }));
+        cx.notify();
+    }
+
+    /// コメントを AI に渡し、進捗などを更新させる。
+    async fn track_run(
+        this: &WeakEntity<Self>,
+        tasks: Vec<(malakt_core::Task, Vec<malakt_core::Comment>)>,
+        cx: &mut AsyncApp,
+    ) -> Result<(), String> {
+        let (config, place) = this
+            .read_with(cx, |s, _| (s.config.clone(), s.place.clone()))
+            .map_err(gone)?;
+        let titles: Vec<String> = tasks
+            .iter()
+            .map(|(t, _)| format!("「{}」", t.title))
+            .collect();
+        let mut message = String::from(
+            "（アプリからの自動のメッセージです）\n\
+             次のタスクにコメントが書かれました。コメントから読み取れることを、それぞれのタスクに update_task で反映してください。\n\
+             - percent（進捗率、0〜100）を、説明とコメントの流れから見積もる。作業の何割が終わったかが分かるときだけ変える。\n\
+             - 着手したと読み取れれば status を in_process に、終わったと読み取れれば completed に、やめたと読み取れれば cancelled にする。\n\
+             - 期限や開始日、優先度が変わったと読み取れれば、due、start、priority を変える。\n\
+             - 読み取れることがなければ、何も変えない。推測で変えない。\n\
+             - タイトルと説明は変えない。コメントを書かない。タスクを作らない。消さない。\n\
+             - ユーザーに聞き返さない。\n",
+        );
+        for (task, comments) in &tasks {
+            message.push_str(&format!(
+                "\n## タスク（id: {}）\nタイトル: {}\n状態: {}\n進捗: {}%\n期限: {}\n説明: {}\n### コメント（古い順）\n",
+                task.id,
+                task.title,
+                task.status.as_str(),
+                task.percent,
+                task.due.as_deref().unwrap_or("（なし）"),
+                if task.description.trim().is_empty() {
+                    "（なし）".to_owned()
+                } else {
+                    clip_tail(&task.description, MAX_TRACK_CHARS)
+                }
+            ));
+            let mut ordered: Vec<&malakt_core::Comment> = comments.iter().collect();
+            ordered.sort_by_key(|c| c.created_at);
+            let skip = ordered.len().saturating_sub(MAX_TRACK_COMMENTS);
+            let mut text = String::new();
+            for comment in &ordered[skip..] {
+                text.push_str(&format!(
+                    "- {}: {}\n",
+                    malakt_core::view::format_datetime(comment.updated_at),
+                    comment.body
+                ));
+            }
+            message.push_str(&clip_tail(&text, MAX_TRACK_CHARS));
+        }
+        this.update(cx, |s, cx| {
+            s.items.push(Item::Notice(
+                format!(
+                    "{} のコメントから、AI がタスクを更新します。",
+                    titles.join("、")
+                )
+                .into(),
+            ));
+            s.turns.push(Turn::User(message));
+            cx.notify();
+        })
+        .map_err(gone)?;
+        Self::converse(
+            this,
+            &config,
+            &format!("コメントからの更新（アプリが自動で始めました）。{place}"),
+            cx,
+        )
+        .await
+    }
+
+    // ---- ワークスペースのアイコンを選ぶ ----
+
+    /// 名前を付けたばかりのワークスペースのアイコンを、AI に選ばせる。チャットには出さない。
+    /// API キーがなければ通信せず、アイコンは最初のままにする。
+    pub fn suggest_icon(&mut self, workspace: String, name: String, cx: &mut Context<Self>) {
+        // Cursor は CLI をシェルで動かすので、チャットの外からは使わない
+        if !self.db.read(cx).unlocked || self.provider == Provider::Cursor {
+            return;
+        }
+        let config = self.config.clone();
+        cx.spawn(async move |this, cx| {
+            let result = Self::icon_run(&this, &config, &workspace, &name, cx).await;
+            // チャットがなくなっていれば、知らせる先もない
+            let _ = this.update(cx, |this, cx| {
+                if let Err(error) = result {
+                    this.items.push(Item::Error(
+                        format!("「{name}」のアイコンを AI が選べませんでした: {error}").into(),
+                    ));
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    async fn icon_run(
+        this: &WeakEntity<Self>,
+        config: &AiConfig,
+        workspace: &str,
+        name: &str,
+        cx: &mut AsyncApp,
+    ) -> Result<(), String> {
+        let (provider, model) = this
+            .read_with(cx, |s, _| (s.provider, s.model().to_owned()))
+            .map_err(gone)?;
+        let found = {
+            let config = config.clone();
+            cx.background_executor()
+                .spawn(async move { keys::lookup(&*config.keys, provider, |n| (config.env)(n)) })
+                .await?
+        };
+        let Some((key, _)) = found else {
+            return Ok(());
+        };
+        let turns = [Turn::User(format!("ワークスペースの名前: {name}"))];
+        let request = wire::Request {
+            model: &model,
+            effort: Effort::Default,
+            system: ICON_PROMPT,
+            turns: &turns,
+            tools: &[],
+            fallbacks: false,
+        };
+        let conversation = malakt_core::new_id();
+        let (_, reply) =
+            Self::request(this, config, provider, &key, &conversation, request, cx).await?;
+        if let Some(notice) = reply.notice {
+            return Err(notice);
+        }
+        let words: Vec<&str> = reply
+            .text
+            .split([',', '、', '\n'])
+            .map(str::trim)
+            .filter(|word| !word.is_empty())
+            .collect();
+        let Some(icon) = crate::icons::pick(&words) else {
+            return Err(format!(
+                "AI の答え「{}」に合うアイコンがありません",
+                reply.text.trim()
+            ));
+        };
+        this.update(cx, |s, cx| {
+            s.db.update(cx, |db, cx| {
+                // 待っている間に消えた、名前が変わった、ユーザーがアイコンを選んだ、のどれかなら変えない
+                let Ok(current) = db.store.workspace(workspace) else {
+                    return Ok(());
+                };
+                if current.name != name || current.icon.is_some() {
+                    return Ok(());
+                }
+                db.store
+                    .set_workspace_icon(workspace, Some(icon), current.color.as_deref())
+                    .map_err(|e| e.to_string())?;
+                cx.notify();
+                Ok(())
+            })
+        })
+        .map_err(gone)?
     }
 
     /// オート実行を切り替える。待っている確認があれば、オンにしたときに実行へ進める。
@@ -1100,6 +1603,7 @@ impl Session {
         self.auto = false;
         self.pending = None;
         self.arranging.clear();
+        self.tracking.clear();
     }
 
     async fn watch_run(this: &WeakEntity<Self>, cx: &mut AsyncApp) -> Result<String, String> {
@@ -1303,6 +1807,7 @@ impl Session {
                     Err(e) => KeyState::Failed(e.into()),
                 };
                 this.arrange_retry = true;
+                this.track_retry = true;
                 cx.notify();
             });
         })
@@ -1676,7 +2181,7 @@ impl Session {
         let system = this
             .update(cx, |s, cx| {
                 let note =
-                    tools::turn_note(&malakt_core::view::today(), place, &s.workspace_context(cx));
+                    tools::turn_note(&malakt_core::view::now(), place, &s.workspace_context(cx));
                 if let Some(Turn::User(message)) = s.turns.last_mut() {
                     message.push_str(&note);
                 }
@@ -1786,7 +2291,7 @@ impl Session {
     ) -> Result<(Wire, Reply), String> {
         let turns = this.read_with(cx, |s, _| s.turns.clone()).map_err(gone)?;
         let definitions = tools::definitions();
-        let mut request = wire::Request {
+        let request = wire::Request {
             model,
             effort,
             system,
@@ -1794,6 +2299,20 @@ impl Session {
             tools: &definitions,
             fallbacks: false,
         };
+        Self::request(this, config, provider, key, conversation, request, cx).await
+    }
+
+    /// AI に 1 回問い合わせる。
+    async fn request(
+        this: &WeakEntity<Self>,
+        config: &AiConfig,
+        provider: Provider,
+        key: &str,
+        conversation: &str,
+        mut request: wire::Request<'_>,
+        cx: &mut AsyncApp,
+    ) -> Result<(Wire, Reply), String> {
+        let (model, effort) = (request.model, request.effort);
 
         if provider == Provider::Cursor {
             let Value::String(prompt) = wire::body(Wire::Cursor, &request) else {
@@ -1898,6 +2417,14 @@ impl Session {
             }
         }
         let failed = |e: String| Ok(Err(ToolError::Failed(e)));
+        let tracking = this
+            .read_with(cx, |s, _| s.tracking.clone())
+            .map_err(gone)?;
+        if !tracking.is_empty() && !track_allows(name, &call.args, &tracking) {
+            return failed(
+                "コメントからの更新では、コメントが書かれたタスクの更新だけができます".into(),
+            );
+        }
         match name {
             tools::RUN_SHELL => {
                 let Some(command) = call.args.get("command").and_then(Value::as_str) else {
@@ -1938,6 +2465,17 @@ impl Session {
                         // 自動の整理では、読めなかったことの注記をタスクに書かせない
                         let cleaned = (!s.arranging.is_empty())
                             .then(|| without_fetch_notes(&s.db.read(cx).store, &call.args));
+                        // コメントからの更新では、タイトルと説明を変えさせない
+                        let cleaned = if s.tracking.is_empty() {
+                            cleaned
+                        } else {
+                            let mut args = call.args.clone();
+                            if let Some(map) = args.as_object_mut() {
+                                map.remove("title");
+                                map.remove("description");
+                            }
+                            Some(args)
+                        };
                         let args = cleaned.as_ref().unwrap_or(&call.args);
                         let result = s.db.update(cx, |db, cx| {
                             // 自分が登録されていれば、コメントの書き手にする
@@ -1953,6 +2491,10 @@ impl Session {
                             result
                         });
                         s.absorb(&waiting, cx);
+                        // AI が書いたコメントは、もう見たものにする
+                        if s.comment_mark.is_some() {
+                            s.comment_mark = comment_mark(&s.db.read(cx).store);
+                        }
                         result
                     })
                     .map_err(gone)?;

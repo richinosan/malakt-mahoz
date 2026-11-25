@@ -1,6 +1,7 @@
 //! 画面の描画。状態は `state` にあり、ここは見た目だけを組み立てる。
 
 use std::ops::Range;
+use std::sync::Arc;
 
 use gpui_kit::base::{Disableable, TestSupportExt};
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants};
@@ -9,7 +10,9 @@ use gpui_kit::component::color_picker::ColorPicker;
 use gpui_kit::component::input::{Input, Textarea};
 use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu, PopupMenu, PopupMenuItem};
 use gpui_kit::component::scroll::ScrollableElement;
+use gpui_kit::component::slider::{Slider, SliderState};
 use gpui_kit::component::spinner::Spinner;
+use gpui_kit::component::switch::Switch;
 use gpui_kit::component::text::TextView;
 use gpui_kit::component::{ActiveTheme, Icon, IconName, Sizable};
 use gpui_kit::prelude::FluentBuilder;
@@ -33,7 +36,7 @@ const fn px(value: f32) -> Pixels {
 }
 
 /// アイコンを選ぶ画面に一度に出す数。それより多いときは検索で絞る。
-const ICONS_SHOWN: usize = 240;
+const ICONS_SHOWN: usize = 400;
 /// 見出しの枠（40px）の中のアイコンの大きさ。
 const TILE_ICON_SIZE: Pixels = px(24.);
 /// ホームのカードの枠（56px）の中のアイコンの大きさ。
@@ -68,6 +71,52 @@ impl Framed for Button {
     }
 }
 
+/// 背景の画像を出しているときは、面を透かして塗る。
+fn glass(color: Hsla, cx: &App) -> Hsla {
+    match crate::theme::backdrop(cx) {
+        Some(backdrop) => color.opacity(backdrop.alpha),
+        None => color,
+    }
+}
+
+/// 画面の後ろに敷く画像。
+fn backdrop_layer(cx: &App) -> Option<Img> {
+    let backdrop = crate::theme::backdrop(cx)?;
+    Some(
+        img(backdrop.image.clone())
+            .absolute()
+            .inset_0()
+            .size_full()
+            .object_fit(ObjectFit::Cover),
+    )
+}
+
+/// 同梱の画像の小さい絵。選ぶ画面に出す。
+fn scene_thumbnail(scene: &crate::theme::Scene, dark: bool) -> Option<Arc<Image>> {
+    use std::sync::OnceLock;
+    static MADE: OnceLock<[Option<Arc<Image>>; 4]> = OnceLock::new();
+    let made = MADE.get_or_init(|| {
+        use crate::theme::Scene;
+        [
+            (Scene::Sky, false),
+            (Scene::Sky, true),
+            (Scene::Forest, false),
+            (Scene::Forest, true),
+        ]
+        .map(|(scene, dark)| {
+            scene
+                .bundled(dark)
+                .map(|bytes| Arc::new(Image::from_bytes(ImageFormat::Jpeg, bytes.to_vec())))
+        })
+    });
+    let at = match scene {
+        crate::theme::Scene::Sky => 0,
+        crate::theme::Scene::Forest => 2,
+        _ => return None,
+    };
+    made[at + usize::from(dark)].clone()
+}
+
 fn row() -> Div {
     div().flex().flex_row().items_center()
 }
@@ -77,6 +126,25 @@ fn col() -> Div {
 }
 
 /// 押せる小さなラベル。選ばれているものは色を付ける。
+/// 進捗の棒。
+fn percent_bar(percent: u8, width: Pixels, cx: &App) -> Div {
+    let theme = cx.theme();
+    div()
+        .w(width)
+        .h(px(6.))
+        .flex_none()
+        .rounded_full()
+        .bg(theme.muted)
+        .overflow_hidden()
+        .child(
+            div()
+                .h_full()
+                .w(relative(f32::from(percent.min(100)) / 100.))
+                .rounded_full()
+                .bg(theme.primary),
+        )
+}
+
 fn chip(
     id: impl Into<ElementId>,
     label: impl Into<SharedString>,
@@ -240,7 +308,7 @@ fn card(cx: &App) -> Div {
         .rounded_lg()
         .border_1()
         .border_color(theme.border)
-        .bg(theme.popover)
+        .bg(glass(theme.popover, cx))
         .elevate(Elevation::Low, cx)
 }
 
@@ -378,6 +446,10 @@ impl MainView {
             };
             let group = SharedString::from(format!("ws-row-{ix}"));
             let active = self.nav == Nav::Workspace(id.clone());
+            let naming = self
+                .workspace_naming
+                .as_ref()
+                .is_some_and(|naming| naming.id == id);
             let view = cx.entity().downgrade();
             let menu_id = id.clone();
             let menu = move |menu: PopupMenu| {
@@ -395,15 +467,16 @@ impl MainView {
                         state.set_value("", window, cx);
                         state.focus(window, cx);
                     });
+                    this.icon_category = None;
                     this.modal = Modal::WorkspaceIcon(id);
                     cx.notify();
                 }))
                 .item(item("名前を変更", |this, id, window, cx| {
-                    this.ask_workspace_name(None, Some(id), window, cx)
+                    this.rename_workspace(id, window, cx)
                 }))
                 .item(item(
                     "サブワークスペースを追加",
-                    |this, id, window, cx| this.ask_workspace_name(Some(id), None, window, cx),
+                    |this, id, window, cx| this.add_workspace(Some(id), window, cx),
                 ))
                 .item(item("設定", |this, id, window, cx| {
                     this.open_workspace_settings(&id, window, cx)
@@ -434,13 +507,49 @@ impl MainView {
                 )
                 .pl(px(12.) * node.depth as f32)
                 .child(caret)
-                .child(self.nav_item(
-                    ("ws", ix),
-                    workspace_icon(ws.icon.as_deref(), ws.color.as_deref()),
-                    ws.name.clone(),
-                    Nav::Workspace(id),
-                    cx,
-                ))
+                .child(if naming {
+                    // その場で名前を書く。文字の大きさも位置も、読むときと同じ。
+                    // Enter かほかの場所を押すと保存、Esc で取り消し
+                    row()
+                        .flex_1()
+                        .min_w_0()
+                        .gap_2()
+                        .px_3()
+                        // 入力欄の高さに足して、読むときの行と同じ高さにする
+                        .py(px(3.2))
+                        .rounded_md()
+                        .text_sm()
+                        .bg(theme.accent)
+                        .text_color(theme.accent_foreground)
+                        .on_mouse_down_out(
+                            cx.listener(|this, _, window, cx| this.save_workspace_name(window, cx)),
+                        )
+                        .child(
+                            workspace_icon(ws.icon.as_deref(), ws.color.as_deref())
+                                .small()
+                                .flex_none(),
+                        )
+                        .child(
+                            div().flex_1().min_w_0().mx(px(-8.)).child(
+                                Input::new(&self.inputs.workspace_name)
+                                    .id("workspace-name-input")
+                                    .aria_label("ワークスペース名")
+                                    .text_sm()
+                                    .bg(theme.background)
+                                    .border_color(theme.ring)
+                                    .px_2(),
+                            ),
+                        )
+                        .into_any_element()
+                } else {
+                    self.nav_item(
+                        ("ws", ix),
+                        workspace_icon(ws.icon.as_deref(), ws.color.as_deref()),
+                        ws.name.clone(),
+                        Nav::Workspace(id),
+                        cx,
+                    )
+                })
                 .child(more)
                 // 右クリックでも同じメニューを出す
                 .context_menu(move |m, _, _| menu(m)),
@@ -452,7 +561,7 @@ impl MainView {
         let inner = col()
             .id("sidebar")
             .size_full()
-            .bg(theme.sidebar)
+            .bg(glass(theme.sidebar, cx))
             .text_color(theme.sidebar_foreground)
             .border_r_1()
             .border_color(theme.sidebar_border)
@@ -568,7 +677,7 @@ impl MainView {
                                     .xsmall()
                                     .tooltip("ワークスペースを追加")
                                     .on_click(cx.listener(|this, _, window, cx| {
-                                        this.ask_workspace_name(None, None, window, cx)
+                                        this.add_workspace(None, window, cx)
                                     })),
                             ),
                     )
@@ -579,9 +688,7 @@ impl MainView {
                 let view = view.clone();
                 menu.item(PopupMenuItem::new("ワークスペースを追加").on_click(
                     move |_, window, cx| {
-                        let _ = view.update(cx, |this, cx| {
-                            this.ask_workspace_name(None, None, window, cx)
-                        });
+                        let _ = view.update(cx, |this, cx| this.add_workspace(None, window, cx));
                     },
                 ))
             });
@@ -684,6 +791,10 @@ impl MainView {
                                     this.error = Some(
                                         format!("配色の選択を保存できませんでした。{error}").into(),
                                     );
+                                }
+                                // ライトとダークで敷く画像が変わる。読めなかったら知らせる
+                                if let Some(error) = crate::theme::take_failure(cx) {
+                                    this.error = Some(error.into());
                                 }
                                 cx.notify();
                             })),
@@ -802,7 +913,7 @@ impl MainView {
             .h(HEADER_HEIGHT)
             .border_b_1()
             .border_color(theme.border)
-            .bg(theme.background)
+            .bg(glass(theme.background, cx))
             .when(cfg!(target_os = "windows"), |d| {
                 d.window_control_area(WindowControlArea::Drag)
             })
@@ -1024,7 +1135,7 @@ impl MainView {
                                 .item(item("担当者", |this, window, cx| {
                                     this.open_people(window, cx)
                                 }))
-                                .item(item("フォントとカラー", |this, window, cx| {
+                                .item(item("見た目", |this, window, cx| {
                                     this.open_appearance(window, cx)
                                 }))
                                 .separator()
@@ -1134,7 +1245,7 @@ impl MainView {
                     .border_1()
                     .border_color(theme.border)
                     .rounded_lg()
-                    .bg(theme.popover)
+                    .bg(glass(theme.popover, cx))
                     .overflow_hidden()
                     .relative()
                     .child(
@@ -1167,7 +1278,7 @@ impl MainView {
                         .border_1()
                         .border_color(theme.border)
                         .rounded_lg()
-                        .bg(theme.popover)
+                        .bg(glass(theme.popover, cx))
                         .cursor_pointer()
                         .hover(|s| s.border_color(theme.primary))
                         .active(|s| s.bg(theme.accent))
@@ -1666,7 +1777,7 @@ impl MainView {
                 .label("新しいタスク")
                 .primary()
                 .elevate(Elevation::Low, cx)
-                .on_click(cx.listener(|this, _, window, cx| this.open_new_task(window, cx))),
+                .on_click(cx.listener(|this, _, window, cx| this.add_task(window, cx))),
         );
 
         let rows = if visible == 0 {
@@ -1730,7 +1841,7 @@ impl MainView {
             .border_1()
             .border_color(theme.border)
             .rounded_lg()
-            .bg(theme.popover)
+            .bg(glass(theme.popover, cx))
             .elevate(Elevation::Low, cx)
             .overflow_hidden()
             .child(
@@ -1801,9 +1912,7 @@ impl MainView {
                         .rounded(px(999.))
                         .elevate(Elevation::High, cx)
                         .tooltip("新しいタスク")
-                        .on_click(
-                            cx.listener(|this, _, window, cx| this.open_new_task(window, cx)),
-                        ),
+                        .on_click(cx.listener(|this, _, window, cx| this.add_task(window, cx))),
                 ),
             )
     }
@@ -2068,14 +2177,19 @@ impl MainView {
             .collect()
     }
 
-    /// 期限の選択肢。今日からの日数で決める。
+    /// 期限の選択肢。今日からの日数で決める。いまの期限に時刻があれば、時刻は残す。
     fn due_options(&self, current: Option<&str>) -> Vec<(SharedString, bool, Option<String>)> {
         let mut options: Vec<(SharedString, bool, Option<String>)> =
             [("今日", 0), ("明日", 1), ("1 週間後", 7), ("1 か月後", 30)]
                 .into_iter()
                 .map(|(label, days)| {
                     let date = view::add_days(&self.today, days);
-                    (label.into(), current == Some(date.as_str()), Some(date))
+                    let checked = current.map(malakt_core::date_of) == Some(date.as_str());
+                    (
+                        label.into(),
+                        checked,
+                        Some(view::with_time_of(&date, current)),
+                    )
                 })
                 .collect();
         options.push(("なし".into(), current.is_none(), None));
@@ -2090,7 +2204,10 @@ impl MainView {
         let cursor = self.cursor.as_deref() == Some(id.as_str());
         let closed = !task.status.is_open();
         let now = malakt_core::now_ms();
-        let arranging = self.ai_session.read(cx).arranging.contains(&task.id);
+        let arranging = {
+            let session = self.ai_session.read(cx);
+            session.arranging.contains(&task.id) || session.tracking.contains(&task.id)
+        };
 
         let select = {
             let id = id.clone();
@@ -2120,6 +2237,20 @@ impl MainView {
                     .bg(theme.secondary)
                     .text_xs()
                     .child(category.clone()),
+            );
+        }
+        if !closed && task.percent > 0 {
+            has_chips = true;
+            // 進んでいるタスクには、進捗の棒と数字を添える
+            chips = chips.child(
+                row()
+                    .flex_none()
+                    .gap_1()
+                    .items_center()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(percent_bar(task.percent, px(48.), cx))
+                    .child(format!("{}%", task.percent)),
             );
         }
         if !task.linked_workspace_ids.is_empty() {
@@ -2977,7 +3108,45 @@ impl MainView {
         // AI が整えている間の印と、整えられなかった理由
         let ai_state = {
             let session = self.ai_session.read(cx);
-            if session.arranging.contains(&task.id) {
+            if session.tracking.contains(&task.id) {
+                // コメントからの更新中の印は「進捗」の行に出す（書いている途中の画面を動かさない）
+                None
+            } else if let Some(note) = session.track_notes.get(&task.id) {
+                let detail = note.clone();
+                let id = task.id.clone();
+                Some(
+                    row()
+                        .gap_1()
+                        .items_center()
+                        .text_sm()
+                        .text_color(theme.muted_foreground)
+                        .child(
+                            // 短い言葉だけを出し、くわしい理由はホバーで出す
+                            row()
+                                .id("ai-track-note")
+                                .gap_2()
+                                .items_center()
+                                .child(app_icon("sparkles").small().flex_none())
+                                .child(crate::ai::arrange_note_label(note))
+                                .tooltip(move |window, cx| {
+                                    gpui_kit::component::tooltip::Tooltip::new(detail.clone())
+                                        .build(window, cx)
+                                })
+                                .test_support(),
+                        )
+                        .child(
+                            Button::new("ai-track-retry")
+                                .icon(app_icon("refresh-cw"))
+                                .ghost()
+                                .xsmall()
+                                .tooltip("もう一度更新する")
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.ai_session.update(cx, |s, cx| s.retry_track(&id, cx));
+                                })),
+                        )
+                        .into_any_element(),
+                )
+            } else if session.arranging.contains(&task.id) {
                 Some(
                     row()
                         .id("ai-working")
@@ -3197,13 +3366,33 @@ impl MainView {
                 .small()
                 .w(px(128.)),
         );
+        due = due.child(
+            Input::new(&self.inputs.due_time)
+                .id("due-time-input")
+                .aria_label("期限の時刻")
+                .small()
+                .w(px(72.)),
+        );
         for (i, (label, days)) in due_buttons.into_iter().enumerate() {
-            due = due.child(chip(("p-due", i), label, false, cx).on_click(cx.listener(
-                move |this, _: &ClickEvent, window, cx| this.set_due_in(days, window, cx),
-            )));
+            due = due.child(
+                chip(("p-due", i), label, false, cx)
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        this.set_due_in(days, window, cx)
+                    }))
+                    .test_support(),
+            );
         }
 
-        let mut percent = row().gap_1().flex_wrap();
+        let mut percent = row().gap_1().flex_wrap().items_center().child(
+            row()
+                .flex_none()
+                .gap_2()
+                .mr_1()
+                .items_center()
+                .text_sm()
+                .child(percent_bar(task.percent, px(64.), cx))
+                .child(format!("{}%", task.percent)),
+        );
         for (i, value) in [0u8, 25, 50, 75, 100].into_iter().enumerate() {
             percent = percent.child(
                 chip(
@@ -3215,6 +3404,34 @@ impl MainView {
                 .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                     this.edit_task(cx, |d| d.percent = value)
                 })),
+            );
+        }
+
+        // AI がコメントから更新している間の印と、変えたあとの元に戻すボタン。同じ場所に出す
+        if self.ai_session.read(cx).tracking.contains(&task.id) {
+            percent = percent.child(
+                div()
+                    .id("ai-tracking")
+                    .flex_none()
+                    .px_1()
+                    .child(Spinner::new().small())
+                    .tooltip(|window, cx| {
+                        gpui_kit::component::tooltip::Tooltip::new("AI がコメントから更新中")
+                            .build(window, cx)
+                    })
+                    .test_support(),
+            );
+        } else if let Some(tracked) = self.ai_session.read(cx).tracked_for(task) {
+            let id = task.id.clone();
+            percent = percent.child(
+                Button::new("ai-tracked-undo")
+                    .icon(app_icon("undo-2"))
+                    .ghost()
+                    .xsmall()
+                    .tooltip(format!("AI の更新（{}）を元に戻す", tracked.label))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.ai_session.update(cx, |s, cx| s.undo_track(&id, cx));
+                    })),
             );
         }
 
@@ -3899,12 +4116,109 @@ impl MainView {
                     ))),
             );
         }
+        let scene = crate::theme::scene(cx);
+        let has_scene = scene != crate::theme::Scene::None;
+        let body = body
+            .child(
+                row()
+                    .gap_2()
+                    .child(label("背景の画像"))
+                    .child(
+                        row()
+                            .id("scene-open")
+                            .flex_1()
+                            .min_w_0()
+                            .h_8()
+                            .px_3()
+                            .gap_2()
+                            .rounded_md()
+                            .border_1()
+                            .border_color(theme.input)
+                            .cursor_pointer()
+                            .hover(|s| s.bg(theme.accent))
+                            .active(|s| s.bg(theme.primary.opacity(0.4)))
+                            .child(div().flex_1().truncate().child(scene.label()))
+                            .child(
+                                app_icon("chevron-right")
+                                    .small()
+                                    .text_color(theme.muted_foreground),
+                            )
+                            .on_click(
+                                cx.listener(|this, _: &ClickEvent, _, cx| {
+                                    this.open_scene_picker(cx)
+                                }),
+                            )
+                            .test_support(),
+                    )
+                    .child(reset("scene-reset", has_scene).on_click(cx.listener(
+                        |this, _, window, cx| this.set_scene(crate::theme::Scene::None, window, cx),
+                    ))),
+            )
+            // 透明度とぼかしは、背景の画像を出しているときだけ
+            .when(has_scene, |d| {
+                let slider = |id: &'static str, state: &Entity<SliderState>, name: &'static str| {
+                    div()
+                        .id(id)
+                        .flex_1()
+                        .child(Slider::new(state).accessibility_label(name))
+                        .test_support()
+                };
+                d.child(
+                    row()
+                        .gap_2()
+                        .child(label("透明度"))
+                        .child(slider("clear-slider", &self.clear_slider, "透明度"))
+                        .child(reset("clear-reset", false)),
+                )
+                .child(
+                    row()
+                        .gap_2()
+                        .child(label("ぼかし"))
+                        .child(slider("blur-slider", &self.blur_slider, "ぼかし"))
+                        .child(reset("blur-reset", false)),
+                )
+            })
+            .child(
+                row()
+                    .gap_2()
+                    .child(label("タスクの一覧"))
+                    .child(
+                        div().flex_1().flex().child(
+                            Switch::new("cards-switch")
+                                .label("カードで表示")
+                                .checked(crate::theme::cards(cx))
+                                .on_click(
+                                    cx.listener(|this, on: &bool, _, cx| this.set_cards(*on, cx)),
+                                ),
+                        ),
+                    )
+                    .child(reset("cards-reset", false)),
+            );
         let body = body.when_some(self.error.clone(), |d, error| {
             d.child(div().text_sm().text_color(theme.danger).child(error))
         });
-        let Some(SubModal::Font) = self.sub_modal else {
-            return self.dialog("フォントとカラー", body, cx);
+        let (title, width, over) = match self.sub_modal {
+            None => return self.dialog("見た目", body, cx),
+            Some(SubModal::Font) => ("フォント", px(400.), self.font_picker(cx)),
+            Some(SubModal::Scene) => ("背景の画像", px(668.), self.scene_picker(cx)),
         };
+        let over = self.dialog_as("dialog", width, title, over, cx);
+        let over = if self.motion {
+            over.with_animation("sub-modal-in", appear(140), |d, t| d.opacity(t))
+                .into_any_element()
+        } else {
+            over.into_any_element()
+        };
+        div()
+            .absolute()
+            .inset_0()
+            .child(self.dialog_as("dialog-under", px(460.), "見た目", body, cx))
+            .child(over)
+    }
+
+    /// この PC に入っている書体の一覧。
+    fn font_picker(&self, cx: &mut Context<Self>) -> Div {
+        let theme = cx.theme().clone();
         let current = self.current_font(cx);
         let found = self.found_fonts(cx);
         let none_found = found.is_empty();
@@ -3952,7 +4266,7 @@ impl MainView {
         // 右の端はスクロールバーの場所
         .pr_4()
         .size_full();
-        let picker = col()
+        col()
             .gap_3()
             .child(
                 Input::new(&self.inputs.font_search)
@@ -3975,19 +4289,100 @@ impl MainView {
                                 .child("見つかりません。"),
                         )
                     }),
-            );
-        let over = self.dialog_as("dialog", px(400.), "フォント", picker, cx);
-        let over = if self.motion {
-            over.with_animation("sub-modal-in", appear(140), |d, t| d.opacity(t))
-                .into_any_element()
-        } else {
-            over.into_any_element()
+            )
+    }
+
+    /// 背景の画像を選ぶ。同梱の画像は、今のライト/ダークの絵を小さく出す。
+    fn scene_picker(&self, cx: &mut Context<Self>) -> Div {
+        use crate::theme::Scene;
+        let theme = cx.theme().clone();
+        let dark = theme.is_dark();
+        let current = crate::theme::scene(cx);
+        let tile = |id: ElementId, selected: bool, picture: AnyElement, label: String| {
+            col()
+                .id(id)
+                .w(px(152.))
+                .gap_1()
+                .p_1()
+                .rounded_lg()
+                .cursor_pointer()
+                .border_2()
+                .border_color(if selected {
+                    theme.primary
+                } else {
+                    theme.transparent
+                })
+                .hover(|s| s.bg(theme.accent))
+                .active(|s| s.bg(theme.primary.opacity(0.4)))
+                .child(
+                    div()
+                        .h(px(80.))
+                        .rounded_md()
+                        .overflow_hidden()
+                        .border_1()
+                        .border_color(theme.border)
+                        .bg(theme.muted)
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(picture),
+                )
+                .child(div().text_sm().truncate().child(label))
         };
-        div()
-            .absolute()
-            .inset_0()
-            .child(self.dialog_as("dialog-under", px(460.), "フォントとカラー", body, cx))
-            .child(over)
+        let mut tiles = row().flex_wrap().items_start().gap_2();
+        for (ix, scene) in Scene::BUNDLED.into_iter().enumerate() {
+            let picture = match scene_thumbnail(&scene, dark) {
+                Some(image) => img(image)
+                    .size_full()
+                    .object_fit(ObjectFit::Cover)
+                    .into_any_element(),
+                None => app_icon("x")
+                    .text_color(theme.muted_foreground)
+                    .into_any_element(),
+            };
+            let chosen = scene.clone();
+            tiles = tiles.child(
+                tile(
+                    ("scene", ix).into(),
+                    current == scene,
+                    picture,
+                    scene.label(),
+                )
+                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                    this.set_scene(chosen.clone(), window, cx)
+                }))
+                .test_support(),
+            );
+        }
+        let own = matches!(current, Scene::File(_));
+        let label = if own {
+            current.label()
+        } else {
+            "画像を選ぶ".to_owned()
+        };
+        let picture = match (own, crate::theme::backdrop(cx)) {
+            (true, Some(backdrop)) => img(backdrop.image.clone())
+                .size_full()
+                .object_fit(ObjectFit::Cover)
+                .into_any_element(),
+            _ => app_icon("upload")
+                .text_color(theme.muted_foreground)
+                .into_any_element(),
+        };
+        tiles =
+            tiles.child(
+                tile("scene-file".into(), own, picture, label)
+                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                        this.pick_scene_file(window, cx)
+                    }))
+                    .test_support(),
+            );
+        col()
+            .gap_3()
+            .child(tiles)
+            .when_some(self.error.clone(), |d, error| {
+                d.child(div().text_sm().text_color(theme.danger).child(error))
+            })
     }
 
     fn workspace_options(&self, cx: &mut Context<Self>) -> Div {
@@ -4033,36 +4428,6 @@ impl MainView {
         };
         Some(match &self.modal {
             Modal::None => return None,
-            Modal::WorkspaceName { rename, parent } => {
-                let title = if rename.is_some() {
-                    "ワークスペースの名前を変更".to_owned()
-                } else if let Some(parent) = parent {
-                    format!(
-                        "「{}」にサブワークスペースを追加",
-                        self.workspace_name(Some(parent))
-                    )
-                } else {
-                    "ワークスペースを追加".to_owned()
-                };
-                let body = col()
-                    .gap_3()
-                    .child(
-                        Input::new(&self.inputs.name)
-                            .id("name-input")
-                            .aria_label("名前"),
-                    )
-                    .child(
-                        row().gap_2().justify_end().child(cancel(cx)).child(
-                            Button::new("name-submit")
-                                .label(if rename.is_some() { "保存" } else { "追加" })
-                                .primary()
-                                .on_click(
-                                    cx.listener(|this, _, window, cx| this.submit_name(window, cx)),
-                                ),
-                        ),
-                    );
-                self.dialog(title, body, cx)
-            }
             Modal::WorkspaceIcon(id) => {
                 let theme = cx.theme().clone();
                 let current = self.workspaces.iter().find(|w| &w.id == id);
@@ -4105,8 +4470,33 @@ impl MainView {
                     );
                 }
                 let query = self.inputs.icon_search.read(cx).value().to_string();
-                let found =
-                    crate::icons::search(&query, &crate::state::WORKSPACE_ICONS, ICONS_SHOWN);
+                let found = crate::icons::search(
+                    &query,
+                    self.icon_category,
+                    &crate::state::WORKSPACE_ICONS,
+                    ICONS_SHOWN,
+                );
+                // カテゴリはもう一度押すと外れる
+                let mut categories = row().gap_1();
+                for (ix, category) in crate::icons::Category::ALL.into_iter().enumerate() {
+                    let active = self.icon_category == Some(category);
+                    categories = categories.child(
+                        div()
+                            .rounded_md()
+                            .when(active, |d| d.bg(theme.secondary_hover))
+                            .child(
+                                Button::new(("icon-category", ix))
+                                    .icon(app_icon(category.icon()))
+                                    .ghost()
+                                    .large()
+                                    .tooltip(category.label())
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.icon_category = (!active).then_some(category);
+                                        cx.notify();
+                                    })),
+                            ),
+                    );
+                }
                 let none_found = found.is_empty();
                 let mut icons = row().gap_1().flex_wrap();
                 for (ix, name) in found.into_iter().enumerate() {
@@ -4147,9 +4537,15 @@ impl MainView {
                             .prefix(app_icon("search").small())
                             .cleanable(true),
                     )
+                    .child(categories)
                     .child(
                         div()
-                            .id("icon-list")
+                            // カテゴリごとに別のものにして、切り替えたら上から見せる
+                            .id((
+                                "icon-list",
+                                self.icon_category
+                                    .map_or(0, |category| category as usize + 1),
+                            ))
                             .h(px(320.))
                             .overflow_y_scrollbar()
                             .child(icons)
@@ -4685,107 +5081,6 @@ impl MainView {
                     );
                 self.dialog("カテゴリをまとめて変更", body, cx)
             }
-            Modal::NewTask => {
-                let theme = cx.theme().clone();
-                let label = |text: &'static str| div().text_sm().child(text);
-                let mut priority = row().gap_1().flex_wrap();
-                for (ix, p) in Prio::ALL.into_iter().enumerate() {
-                    priority = priority.child(
-                        chip(
-                            ("nt-prio", ix),
-                            p.label(),
-                            Prio::of(self.new_task.priority) == p,
-                            cx,
-                        )
-                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                            this.set_new_task_priority(p.value(), cx)
-                        }))
-                        .test_support(),
-                    );
-                }
-                let mut assignees = row().gap_1().flex_wrap();
-                for (ix, p) in self.people.iter().enumerate() {
-                    let pid = p.id.clone();
-                    assignees = assignees.child(
-                        chip(
-                            ("nt-as", ix),
-                            p.name.clone(),
-                            self.new_task.assignee_ids.contains(&p.id),
-                            cx,
-                        )
-                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                            this.toggle_new_task_assignee(&pid, cx)
-                        }))
-                        .test_support(),
-                    );
-                }
-                let field = |text: &'static str, input: Input| {
-                    col().gap_1().child(label(text)).child(input)
-                };
-                let form = col()
-                    .gap_3()
-                    .child(field(
-                        "タイトル",
-                        Input::new(&self.inputs.nt_title)
-                            .id("nt-title")
-                            .aria_label("タイトル"),
-                    ))
-                    .child(
-                        col()
-                            .gap_1()
-                            .child(label("説明"))
-                            .child(Textarea::new(&self.inputs.nt_description).h(px(96.))),
-                    )
-                    .child(col().gap_1().child(label("優先度")).child(priority))
-                    .when(!self.people.is_empty(), |d| {
-                        d.child(col().gap_1().child(label("担当者")).child(assignees))
-                    })
-                    .child(field(
-                        "開始日",
-                        Input::new(&self.inputs.nt_start)
-                            .id("nt-start")
-                            .aria_label("開始日"),
-                    ))
-                    .child(field(
-                        "期限",
-                        Input::new(&self.inputs.nt_due)
-                            .id("nt-due")
-                            .aria_label("期限"),
-                    ))
-                    .child(field(
-                        "カテゴリ",
-                        Input::new(&self.inputs.nt_categories)
-                            .id("nt-categories")
-                            .aria_label("カテゴリ"),
-                    ));
-                let place = self.workspace_name(self.current_workspace());
-                let body = col()
-                    .gap_3()
-                    .min_h_0()
-                    .child(muted(format!("「{place}」")))
-                    .child(
-                        div()
-                            .id("new-task-scroll")
-                            .flex_1()
-                            .min_h_0()
-                            .overflow_y_scrollbar()
-                            .child(form),
-                    )
-                    .when_some(self.error.clone(), |d, error| {
-                        d.child(div().text_sm().text_color(theme.danger).child(error))
-                    })
-                    .child(
-                        row().gap_2().justify_end().child(cancel(cx)).child(
-                            Button::new("new-task-submit")
-                                .label("作成")
-                                .primary()
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.submit_new_task(window, cx)
-                                })),
-                        ),
-                    );
-                self.dialog("新しいタスク", body, cx)
-            }
             Modal::LinkTask(id) => {
                 let task = self
                     .detail
@@ -5152,7 +5447,7 @@ impl MainView {
         let theme = cx.theme().clone();
         let bounds = self.pane_bounds.unwrap_or_default();
         let width = bounds.size.width;
-        let table = width >= px(880.);
+        let table = width >= px(880.) && !crate::theme::cards(cx);
         let sheet = width < px(1000.);
         self.list_width = f32::from(width) / crate::UI_SCALE;
         let main = match self.nav {
@@ -5165,7 +5460,10 @@ impl MainView {
             .map(|d| self.with_drags(d, cx))
             .size_full()
             .relative()
-            .bg(theme.background)
+            // ペインの後ろには、ウィンドウが敷いた画像が見えている
+            .when(crate::theme::backdrop(cx).is_none(), |d| {
+                d.bg(theme.background)
+            })
             .text_color(theme.foreground)
             .child(div().absolute().inset_0().child(main))
             .children(self.render_panel(sheet, cx))
@@ -5285,7 +5583,7 @@ impl Render for MainView {
             .map_or(main_width, |(_, rect)| main_width * rect.w);
         let split = self.layout.panes().len() > 1;
         // 表は、タイトルの列に読める幅が残るときだけ
-        let table = own_width >= px(880.);
+        let table = own_width >= px(880.) && !crate::theme::cards(cx);
         self.list_width = f32::from(own_width) / crate::UI_SCALE;
         let sheet = if split {
             own_width < px(1000.)
@@ -5356,6 +5654,7 @@ impl Render for MainView {
             .flex_row()
             .bg(theme.background)
             .text_color(theme.foreground)
+            .children(backdrop_layer(cx))
             .when(wide && sidebar, |d| d.child(self.render_sidebar(wide, cx)))
             .child(
                 col()
@@ -5369,6 +5668,10 @@ impl Render for MainView {
                             .flex_1()
                             .min_h_0()
                             .relative()
+                            // 背景の画像の上では、中身の後ろも薄く塗って文字を読めるようにする
+                            .when_some(crate::theme::backdrop(cx), |d, backdrop| {
+                                d.bg(theme.background.opacity(backdrop.alpha * 0.45))
+                            })
                             .items_stretch()
                             .child(
                                 // 画面を切り替えたときは、少し下から浮かび上がる

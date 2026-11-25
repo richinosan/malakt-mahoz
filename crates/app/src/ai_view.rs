@@ -825,6 +825,7 @@ impl AiPane {
         let busy = session.busy;
         let auto_run = session.auto_run;
         let arrange = session.arrange;
+        let track = session.track;
         let mut minutes_row = row().gap_1().flex_wrap();
         for minutes in WATCH_MINUTES {
             let text = if minutes < 60 {
@@ -1036,6 +1037,18 @@ impl AiPane {
                         .on_click(cx.listener(|this, on: &bool, _, cx| {
                             let on = *on;
                             this.session.update(cx, |s, cx| s.set_arrange(on, cx));
+                        })),
+                ),
+            )
+            .child(
+                section().child(
+                    Switch::new("ai-track")
+                        .checked(track)
+                        .label("コメントから進捗を更新する")
+                        .tooltip("タスクにコメントを書くと、AI が進捗・状態・期限を更新する")
+                        .on_click(cx.listener(|this, on: &bool, _, cx| {
+                            let on = *on;
+                            this.session.update(cx, |s, cx| s.set_track(on, cx));
                         })),
                 ),
             )
