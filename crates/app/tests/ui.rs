@@ -2298,6 +2298,17 @@ fn tree_caret_has_room_to_press(cx: &mut TestAppContext) {
         let caret = window.find(("caret", 0usize)).bounds();
         assert!(caret.size.width >= px(22. * scale), "{caret:?}");
         assert!(caret.size.height >= px(28. * scale), "{caret:?}");
+        // 「＋」と「…」も、押しやすい大きさがある
+        for id in [
+            gpui_kit::ElementId::from("add-workspace"),
+            ("ws-more", 0usize).into(),
+        ] {
+            let size = window.find(id.clone()).bounds().size;
+            assert!(
+                size.width.min(size.height) >= px(20. * scale),
+                "{id:?}: {size:?}"
+            );
+        }
         // 行の名前とは重ならず、押すとたたむ
         let name = window.find(("ws", 0usize)).bounds();
         assert!(caret.right() <= name.left());
