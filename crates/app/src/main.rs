@@ -40,6 +40,8 @@ fn main() {
                 terms.register_mcp = true;
                 terms.cursor_home = dirs::home_dir();
             });
+            // GitHub のアカウントは、gh にログインしているものを使う
+            malakt_mahoz::ai::shared(cx).update(cx, |ai, cx| ai.read_github(cx));
             malakt_mahoz::reminders::connect_system(cx);
             malakt_mahoz::update::connect_system(cx);
             malakt_mahoz::db::watch(cx);

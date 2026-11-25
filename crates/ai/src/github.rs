@@ -114,6 +114,62 @@ pub fn find_links(text: &str) -> Vec<Link> {
     links
 }
 
+/// `gh` にログインしているアカウントの名前を調べるコマンド。上から順に試し、最初に読めたものを使う。
+/// `network` が `false` なら、`gh` の設定を読むだけで、GitHub には通信しない。
+pub fn whoami(network: bool) -> Vec<Spec> {
+    whoami_for(network, cfg!(windows))
+}
+
+fn whoami_for(network: bool, windows: bool) -> Vec<Spec> {
+    let mut commands = vec!["gh config get user -h github.com"];
+    if network {
+        // 環境変数のトークンでログインしていると、設定には名前がない
+        commands.push("gh api user --jq .login");
+    }
+    let mut specs = Vec::new();
+    for command in commands {
+        let args = command.split(' ').skip(1).map(str::to_owned).collect();
+        let mut spec = Spec::direct("gh", args);
+        spec.env = quiet_env();
+        specs.push(spec);
+        if windows {
+            // gh を WSL の中にだけ入れている。ログインシェルに PATH を読ませる
+            let mut spec = Spec::direct(
+                "wsl.exe",
+                vec!["-e".into(), "sh".into(), "-lc".into(), command.into()],
+            );
+            spec.env = quiet_env();
+            specs.push(spec);
+        }
+    }
+    specs
+}
+
+/// [`whoami`] のコマンドの出力から、アカウントの名前を読む。
+pub fn parse_login(output: &str) -> Option<String> {
+    let line = output
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|l| !l.is_empty())?;
+    (is_name(line, &[]) && line.len() <= 39).then(|| line.to_owned())
+}
+
+/// ユーザーの GitHub のアカウントを、AI に伝える文。
+pub fn account_note(login: &str) -> String {
+    format!(
+        "ユーザーの GitHub アカウントは {login} です。GitHub で {login} が担当やレビューを頼まれているものは、ユーザー自身（担当者の「自分」）のものです。"
+    )
+}
+
+/// 入力を待って止まらないようにする。
+fn quiet_env() -> Vec<(String, String)> {
+    vec![
+        ("GH_PROMPT_DISABLED".into(), "1".into()),
+        ("NO_COLOR".into(), "1".into()),
+    ]
+}
+
 /// `gh issue view --json` で受け取る項目。
 const ISSUE_FIELDS: &str =
     "number,title,state,author,body,labels,assignees,milestone,closedAt,url,comments";
@@ -187,11 +243,7 @@ impl Link {
             }
         };
         let mut spec = Spec::direct("gh", args);
-        // 入力を待って止まらないようにする
-        spec.env = vec![
-            ("GH_PROMPT_DISABLED".into(), "1".into()),
-            ("NO_COLOR".into(), "1".into()),
-        ];
+        spec.env = quiet_env();
         spec
     }
 
@@ -371,6 +423,61 @@ mod tests {
             link("o", "r", Kind::Commit("abc1234".into())).gh().args[3],
             "repos/o/r/commits/abc1234"
         );
+    }
+
+    #[test]
+    fn the_account_is_read_from_the_gh_settings_first() {
+        let display =
+            |specs: Vec<Spec>| -> Vec<String> { specs.into_iter().map(|s| s.display).collect() };
+        // 通信しないときは、設定を読むだけ
+        assert_eq!(
+            display(whoami_for(false, false)),
+            ["gh config get user -h github.com"]
+        );
+        assert_eq!(
+            display(whoami_for(true, false)),
+            [
+                "gh config get user -h github.com",
+                "gh api user --jq .login"
+            ]
+        );
+        // Windows では、gh が WSL の中にだけあるときも読む
+        let windows = whoami_for(true, true);
+        assert_eq!(
+            display(windows.clone()),
+            [
+                "gh config get user -h github.com",
+                "wsl.exe -e sh -lc gh config get user -h github.com",
+                "gh api user --jq .login",
+                "wsl.exe -e sh -lc gh api user --jq .login",
+            ]
+        );
+        assert_eq!(windows[1].args[3], "gh config get user -h github.com");
+        for spec in windows {
+            assert!(spec
+                .env
+                .contains(&("GH_PROMPT_DISABLED".into(), "1".into())));
+        }
+    }
+
+    #[test]
+    fn the_login_is_the_last_line_of_the_output() {
+        assert_eq!(parse_login("octo-cat\n"), Some("octo-cat".into()));
+        assert_eq!(
+            parse_login("bash: no job control in this shell\r\nkanade\r\n\r\n"),
+            Some("kanade".into())
+        );
+        for output in [
+            "",
+            "\n",
+            "could not find key \"user\"",
+            "a b",
+            "名前",
+            &"a".repeat(40),
+        ] {
+            assert_eq!(parse_login(output), None, "{output}");
+        }
+        assert!(account_note("octo").contains("GitHub アカウントは octo です"));
     }
 
     #[test]

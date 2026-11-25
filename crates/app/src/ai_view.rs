@@ -20,8 +20,8 @@ use malakt_ai::keys::Source;
 use malakt_ai::{Effort, Provider};
 
 use crate::ai::{
-    self, Decision, Item, KeyState, LineKind, Run, Session, ShellPlace, ToolState, Watch,
-    WATCH_MINUTES,
+    self, Decision, GithubAccount, Item, KeyState, LineKind, Run, Session, ShellPlace, ToolState,
+    Watch, WATCH_MINUTES,
 };
 use crate::db::{self, Db};
 use crate::feel::{self, Lit};
@@ -886,6 +886,11 @@ impl AiPane {
             KeyState::Failed(e) => (e.clone(), theme.danger, false),
         };
 
+        let (account, signed_in): (SharedString, bool) = match session.github() {
+            GithubAccount::Login(login) => (format!("@{login}").into(), true),
+            GithubAccount::Missing => ("gh にログインしていません".into(), false),
+            GithubAccount::Unknown => ("".into(), false),
+        };
         let watch = session.watch.clone();
         let watch_status = session.watch_status.clone();
         let busy = session.busy;
@@ -1181,6 +1186,34 @@ impl AiPane {
                                     ),
                             )
                     }),
+            )
+            .child(
+                section().child(
+                    row()
+                        .gap_2()
+                        .child(
+                            app_icon("github")
+                                .size_4()
+                                .text_color(theme.muted_foreground),
+                        )
+                        .child(
+                            div()
+                                .id("ai-github-account")
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_sm()
+                                .when(!signed_in, |d| d.text_color(theme.muted_foreground))
+                                .child(account)
+                                .test_support(),
+                        )
+                        .child(feel::gloss(
+                            icon_button("ai-github-read", "refresh-cw", "gh から読み直す")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.session.update(cx, |s, cx| s.read_github(cx));
+                                })),
+                        )),
+                ),
             )
             .overflow_y_scroll()
             .flex_1()
