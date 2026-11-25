@@ -480,7 +480,7 @@ impl MainView {
             .map(|id| malakt_core::tasklink::url(id))
             .collect();
         cx.write_to_clipboard(ClipboardItem::new_string(links.join("\n")));
-        self.notice = Some(if ids.len() == 1 {
+        self.show_notice(if ids.len() == 1 {
             "リンクをコピーしました。".into()
         } else {
             format!("{} 件のリンクをコピーしました。", ids.len()).into()
@@ -496,7 +496,7 @@ impl MainView {
             return;
         }
         cx.write_to_clipboard(ClipboardItem::new_string(malakt_core::tasklink::url(id)));
-        self.notice = Some("リンクをコピーしました。".into());
+        self.show_notice("リンクをコピーしました。".into());
         cx.notify();
     }
 
@@ -522,7 +522,7 @@ impl MainView {
             Ok(last)
         });
         if let Some(last) = made {
-            self.notice = Some(format!("{} 件のタスクを複製しました。", ids.len()).into());
+            self.show_notice(format!("{} 件のタスクを複製しました。", ids.len()).into());
             // 続けて名前を変えたり開いたりできるよう、できたタスクを選ぶ
             self.cursor = last;
             self.reveal_cursor(cx);
@@ -545,7 +545,7 @@ impl MainView {
             Ok(false) => return false,
             Ok(true) => {
                 self.error = None;
-                self.notice = Some(
+                self.show_notice(
                     if redo {
                         "やり直しました。"
                     } else {
@@ -621,7 +621,7 @@ impl MainView {
             Ok((drafts.len(), last))
         });
         if let Some((count, last)) = made {
-            self.notice = Some(format!("{count} 件のタスクを追加しました。").into());
+            self.show_notice(format!("{count} 件のタスクを追加しました。").into());
             self.query.tab = malakt_core::view::Tab::Open;
             self.cursor = last;
             self.reveal_cursor(cx);

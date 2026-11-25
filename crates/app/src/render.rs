@@ -6726,8 +6726,25 @@ impl MainView {
         })
     }
 
+    /// 時間がたって消えていく知らせ。少し下へずれながら薄くなる。
+    fn notice_fade(&self, notice: impl IntoElement) -> AnyElement {
+        let clock = &self.notice_clock;
+        let notice = div().relative().child(notice);
+        if !clock.closing || self.error.is_some() {
+            return notice.into_any_element();
+        }
+        notice
+            .with_animation(
+                ("notice-out", clock.closes as usize),
+                Animation::new(crate::state::NOTICE_FADE).with_easing(ease_in_out),
+                |d, t| d.opacity(1. - t).top(px(8. * t)),
+            )
+            .into_any_element()
+    }
+
     /// ほかのウィンドウの中のペインとして出す。左のメニューと上のバーは出さない。
     fn render_embedded(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        self.arm_notice(cx);
         self.drops.begin(crate::drops::PANE);
         let theme = cx.theme().clone();
         let bounds = self.pane_bounds.unwrap_or_default();
@@ -6785,32 +6802,37 @@ impl MainView {
                             .flex()
                             .justify_center()
                             .child(
-                                div()
-                                    .id("pane-notice")
-                                    .px_3()
-                                    .py_2()
-                                    .rounded(feel::md())
-                                    .elevate(Elevation::High, cx)
-                                    .text_sm()
-                                    .cursor_pointer()
-                                    .when(is_error, |d| {
-                                        d.bg(theme.danger).text_color(theme.danger_foreground)
-                                    })
-                                    .when(!is_error, |d| {
-                                        d.bg(theme.primary).text_color(theme.primary_foreground)
-                                    })
-                                    .child(text)
-                                    .when(
-                                        !is_error
-                                            && self.notice.is_some()
-                                            && self.notice == self.notice_undo,
-                                        |d| d.child(notice_undo(cx)),
-                                    )
-                                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                                        this.error = None;
-                                        this.notice = None;
-                                        cx.notify();
-                                    })),
+                                self.notice_fade(
+                                    div()
+                                        .id("pane-notice")
+                                        .px_3()
+                                        .py_2()
+                                        .rounded(feel::md())
+                                        .elevate(Elevation::High, cx)
+                                        .text_sm()
+                                        .cursor_pointer()
+                                        .when(is_error, |d| {
+                                            d.bg(theme.danger).text_color(theme.danger_foreground)
+                                        })
+                                        .when(!is_error, |d| {
+                                            d.bg(theme.primary).text_color(theme.primary_foreground)
+                                        })
+                                        .child(text)
+                                        .when(
+                                            !is_error
+                                                && self.notice.is_some()
+                                                && self.notice == self.notice_undo,
+                                            |d| d.child(notice_undo(cx)),
+                                        )
+                                        .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                                            this.hover_notice(*hovered, cx)
+                                        }))
+                                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                            this.error = None;
+                                            this.notice = None;
+                                            cx.notify();
+                                        })),
+                                ),
                             ),
                     )
                 },
@@ -6824,6 +6846,7 @@ impl Render for MainView {
         if self.embedded {
             return self.render_embedded(cx);
         }
+        self.arm_notice(cx);
         // 落とせる場所を覚え直す。描かれなかったペインと AI チャットの場所は残さない
         self.drops.begin(crate::drops::ROOT);
         for child in self.children.values() {
@@ -7063,36 +7086,41 @@ impl Render for MainView {
                             .flex()
                             .justify_center()
                             .child(
-                                row()
-                                    .id("notice")
-                                    // 下に重なったボタンまで押さない
-                                    .occlude()
-                                    .gap_3()
-                                    .px_3()
-                                    .py_2()
-                                    .rounded(feel::md())
-                                    .elevate(Elevation::High, cx)
-                                    .text_sm()
-                                    .cursor_pointer()
-                                    .when(is_error, |d| {
-                                        d.bg(theme.danger).text_color(theme.danger_foreground)
-                                    })
-                                    .when(!is_error, |d| {
-                                        d.bg(theme.primary).text_color(theme.primary_foreground)
-                                    })
-                                    .child(text)
-                                    .when(
-                                        !is_error
-                                            && self.notice.is_some()
-                                            && self.notice == self.notice_undo,
-                                        |d| d.child(notice_undo(cx)),
-                                    )
-                                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                                        this.error = None;
-                                        this.notice = None;
-                                        cx.notify();
-                                    }))
-                                    .test_support(),
+                                self.notice_fade(
+                                    row()
+                                        .id("notice")
+                                        // 下に重なったボタンまで押さない
+                                        .occlude()
+                                        .gap_3()
+                                        .px_3()
+                                        .py_2()
+                                        .rounded(feel::md())
+                                        .elevate(Elevation::High, cx)
+                                        .text_sm()
+                                        .cursor_pointer()
+                                        .when(is_error, |d| {
+                                            d.bg(theme.danger).text_color(theme.danger_foreground)
+                                        })
+                                        .when(!is_error, |d| {
+                                            d.bg(theme.primary).text_color(theme.primary_foreground)
+                                        })
+                                        .child(text)
+                                        .when(
+                                            !is_error
+                                                && self.notice.is_some()
+                                                && self.notice == self.notice_undo,
+                                            |d| d.child(notice_undo(cx)),
+                                        )
+                                        .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                                            this.hover_notice(*hovered, cx)
+                                        }))
+                                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                            this.error = None;
+                                            this.notice = None;
+                                            cx.notify();
+                                        }))
+                                        .test_support(),
+                                ),
                             ),
                     )
                 },

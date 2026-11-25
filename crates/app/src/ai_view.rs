@@ -2733,11 +2733,11 @@ impl AiPane {
         // 見ているのが AI のシェルか、ターミナルか
         let on_ai = term::shared(cx).read(cx).active_tab().is_none();
         // 失敗を先に出す。なければ、うまくいったことの知らせ
-        let (term_error, term_failed) = {
+        let (term_error, term_failed, term_closing) = {
             let terms = term::shared(cx).read(cx);
             match (&terms.error, &terms.notice) {
-                (Some(error), _) => (Some(error.clone()), true),
-                (None, notice) => (notice.clone(), false),
+                (Some(error), _) => (Some(error.clone()), true, false),
+                (None, notice) => (notice.clone(), false, terms.notice_closing),
             }
         };
 
@@ -2898,7 +2898,7 @@ impl AiPane {
             .min_h_0()
             .child(header)
             .when_some(term_error, |d, error| {
-                d.child(
+                let line = div().flex_none().child(
                     row()
                         .id("term-error")
                         .flex_none()
@@ -2926,8 +2926,22 @@ impl AiPane {
                                     })
                                 }),
                         ))
+                        .on_hover(|hovered, _, cx| {
+                            let hovered = *hovered;
+                            term::shared(cx).update(cx, |terms, cx| terms.hover_notice(hovered, cx))
+                        })
                         .test_support(),
-                )
+                );
+                // 時間がたった知らせは、薄くなって消える
+                if term_closing {
+                    d.child(line.with_animation(
+                        "term-notice-out",
+                        Animation::new(crate::state::NOTICE_FADE).with_easing(ease_in_out),
+                        |d, t| d.opacity(1. - t),
+                    ))
+                } else {
+                    d.child(line)
+                }
             })
             .when(!on_ai, |d| d.child(self.term.clone()))
             .when(on_ai, |d| {

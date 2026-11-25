@@ -254,6 +254,8 @@ pub struct MainView {
     pub notice: Option<SharedString>,
     /// 「元に戻す」ボタンを付けて出す知らせ。`notice` と同じ間だけボタンが出る
     pub notice_undo: Option<SharedString>,
+    /// 時間で閉じる知らせの時計。失敗（`error`）は閉じるまで出したままにする
+    pub notice_clock: NoticeClock,
     pub sidebar_open: bool,
     /// このウィンドウの右に AI チャットを出しているか。
     pub ai_open: bool,
@@ -688,6 +690,7 @@ impl MainView {
                 .or_else(|| crate::theme::take_failure(cx).map(Into::into)),
             notice: None,
             notice_undo: None,
+            notice_clock: NoticeClock::default(),
             sidebar_open: false,
             ai_open: false,
             ai_log_open: false,
@@ -1714,7 +1717,7 @@ impl MainView {
     /// 状態をすぐ変える。コメントは付けない。
     pub fn set_status(&mut self, id: &str, status: Status, cx: &mut Context<Self>) {
         if self.write(cx, |s| s.set_task_status(id, status)).is_some() {
-            self.notice = Some(format!("状態を「{}」にしました。", status.label()).into());
+            self.show_notice(format!("状態を「{}」にしました。", status.label()).into());
             // この知らせが出ている間は、その場で元に戻せる
             self.notice_undo = self.notice.clone();
         }
@@ -1743,7 +1746,7 @@ impl MainView {
         if done.is_some() {
             Self::take_area(&self.inputs.status_comment.clone(), window, cx);
             self.modal = Modal::None;
-            self.notice = Some(format!("状態を「{}」にしました。", status.label()).into());
+            self.show_notice(format!("状態を「{}」にしました。", status.label()).into());
         }
     }
 
@@ -1760,7 +1763,7 @@ impl MainView {
         if done.is_some() {
             self.modal = Modal::None;
             self.selected.clear();
-            self.notice = Some(format!("{} 件のタスクを削除しました。", ids.len()).into());
+            self.show_notice(format!("{} 件のタスクを削除しました。", ids.len()).into());
         }
     }
 
@@ -1787,7 +1790,7 @@ impl MainView {
             self.modal = Modal::None;
             self.selected.clear();
             let kept = ids.len() - removed;
-            self.notice = Some(if kept == 0 {
+            self.show_notice(if kept == 0 {
                 format!("{removed} 件をこのワークスペースから外しました。").into()
             } else {
                 format!(
@@ -1806,7 +1809,7 @@ impl MainView {
         if self.write(cx, |s| s.link_task(&id, workspace)).is_some() {
             self.modal = Modal::None;
             let name = self.workspace_name(Some(workspace));
-            self.notice = Some(format!("「{name}」と同期しました。").into());
+            self.show_notice(format!("「{name}」と同期しました。").into());
         }
     }
 
@@ -1828,7 +1831,7 @@ impl MainView {
             self.modal = Modal::None;
             self.selected.clear();
             let name = self.workspace_name(workspace.as_deref());
-            self.notice = Some(format!("{} 件を「{name}」に移しました。", ids.len()).into());
+            self.show_notice(format!("{} 件を「{name}」に移しました。", ids.len()).into());
         }
     }
 
@@ -2036,7 +2039,7 @@ impl MainView {
                 let done = self.write(cx, |s| s.move_task(id, workspace.as_deref()));
                 if done.is_some() {
                     let name = self.workspace_name(workspace.as_deref());
-                    self.notice = Some(format!("「{title}」を「{name}」に移しました。").into());
+                    self.show_notice(format!("「{title}」を「{name}」に移しました。").into());
                     cx.notify();
                 }
             }
@@ -2079,7 +2082,7 @@ impl MainView {
                 if done.is_some() {
                     if let Some(workspace) = target.filter(|_| from.is_none()) {
                         let name = self.workspace_name(workspace.as_deref());
-                        self.notice = Some(format!("「{title}」を「{name}」に移しました。").into());
+                        self.show_notice(format!("「{title}」を「{name}」に移しました。").into());
                     }
                     self.query.sort = view::Sort::Manual;
                     self.query.descending = false;
@@ -2132,7 +2135,7 @@ impl MainView {
         let ids = self.selected_ids();
         match self.write(cx, |s| s.bulk_apply(&ids, op)) {
             Some(changed) => {
-                self.notice = Some(if changed == ids.len() {
+                self.show_notice(if changed == ids.len() {
                     format!("{changed} 件のタスクを変更しました。").into()
                 } else {
                     format!(
@@ -2932,7 +2935,7 @@ impl MainView {
     /// 開いているタスクへのリンクをクリップボードに入れる。
     pub fn copy_task_link(&mut self, id: &str, cx: &mut Context<Self>) {
         cx.write_to_clipboard(ClipboardItem::new_string(malakt_core::tasklink::url(id)));
-        self.notice = Some("リンクをコピーしました。".into());
+        self.show_notice("リンクをコピーしました。".into());
         cx.notify();
     }
 
@@ -3195,7 +3198,7 @@ impl MainView {
         self.with_passkey("ロックを有効にする", window, cx, |this, cx| {
             if this.write(cx, lock::enable).is_some() {
                 crate::db::sync_open_mark(cx);
-                this.notice = Some("ロックを有効にしました。".into());
+                this.show_notice("ロックを有効にしました。".into());
             }
         });
     }
@@ -3204,7 +3207,7 @@ impl MainView {
         self.with_passkey("ロックを無効にする", window, cx, |this, cx| {
             if this.write(cx, lock::disable).is_some() {
                 crate::db::sync_open_mark(cx);
-                this.notice = Some("ロックを無効にしました。".into());
+                this.show_notice("ロックを無効にしました。".into());
             }
         });
     }
@@ -3231,7 +3234,7 @@ impl MainView {
     pub fn copy_ticket(&mut self, cx: &mut Context<Self>) {
         if let Some(ticket) = &self.issued_ticket {
             cx.write_to_clipboard(ClipboardItem::new_string(ticket.secret.clone()));
-            self.notice = Some("完了チケットをコピーしました。".into());
+            self.show_notice("完了チケットをコピーしました。".into());
             cx.notify();
         }
     }
@@ -3242,7 +3245,7 @@ impl MainView {
         };
         if let Some(count) = self.write(cx, |s| s.revoke_tickets(&task_id)) {
             self.issued_ticket = None;
-            self.notice = Some(format!("{count} 枚の完了チケットを取り消しました。").into());
+            self.show_notice(format!("{count} 枚の完了チケットを取り消しました。").into());
         }
     }
 
@@ -3280,6 +3283,91 @@ impl MainView {
     pub fn update_now(&mut self, cx: &mut Context<Self>) {
         self.error = crate::update::install_and_restart(cx).err().map(Into::into);
         cx.notify();
+    }
+
+    // ---- 知らせ ----
+
+    /// 画面の下に、うまくいったことの知らせを出す。`NOTICE_LIFE` たつと閉じる。
+    pub fn show_notice(&mut self, text: SharedString) {
+        self.notice = Some(text);
+        self.notice_clock.shown += 1;
+    }
+
+    /// 出ている知らせに時計を合わせる。描くたびに呼ぶ（`notice` を直接消したときも、ここで時計を止める）。
+    pub fn arm_notice(&mut self, cx: &mut Context<Self>) {
+        let clock = &mut self.notice_clock;
+        if self.notice.is_none() {
+            // 消えた知らせの上にあったマウスは、離れた知らせを受け取れない
+            *clock = NoticeClock {
+                shown: clock.shown,
+                armed: clock.shown,
+                ..NoticeClock::default()
+            };
+            return;
+        }
+        if clock.armed == clock.shown {
+            return;
+        }
+        let shown = clock.shown;
+        clock.armed = shown;
+        clock.expired = false;
+        clock.closing = false;
+        clock.task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(NOTICE_LIFE).await;
+            // ウィンドウを閉じたあとなら、閉じる知らせもない
+            let _ = this.update(cx, |this, cx| {
+                if this.notice_clock.shown == shown {
+                    this.notice_clock.expired = true;
+                    this.close_notice_if_idle(cx);
+                }
+            });
+        }));
+    }
+
+    /// 時間がたった知らせを、マウスが乗っていなければ閉じる。
+    fn close_notice_if_idle(&mut self, cx: &mut Context<Self>) {
+        let clock = &mut self.notice_clock;
+        if !clock.expired || clock.hovered || clock.closing {
+            return;
+        }
+        // 失敗の後ろに隠れている知らせや、動きを止めているときは、すぐ消す
+        if self.error.is_some() || !self.motion {
+            self.notice = None;
+            self.notice_undo = None;
+            cx.notify();
+            return;
+        }
+        clock.closing = true;
+        clock.closes += 1;
+        let shown = clock.shown;
+        clock.task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(NOTICE_FADE).await;
+            // ウィンドウを閉じたあとなら、閉じる知らせもない
+            let _ = this.update(cx, |this, cx| {
+                let clock = &this.notice_clock;
+                if clock.shown == shown && clock.closing {
+                    this.notice = None;
+                    this.notice_undo = None;
+                    cx.notify();
+                }
+            });
+        }));
+        cx.notify();
+    }
+
+    /// 知らせにマウスが乗った・離れた。乗っている間は閉じず、閉じかけていたら戻す。
+    pub fn hover_notice(&mut self, hovered: bool, cx: &mut Context<Self>) {
+        let clock = &mut self.notice_clock;
+        clock.hovered = hovered;
+        if hovered {
+            if clock.closing {
+                clock.closing = false;
+                clock.task = None;
+                cx.notify();
+            }
+        } else {
+            self.close_notice_if_idle(cx);
+        }
     }
 
     // ---- 通知 ----
@@ -3513,7 +3601,7 @@ impl MainView {
         });
         if saved.is_some() {
             self.modal = Modal::None;
-            self.notice = Some("ワークスペースの設定を保存しました。".into());
+            self.show_notice("ワークスペースの設定を保存しました。".into());
         }
     }
 
@@ -3628,7 +3716,7 @@ impl MainView {
         match result {
             Ok(()) => {
                 self.error = None;
-                self.notice = Some(format!("{} に保存しました。", path.display()).into());
+                self.show_notice(format!("{} に保存しました。", path.display()).into());
             }
             Err(error) => self.error = Some(error.to_string().into()),
         }
@@ -3656,7 +3744,7 @@ impl MainView {
         match archive::export_to_path(&self.db.read(cx).store, path) {
             Ok(manifest) => {
                 self.error = None;
-                self.notice = Some(
+                self.show_notice(
                     format!(
                         "{} 件のタスクを {} に書き出しました。",
                         manifest.counts.tasks,
@@ -3994,6 +4082,28 @@ const AI_PLACE_CHARS: usize = 1500;
 
 /// 通知の一覧に出す数。
 const NOTICES_SHOWN: usize = 100;
+
+/// うまくいったことの知らせを出しておく時間。
+pub const NOTICE_LIFE: std::time::Duration = std::time::Duration::from_secs(180);
+/// 知らせが消えていく時間。
+pub const NOTICE_FADE: std::time::Duration = std::time::Duration::from_millis(240);
+
+/// 画面の下の知らせを、時間で閉じるための時計。
+#[derive(Default)]
+pub struct NoticeClock {
+    /// 知らせを出した回数。同じ文の知らせを出し直しても、時計を合わせ直す
+    shown: u64,
+    /// 時計を合わせた知らせ（`shown` の何回目か）
+    armed: u64,
+    /// 時間がたった。マウスが乗っていれば、離れたときに閉じる
+    expired: bool,
+    hovered: bool,
+    /// 消えていく途中
+    pub closing: bool,
+    /// 消えていく動きを始めた回数。動きを毎回はじめから描く
+    pub closes: u64,
+    task: Option<Task<()>>,
+}
 
 /// 左のメニューの最初の幅と、変えられる範囲（拡大率を掛ける前の値）。
 pub const SIDEBAR_WIDTH: f32 = 256.;
