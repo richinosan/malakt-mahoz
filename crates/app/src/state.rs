@@ -327,6 +327,15 @@ impl MainView {
                     cx.notify();
                 },
             ),
+            // 新しい版を取ってきたら、上のバーに印を出す
+            cx.observe(&crate::update::shared(cx), |_, _, cx| cx.notify()),
+            cx.subscribe(
+                &crate::update::shared(cx),
+                |this, _, failed: &crate::update::Failed, cx| {
+                    this.error = Some(failed.0.clone());
+                    cx.notify();
+                },
+            ),
             // 読み直すたびに、まだ出していない通知を OS に出す
             cx.observe_in(&db, window, |this, _, window, cx| {
                 this.deliver_notices(window, cx)
@@ -458,7 +467,7 @@ impl MainView {
             notices: Vec::new(),
             unread_notices: 0,
             defaults_draft: TaskDefaults::default(),
-            error: None,
+            error: crate::update::take_failure(cx),
             notice: None,
             sidebar_open: false,
             ai_open: false,
@@ -2057,6 +2066,21 @@ impl MainView {
             Ok(()) => self.error = None,
             Err(error) => self.error = Some(format!("設定を保存できませんでした。{error}").into()),
         }
+        cx.notify();
+    }
+
+    // ---- 自動アップデート ----
+
+    /// 自動アップデートを有効にする・無効にする。
+    pub fn toggle_auto_update(&mut self, cx: &mut Context<Self>) {
+        let on = !crate::update::enabled(cx);
+        self.error = crate::update::set_enabled(on, cx).err().map(Into::into);
+        cx.notify();
+    }
+
+    /// 取ってきた新しい版に今すぐ入れ替えて、起動し直す。
+    pub fn update_now(&mut self, cx: &mut Context<Self>) {
+        self.error = crate::update::install_and_restart(cx).err().map(Into::into);
         cx.notify();
     }
 

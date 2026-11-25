@@ -13,6 +13,7 @@ pub mod session;
 pub mod shadow;
 pub mod state;
 pub mod theme;
+pub mod update;
 
 use std::path::PathBuf;
 
@@ -118,6 +119,7 @@ pub fn init_with(store: malakt_core::Store, ai: AiConfig, cx: &mut App) {
     passkey::init(cx);
     ai::init(ai, cx);
     reminders::init(cx);
+    update::init(cx);
     theme::init(cx);
     cx.bind_keys([
         #[cfg(target_os = "macos")]
@@ -151,6 +153,7 @@ pub fn init_with(store: malakt_core::Store, ai: AiConfig, cx: &mut App) {
     });
     cx.on_action(|_: &Quit, cx| {
         session::quitting(cx);
+        update::install_on_quit(cx);
         cx.quit()
     });
     cx.on_action(|_: &LockNow, cx| db::lock_now(cx));

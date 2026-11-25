@@ -868,6 +868,8 @@ impl MainView {
         let unread = self.unread_notices;
         let lock_enabled = self.lock_enabled(cx);
         let reminders = crate::reminders::menu_label(cx);
+        let auto_update = crate::update::menu_label(cx);
+        let update_ready = crate::update::ready_version(cx);
         let view = cx.entity().downgrade();
         bar.child(
             row()
@@ -957,6 +959,15 @@ impl MainView {
                         .tooltip("AI チャット")
                         .on_click(cx.listener(|this, _, window, cx| this.toggle_ai(window, cx))),
                 )
+                // 新しい版を取ってあるときだけ出る。閉じても同じ版に入れ替わる
+                .children(update_ready.map(|version| {
+                    Button::new("update-now")
+                        .icon(app_icon("refresh-cw"))
+                        .framed(cx)
+                        .rounded(px(999.))
+                        .tooltip(format!("v{version} に更新して再起動"))
+                        .on_click(cx.listener(|this, _, _, cx| this.update_now(cx)))
+                }))
                 .child(
                     div()
                         .relative()
@@ -1039,10 +1050,19 @@ impl MainView {
                                     .item(item(label, |this, _, cx| this.toggle_reminders(cx))),
                                 None => menu,
                             };
+                            let menu = match auto_update {
+                                Some(label) => menu
+                                    .separator()
+                                    .item(item(label, |this, _, cx| this.toggle_auto_update(cx))),
+                                None => menu,
+                            };
                             menu.separator()
                                 .item(item("新しいウィンドウ", |_, window, cx| {
                                     window.dispatch_action(Box::new(NewWindow), cx)
                                 }))
+                                // 今動いている版
+                                .separator()
+                                .label(concat!("v", env!("CARGO_PKG_VERSION")))
                         }),
                 )
                 .children(self.window_controls(window, cx)),

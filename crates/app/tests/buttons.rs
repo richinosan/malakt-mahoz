@@ -30,6 +30,8 @@ const NOT_BUTTONS: &[&str] = &[
     "sidebar-resize",
     "detail-panel",
     "dialog",
+    // メニューの入れ物。中の項目は 1 つずつ押す
+    "popup-menu",
     "detail-description",
     "col-head",
     "col-resize",
@@ -607,6 +609,26 @@ fn screens() -> Vec<(&'static str, Size<Pixels>, Setup)> {
         }),
         ("狭いウィンドウ", window_size(420., 900.), |cx, w| {
             with_view(cx, w, |v, _, cx| v.go(Nav::All, cx))
+        }),
+        // このあとの画面にも自動アップデートがつながったままになるので、最後に置く
+        ("新しい版を取ってある画面", wide, |cx, _| {
+            use malakt_mahoz::update::{Staged, Updater};
+            cx.update(|cx| {
+                cx.set_global(Updater {
+                    available: true,
+                    check: std::sync::Arc::new(|_| {
+                        let dir = std::env::temp_dir().join("malakt-mahoz-test-no-such-dir");
+                        Ok(Some(Staged {
+                            version: "0.2.0".into(),
+                            payload: dir.join("payload"),
+                            dir,
+                        }))
+                    }),
+                    install: std::sync::Arc::new(|_| Ok(())),
+                });
+                malakt_mahoz::update::check_now(cx);
+            });
+            cx.run_until_parked();
         }),
     ]
 }
