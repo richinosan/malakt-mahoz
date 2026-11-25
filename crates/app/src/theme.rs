@@ -281,6 +281,33 @@ thread_local! {
     static FEEL_NOW: std::cell::Cell<Feel> = const { std::cell::Cell::new(Feel::Standard) };
 }
 
+thread_local! {
+    /// パネルを浮かせているか。角の丸みを決めるたびに読むので、ここに持っておく。
+    static FLOAT_NOW: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// パネルを浮かせているか。`cx` を持たない所から読む。
+pub(crate) fn floating_now() -> bool {
+    FLOAT_NOW.get()
+}
+
+/// 浮かせたパネル（角の丸みが大きい）の中では、部品の丸みも大きくする。
+/// 内側の丸みが小さいままだと、外の角と並んだときにそろって見えない。
+fn sync_corners(cx: &mut App) {
+    let on = floating(cx);
+    FLOAT_NOW.set(on);
+    if on {
+        Theme::update(cx, |theme| {
+            theme.radius = gpui_kit::px(FLOAT_RADIUS);
+            theme.radius_lg = gpui_kit::px(FLOAT_RADIUS_LG);
+        });
+    }
+}
+
+/// 浮かせたパネルの中の、部品とカードの角の丸み。
+pub(crate) const FLOAT_RADIUS: f32 = 12.;
+pub(crate) const FLOAT_RADIUS_LG: f32 = 14.;
+
 /// 今の、乗せたとき・押したときの描き方。
 pub fn feel(_cx: &App) -> Feel {
     feel_now()
@@ -947,6 +974,9 @@ pub fn floating(cx: &App) -> bool {
 /// パネルを浮かせるかどうかを変える。
 pub fn set_floating(on: bool, cx: &mut App) -> malakt_core::Result<()> {
     db::shared(cx).update(cx, |db, _| db.store.set_setting(FLOAT, on.then_some("1")))?;
+    // 配色を読み直して、角の丸みを合わせる
+    let mode = Theme::global(cx).mode;
+    repaint(mode, cx);
     cx.refresh_windows();
     Ok(())
 }
@@ -1457,6 +1487,7 @@ fn repaint(mode: ThemeMode, cx: &mut App) {
         // スクロールできる場所が分かるように、スクロールバーはいつも出す
         theme.scrollbar_mode = gpui_kit::component::scroll::ScrollbarMode::Always;
     });
+    sync_corners(cx);
 }
 
 #[cfg(test)]

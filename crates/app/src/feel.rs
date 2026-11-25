@@ -34,6 +34,17 @@ fn edge(color: Hsla, offset: f32, blur: f32, inset: bool) -> BoxShadow {
     }
 }
 
+/// ガラスの縁。内側を 1 周する細い光と、上の縁の少し強い光。
+fn ring(dark: bool) -> Vec<BoxShadow> {
+    vec![
+        BoxShadow {
+            spread_radius: px(1.),
+            ..edge(white(if dark { 0.16 } else { 0.55 }), 0., 0., true)
+        },
+        edge(white(if dark { 0.3 } else { 0.85 }), 1., 0., true),
+    ]
+}
+
 /// 1 枚の面の描き方。面は上から下への 2 色、影は外と内。
 #[derive(Default)]
 struct Look {
@@ -51,23 +62,26 @@ impl Look {
     }
 
     /// 乗せたとき。`on_top` は、中身の上に重ねて描く部品（ライブラリのボタン）。
-    fn hover(color: Hsla, on_top: bool, cx: &App) -> Self {
+    /// `square` は角の丸みがない部品（一覧の行）。
+    fn hover(color: Hsla, on_top: bool, square: bool, cx: &App) -> Self {
         let theme = cx.theme();
         let dark = theme.mode.is_dark();
         match crate::theme::feel(cx) {
             Feel::Standard => Look::flat(color),
+            // 端から端まである行は、面を明るくするだけ。縁の線を引くと帯に見える
+            Feel::Glass if square => Look::flat(white(if dark { 0.07 } else { 0.3 })),
             Feel::Glass => {
-                // 上が明るい反射、上の縁の光、外ににじむ光。文字の上に重ねるときは薄くする
+                // 上が少し明るい面と、内側を 1 周する細い光。文字の上に重ねるときは薄くする
                 let (top, bottom) = match (on_top, dark) {
-                    (false, true) => (0.2, 0.05),
-                    (false, false) => (0.6, 0.2),
-                    (true, true) => (0.2, 0.02),
-                    (true, false) => (0.32, 0.04),
+                    (false, true) => (0.16, 0.07),
+                    (false, false) => (0.55, 0.3),
+                    (true, true) => (0.14, 0.03),
+                    (true, false) => (0.3, 0.06),
                 };
                 Look {
                     fill: Some((white(top), white(bottom))),
-                    glow: vec![edge(white(if dark { 0.14 } else { 0.5 }), 0., 8., false)],
-                    inner: vec![edge(white(if dark { 0.45 } else { 0.9 }), 1., 0., true)],
+                    glow: Vec::new(),
+                    inner: ring(dark),
                 }
             }
             Feel::Crisp => Look::flat(theme.foreground.opacity(0.08)),
@@ -229,8 +243,9 @@ fn wash(
                     None => Corners::all(cx.theme().radius),
                 }
                 .clamp_radii_for_quad_size(bounds.size);
+                let square = radii == Corners::all(px(0.));
                 let look = match kind {
-                    Kind::Hover => Look::hover(color, on_top, cx),
+                    Kind::Hover => Look::hover(color, on_top, square, cx),
                     Kind::Press => Look::press(color, cx),
                 };
                 look.paint(bounds, radii, value, window);
@@ -361,29 +376,55 @@ pub(crate) fn button(hover: Hsla, active: Hsla, cx: &App) -> (Hsla, Hsla) {
     }
 }
 
-/// 選んでいる行や項目の面。
-pub(crate) fn selected<E: Styled>(el: E, color: Hsla, cx: &App) -> E {
+/// 選んでいる行や項目の面。角の丸みを決めたあとに呼ぶ。
+pub(crate) fn selected<E: Styled>(mut el: E, color: Hsla, cx: &App) -> E {
     let theme = cx.theme();
     let dark = theme.mode.is_dark();
+    let square = el.style().corner_radii.top_left.is_none();
     match crate::theme::feel(cx) {
         Feel::Standard => el.bg(color),
+        Feel::Glass if square => el.bg(white(if dark { 0.1 } else { 0.4 })),
         Feel::Glass => {
-            let (top, bottom) = if dark { (0.16, 0.08) } else { (0.7, 0.4) };
+            let (top, bottom) = if dark { (0.18, 0.1) } else { (0.7, 0.45) };
             el.bg(linear_gradient(
                 180.,
                 linear_color_stop(white(top), 0.),
                 linear_color_stop(white(bottom), 1.),
             ))
-            .shadow(vec![edge(
-                white(if dark { 0.35 } else { 0.9 }),
-                1.,
-                0.,
-                true,
-            )])
+            .shadow(ring(dark))
         }
         Feel::Crisp => el.bg(theme.foreground.opacity(0.12)),
         Feel::Tint => el.bg(theme.primary.opacity(0.2)),
     }
+}
+
+/// 部品の角の丸み。浮かせたパネルの中では、パネルの角に合わせて大きくする。
+pub(crate) fn md() -> AbsoluteLength {
+    if crate::theme::floating_now() {
+        px(crate::theme::FLOAT_RADIUS).into()
+    } else {
+        rems(0.375).into()
+    }
+}
+
+/// カードの角の丸み。
+pub(crate) fn lg() -> AbsoluteLength {
+    if crate::theme::floating_now() {
+        px(crate::theme::FLOAT_RADIUS_LG).into()
+    } else {
+        rems(0.5).into()
+    }
+}
+
+/// 浮かせたパネルの影。ガラスのときは、上の縁の光と、下に落ちるやわらかい影にする。
+pub(crate) fn panel_shadow(cx: &App) -> Option<Vec<BoxShadow>> {
+    let dark = cx.theme().mode.is_dark();
+    (crate::theme::feel(cx) == Feel::Glass).then(|| {
+        vec![
+            edge(white(if dark { 0.14 } else { 0.6 }), 1., 0., true),
+            edge(dark_ink(if dark { 0.3 } else { 0.1 }), 8., 24., false),
+        ]
+    })
 }
 
 /// 浮かせたパネルの縁。ガラスのときは細い光の線にする。
