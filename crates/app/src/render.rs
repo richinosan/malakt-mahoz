@@ -2999,8 +2999,7 @@ impl MainView {
                 .collect(),
             |this, value, cx| {
                 this.quick.status = value;
-                this.quick_touched = true;
-                cx.notify();
+                this.touch_quick(cx);
             },
             cx,
         );
@@ -3011,8 +3010,7 @@ impl MainView {
             Self::priority_options(current),
             |this, value, cx| {
                 this.quick.priority = value;
-                this.quick_touched = true;
-                cx.notify();
+                this.touch_quick(cx);
             },
             cx,
         );
@@ -3021,13 +3019,12 @@ impl MainView {
             self.assignee_cell(&quick.assignee_ids, cx),
             self.assignee_options(self.current_workspace(), &quick.assignee_ids),
             |this, person: Id, cx| {
-                this.quick_touched = true;
                 if let Some(i) = this.quick.assignee_ids.iter().position(|a| a == &person) {
                     this.quick.assignee_ids.remove(i);
                 } else {
                     this.quick.assignee_ids.push(person);
                 }
-                cx.notify();
+                this.touch_quick(cx);
             },
             cx,
         );

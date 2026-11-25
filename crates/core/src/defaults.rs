@@ -11,6 +11,18 @@ use crate::text::{normalize, normalize_line};
 use crate::view::add_days;
 use crate::{Error, Result, Store};
 
+/// 追加行で前に選んだ値。
+#[derive(serde::Serialize, serde::Deserialize)]
+struct QuickChoice {
+    status: Status,
+    priority: u8,
+    assignee_ids: Vec<Id>,
+}
+
+fn quick_key(workspace_id: Option<&str>) -> String {
+    format!("quick_choice:{}", workspace_id.unwrap_or(""))
+}
+
 /// 入力を整えて確かめる。エラーは画面に出す文。
 pub fn clean(input: &TaskDefaults) -> Result<TaskDefaults> {
     let unique = |ids: &[Id]| {
@@ -170,6 +182,8 @@ impl Store {
             self.workspace(id)?;
         }
         save(&self.conn, &cleaned)?;
+        // 既定値を決め直したら、追加行で前に選んだ値よりそちらを使う
+        self.set_setting(&quick_key(Some(&cleaned.workspace_id)), None)?;
         self.task_defaults(&cleaned.workspace_id)
     }
 
@@ -202,6 +216,41 @@ impl Store {
         draft.categories = defaults.categories;
         draft.description = defaults.description;
         Ok(draft)
+    }
+
+    /// 一覧の追加行に最初に入れる値。前にその行で選んだ状態・優先度・担当があればそれを、
+    /// なければワークスペースの既定値を使う。担当がどれにもなければ自分にする。
+    pub fn quick_draft(&self, workspace_id: Option<&str>) -> Result<TaskDraft> {
+        let mut draft = self.draft_for(workspace_id, "")?;
+        let people = self.people()?;
+        let remembered = self
+            .setting(&quick_key(workspace_id))?
+            .and_then(|json| serde_json::from_str::<QuickChoice>(&json).ok());
+        if let Some(choice) = remembered {
+            draft.status = choice.status;
+            draft.priority = choice.priority;
+            draft.assignee_ids = choice
+                .assignee_ids
+                .into_iter()
+                .filter(|id| people.iter().any(|p| &p.id == id))
+                .collect();
+        } else if draft.assignee_ids.is_empty() {
+            if let Some(me) = people.iter().find(|p| p.is_self) {
+                draft.assignee_ids.push(me.id.clone());
+            }
+        }
+        Ok(draft)
+    }
+
+    /// 追加行で選んだ状態・優先度・担当を、ワークスペースごとに覚える。
+    pub fn remember_quick(&mut self, workspace_id: Option<&str>, draft: &TaskDraft) -> Result<()> {
+        let choice = QuickChoice {
+            status: draft.status,
+            priority: draft.priority,
+            assignee_ids: draft.assignee_ids.clone(),
+        };
+        let json = serde_json::to_string(&choice)?;
+        self.set_setting(&quick_key(workspace_id), Some(&json))
     }
 
     pub(crate) fn all_task_defaults(&self) -> Result<Vec<TaskDefaults>> {
@@ -426,6 +475,71 @@ mod tests {
         assert_eq!(
             other.draft_for(Some(&ws.id), "x").unwrap().due.as_deref(),
             Some("2026-12-31 12:00")
+        );
+    }
+
+    #[test]
+    fn quick_draft_starts_with_me_and_remembers_the_choice() {
+        let mut store = Store::open_in_memory().unwrap();
+        store.ensure_self().unwrap();
+        let me = store.people().unwrap().remove(0);
+        let sato = store.create_person("佐藤", false).unwrap();
+        let ws = store.create_workspace(None, "仕事").unwrap();
+
+        // 何も決めていなければ、担当は自分
+        let draft = store.quick_draft(Some(&ws.id)).unwrap();
+        assert_eq!(draft.assignee_ids, vec![me.id.clone()]);
+        assert_eq!(
+            store.quick_draft(None).unwrap().assignee_ids,
+            vec![me.id.clone()]
+        );
+
+        // 選んだ値は、そのワークスペースでだけ残る。担当なしも選んだ値として残る
+        let mut chosen = draft.clone();
+        chosen.status = Status::InProcess;
+        chosen.priority = 1;
+        chosen.assignee_ids = vec![sato.id.clone()];
+        store.remember_quick(Some(&ws.id), &chosen).unwrap();
+        let draft = store.quick_draft(Some(&ws.id)).unwrap();
+        assert_eq!(draft.status, Status::InProcess);
+        assert_eq!(draft.priority, 1);
+        assert_eq!(draft.assignee_ids, vec![sato.id.clone()]);
+        assert_eq!(
+            store.quick_draft(None).unwrap().assignee_ids,
+            vec![me.id.clone()]
+        );
+        chosen.assignee_ids.clear();
+        store.remember_quick(None, &chosen).unwrap();
+        assert!(store.quick_draft(None).unwrap().assignee_ids.is_empty());
+
+        // 消した担当者は入れない
+        store.delete_person(&sato.id).unwrap();
+        assert!(store
+            .quick_draft(Some(&ws.id))
+            .unwrap()
+            .assignee_ids
+            .is_empty());
+
+        // 既定値を決め直したら、そちらを使う
+        store
+            .set_task_defaults(&TaskDefaults {
+                workspace_id: ws.id.clone(),
+                assignee_ids: vec![me.id.clone()],
+                priority: Some(5),
+                ..Default::default()
+            })
+            .unwrap();
+        let draft = store.quick_draft(Some(&ws.id)).unwrap();
+        assert_eq!(draft.assignee_ids, vec![me.id.clone()]);
+        assert_eq!(draft.priority, 5);
+        assert_eq!(draft.status, Status::NeedsAction);
+
+        // ワークスペースを消すと、覚えた値も消える
+        store.remember_quick(Some(&ws.id), &chosen).unwrap();
+        store.delete_workspace(&ws.id).unwrap();
+        assert_eq!(
+            store.setting(&super::quick_key(Some(&ws.id))).unwrap(),
+            None
         );
     }
 }

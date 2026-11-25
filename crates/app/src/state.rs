@@ -1172,7 +1172,23 @@ impl MainView {
         value
     }
 
-    /// 追加行の状態・優先度・担当・期限を、今のワークスペースの既定値に戻す。
+    /// 追加行で状態・優先度・担当を選んだら、次に足すときも、起動し直しても同じ値で始まるように覚える。
+    pub fn touch_quick(&mut self, cx: &mut Context<Self>) {
+        self.quick_touched = true;
+        let workspace = self.current_workspace().map(str::to_owned);
+        let quick = self.quick.clone();
+        // 元に戻す（Ctrl+Z）の段にはしない
+        let saved = self.db.update(cx, |db, _| {
+            db.store.remember_quick(workspace.as_deref(), &quick)
+        });
+        if let Err(error) = saved {
+            self.error = Some(error.to_string().into());
+        }
+        cx.notify();
+    }
+
+    /// 追加行の状態・優先度・担当・期限を、最初の値に戻す。前にこの行で選んだ値があればそれ、
+    /// なければ今のワークスペースの既定値で、担当は自分。
     pub fn reset_quick(&mut self, cx: &mut Context<Self>) {
         let workspace = self.current_workspace().map(str::to_owned);
         // 既定値を読めないときは、何も入っていない状態から始める（追加のときに同じ失敗が画面に出る）
@@ -1180,7 +1196,7 @@ impl MainView {
             .db
             .read(cx)
             .store
-            .draft_for(workspace.as_deref(), "")
+            .quick_draft(workspace.as_deref())
             .unwrap_or_default();
         self.quick_nav = Some(self.nav.clone());
         self.quick_touched = false;
