@@ -25,7 +25,7 @@ use crate::ai::{
 use crate::db::{self, Db};
 use crate::render::app_icon;
 use crate::shadow::{Elevate, Elevation};
-use crate::state::MainView;
+use crate::state::{DropTarget, MainView};
 use crate::{ClearShell, StopAi};
 
 /// 参照する寸法を、画面全体の拡大率に合わせる。
@@ -1745,6 +1745,16 @@ impl AiPane {
             });
         let error = session.error.clone();
         let pills = self.render_pills(cx);
+        let attached = self.session.read(cx).attached.clone();
+        let dropping = self.main.as_ref().is_some_and(|main| {
+            main.read_with(cx, |main, _| {
+                main.task_drag
+                    .as_ref()
+                    .and_then(|d| d.over.as_ref())
+                    .is_some_and(|(target, _)| *target == DropTarget::Chat)
+            })
+            .unwrap_or(false)
+        });
 
         col()
             .id("ai-chat")
@@ -1791,13 +1801,54 @@ impl AiPane {
                     .child(
                         // 入力欄と、サービス・モデル・effort・送信を 1 つの枠にまとめる
                         col()
+                            .id("ai-composer")
                             .rounded_lg()
                             .border_1()
                             .border_color(theme.input)
                             .bg(theme.background)
+                            // ドラッグ中のタスクが上にある間は、色を付ける
+                            .when(dropping, |d| {
+                                d.border_color(theme.primary)
+                                    .bg(theme.primary.opacity(0.15))
+                            })
                             .elevate(Elevation::Mid, cx)
                             .p_1()
                             .gap_1()
+                            .when(!attached.is_empty(), |d| {
+                                d.child(row().gap_1().flex_wrap().px_1().pt_1().children(
+                                    attached.iter().enumerate().map(|(ix, (id, title))| {
+                                        let id = id.clone();
+                                        row()
+                                            .id(("ai-attached", ix))
+                                            .max_w_full()
+                                            .gap_1()
+                                            .pl_2()
+                                            .pr_0p5()
+                                            .h_6()
+                                            .items_center()
+                                            .rounded_md()
+                                            .bg(theme.secondary)
+                                            .text_xs()
+                                            .child(app_icon("list-todo").size_3().flex_none())
+                                            .child(div().min_w_0().truncate().child(title.clone()))
+                                            .child(
+                                                Button::new(("ai-attached-remove", ix))
+                                                    .icon(app_icon("x"))
+                                                    .ghost()
+                                                    .xsmall()
+                                                    .tooltip("外す")
+                                                    .on_click(cx.listener(
+                                                        move |this, _, _, cx| {
+                                                            this.session.update(cx, |s, cx| {
+                                                                s.detach_task(&id, cx)
+                                                            });
+                                                        },
+                                                    )),
+                                            )
+                                            .test_support()
+                                    }),
+                                ))
+                            })
                             .child(
                                 div()
                                     .id("ai-input")
@@ -2084,10 +2135,37 @@ impl Render for AiPane {
         self.refresh_rows(cx);
         let width = window.viewport_size().width;
         let shell_docked = self.session.read(cx).shell_place == ShellPlace::Docked;
+        // タスクをドラッグしている間は、チャットが落とし先になる
+        let dragging = self.main.as_ref().is_some_and(|main| {
+            main.read_with(cx, |main, _| {
+                main.task_drag.as_ref().is_some_and(|d| d.moved)
+            })
+            .unwrap_or(false)
+        });
         let base = div()
             .flex()
             .bg(theme.background)
-            .text_color(theme.foreground);
+            .text_color(theme.foreground)
+            .when(dragging, |d| {
+                d.on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
+                    if let Some(main) = &this.main {
+                        // メインの画面がもうなければ、落とす先もない
+                        let _ = main.update(cx, |main, cx| {
+                            // チャットの上では、メインの画面にマウスの動きが届かない
+                            main.drag_task(event.position, cx);
+                            main.drag_task_over(DropTarget::Chat, event.position, cx)
+                        });
+                    }
+                }))
+                .on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, cx| {
+                        if let Some(main) = &this.main {
+                            let _ = main.update(cx, |main, cx| main.finish_task_drag(cx));
+                        }
+                    }),
+                )
+            });
         match self.mode {
             PaneMode::ShellWindow => base
                 .size_full()

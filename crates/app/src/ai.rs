@@ -160,6 +160,9 @@ pub fn workspace_context_error(text: &str) -> Option<String> {
     })
 }
 
+/// 入力欄に添えられるタスクの数。
+pub const MAX_ATTACHED_TASKS: usize = 10;
+
 const MAX_ARRANGE_TASKS: usize = 5;
 /// 新しいタスクを整えるとき、タスク 1 つで読みに行くリンクの数。
 const MAX_ARRANGE_LINKS: usize = 3;
@@ -478,6 +481,8 @@ pub struct Session {
     pub window_bounds: [Option<[f32; 4]>; 2],
     /// ユーザーが今見ている場所（ワークスペースや開いているタスク）。画面が書き込む。
     pub place: String,
+    /// 入力欄に添えたタスク（ID と題）。送るときに、中身を AI に渡す。
+    pub attached: Vec<(String, SharedString)>,
     /// ユーザーが今開いているワークスペース。画面が書き込む。
     pub workspace: Option<String>,
     _subscriptions: Vec<Subscription>,
@@ -631,6 +636,7 @@ impl Session {
             resizing: false,
             window_bounds: ui.bounds,
             place: String::new(),
+            attached: Vec::new(),
             workspace: None,
             _subscriptions: Vec::new(),
         };
@@ -1912,8 +1918,28 @@ impl Session {
         self.turns.clear();
         self.items.clear();
         self.allow_shell = false;
+        self.attached.clear();
         self.conversation = malakt_core::new_id();
         self.error = None;
+        cx.notify();
+    }
+
+    /// タスクを入力欄に添える。同じタスクは 1 つだけ。
+    pub fn attach_task(&mut self, id: &str, title: SharedString, cx: &mut Context<Self>) {
+        if self.attached.iter().any(|(have, _)| have == id) {
+            return;
+        }
+        if self.attached.len() >= MAX_ATTACHED_TASKS {
+            self.error = Some(format!("添えられるタスクは {MAX_ATTACHED_TASKS} 件までです").into());
+        } else {
+            self.attached.push((id.to_owned(), title));
+        }
+        cx.notify();
+    }
+
+    /// 添えたタスクを外す。
+    pub fn detach_task(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.attached.retain(|(have, _)| have != id);
         cx.notify();
     }
 
@@ -1923,11 +1949,37 @@ impl Session {
         if self.busy || text.is_empty() || !self.db.read(cx).unlocked {
             return false;
         }
+        // 添えたタスクの中身を読む。読めないものがあれば、送らずにそのことを出す
+        let mut extra = String::new();
+        let mut shown = String::new();
+        for (id, title) in &self.attached {
+            let read = self.db.update(cx, |db, _| {
+                tools::execute(
+                    &mut db.store,
+                    None,
+                    "get_task",
+                    &serde_json::json!({"id": id}),
+                )
+            });
+            match read {
+                Ok(task) => {
+                    extra.push_str(&format!("\n\n[添えたタスク「{title}」]\n{task}"));
+                    shown.push_str(&format!("「{title}」\n"));
+                }
+                Err(error) => {
+                    self.error =
+                        Some(format!("添えたタスク「{title}」を読めませんでした: {error}").into());
+                    cx.notify();
+                    return false;
+                }
+            }
+        }
+        self.attached.clear();
         self.busy = true;
         self.error = None;
-        self.items.push(Item::User(text.clone().into()));
+        self.items.push(Item::User(format!("{shown}{text}").into()));
         self.task = Some(cx.spawn(async move |this, cx| {
-            let result = Self::run(&this, text, place, cx).await;
+            let result = Self::run(&this, text, extra, place, cx).await;
             let _ = this.update(cx, |this, cx| {
                 if let Err(error) = result {
                     this.items.push(Item::Error(error.into()));
@@ -2126,6 +2178,7 @@ impl Session {
     async fn run(
         this: &WeakEntity<Self>,
         text: String,
+        extra: String,
         place: String,
         cx: &mut AsyncApp,
     ) -> Result<(), String> {
@@ -2133,6 +2186,7 @@ impl Session {
 
         // メッセージに GitHub のリンクがあれば、先に中身を取ってきて添える
         let mut message = text.clone();
+        message.push_str(&extra);
         for link in github::find_links(&text) {
             match Self::fetch_github(this, &config, &link, cx).await {
                 Ok(content) => message.push_str(&format!("\n\n[{} の中身]\n{content}", link.url())),
