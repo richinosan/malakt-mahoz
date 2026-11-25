@@ -147,6 +147,38 @@ mod unix {
         wait(&terminal, "got", |s| s.text().contains("got:こんにちは"));
     }
 
+    /// IME は、変換を取り消したときなどに空の文字を確定してくる。そのあとの入力も届く。
+    #[test]
+    fn input_still_arrives_after_an_empty_one() {
+        let (terminal, _rx) = start(&shell("read a; echo got-$a; read b; echo again-$b"));
+        terminal.input("");
+        terminal.write(Vec::new());
+        terminal.paste("");
+        terminal.input("one\r");
+        wait(&terminal, "1 つ目", |s| s.text().contains("got-one"));
+        terminal.input("");
+        terminal.input("two\r");
+        wait(&terminal, "2 つ目", |s| s.text().contains("again-two"));
+    }
+
+    /// カーソルを隠すプログラム（Claude Code など）でも、入力の場所は分かる。IME の変換をそこに出す。
+    #[test]
+    fn the_input_place_is_known_while_the_cursor_is_hidden() {
+        let (terminal, _rx) = start(&shell(
+            "printf 'ab\\033[?25l'; read a; printf '\\033[?25hshown'; read b",
+        ));
+        wait(&terminal, "隠れたカーソル", |s| {
+            s.line(0) == "ab" && s.cursor.is_none()
+        });
+        assert_eq!(terminal.snapshot().input_at, Some((2, 0)));
+        terminal.input("\r");
+        wait(&terminal, "出たカーソル", |s| {
+            s.text().contains("shown") && s.cursor.is_some()
+        });
+        let shown = terminal.snapshot();
+        assert_eq!(shown.cursor.map(|(col, row, _)| (col, row)), shown.input_at);
+    }
+
     #[test]
     fn ctrl_c_interrupts_the_program() {
         let (terminal, rx) = start(&shell("echo ready; sleep 60"));

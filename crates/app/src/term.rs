@@ -632,6 +632,11 @@ impl TermPane {
         }
     }
 
+    /// キーの入力先が、このターミナルか。
+    pub fn is_focused(&self, window: &Window) -> bool {
+        self.focus.is_focused(window)
+    }
+
     fn terminal(&self, cx: &App) -> Option<Arc<Terminal>> {
         self.terms
             .read(cx)
@@ -867,7 +872,7 @@ impl TermPane {
     /// カーソルのマスの場所。IME の変換の窓を出す場所になる。
     fn cursor_bounds(&self, cx: &App) -> Option<Bounds<Pixels>> {
         let terminal = self.terminal(cx)?;
-        let (col, row, _) = terminal.snapshot().cursor?;
+        let (col, row) = terminal.snapshot().input_at?;
         Some(Bounds::new(
             point(
                 self.origin.x + self.cell.width * col as f32,
@@ -1139,6 +1144,34 @@ fn paint(frame: &Frame, window: &mut Window, cx: &mut App) {
             );
         }
     }
+    if let (Some(ime), Some((col, row))) = (&frame.ime, snapshot.input_at) {
+        // 変換中の文字は、入力の場所に、色を敷いて下線を付けて重ねる。
+        // カーソルを隠すプログラムの中でも、どこで変換しているかが分かる
+        let color = hsla(malakt_term::CURSOR);
+        let run = TextRun {
+            len: ime.len(),
+            font: frame.font.clone(),
+            color: hsla(malakt_term::FOREGROUND),
+            background_color: None,
+            underline: Some(UnderlineStyle {
+                thickness: gpui_kit::px(2.),
+                color: Some(color),
+                wavy: false,
+            }),
+            strikethrough: None,
+        };
+        let line =
+            window
+                .text_system()
+                .shape_line(ime.clone().into(), frame.font_size, &[run], None);
+        let origin = at(col, row);
+        window.paint_quad(fill(
+            Bounds::new(origin, size(line.width, cell.height)),
+            hsla(malakt_term::SELECTION),
+        ));
+        // 描けなかった文字は、その場所が空くだけ
+        let _ = line.paint(origin, cell.height, TextAlign::Left, None, window, cx);
+    }
     if let Some((col, row, caret)) = snapshot.cursor {
         let here = snapshot.cells[row * snapshot.cols + col];
         let wide = if here.style & style::WIDE != 0 {
@@ -1148,30 +1181,8 @@ fn paint(frame: &Frame, window: &mut Window, cx: &mut App) {
         };
         let block = Bounds::new(at(col, row), size(cell.width * wide, cell.height));
         let color = hsla(malakt_term::CURSOR);
-        if let Some(ime) = &frame.ime {
-            // 変換中の文字は、カーソルの場所に下線を付けて重ねる
-            let run = TextRun {
-                len: ime.len(),
-                font: frame.font.clone(),
-                color: hsla(malakt_term::FOREGROUND),
-                background_color: None,
-                underline: Some(UnderlineStyle {
-                    thickness: gpui_kit::px(1.),
-                    color: Some(color),
-                    wavy: false,
-                }),
-                strikethrough: None,
-            };
-            let line =
-                window
-                    .text_system()
-                    .shape_line(ime.clone().into(), frame.font_size, &[run], None);
-            window.paint_quad(fill(
-                Bounds::new(block.origin, size(line.width, cell.height)),
-                hsla(malakt_term::BACKGROUND),
-            ));
-            // 描けなかった文字は、その場所が空くだけ
-            let _ = line.paint(block.origin, cell.height, TextAlign::Left, None, window, cx);
+        if frame.ime.is_some() {
+            // 変換中は、下で変換中の文字を描く
         } else if !frame.focused {
             window.paint_quad(outline(block, color, BorderStyle::Solid));
         } else {
@@ -1219,6 +1230,10 @@ impl Render for TermPane {
             self.terms.update(cx, |terms, _| terms.focus_wanted = false);
             window.focus(&self.focus, cx);
         }
+        // 変換の途中でほかの場所へ移ったら、変換中の文字を残さない（残ると Enter などが届かなくなる）
+        if self.ime.is_some() && !self.focus.is_focused(window) {
+            self.ime = None;
+        }
         let danger = cx.theme().danger;
         let pane = cx.entity();
         let focus = self.focus.clone();
@@ -1233,7 +1248,6 @@ impl Render for TermPane {
             .min_h_0()
             .min_w_0()
             .bg(gpui_kit::rgb(malakt_term::BACKGROUND))
-            .cursor_text()
             .on_mouse_down(MouseButton::Left, cx.listener(Self::mouse_down))
             .on_mouse_down(MouseButton::Middle, cx.listener(Self::mouse_down))
             .on_mouse_down(MouseButton::Right, cx.listener(Self::mouse_down))
