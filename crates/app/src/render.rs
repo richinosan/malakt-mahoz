@@ -26,7 +26,7 @@ use crate::ai_view::{docked_width, TASKS_MIN};
 use crate::feel::{self, Lit, Sunk};
 use crate::shadow::{Elevate, Elevation};
 use crate::state::{
-    Column, CommentMode, Detail, DropTarget, Editing, MainView, Modal, Nav, SubModal,
+    Column, CommentMode, Detail, DropTarget, Editing, MainView, Modal, Nav, SubModal, When,
 };
 use crate::{Dismiss, LockNow, NewWindow, PanePrefix, ToggleAi};
 use malakt_core::Id;
@@ -441,12 +441,62 @@ fn card(cx: &App) -> Div {
 }
 
 impl MainView {
+    /// 詳細の開始日か期限。日付の欄、時刻の欄、今日からの日数で決めるボタン。
+    fn when_property(&self, which: When, cx: &mut Context<Self>) -> Div {
+        let (date, time, name, label) = match which {
+            When::Start => (
+                &self.inputs.start,
+                &self.inputs.start_time,
+                "start",
+                "開始日",
+            ),
+            When::Due => (&self.inputs.due, &self.inputs.due_time, "due", "期限"),
+        };
+        let mut line = row()
+            .gap_1p5()
+            .flex_wrap()
+            .child(
+                Input::new(date)
+                    .id(SharedString::from(format!("{name}-input")))
+                    .aria_label(label)
+                    .small()
+                    .w(px(128.)),
+            )
+            .child(
+                Input::new(time)
+                    .id(SharedString::from(format!("{name}-time-input")))
+                    .aria_label(format!("{label}の時刻"))
+                    .small()
+                    .w(px(72.)),
+            );
+        let buttons = [
+            ("今日", Some(0)),
+            ("明日", Some(1)),
+            ("1 週間後", Some(7)),
+            ("クリア", None),
+        ];
+        let chips = match which {
+            When::Start => "p-start",
+            When::Due => "p-due",
+        };
+        for (i, (text, days)) in buttons.into_iter().enumerate() {
+            line = line.child(
+                chip((chips, i), text, false, cx)
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        this.set_when_in(which, days, window, cx)
+                    }))
+                    .test_support(),
+            );
+        }
+        line
+    }
+
     fn due_label(&self, task: &Todo, cx: &App) -> Div {
         let theme = cx.theme();
         let Some(due) = &task.due else {
             return div().text_color(theme.muted_foreground).child("—");
         };
-        let text = view::format_date(due, &self.today);
+        let text = view::format_span(task.start.as_deref(), due, &self.today);
         if !task.status.is_open() {
             return div().text_color(theme.muted_foreground).child(text);
         }
@@ -3778,35 +3828,8 @@ impl MainView {
 
         let people = self.assignee_property(task, cx);
 
-        let due_buttons = [
-            ("今日", Some(0)),
-            ("明日", Some(1)),
-            ("1 週間後", Some(7)),
-            ("クリア", None),
-        ];
-        let mut due = row().gap_1p5().flex_wrap().child(
-            Input::new(&self.inputs.due)
-                .id("due-input")
-                .aria_label("期限")
-                .small()
-                .w(px(128.)),
-        );
-        due = due.child(
-            Input::new(&self.inputs.due_time)
-                .id("due-time-input")
-                .aria_label("期限の時刻")
-                .small()
-                .w(px(72.)),
-        );
-        for (i, (label, days)) in due_buttons.into_iter().enumerate() {
-            due = due.child(
-                chip(("p-due", i), label, false, cx)
-                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                        this.set_due_in(days, window, cx)
-                    }))
-                    .test_support(),
-            );
-        }
+        let start = self.when_property(When::Start, cx);
+        let due = self.when_property(When::Due, cx);
 
         let mut percent = row().gap_1p5().flex_wrap().items_center().child(
             row()
@@ -4207,24 +4230,7 @@ impl MainView {
                         .child(status_chips)
                         .child(self.property("優先度", cx).child(prio_chips))
                         .child(self.property("担当", cx).child(people))
-                        .child(
-                            self.property("開始日", cx).child(
-                                row()
-                                    .gap_1p5()
-                                    .child(
-                                        Input::new(&self.inputs.start)
-                                            .id("start-input")
-                                            .aria_label("開始日")
-                                            .small()
-                                            .w(px(128.)),
-                                    )
-                                    .child(chip("p-start-clear", "クリア", false, cx).on_click(
-                                        cx.listener(|this, _: &ClickEvent, window, cx| {
-                                            this.clear_start(window, cx)
-                                        }),
-                                    )),
-                            ),
-                        )
+                        .child(self.property("開始日", cx).child(start))
                         .child(self.property("期限", cx).child(due))
                         .child(self.property("進捗", cx).child(percent))
                         .child(self.property("カテゴリ", cx).child(categories))
