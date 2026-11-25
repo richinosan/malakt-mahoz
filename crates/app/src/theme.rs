@@ -120,8 +120,6 @@ pub struct Backdrop {
 #[derive(Default)]
 struct Shown {
     backdrop: Option<Backdrop>,
-    /// 乗せたとき・押したときの描き方。描くたびに読むので、ここに持っておく。
-    feel: Feel,
     /// 起動のときに画像を読めなかった理由。最初のウィンドウが画面に出す。
     failed: Option<String>,
 }
@@ -278,11 +276,19 @@ impl Feel {
     }
 }
 
+thread_local! {
+    /// 今の描き方。描くたびに読むので、DB ではなくここから読む（画面を描くスレッドは 1 つ）。
+    static FEEL_NOW: std::cell::Cell<Feel> = const { std::cell::Cell::new(Feel::Standard) };
+}
+
 /// 今の、乗せたとき・押したときの描き方。
-pub fn feel(cx: &App) -> Feel {
-    cx.try_global::<Shown>()
-        .map(|shown| shown.feel)
-        .unwrap_or_default()
+pub fn feel(_cx: &App) -> Feel {
+    feel_now()
+}
+
+/// 今の描き方。`cx` を持たない所から読む。
+pub(crate) fn feel_now() -> Feel {
+    FEEL_NOW.get()
 }
 
 fn saved_feel(cx: &App) -> Feel {
@@ -293,7 +299,7 @@ fn saved_feel(cx: &App) -> Feel {
 /// 乗せたとき・押したときの描き方を変える。
 pub fn set_feel(feel: Feel, cx: &mut App) -> malakt_core::Result<()> {
     db::shared(cx).update(cx, |db, _| db.store.set_setting(FEEL, feel.key()))?;
-    cx.global_mut::<Shown>().feel = feel;
+    FEEL_NOW.set(feel);
     cx.refresh_windows();
     Ok(())
 }
@@ -1018,7 +1024,7 @@ pub fn apply_preset(preset: &Preset, window: &mut Window, cx: &mut App) -> Resul
     // 途中まで保存されたときも、画面は保存されている中身に合わせる
     install(&with_scene(self::look(cx), &scene(cx)), cx);
     apply(choice(cx), Some(window), cx);
-    cx.global_mut::<Shown>().feel = saved_feel(cx);
+    FEEL_NOW.set(saved_feel(cx));
     let alpha = 1. - f32::from(clear(cx)) / 100.;
     if let Some(backdrop) = cx.global_mut::<Shown>().backdrop.as_mut() {
         backdrop.alpha = alpha;
@@ -1199,7 +1205,7 @@ pub fn fonts(cx: &App) -> Vec<String> {
 /// 配色を読み込んで、保存してある選択で塗る。`gpui_kit::init` のあとに 1 回呼ぶ。
 pub fn init(cx: &mut App) {
     cx.set_global(Shown::default());
-    cx.global_mut::<Shown>().feel = saved_feel(cx);
+    FEEL_NOW.set(saved_feel(cx));
     install(&with_scene(look(cx), &scene(cx)), cx);
     apply(choice(cx), None, cx);
 }

@@ -24,8 +24,8 @@ use crate::ai::{
     WATCH_MINUTES,
 };
 use crate::db::{self, Db};
+use crate::feel::{self, Lit};
 use crate::render::app_icon;
-use crate::render::Lit;
 use crate::shadow::{Elevate, Elevation};
 use crate::state::{DropTarget, MainView};
 use crate::term::{self, TermPane};
@@ -922,7 +922,7 @@ impl AiPane {
                     .child(providers)
                     .child(label("モデル"))
                     .child(
-                        Button::new("ai-model-open")
+                        feel::gloss(Button::new("ai-model-open")
                             .outline()
                             .small()
                             .w_full()
@@ -949,7 +949,7 @@ impl AiPane {
                                     });
                                 }
                                 cx.notify();
-                            })),
+                            }))),
                     )
                     .when(model_open, |d| {
                         d.child(
@@ -977,7 +977,7 @@ impl AiPane {
                                                 || provider.catalog_url().is_some(),
                                             |d| {
                                                 d.child(
-                                                    icon_button(
+                                                    feel::gloss(icon_button(
                                                         "ai-fetch-models",
                                                         "refresh-cw",
                                                         "モデル一覧を更新",
@@ -985,7 +985,7 @@ impl AiPane {
                                                     .on_click(cx.listener(|this, _, _, cx| {
                                                         this.session
                                                             .update(cx, |s, cx| s.fetch_models(cx));
-                                                    })),
+                                                    }))),
                                                 )
                                             },
                                         ),
@@ -1019,10 +1019,10 @@ impl AiPane {
                             )
                             .when(deletable, |d| {
                                 d.child(
-                                    icon_button("ai-key-delete", "trash", "API キーを削除")
+                                    feel::gloss(icon_button("ai-key-delete", "trash", "API キーを削除")
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             this.session.update(cx, |s, cx| s.delete_key(cx));
-                                        })),
+                                        }))),
                                 )
                             }),
                     )
@@ -1037,13 +1037,13 @@ impl AiPane {
                                     .flex_1(),
                             )
                             .child(
-                                icon_button("ai-key-save", "check", "API キーを保存")
+                                feel::gloss(icon_button("ai-key-save", "check", "API キーを保存")
                                     .primary()
                                     .on_click(
                                         cx.listener(|this, _, window, cx| {
                                             this.save_key(window, cx)
                                         }),
-                                    ),
+                                    )),
                             ),
                     ),
             )
@@ -1073,10 +1073,10 @@ impl AiPane {
                                 .test_support(),
                         )
                         .child(
-                            icon_button("ai-context-save", "check", "保存").on_click(cx.listener(|this, _, _, cx| {
+                            feel::gloss(icon_button("ai-context-save", "check", "保存").on_click(cx.listener(|this, _, _, cx| {
                                 let text = this.context_input.read(cx).value().to_string();
                                 this.session.update(cx, |s, cx| s.set_context(&text, cx));
-                            })),
+                            }))),
                         ),
                 ),
             )
@@ -1124,13 +1124,13 @@ impl AiPane {
                                 ),
                             )
                             .child(
-                                icon_button("ai-watch-now", "play", "今すぐチェック")
+                                feel::gloss(icon_button("ai-watch-now", "play", "今すぐチェック")
                                     .disabled(busy)
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.session.update(cx, |s, cx| {
                                             s.check_github(cx);
                                         });
-                                    })),
+                                    }))),
                             ),
                     )
                     .when_some(watch_status, |d, status| {
@@ -1160,10 +1160,10 @@ impl AiPane {
                                             .test_support(),
                                     )
                                     .child(
-                                        icon_button("ai-watch-save", "check", "保存")
+                                        feel::gloss(icon_button("ai-watch-save", "check", "保存")
                                             .on_click(cx.listener(|this, _, _, cx| {
                                                 this.set_watch(|_| {}, cx)
-                                            })),
+                                            }))),
                                     ),
                             )
                     }),
@@ -1281,7 +1281,7 @@ impl AiPane {
                             }))
                             .test_support(),
                     )
-                    .child(
+                    .child(feel::gloss(
                         Button::new(("ai-failed-retry", ix))
                             .icon(app_icon("refresh-cw"))
                             .ghost()
@@ -1290,8 +1290,8 @@ impl AiPane {
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.session.update(cx, |s, cx| s.retry_run(&retry, cx));
                             })),
-                    )
-                    .child(
+                    ))
+                    .child(feel::gloss(
                         Button::new(("ai-failed-dismiss", ix))
                             .icon(app_icon("x"))
                             .ghost()
@@ -1300,7 +1300,7 @@ impl AiPane {
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.session.update(cx, |s, cx| s.dismiss_run(&dismiss, cx));
                             })),
-                    ),
+                    )),
             );
         }
         Some(tray.test_support().into_any_element())
@@ -1378,7 +1378,7 @@ impl AiPane {
                             }))
                             .test_support(),
                     )
-                    .child(
+                    .child(feel::gloss(
                         Button::new(("ai-chat-delete", ix))
                             .icon(app_icon("trash"))
                             .ghost()
@@ -1387,7 +1387,7 @@ impl AiPane {
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.session.update(cx, |s, cx| s.delete_chat(&delete, cx));
                             })),
-                    ),
+                    )),
             );
         }
         div()
@@ -1474,7 +1474,7 @@ impl AiPane {
                             .test_support(),
                     )
                     .when(failed, |d| {
-                        d.child(
+                        d.child(feel::gloss(
                             Button::new(("ai-run-retry", ix))
                                 .icon(app_icon("refresh-cw"))
                                 .ghost()
@@ -1483,10 +1483,10 @@ impl AiPane {
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.session.update(cx, |s, cx| s.retry_run(&retry, cx));
                                 })),
-                        )
+                        ))
                     })
                     .when_some(task.filter(|_| self.main.is_some()), |d, task| {
-                        d.child(
+                        d.child(feel::gloss(
                             Button::new(("ai-run-task", ix))
                                 .icon(app_icon("list-todo"))
                                 .ghost()
@@ -1495,7 +1495,7 @@ impl AiPane {
                                 .on_click(cx.listener(move |this, _, window, cx| {
                                     this.open_task(&task, window, cx);
                                 })),
-                        )
+                        ))
                     }),
             );
             if opened {
@@ -1914,16 +1914,18 @@ impl AiPane {
         let mode = self.mode;
         let pane = cx.entity().downgrade();
         let close = (mode == PaneMode::Docked).then(|| {
-            icon_button("ai-close", "x", "閉じる").on_click(cx.listener(|this, _, _, cx| {
-                if let Some(main) = &this.main {
-                    // メインの画面がもうなければ、閉じる先もない
-                    let _ = main.update(cx, |main, cx| {
-                        main.ai_open = false;
-                        cx.notify();
-                    });
-                    this.session.update(cx, |s, cx| s.set_open(false, cx));
-                }
-            }))
+            feel::gloss(icon_button("ai-close", "x", "閉じる").on_click(cx.listener(
+                |this, _, _, cx| {
+                    if let Some(main) = &this.main {
+                        // メインの画面がもうなければ、閉じる先もない
+                        let _ = main.update(cx, |main, cx| {
+                            main.ai_open = false;
+                            cx.notify();
+                        });
+                        this.session.update(cx, |s, cx| s.set_open(false, cx));
+                    }
+                },
+            )))
         });
         let bar = || {
             row()
@@ -1955,28 +1957,28 @@ impl AiPane {
             // 設定の間は、戻るボタンと「設定」だけにする
             bar()
                 .pl_2()
-                .child(
+                .child(feel::gloss(
                     icon_button("ai-settings-toggle", "arrow-left", "チャットに戻る").on_click(
                         cx.listener(|this, _, _, cx| {
                             this.settings_open = false;
                             cx.notify();
                         }),
                     ),
-                )
+                ))
                 .child(div().flex_1().min_w_0().pl_1().text_sm().child("AI の設定"))
                 .children(badge)
                 .children(close)
         } else if let Some(side) = self.side {
             bar()
                 .pl_2()
-                .child(
+                .child(feel::gloss(
                     icon_button("ai-side-back", "arrow-left", "チャットに戻る").on_click(
                         cx.listener(|this, _, _, cx| {
                             this.side = None;
                             cx.notify();
                         }),
                     ),
-                )
+                ))
                 .child(div().flex_1().min_w_0().pl_1().text_sm().child(match side {
                     Side::Chats => "会話",
                     Side::Runs => "AI の実行履歴",
@@ -1995,21 +1997,21 @@ impl AiPane {
                         .child("AI チャット"),
                 )
                 .children(badge)
-                .child(
+                .child(feel::gloss(
                     icon_button("ai-chats", "history", "会話の一覧").on_click(cx.listener(
                         |this, _, _, cx| {
                             this.side = Some(Side::Chats);
                             cx.notify();
                         },
                     )),
-                )
-                .child(
+                ))
+                .child(feel::gloss(
                     icon_button("ai-new-chat", "message-square-plus", "新しいチャット").on_click(
                         cx.listener(|this, _, _, cx| {
                             this.session.update(cx, |s, cx| s.clear(cx));
                         }),
                     ),
-                )
+                ))
                 .child(
                     // 残りの操作は、名前の付いたメニューにまとめる
                     icon_button("ai-menu", "ellipsis", "メニュー").dropdown_menu_with_anchor(
@@ -2071,7 +2073,7 @@ impl AiPane {
             if has_key {
                 // 押すと、そのまま送る
                 for (ix, text) in SUGGESTIONS.into_iter().enumerate() {
-                    start = start.child(
+                    start = start.child(feel::gloss(
                         Button::new(("ai-suggest", ix))
                             .label(text)
                             .outline()
@@ -2080,10 +2082,10 @@ impl AiPane {
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.send_text(text, cx);
                             })),
-                    );
+                    ));
                 }
             } else {
-                start = start.child(
+                start = start.child(feel::gloss(
                     Button::new("ai-empty-key")
                         .icon(app_icon("settings"))
                         .label("API キーを設定")
@@ -2093,7 +2095,7 @@ impl AiPane {
                             this.settings_open = true;
                             cx.notify();
                         })),
-                );
+                ));
             }
             list = list.child(start.test_support());
         }
@@ -2144,55 +2146,57 @@ impl AiPane {
             );
         }
 
-        let pending =
-            session.pending.as_ref().map(|pending| {
-                col()
-                    .id("ai-confirm")
-                    .flex_none()
-                    .gap_2()
-                    .m_3()
-                    .p_3()
-                    .rounded_md()
-                    .border_1()
-                    .border_color(theme.primary)
-                    .bg(theme.background)
-                    .elevate(Elevation::Mid, cx)
-                    .child(div().text_sm().child(pending.text.clone()))
-                    .child(
-                        row()
-                            .gap_2()
-                            .flex_wrap()
-                            .child(
-                                Button::new("ai-allow")
-                                    .label("許可")
-                                    .primary()
+        let pending = session.pending.as_ref().map(|pending| {
+            col()
+                .id("ai-confirm")
+                .flex_none()
+                .gap_2()
+                .m_3()
+                .p_3()
+                .rounded_md()
+                .border_1()
+                .border_color(theme.primary)
+                .bg(theme.background)
+                .elevate(Elevation::Mid, cx)
+                .child(div().text_sm().child(pending.text.clone()))
+                .child(
+                    row()
+                        .gap_2()
+                        .flex_wrap()
+                        .child(feel::gloss(
+                            Button::new("ai-allow")
+                                .label("許可")
+                                .primary()
+                                .small()
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.session
+                                        .update(cx, |s, cx| s.answer(Decision::Allow, cx));
+                                })),
+                        ))
+                        .when(pending.shell, |d| {
+                            d.child(feel::gloss(
+                                Button::new("ai-allow-always")
+                                    .label("このチャットでは常に許可")
                                     .small()
                                     .on_click(cx.listener(|this, _, _, cx| {
-                                        this.session
-                                            .update(cx, |s, cx| s.answer(Decision::Allow, cx));
+                                        this.session.update(cx, |s, cx| {
+                                            s.answer(Decision::AllowShellAlways, cx)
+                                        });
                                     })),
-                            )
-                            .when(pending.shell, |d| {
-                                d.child(
-                                    Button::new("ai-allow-always")
-                                        .label("このチャットでは常に許可")
-                                        .small()
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.session.update(cx, |s, cx| {
-                                                s.answer(Decision::AllowShellAlways, cx)
-                                            });
-                                        })),
-                                )
-                            })
-                            .child(Button::new("ai-deny").label("拒否").small().on_click(
-                                cx.listener(|this, _, _, cx| {
+                            ))
+                        })
+                        .child(feel::gloss(
+                            Button::new("ai-deny")
+                                .label("拒否")
+                                .small()
+                                .on_click(cx.listener(|this, _, _, cx| {
                                     this.session
                                         .update(cx, |s, cx| s.answer(Decision::Deny, cx));
-                                }),
-                            )),
-                    )
-                    .test_support()
-            });
+                                })),
+                        )),
+                )
+                .test_support()
+        });
         let error = session.error.clone();
         let tray = self.render_tray(cx);
         let pills = self.render_pills(cx);
@@ -2289,7 +2293,7 @@ impl AiPane {
                                             .text_xs()
                                             .child(app_icon("list-todo").size_3().flex_none())
                                             .child(div().min_w_0().truncate().child(title.clone()))
-                                            .child(
+                                            .child(feel::gloss(
                                                 Button::new(("ai-attached-remove", ix))
                                                     .icon(app_icon("x"))
                                                     .ghost()
@@ -2302,7 +2306,7 @@ impl AiPane {
                                                             });
                                                         },
                                                     )),
-                                            )
+                                            ))
                                             .test_support()
                                     }),
                                 ))
@@ -2324,22 +2328,22 @@ impl AiPane {
                                             .test_support(),
                                     )
                                     .when(busy, |d| {
-                                        d.child(
+                                        d.child(feel::gloss(
                                             icon_button("ai-stop", "square", "停止（Ctrl+C）")
                                                 .danger()
                                                 .on_click(
                                                     cx.listener(|this, _, _, cx| this.stop(cx)),
                                                 ),
-                                        )
+                                        ))
                                     })
                                     .when(!busy, |d| {
-                                        d.child(
+                                        d.child(feel::gloss(
                                             icon_button("ai-send", "arrow-up", "送信（Enter）")
                                                 .primary()
                                                 .on_click(cx.listener(|this, _, window, cx| {
                                                     this.submit(window, cx)
                                                 })),
-                                        )
+                                        ))
                                     }),
                             ),
                     )
@@ -2377,31 +2381,31 @@ impl AiPane {
             .bg(theme.background)
             .child(self.render_term_tabs(cx))
             .when(running && on_ai, |d| {
-                d.child(
+                d.child(feel::gloss(
                     icon_button("ai-shell-kill", "square", "強制終了（Ctrl+C）")
                         .danger()
                         .on_click(cx.listener(|this, _, _, cx| this.stop(cx))),
-                )
+                ))
             })
             .when(on_ai, |d| {
-                d.child(
+                d.child(feel::gloss(
                     icon_button(
                         "ai-shell-copy",
                         if self.copied { "check" } else { "copy" },
                         "すべてコピー",
                     )
                     .on_click(cx.listener(|this, _, _, cx| this.copy_shell(cx))),
-                )
-                .child(
+                ))
+                .child(feel::gloss(
                     icon_button("ai-shell-clear", "eraser", "クリア（Ctrl+L）").on_click(
                         cx.listener(|this, _, _, cx| {
                             this.session.update(cx, |s, cx| s.clear_shell(cx));
                         }),
                     ),
-                )
+                ))
             })
             .when(!detached, |d| {
-                d.child(
+                d.child(feel::gloss(
                     icon_button(
                         "ai-shell-wide",
                         if self.shell_wide {
@@ -2419,24 +2423,26 @@ impl AiPane {
                         this.shell_wide = !this.shell_wide;
                         cx.notify();
                     })),
-                )
-                .child(
+                ))
+                .child(feel::gloss(
                     icon_button(
                         "ai-shell-detach",
                         "picture-in-picture-2",
                         "別ウィンドウで開く",
                     )
                     .on_click(cx.listener(|this, _, _, cx| this.detach(PaneMode::ShellWindow, cx))),
-                )
-                .child(icon_button("ai-shell-close", "x", "閉じる").on_click(
-                    cx.listener(|this, _, _, cx| this.set_shell_place(ShellPlace::Closed, cx)),
+                ))
+                .child(feel::gloss(
+                    icon_button("ai-shell-close", "x", "閉じる").on_click(
+                        cx.listener(|this, _, _, cx| this.set_shell_place(ShellPlace::Closed, cx)),
+                    ),
                 ))
             })
             .when(detached, |d| {
-                d.child(
+                d.child(feel::gloss(
                     icon_button("ai-shell-attach", "panel-right", "チャットの横に戻す")
                         .on_click(|_, window, _| window.remove_window()),
-                )
+                ))
             });
 
         let lines = uniform_list(
@@ -2531,7 +2537,7 @@ impl AiPane {
                         .text_xs()
                         .text_color(theme.danger)
                         .child(div().flex_1().min_w_0().child(error))
-                        .child(
+                        .child(feel::gloss(
                             Button::new("term-error-close")
                                 .icon(app_icon("x"))
                                 .tooltip("閉じる")
@@ -2543,7 +2549,7 @@ impl AiPane {
                                         cx.notify();
                                     })
                                 }),
-                        )
+                        ))
                         .test_support(),
                 )
             })
@@ -2731,7 +2737,7 @@ impl AiPane {
             .min_w_0()
             .gap_0p5()
             .child(tabs)
-            .child(
+            .child(feel::gloss(
                 Button::new("term-new")
                     .icon(app_icon("plus"))
                     .tooltip(new_tip)
@@ -2745,7 +2751,7 @@ impl AiPane {
                             })
                         }
                     }),
-            )
+            ))
             .child(
                 icon_button("term-shells", "chevron-down", "シェルを選ぶ")
                     .dropdown_menu_with_anchor(Anchor::TopRight, move |mut menu, _, _| {
