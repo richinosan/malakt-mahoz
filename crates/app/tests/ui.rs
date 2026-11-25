@@ -177,13 +177,23 @@ fn nested_workspaces_and_filing_later(cx: &mut TestAppContext) {
 
     // ワークスペースを作ると、そこへ移動する
     ui(cx, window, |window, cx| window.click("add-workspace", cx));
+    // ダイアログは出ず、「新規ワークスペース」という名前で増えて、その行で名前を書ける
+    cx.update(|cx| {
+        let view = view.read(cx);
+        assert_eq!(view.modal, Modal::None);
+        assert!(view.workspace_naming.as_ref().is_some_and(|n| n.created));
+    });
+    let parent = store(cx, |s| s.workspaces().unwrap()).remove(0);
+    assert_eq!(parent.name, malakt_mahoz::state::NEW_WORKSPACE_NAME);
+    // 名前は全部選ばれているので、打つと置き換わる
     ui(cx, window, |window, cx| {
-        window.click("name-input", cx);
+        assert!(window.find("workspace-name-input").visible());
         window.input("冬のイベント", cx);
         window.press("enter", cx);
     });
     let parent = store(cx, |s| s.workspaces().unwrap()).remove(0);
     assert_eq!(parent.name, "冬のイベント");
+    cx.update(|cx| assert_eq!(view.read(cx).workspace_naming, None));
     cx.update(|cx| assert_eq!(view.read(cx).nav, Nav::Workspace(parent.id.clone())));
 
     // その中に子を作る
@@ -193,11 +203,10 @@ fn nested_workspaces_and_filing_later(cx: &mut TestAppContext) {
     for key in ["down", "down", "down", "enter"] {
         ui(cx, window, |window, cx| window.press(key, cx));
     }
-    ui(cx, window, |window, cx| {
-        window.click("name-input", cx);
-        window.input("会場", cx);
-        window.click("name-submit", cx);
-    });
+    // ほかの場所を押しても保存される
+    ui(cx, window, |window, cx| window.input("会場", cx));
+    ui(cx, window, |window, cx| window.click("quick-add", cx));
+    cx.update(|cx| assert_eq!(view.read(cx).workspace_naming, None));
     let all = store(cx, |s| s.workspaces().unwrap());
     let child = all
         .iter()
@@ -243,15 +252,64 @@ fn nested_workspaces_and_filing_later(cx: &mut TestAppContext) {
         assert_eq!(view.open_counts.get(&child.id), Some(&2));
     });
 
-    // 空の名前では作れず、ダイアログは開いたまま
+    // 何も打たずに Enter を押すと、「新規ワークスペース」のまま残る
     ui(cx, window, |window, cx| window.click("add-workspace", cx));
-    ui(cx, window, |window, cx| window.click("name-submit", cx));
+    ui(cx, window, |window, cx| window.press("enter", cx));
+    let all = store(cx, |s| s.workspaces().unwrap());
+    assert_eq!(all.len(), 3);
+    let added = all
+        .iter()
+        .find(|w| w.name == malakt_mahoz::state::NEW_WORKSPACE_NAME)
+        .expect("新規ワークスペース")
+        .id
+        .clone();
     cx.update(|cx| {
         let view = view.read(cx);
-        assert!(matches!(view.modal, Modal::WorkspaceName { .. }));
-        assert!(view.error.is_some());
+        assert_eq!(view.workspace_naming, None);
+        assert_eq!(view.nav, Nav::Workspace(added.clone()));
     });
-    assert_eq!(store(cx, |s| s.workspaces().unwrap()).len(), 2);
+
+    // 行のメニューの「名前を変更」も、その行で書く。空にして Enter を押すと、前の名前のまま
+    let rename = |cx: &mut TestAppContext| {
+        cx.update_window(window, |_, window, cx| {
+            view.update(cx, |v, cx| v.rename_workspace(added.clone(), window, cx))
+        })
+        .unwrap();
+        cx.run_until_parked();
+    };
+    rename(cx);
+    cx.update(|cx| {
+        let naming = view
+            .read(cx)
+            .workspace_naming
+            .clone()
+            .expect("名前を書いている");
+        assert!(!naming.created);
+    });
+    ui(cx, window, |window, cx| {
+        window.press("backspace", cx);
+        window.press("enter", cx);
+    });
+    assert_eq!(
+        store(cx, |s| s.workspace(&added).unwrap()).name,
+        malakt_mahoz::state::NEW_WORKSPACE_NAME
+    );
+    // Esc は書きかけを捨てる
+    rename(cx);
+    ui(cx, window, |window, cx| window.input("捨てる名前", cx));
+    ui(cx, window, |window, cx| window.press("escape", cx));
+    cx.update(|cx| assert_eq!(view.read(cx).workspace_naming, None));
+    assert_eq!(
+        store(cx, |s| s.workspace(&added).unwrap()).name,
+        malakt_mahoz::state::NEW_WORKSPACE_NAME
+    );
+    // 書いて Enter で変わる
+    rename(cx);
+    ui(cx, window, |window, cx| {
+        window.input("打ち上げ", cx);
+        window.press("enter", cx);
+    });
+    assert_eq!(store(cx, |s| s.workspace(&added).unwrap()).name, "打ち上げ");
 }
 
 /// ウィンドウを 2 枚開くと、片方の変更がもう片方にもすぐ出る。
@@ -511,10 +569,6 @@ fn every_screen_renders_at_any_size(cx: &mut TestAppContext) {
         .unwrap();
         ui(cx, window, |_, _| {});
         let modals = [
-            Modal::WorkspaceName {
-                parent: None,
-                rename: Some(ws.clone()),
-            },
             Modal::DeleteWorkspace(ws.clone()),
             Modal::DeleteTasks(vec![task.clone()]),
             Modal::MoveTasks(vec![task.clone()]),

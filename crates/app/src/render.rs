@@ -378,6 +378,10 @@ impl MainView {
             };
             let group = SharedString::from(format!("ws-row-{ix}"));
             let active = self.nav == Nav::Workspace(id.clone());
+            let naming = self
+                .workspace_naming
+                .as_ref()
+                .is_some_and(|naming| naming.id == id);
             let view = cx.entity().downgrade();
             let menu_id = id.clone();
             let menu = move |menu: PopupMenu| {
@@ -400,11 +404,11 @@ impl MainView {
                     cx.notify();
                 }))
                 .item(item("名前を変更", |this, id, window, cx| {
-                    this.ask_workspace_name(None, Some(id), window, cx)
+                    this.rename_workspace(id, window, cx)
                 }))
                 .item(item(
                     "サブワークスペースを追加",
-                    |this, id, window, cx| this.ask_workspace_name(Some(id), None, window, cx),
+                    |this, id, window, cx| this.add_workspace(Some(id), window, cx),
                 ))
                 .item(item("設定", |this, id, window, cx| {
                     this.open_workspace_settings(&id, window, cx)
@@ -435,13 +439,49 @@ impl MainView {
                 )
                 .pl(px(12.) * node.depth as f32)
                 .child(caret)
-                .child(self.nav_item(
-                    ("ws", ix),
-                    workspace_icon(ws.icon.as_deref(), ws.color.as_deref()),
-                    ws.name.clone(),
-                    Nav::Workspace(id),
-                    cx,
-                ))
+                .child(if naming {
+                    // その場で名前を書く。文字の大きさも位置も、読むときと同じ。
+                    // Enter かほかの場所を押すと保存、Esc で取り消し
+                    row()
+                        .flex_1()
+                        .min_w_0()
+                        .gap_2()
+                        .px_3()
+                        // 入力欄の高さに足して、読むときの行と同じ高さにする
+                        .py(px(3.2))
+                        .rounded_md()
+                        .text_sm()
+                        .bg(theme.accent)
+                        .text_color(theme.accent_foreground)
+                        .on_mouse_down_out(
+                            cx.listener(|this, _, window, cx| this.save_workspace_name(window, cx)),
+                        )
+                        .child(
+                            workspace_icon(ws.icon.as_deref(), ws.color.as_deref())
+                                .small()
+                                .flex_none(),
+                        )
+                        .child(
+                            div().flex_1().min_w_0().mx(px(-8.)).child(
+                                Input::new(&self.inputs.workspace_name)
+                                    .id("workspace-name-input")
+                                    .aria_label("ワークスペース名")
+                                    .text_sm()
+                                    .bg(theme.background)
+                                    .border_color(theme.ring)
+                                    .px_2(),
+                            ),
+                        )
+                        .into_any_element()
+                } else {
+                    self.nav_item(
+                        ("ws", ix),
+                        workspace_icon(ws.icon.as_deref(), ws.color.as_deref()),
+                        ws.name.clone(),
+                        Nav::Workspace(id),
+                        cx,
+                    )
+                })
                 .child(more)
                 // 右クリックでも同じメニューを出す
                 .context_menu(move |m, _, _| menu(m)),
@@ -569,7 +609,7 @@ impl MainView {
                                     .xsmall()
                                     .tooltip("ワークスペースを追加")
                                     .on_click(cx.listener(|this, _, window, cx| {
-                                        this.ask_workspace_name(None, None, window, cx)
+                                        this.add_workspace(None, window, cx)
                                     })),
                             ),
                     )
@@ -580,9 +620,7 @@ impl MainView {
                 let view = view.clone();
                 menu.item(PopupMenuItem::new("ワークスペースを追加").on_click(
                     move |_, window, cx| {
-                        let _ = view.update(cx, |this, cx| {
-                            this.ask_workspace_name(None, None, window, cx)
-                        });
+                        let _ = view.update(cx, |this, cx| this.add_workspace(None, window, cx));
                     },
                 ))
             });
@@ -4032,36 +4070,6 @@ impl MainView {
         };
         Some(match &self.modal {
             Modal::None => return None,
-            Modal::WorkspaceName { rename, parent } => {
-                let title = if rename.is_some() {
-                    "ワークスペースの名前を変更".to_owned()
-                } else if let Some(parent) = parent {
-                    format!(
-                        "「{}」にサブワークスペースを追加",
-                        self.workspace_name(Some(parent))
-                    )
-                } else {
-                    "ワークスペースを追加".to_owned()
-                };
-                let body = col()
-                    .gap_3()
-                    .child(
-                        Input::new(&self.inputs.name)
-                            .id("name-input")
-                            .aria_label("名前"),
-                    )
-                    .child(
-                        row().gap_2().justify_end().child(cancel(cx)).child(
-                            Button::new("name-submit")
-                                .label(if rename.is_some() { "保存" } else { "追加" })
-                                .primary()
-                                .on_click(
-                                    cx.listener(|this, _, window, cx| this.submit_name(window, cx)),
-                                ),
-                        ),
-                    );
-                self.dialog(title, body, cx)
-            }
             Modal::WorkspaceIcon(id) => {
                 let theme = cx.theme().clone();
                 let current = self.workspaces.iter().find(|w| &w.id == id);

@@ -203,6 +203,11 @@ pub type PostFn = dyn Fn(&str, &Headers, &Value) -> Result<Value, String> + Send
 /// GET して、本文を受け取る。
 pub type GetFn = dyn Fn(&str, &Headers) -> Result<String, String> + Send + Sync;
 
+/// ワークスペースのアイコンを選ぶときの、AI への指示。
+const ICON_PROMPT: &str = "ワークスペース（タスクをまとめるフォルダ）の名前を受け取り、その名前に合うアイコンを探すための英単語を答えます。\n\
+- 具体的な物や生き物を表す、小文字の英語の名詞を 5 つまで、合う順にコンマで区切って書く（例: cat, plane, book, wrench, house）。\n\
+- 英単語のほかには何も書かない。";
+
 /// 外とのやり取り。テストでは差し替える。
 #[derive(Clone)]
 pub struct AiConfig {
@@ -1005,6 +1010,96 @@ impl Session {
         Ok(notes)
     }
 
+    // ---- ワークスペースのアイコンを選ぶ ----
+
+    /// 名前を付けたばかりのワークスペースのアイコンを、AI に選ばせる。チャットには出さない。
+    /// API キーがなければ通信せず、アイコンは最初のままにする。
+    pub fn suggest_icon(&mut self, workspace: String, name: String, cx: &mut Context<Self>) {
+        // Cursor は CLI をシェルで動かすので、チャットの外からは使わない
+        if !self.db.read(cx).unlocked || self.provider == Provider::Cursor {
+            return;
+        }
+        let config = self.config.clone();
+        cx.spawn(async move |this, cx| {
+            let result = Self::icon_run(&this, &config, &workspace, &name, cx).await;
+            // チャットがなくなっていれば、知らせる先もない
+            let _ = this.update(cx, |this, cx| {
+                if let Err(error) = result {
+                    this.items.push(Item::Error(
+                        format!("「{name}」のアイコンを AI が選べませんでした: {error}").into(),
+                    ));
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    async fn icon_run(
+        this: &WeakEntity<Self>,
+        config: &AiConfig,
+        workspace: &str,
+        name: &str,
+        cx: &mut AsyncApp,
+    ) -> Result<(), String> {
+        let (provider, model) = this
+            .read_with(cx, |s, _| (s.provider, s.model().to_owned()))
+            .map_err(gone)?;
+        let found = {
+            let config = config.clone();
+            cx.background_executor()
+                .spawn(async move { keys::lookup(&*config.keys, provider, |n| (config.env)(n)) })
+                .await?
+        };
+        let Some((key, _)) = found else {
+            return Ok(());
+        };
+        let turns = [Turn::User(format!("ワークスペースの名前: {name}"))];
+        let request = wire::Request {
+            model: &model,
+            effort: Effort::Default,
+            system: ICON_PROMPT,
+            turns: &turns,
+            tools: &[],
+            fallbacks: false,
+        };
+        let conversation = malakt_core::new_id();
+        let (_, reply) =
+            Self::request(this, config, provider, &key, &conversation, request, cx).await?;
+        if let Some(notice) = reply.notice {
+            return Err(notice);
+        }
+        let words: Vec<&str> = reply
+            .text
+            .split([',', '、', '\n'])
+            .map(str::trim)
+            .filter(|word| !word.is_empty())
+            .collect();
+        let Some(icon) = crate::icons::pick(&words) else {
+            return Err(format!(
+                "AI の答え「{}」に合うアイコンがありません",
+                reply.text.trim()
+            ));
+        };
+        this.update(cx, |s, cx| {
+            s.db.update(cx, |db, cx| {
+                // 待っている間に消えた、名前が変わった、ユーザーがアイコンを選んだ、のどれかなら変えない
+                let Ok(current) = db.store.workspace(workspace) else {
+                    return Ok(());
+                };
+                if current.name != name || current.icon.is_some() {
+                    return Ok(());
+                }
+                db.store
+                    .set_workspace_icon(workspace, Some(icon), current.color.as_deref())
+                    .map_err(|e| e.to_string())?;
+                cx.notify();
+                Ok(())
+            })
+        })
+        .map_err(gone)?
+    }
+
     /// オート実行を切り替える。待っている確認があれば、オンにしたときに実行へ進める。
     pub fn set_auto_run(&mut self, on: bool, cx: &mut Context<Self>) {
         if self.auto_run == on || !self.save_setting("ai.auto_run", if on { "1" } else { "0" }, cx)
@@ -1786,7 +1881,7 @@ impl Session {
     ) -> Result<(Wire, Reply), String> {
         let turns = this.read_with(cx, |s, _| s.turns.clone()).map_err(gone)?;
         let definitions = tools::definitions();
-        let mut request = wire::Request {
+        let request = wire::Request {
             model,
             effort,
             system,
@@ -1794,6 +1889,20 @@ impl Session {
             tools: &definitions,
             fallbacks: false,
         };
+        Self::request(this, config, provider, key, conversation, request, cx).await
+    }
+
+    /// AI に 1 回問い合わせる。
+    async fn request(
+        this: &WeakEntity<Self>,
+        config: &AiConfig,
+        provider: Provider,
+        key: &str,
+        conversation: &str,
+        mut request: wire::Request<'_>,
+        cx: &mut AsyncApp,
+    ) -> Result<(Wire, Reply), String> {
+        let (model, effort) = (request.model, request.effort);
 
         if provider == Provider::Cursor {
             let Value::String(prompt) = wire::body(Wire::Cursor, &request) else {

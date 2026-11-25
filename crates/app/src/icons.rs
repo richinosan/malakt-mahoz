@@ -404,6 +404,33 @@ pub fn search(
     named.into_iter().chain(tagged).take(limit).collect()
 }
 
+/// 言葉の並びから、いちばん合うアイコンを 1 つ選ぶ。前の言葉ほど優先する。
+/// 名前がその言葉と同じものがあればそれを、なければ探して最初に見つかったものを返す。
+pub fn pick(words: &[&str]) -> Option<&'static str> {
+    let words: Vec<String> = words
+        .iter()
+        .map(|word| {
+            word.trim()
+                .trim_matches(|c: char| !c.is_alphanumeric())
+                .to_lowercase()
+                .replace([' ', '_'], "-")
+        })
+        .filter(|word| !word.is_empty())
+        .collect();
+    let exact = words.iter().find_map(|word| {
+        let emoji = format!("emoji-{word}");
+        let lucide = by_name().get(word.as_str());
+        lucide
+            .or_else(|| by_name().get(emoji.as_str()))
+            .map(|entry| entry.name)
+    });
+    exact.or_else(|| {
+        words
+            .iter()
+            .find_map(|word| search(word, None, &[], 1).into_iter().next())
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -457,6 +484,18 @@ mod tests {
         assert!(search("penguin", None, &first, 200).contains(&"emoji-penguin"));
         // 上限を守る
         assert_eq!(search("a", None, &first, 5).len(), 5);
+    }
+
+    #[test]
+    fn pick_takes_the_first_word_that_has_an_icon() {
+        // 同じ名前の線画が先、なければ絵文字
+        assert_eq!(pick(&["cat", "dog"]), Some("cat"));
+        assert_eq!(pick(&["penguin", "bird"]), Some("emoji-penguin"));
+        assert_eq!(pick(&["zzzzqqq", " Rocket. "]), Some("rocket"));
+        // 同じ名前がなければ、探して見つかったもの
+        assert_eq!(pick(&["zzzzqqq", "takeoff"]), Some("plane-takeoff"));
+        assert_eq!(pick(&["zzzzqqq"]), None);
+        assert_eq!(pick(&[]), None);
     }
 
     #[test]
