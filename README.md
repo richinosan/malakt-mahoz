@@ -8,14 +8,16 @@
 オフラインで使うタスク管理ツールです。Rust と [gpui](https://www.gpui.rs/) で作っていて、macOS・Windows・Linux で動きます。
 
 ![タスクの一覧](docs/images/list.png)
+<sub>タスクの一覧（テーマ: ガラスと青い空）</sub>
 
 | | |
 | --- | --- |
-| ![ホーム](docs/images/home.png) | ![タスクの詳細](docs/images/detail.png) |
-| ![ペイン](docs/images/panes.png) | ![AI チャットとシェル](docs/images/ai.png) |
-| ![テーマの見本](docs/images/themes.png) | ![テーマ「ガラスと青い空」](docs/images/theme-sky.png) |
+| ![ホーム](docs/images/home.png)<br><sub>ホーム（夕暮れ）</sub> | ![タスクの詳細](docs/images/detail.png)<br><sub>タスクの詳細（ダークフォレスト）</sub> |
+| ![ペイン](docs/images/panes.png)<br><sub>ペイン（星空）</sub> | ![AI チャット](docs/images/ai.png)<br><sub>AI チャット（ノート風）</sub> |
+| ![ターミナル](docs/images/terminal.png)<br><sub>ターミナル（エディタ風）</sub> | ![すべてのタスク](docs/images/all.png)<br><sub>すべてのタスク（さくら）</sub> |
 
-![ダークモード](docs/images/dark.png)
+![テーマ](docs/images/themes.png)
+<sub>テーマの一覧（紙とインク）</sub>
 
 ## 機能
 
