@@ -867,6 +867,7 @@ impl MainView {
         };
         let unread = self.unread_notices;
         let lock_enabled = self.lock_enabled(cx);
+        let reminders = crate::reminders::menu_label(cx);
         let view = cx.entity().downgrade();
         bar.child(
             row()
@@ -1031,6 +1032,12 @@ impl MainView {
                                 ))
                             } else {
                                 menu
+                            };
+                            let menu = match reminders {
+                                Some(label) => menu
+                                    .separator()
+                                    .item(item(label, |this, _, cx| this.toggle_reminders(cx))),
+                                None => menu,
                             };
                             menu.separator()
                                 .item(item("新しいウィンドウ", |_, window, cx| {

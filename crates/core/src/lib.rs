@@ -7,6 +7,7 @@
 //! - `defaults`: ワークスペースごとのタスク追加時の既定値と基準日
 //! - `links`: 1 つのタスクを複数のワークスペースに表示する
 //! - `notice`: 通知（期限が今日、ほかの人からの変更）
+//! - `remind`: OS のリマインダーとの連携（何を作り・直し・消すかの判断）
 //! - `ticket`: 完了チケット（画面で発行し、コマンドで完了報告する）
 //! - `lock`: アプリロック
 //! - `mention`: コメントの `@名前`
@@ -25,6 +26,7 @@ pub mod mention;
 pub mod model;
 pub mod notice;
 pub mod panes;
+pub mod remind;
 mod schema;
 pub mod store;
 pub mod tasklink;

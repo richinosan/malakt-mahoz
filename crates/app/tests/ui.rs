@@ -1,7 +1,7 @@
 //! 画面を通したシナリオテスト。実際のウィンドウ（ヘッドレス）を開き、クリックと入力で操作する。
 
 use gpui_kit::component::input::InputState;
-use gpui_kit::test::TestWindowExt;
+use gpui_kit::test::{TestQueryExt, TestWindowExt};
 use gpui_kit::{
     px, size, AnyWindowHandle, AppContext, Bounds, Entity, Pixels, Point, Size, TestAppContext,
     WindowBounds, WindowOptions,
@@ -2317,4 +2317,156 @@ fn panes_split_move_resize_close_and_come_back(cx: &mut TestAppContext) {
             .unwrap()
     });
     ui(cx, window, |_, _| {});
+}
+
+/// OS のリマインダーを、メモリの中のものに差し替える。戻り値は、その中身。
+fn reminders(
+    cx: &mut TestAppContext,
+    refuse: Option<&'static str>,
+) -> std::sync::Arc<std::sync::Mutex<malakt_core::remind::Memory>> {
+    use malakt_mahoz::reminders::{Reminders, Target};
+    let os = std::sync::Arc::new(std::sync::Mutex::new(malakt_core::remind::Memory::default()));
+    let inside = os.clone();
+    cx.update(|cx| {
+        cx.set_global(Reminders {
+            target: Some(Target::Reminders),
+            run: std::sync::Arc::new(move |snapshot, links| match refuse {
+                Some(reason) => Err(reason.into()),
+                None => Ok(malakt_core::remind::sync(
+                    &mut *inside.lock().unwrap(),
+                    &snapshot,
+                    &links,
+                )),
+            }),
+        })
+    });
+    os
+}
+
+/// 設定のメニューを開いて、その文の項目を押す。
+fn choose_in_menu(cx: &mut TestAppContext, window: AnyWindowHandle, label: &str) {
+    ui(cx, window, |window, cx| window.click("open-menu", cx));
+    let id = cx
+        .update_window(window, |_, window, _| {
+            window
+                .elements()
+                .iter()
+                .find(|e| e.label() == Some(label))
+                .and_then(|e| e.path().last().cloned())
+        })
+        .unwrap()
+        .unwrap_or_else(|| panic!("メニューに「{label}」がありません"));
+    ui(cx, window, |window, cx| window.click(id, cx));
+}
+
+/// リマインダーとの連携は、選ぶまで動かない。選ぶと、タスクが期限つきでリストに入り、
+/// 完了は両方向に伝わり、解除すると作ったものが消える。
+#[gpui_kit::test]
+fn reminders_follow_tasks_once_chosen(cx: &mut TestAppContext) {
+    start(cx);
+    let os = reminders(cx, None);
+    let (desk, milk) = cx.update(|cx| {
+        db::shared(cx).update(cx, |db, _| {
+            let event = db.store.create_workspace(None, "冬のイベント").unwrap();
+            let venue = db.store.create_workspace(Some(&event.id), "会場").unwrap();
+            let draft = |title: &str, due: &str| malakt_core::TaskDraft {
+                title: title.into(),
+                due: Some(due.into()),
+                ..Default::default()
+            };
+            let desk = db
+                .store
+                .create_task(Some(&venue.id), &draft("机を借りる", "2099-12-20 18:30"))
+                .unwrap();
+            let milk = db
+                .store
+                .create_task(None, &draft("牛乳を買う", "2099-12-01"))
+                .unwrap();
+            (desk, milk)
+        })
+    });
+    let (window, view) = open(cx, wide());
+    cx.run_until_parked();
+    // 標準では何も作らない
+    assert!(os.lock().unwrap().items.is_empty());
+
+    choose_in_menu(cx, window, "リマインダーと連携する");
+    cx.run_until_parked();
+    {
+        let os = os.lock().unwrap();
+        assert_eq!(os.titles_in("冬のイベント / 会場"), ["机を借りる"]);
+        assert_eq!(os.titles_in("Malakt Mahoz"), ["牛乳を買う"]);
+        assert_eq!(
+            os.find("机を借りる").unwrap().due_parts(),
+            Some((2099, 12, 20, Some((18, 30))))
+        );
+    }
+
+    // アプリで完了にすると、リマインダーも完了になる
+    cx.update(|cx| {
+        view.update(cx, |v, cx| {
+            v.write(cx, |s| s.set_task_status(&desk.id, Status::Completed))
+        })
+    });
+    cx.run_until_parked();
+    assert!(os.lock().unwrap().find("机を借りる").unwrap().done);
+
+    // リマインダーで完了にすると、1 分以内にタスクも完了になる
+    os.lock().unwrap().set_done("牛乳を買う", true);
+    cx.executor()
+        .advance_clock(std::time::Duration::from_secs(61));
+    cx.run_until_parked();
+    assert_eq!(
+        store(cx, |s| s.task(&milk.id).unwrap().status),
+        Status::Completed
+    );
+
+    // 落ち着いたら、もう書き直さない
+    let writes = os.lock().unwrap().writes;
+    cx.executor()
+        .advance_clock(std::time::Duration::from_secs(61));
+    cx.run_until_parked();
+    assert_eq!(os.lock().unwrap().writes, writes);
+
+    // 解除すると、作ったリマインダーとリストが消える。タスクは残る
+    choose_in_menu(cx, window, "リマインダーとの連携を解除する");
+    cx.run_until_parked();
+    {
+        let os = os.lock().unwrap();
+        assert!(os.items.is_empty() && os.lists.is_empty());
+    }
+    assert_eq!(all_tasks(cx).len(), 2);
+    assert!(store(cx, |s| s.reminder_links().unwrap()).is_empty());
+    cx.update(|cx| assert!(view.read(cx).error.is_none()));
+}
+
+/// アクセスが許可されなかったら、設定はオフに戻り、理由が画面に出る。
+#[gpui_kit::test]
+fn reminders_refused_by_the_os_turn_back_off(cx: &mut TestAppContext) {
+    start(cx);
+    reminders(cx, Some("リマインダーへのアクセスが許可されていません"));
+    cx.update(|cx| {
+        db::shared(cx).update(cx, |db, _| {
+            db.store
+                .create_task(
+                    None,
+                    &malakt_core::TaskDraft {
+                        title: "牛乳を買う".into(),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+        })
+    });
+    let (window, view) = open(cx, wide());
+    cx.run_until_parked();
+    choose_in_menu(cx, window, "リマインダーと連携する");
+    cx.run_until_parked();
+    assert!(!store(cx, |s| s.reminders_enabled().unwrap()));
+    cx.update(|cx| {
+        assert_eq!(
+            view.read(cx).error.as_deref(),
+            Some("リマインダーへのアクセスが許可されていません")
+        )
+    });
 }

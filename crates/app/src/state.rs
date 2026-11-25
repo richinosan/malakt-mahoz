@@ -303,6 +303,14 @@ impl MainView {
                     this.ai_session.update(cx, |s, _| s.place = place);
                 }
             }),
+            // リマインダーとの連携で失敗したことを出す
+            cx.subscribe(
+                &crate::reminders::shared(cx),
+                |this, _, failed: &crate::reminders::Failed, cx| {
+                    this.error = Some(failed.0.clone());
+                    cx.notify();
+                },
+            ),
             // 読み直すたびに、まだ出していない通知を OS に出す
             cx.observe_in(&db, window, |this, _, window, cx| {
                 this.deliver_notices(window, cx)
@@ -2017,6 +2025,18 @@ impl MainView {
             .store
             .active_ticket_count(task_id)
             .unwrap_or(0)
+    }
+
+    // ---- リマインダー ----
+
+    /// OS のリマインダーとの連携を始める・解除する。
+    pub fn toggle_reminders(&mut self, cx: &mut Context<Self>) {
+        let on = !crate::reminders::enabled(cx);
+        match crate::reminders::set_enabled(on, cx) {
+            Ok(()) => self.error = None,
+            Err(error) => self.error = Some(format!("設定を保存できませんでした。{error}").into()),
+        }
+        cx.notify();
     }
 
     // ---- 通知 ----
