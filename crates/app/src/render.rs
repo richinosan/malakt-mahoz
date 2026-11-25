@@ -119,7 +119,7 @@ fn glass(color: Hsla, cx: &App) -> Hsla {
     }
 }
 
-/// 「見た目」のダイアログと、テーマの見本の幅。見本は 1 行に 5 つ並ぶ。
+/// 「テーマ」のダイアログと、テーマの見本の幅。見本は 1 行に 5 つ並ぶ。
 const APPEARANCE_WIDTH: Pixels = px(680.);
 const PRESET_WIDTH: Pixels = px(124.);
 
@@ -1303,7 +1303,7 @@ impl MainView {
                                 .item(item("担当者", |this, window, cx| {
                                     this.open_people(window, cx)
                                 }))
-                                .item(item("見た目", |this, window, cx| {
+                                .item(item("テーマ", |this, window, cx| {
                                     this.open_appearance(window, cx)
                                 }))
                                 .separator()
@@ -4721,7 +4721,7 @@ impl MainView {
                             .pr_4()
                             .track_scroll(&self.appearance_scroll)
                             .overflow_y_scroll()
-                            .child(heading("テーマ"))
+                            .child(heading("プリセット"))
                             .child(presets)
                             .child(heading("レイアウト"))
                             .child(layouts)
@@ -4735,7 +4735,7 @@ impl MainView {
                 d.child(div().text_sm().text_color(theme.danger).child(error))
             });
         let (title, width, over) = match self.sub_modal {
-            None => return self.dialog_as("dialog", APPEARANCE_WIDTH, "見た目", body, cx),
+            None => return self.dialog_as("dialog", APPEARANCE_WIDTH, "テーマ", body, cx),
             Some(SubModal::Font) => ("フォント", px(400.), self.font_picker(cx)),
             Some(SubModal::Scene) => ("背景の画像", px(680.), self.scene_picker(cx)),
         };
@@ -4749,11 +4749,11 @@ impl MainView {
         div()
             .absolute()
             .inset_0()
-            .child(self.dialog_as("dialog-under", APPEARANCE_WIDTH, "見た目", body, cx))
+            .child(self.dialog_as("dialog-under", APPEARANCE_WIDTH, "テーマ", body, cx))
             .child(over)
     }
 
-    /// テーマの見本。おすすめ、自分で保存したもの、今の見た目を保存するボタンの順に並べる。
+    /// テーマの見本。おすすめ、自分で保存したもの、今のテーマを保存するボタンの順に並べる。
     fn preset_tiles(&self, cx: &mut Context<Self>) -> Div {
         use crate::theme::{Preset, Scene};
         let theme = cx.theme().clone();
@@ -4950,7 +4950,7 @@ impl MainView {
                         .justify_center()
                         .child(app_icon("plus").text_color(theme.muted_foreground)),
                 )
-                .child(name("今の見た目を保存".into()))
+                .child(name("今のテーマを保存".into()))
                 .on_click(
                     cx.listener(|this, _: &ClickEvent, window, cx| this.save_preset(window, cx)),
                 )
