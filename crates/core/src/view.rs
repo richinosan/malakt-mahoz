@@ -1,5 +1,7 @@
 //! 一覧の絞り込み・並べ替えや、期限・優先度の見せ方。画面に依存しない。
 
+use std::collections::{HashMap, HashSet};
+
 use crate::model::*;
 
 /// 一覧のタブ。
@@ -206,6 +208,158 @@ pub fn apply(tasks: &[Task], query: &ListQuery, self_id: Option<&str>) -> Vec<us
     hits
 }
 
+/// 一覧の 1 行。タスクか、サブワークスペースの見出し。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ListRow {
+    /// `index` は [`Outline::visible`] の中の位置。
+    Task { index: usize, depth: usize },
+    /// `workspace` はワークスペースの並びの中の位置。`count` は、その下（さらに下のサブワークスペースを含む）で
+    /// 条件に合うタスクの数。
+    Folder {
+        workspace: usize,
+        depth: usize,
+        count: usize,
+        open: bool,
+    },
+}
+
+/// ワークスペースの一覧を、サブワークスペースを入れ子にして並べたもの。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Outline {
+    /// 画面に出ているタスクの添え字。上から順。
+    pub visible: Vec<usize>,
+    /// `visible` と同じ並びで、そのタスクを出しているワークスペース（ワークスペースの並びの中の位置）。
+    pub homes: Vec<Option<usize>>,
+    pub rows: Vec<ListRow>,
+}
+
+impl Outline {
+    /// 入れ子にしない一覧。
+    pub fn flat(hits: Vec<usize>) -> Self {
+        Outline {
+            rows: (0..hits.len())
+                .map(|index| ListRow::Task { index, depth: 0 })
+                .collect(),
+            homes: vec![None; hits.len()],
+            visible: hits,
+        }
+    }
+
+    /// `visible` のその位置のタスクが、何行目にあるか。
+    pub fn row_of(&self, index: usize) -> Option<usize> {
+        self.rows
+            .iter()
+            .position(|row| matches!(row, ListRow::Task { index: i, .. } if *i == index))
+    }
+}
+
+/// サブワークスペースを見出しの行として先に、`root` のタスクをその後ろに並べる。開いているサブワークスペース
+/// （`open`）は、見出しの下にさらに下のサブワークスペースと中のタスクを出す。
+///
+/// `hits` は [`apply`] の結果。タスクは、出ているワークスペースのうち上から順にたどって最初の 1 か所にだけ出す。
+/// `hide_empty` なら、条件に合うタスクがないサブワークスペースは出さない（絞り込み中）。
+pub fn outline(
+    tasks: &[Task],
+    hits: &[usize],
+    workspaces: &[Workspace],
+    root: &str,
+    open: &HashSet<Id>,
+    hide_empty: bool,
+) -> Outline {
+    let Some(root) = workspaces.iter().position(|w| w.id == root) else {
+        return Outline::flat(hits.to_vec());
+    };
+    let mut children: HashMap<&str, Vec<usize>> = HashMap::new();
+    for (i, w) in workspaces.iter().enumerate() {
+        if let Some(parent) = w.parent_id.as_deref() {
+            children.entry(parent).or_default().push(i);
+        }
+    }
+    for list in children.values_mut() {
+        list.sort_by_key(|&i| (workspaces[i].position, workspaces[i].id.as_str()));
+    }
+    let kids = |i: usize| -> &[usize] {
+        children
+            .get(workspaces[i].id.as_str())
+            .map_or(&[], Vec::as_slice)
+    };
+    // root から上から順にたどった並び（ワークスペース, 深さ, 親の位置）。深い入れ子でもスタックを
+    // 使い切らないよう、再帰しない
+    let mut order: Vec<(usize, usize, usize)> = Vec::new();
+    let mut rank: HashMap<&str, usize> = HashMap::new();
+    let mut stack = vec![(root, 0, 0)];
+    while let Some((i, depth, up)) = stack.pop() {
+        // 親をたどって自分に戻るデータでも、止まるようにする
+        if rank.contains_key(workspaces[i].id.as_str()) {
+            continue;
+        }
+        let at = order.len();
+        rank.insert(workspaces[i].id.as_str(), at);
+        order.push((i, depth, up));
+        stack.extend(kids(i).iter().rev().map(|&k| (k, depth + 1, at)));
+    }
+    // ワークスペースごとのタスク。並びは `hits` のまま
+    let mut own: Vec<Vec<usize>> = vec![Vec::new(); order.len()];
+    for &hit in hits {
+        let at = tasks[hit]
+            .places()
+            .filter_map(|id| rank.get(id.as_str()).copied())
+            .min()
+            .unwrap_or(0);
+        own[at].push(hit);
+    }
+    // 下のサブワークスペースを含めた数。`order` では子が親より後ろにあるので、後ろから足し上げる
+    let mut total: Vec<usize> = own.iter().map(Vec::len).collect();
+    let mut below: Vec<Vec<usize>> = vec![Vec::new(); order.len()];
+    for at in (1..order.len()).rev() {
+        let up = order[at].2;
+        total[up] += total[at];
+        below[up].push(at);
+    }
+    enum Step {
+        Folder(usize),
+        Tasks(usize),
+    }
+    let mut out = Outline::default();
+    // `below` は後ろから足したので、そのまま積むと上から順に取り出せる
+    let mut steps = vec![Step::Tasks(0)];
+    steps.extend(below[0].iter().map(|&at| Step::Folder(at)));
+    while let Some(step) = steps.pop() {
+        match step {
+            Step::Folder(at) => {
+                let (workspace, depth, _) = order[at];
+                let count = total[at];
+                if hide_empty && count == 0 {
+                    continue;
+                }
+                let is_open = open.contains(&workspaces[workspace].id);
+                out.rows.push(ListRow::Folder {
+                    workspace,
+                    depth: depth - 1,
+                    count,
+                    open: is_open,
+                });
+                if is_open {
+                    steps.push(Step::Tasks(at));
+                    steps.extend(below[at].iter().map(|&at| Step::Folder(at)));
+                }
+            }
+            Step::Tasks(at) => {
+                let (workspace, depth, _) = order[at];
+                for &hit in &own[at] {
+                    out.rows.push(ListRow::Task {
+                        index: out.visible.len(),
+                        depth,
+                    });
+                    out.visible.push(hit);
+                    out.homes.push(Some(workspace));
+                }
+            }
+        }
+    }
+    out
+}
+
 /// 期限の状態。期限切れ・今日・近い（3 日以内）を目立たせるのに使う。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DueState {
@@ -372,6 +526,178 @@ mod tests {
             .into_iter()
             .map(|i| tasks[i].id.clone())
             .collect()
+    }
+
+    fn space(id: &str, parent: Option<&str>, position: i64) -> Workspace {
+        Workspace {
+            id: id.into(),
+            parent_id: parent.map(Into::into),
+            name: id.to_uppercase(),
+            date: None,
+            icon: None,
+            color: None,
+            position,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    fn in_space(id: &str, workspace: &str) -> Task {
+        Task {
+            workspace_id: Some(workspace.into()),
+            ..task(id, Status::NeedsAction)
+        }
+    }
+
+    /// 行を「深さ:名前」で書き出す。見出しは `[名前 数]`、開いていれば `v`、閉じていれば `>` を付ける。
+    fn drawn(tasks: &[Task], spaces: &[Workspace], open: &[&str], hide_empty: bool) -> Vec<String> {
+        let hits = apply(tasks, &ListQuery::default(), None);
+        let open = open.iter().map(|id| id.to_string()).collect();
+        let outline = outline(tasks, &hits, spaces, "w", &open, hide_empty);
+        assert_eq!(outline.visible.len(), outline.homes.len());
+        outline
+            .rows
+            .iter()
+            .map(|row| match *row {
+                ListRow::Task { index, depth } => {
+                    let task = &tasks[outline.visible[index]];
+                    let home = &spaces[outline.homes[index].unwrap()].id;
+                    format!("{depth}:{}@{home}", task.id)
+                }
+                ListRow::Folder {
+                    workspace,
+                    depth,
+                    count,
+                    open,
+                } => format!(
+                    "{depth}:{}[{} {count}]",
+                    if open { 'v' } else { '>' },
+                    spaces[workspace].id
+                ),
+            })
+            .collect()
+    }
+
+    fn nested() -> (Vec<Task>, Vec<Workspace>) {
+        let spaces = vec![
+            space("other", None, 0),
+            space("w", None, 1),
+            space("b", Some("w"), 1),
+            space("a", Some("w"), 0),
+            space("a1", Some("a"), 0),
+            space("a1x", Some("a1"), 0),
+        ];
+        let tasks = vec![
+            in_space("t1", "w"),
+            in_space("t2", "a"),
+            in_space("t3", "a1"),
+            in_space("t4", "a1x"),
+            in_space("t5", "b"),
+        ];
+        (tasks, spaces)
+    }
+
+    #[test]
+    fn outline_folds_sub_workspaces() {
+        let (tasks, spaces) = nested();
+        // 閉じていれば見出しだけ。数は、さらに下のサブワークスペースの分も含む
+        assert_eq!(
+            drawn(&tasks, &spaces, &[], false),
+            ["0:>[a 3]", "0:>[b 1]", "0:t1@w"]
+        );
+        // 開くと、下のサブワークスペース、中のタスクの順に出る
+        assert_eq!(
+            drawn(&tasks, &spaces, &["a"], false),
+            ["0:v[a 3]", "1:>[a1 2]", "1:t2@a", "0:>[b 1]", "0:t1@w"]
+        );
+        // サブのサブのサブまで開ける
+        assert_eq!(
+            drawn(&tasks, &spaces, &["a", "a1", "a1x", "b"], false),
+            [
+                "0:v[a 3]",
+                "1:v[a1 2]",
+                "2:v[a1x 1]",
+                "3:t4@a1x",
+                "2:t3@a1",
+                "1:t2@a",
+                "0:v[b 1]",
+                "1:t5@b",
+                "0:t1@w"
+            ]
+        );
+        // 上が閉じていれば、下が開いていても出ない
+        assert_eq!(
+            drawn(&tasks, &spaces, &["a1", "a1x"], false),
+            ["0:>[a 3]", "0:>[b 1]", "0:t1@w"]
+        );
+    }
+
+    #[test]
+    fn outline_hides_empty_folders_only_when_asked() {
+        let (mut tasks, spaces) = nested();
+        tasks.retain(|t| t.id != "t5" && t.id != "t2" && t.id != "t3");
+        assert_eq!(
+            drawn(&tasks, &spaces, &["a"], false),
+            ["0:v[a 1]", "1:>[a1 1]", "0:>[b 0]", "0:t1@w"]
+        );
+        assert_eq!(
+            drawn(&tasks, &spaces, &["a", "b"], true),
+            ["0:v[a 1]", "1:>[a1 1]", "0:t1@w"]
+        );
+    }
+
+    #[test]
+    fn outline_shows_a_task_once() {
+        let (mut tasks, spaces) = nested();
+        // a1 に入っていて w にも出しているタスクは、w の行として 1 度だけ出る
+        tasks[2].linked_workspace_ids = vec!["w".into()];
+        // よそに入っていて b に出しているタスクは、b の下に出る
+        tasks.push(Task {
+            linked_workspace_ids: vec!["b".into()],
+            ..in_space("t6", "other")
+        });
+        assert_eq!(
+            drawn(&tasks, &spaces, &["a", "a1", "b"], false),
+            [
+                "0:v[a 2]",
+                "1:v[a1 1]",
+                "2:>[a1x 1]",
+                "1:t2@a",
+                "0:v[b 2]",
+                "1:t5@b",
+                "1:t6@b",
+                "0:t1@w",
+                "0:t3@w"
+            ]
+        );
+    }
+
+    #[test]
+    fn outline_row_of_and_flat() {
+        let (tasks, spaces) = nested();
+        let hits = apply(&tasks, &ListQuery::default(), None);
+        let open = ["a".to_string()].into_iter().collect();
+        let nested = outline(&tasks, &hits, &spaces, "w", &open, false);
+        // t2 は 3 行目、t1 は最後の行
+        assert_eq!(nested.row_of(0), Some(2));
+        assert_eq!(nested.row_of(1), Some(4));
+        assert_eq!(nested.row_of(2), None);
+        // ワークスペースが見つからなければ、入れ子にしない
+        let flat = outline(&tasks, &hits, &spaces, "gone", &open, false);
+        assert_eq!(flat, Outline::flat(hits.clone()));
+        assert_eq!(flat.visible, hits);
+        assert_eq!(flat.row_of(4), Some(4));
+    }
+
+    #[test]
+    fn outline_stops_on_a_parent_loop() {
+        let mut spaces = vec![space("w", Some("a"), 0), space("a", Some("w"), 0)];
+        spaces[0].parent_id = Some("a".into());
+        let tasks = vec![in_space("t1", "w"), in_space("t2", "a")];
+        assert_eq!(
+            drawn(&tasks, &spaces, &["a", "w"], false),
+            ["0:v[a 1]", "1:t2@a", "0:t1@w"]
+        );
     }
 
     #[test]

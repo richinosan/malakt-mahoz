@@ -51,6 +51,7 @@ const NOT_BUTTONS: &[&str] = &[
     "home",
     "caret",
     "row-cursor",
+    "folder-cursor",
     "keys-help",
     "app-keys",
 ];
@@ -422,7 +423,7 @@ fn fingerprint(cx: &mut TestAppContext, world: &World) -> String {
     cx.update(|cx| {
         let v = world.view.read(cx);
         let state = format!(
-            "{} {:?} {:?} {:?} {:?} {:?} {:?} {:?} {:?} {:?} {:?} {:?} {:?} {:?} {} {} {} {} {} {} {} {} {:?} {} {} {} {} {:?} {:?} {:?} {:?} {:?} {:?} {:?} {:?} {:?}",
+            "{} {:?} {:?} {:?} {:?} {:?} {:?} {:?} {:?} {:?} {:?} {:?} {:?} {:?} {} {} {} {} {} {} {} {:?} {:?} {} {} {} {} {:?} {:?} {:?} {:?} {:?} {:?} {:?} {:?} {:?}",
             v.layout.encode(),
             v.pane_keys,
             v.pane_overlay,
@@ -444,7 +445,7 @@ fn fingerprint(cx: &mut TestAppContext, world: &World) -> String {
             v.column_menu.is_some(),
             v.filters_open,
             v.due_mine,
-            v.include_descendants,
+            v.list_open,
             v.collapsed,
             v.unread_notices,
             v.notices.len(),

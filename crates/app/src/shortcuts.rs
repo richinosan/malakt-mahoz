@@ -7,6 +7,8 @@ use gpui_kit::*;
 use malakt_core::{Id, TaskDraft};
 
 use crate::panes::PaneOverlay;
+use malakt_core::view::ListRow;
+
 use crate::state::{Editing, MainView, Modal, Nav};
 
 actions!(
@@ -269,11 +271,30 @@ impl MainView {
             .position(|&i| &self.tasks[i].id == cursor)
     }
 
+    /// キーで選んでいる行が、一覧の何行目か。タスクでも、サブワークスペースの見出しでも。
+    fn cursor_row(&self) -> Option<usize> {
+        match self.cursor_index() {
+            Some(ix) => self
+                .rows
+                .iter()
+                .position(|row| matches!(row, ListRow::Task { index, .. } if *index == ix)),
+            None => self.cursor_folder().map(|(row, _)| row),
+        }
+    }
+
+    /// 一覧のその行の、タスクかワークスペースの ID。
+    fn row_id(&self, row: usize) -> Id {
+        match self.rows[row] {
+            ListRow::Task { index, .. } => self.tasks[self.visible[index]].id.clone(),
+            ListRow::Folder { workspace, .. } => self.workspaces[workspace].id.clone(),
+        }
+    }
+
     /// 作ったばかりのタスクを読み込んで、キーで選んでいる行が見えるところまで一覧を動かす。
     fn reveal_cursor(&mut self, cx: &mut Context<Self>) {
         self.reload(cx);
-        if let Some(ix) = self.cursor_index() {
-            self.list_scroll.scroll_to_item(ix, ScrollStrategy::Top);
+        if let Some(row) = self.cursor_row() {
+            self.list_scroll.scroll_to_item(row, ScrollStrategy::Top);
         }
     }
 
@@ -283,6 +304,10 @@ impl MainView {
         if !selected.is_empty() {
             return selected;
         }
+        // サブワークスペースの見出しを選んでいる間は、タスクを相手にしない
+        if self.cursor_folder().is_some() {
+            return Vec::new();
+        }
         self.cursor_index()
             .map(|ix| self.tasks[self.visible[ix]].id.clone())
             .or_else(|| self.panel.clone())
@@ -291,11 +316,18 @@ impl MainView {
     }
 
     fn move_cursor(&mut self, by: isize, extend: bool, cx: &mut Context<Self>) -> bool {
-        if self.nav == Nav::Home || self.visible.is_empty() || self.editing.is_some() {
+        if self.nav == Nav::Home || self.editing.is_some() {
             return false;
         }
-        let last = self.visible.len() - 1;
-        let to = match self.cursor_index() {
+        if extend {
+            return self.extend_cursor(by, cx);
+        }
+        // サブワークスペースの見出しにも止まる
+        if self.rows.is_empty() {
+            return false;
+        }
+        let last = self.rows.len() - 1;
+        let to = match self.cursor_row() {
             _ if by == isize::MIN => 0,
             _ if by == isize::MAX => last,
             Some(at) => at.saturating_add_signed(by).min(last),
@@ -303,24 +335,8 @@ impl MainView {
             None if by < 0 => last,
             None => 0,
         };
-        let id = self.tasks[self.visible[to]].id.clone();
-        if extend {
-            let from = self
-                .select_anchor
-                .as_ref()
-                .and_then(|anchor| {
-                    self.visible
-                        .iter()
-                        .position(|&i| &self.tasks[i].id == anchor)
-                })
-                .unwrap_or(to);
-            self.selected = (from.min(to)..=from.max(to))
-                .map(|ix| self.tasks[self.visible[ix]].id.clone())
-                .collect();
-            if self.select_anchor.is_none() {
-                self.select_anchor = Some(id.clone());
-            }
-        } else {
+        let id = self.row_id(to);
+        if matches!(self.rows[to], ListRow::Task { .. }) {
             self.select_anchor = Some(id.clone());
         }
         self.cursor = Some(id);
@@ -329,7 +345,47 @@ impl MainView {
         true
     }
 
+    /// Shift を押しながらの ↑↓。タスクだけを相手に、範囲をまとめて選ぶ。
+    fn extend_cursor(&mut self, by: isize, cx: &mut Context<Self>) -> bool {
+        if self.visible.is_empty() {
+            return false;
+        }
+        let last = self.visible.len() - 1;
+        let to = match self.cursor_index() {
+            Some(at) => at.saturating_add_signed(by).min(last),
+            None if by < 0 => last,
+            None => 0,
+        };
+        let id = self.tasks[self.visible[to]].id.clone();
+        let from = self
+            .select_anchor
+            .as_ref()
+            .and_then(|anchor| {
+                self.visible
+                    .iter()
+                    .position(|&i| &self.tasks[i].id == anchor)
+            })
+            .unwrap_or(to);
+        self.selected = (from.min(to)..=from.max(to))
+            .map(|ix| self.tasks[self.visible[ix]].id.clone())
+            .collect();
+        if self.select_anchor.is_none() {
+            self.select_anchor = Some(id.clone());
+        }
+        self.cursor = Some(id);
+        if let Some(row) = self.cursor_row() {
+            self.list_scroll.scroll_to_item(row, ScrollStrategy::Top);
+        }
+        cx.notify();
+        true
+    }
+
     fn toggle_cursor(&mut self, cx: &mut Context<Self>) -> bool {
+        // 見出しなら、開く・閉じる
+        if let Some(id) = self.cursor_folder().map(|(_, w)| w.id.clone()) {
+            self.toggle_list_folder(&id, cx);
+            return true;
+        }
         let Some(ix) = self.cursor_index() else {
             return false;
         };
@@ -352,6 +408,11 @@ impl MainView {
     }
 
     fn open_cursor(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        // 見出しなら、そのワークスペースへ移る
+        if let Some(id) = self.cursor_folder().map(|(_, w)| w.id.clone()) {
+            self.go_here(Nav::Workspace(id), cx);
+            return true;
+        }
         let Some(ix) = self.cursor_index() else {
             return false;
         };
