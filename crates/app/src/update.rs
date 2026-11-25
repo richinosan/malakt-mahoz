@@ -226,8 +226,15 @@ fn install(cx: &mut App) -> Option<Result<(), String>> {
         progress.ready.take()
     })?;
     let install = cx.global::<Updater>().install.clone();
+    // MCP サーバーが実行ファイルをつかんでいると入れ替えられないので、先に終わらせる
+    let released = crate::mcp::release_for_install();
     let result = install(&staged);
     if result.is_err() {
+        if released {
+            if let Err(error) = crate::mcp::resume() {
+                eprintln!("アプリが動いている印を付け直せませんでした: {error}");
+            }
+        }
         // 書き込めない場所に置いてあるときなどは、何度やっても同じなので、この版は見送る。
         // 残したものは次の起動で消えるので、ここで消せなくても続ける
         let _ = malakt_update::discard(&staged);
