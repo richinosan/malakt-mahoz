@@ -111,10 +111,12 @@ impl Store {
         conn.set_prepared_statement_cache_capacity(64);
         schema::migrate(&mut conn)?;
         crate::undo::install(&conn)?;
-        Ok(Self {
+        let mut store = Self {
             conn,
             history: Default::default(),
-        })
+        };
+        store.purge_custom_icons()?;
+        Ok(store)
     }
 
     // ---- ワークスペース ----
@@ -273,6 +275,13 @@ impl Store {
             if !ok {
                 return Err(Error::Invalid(format!(
                     "アイコンの名前が正しくありません: {icon}"
+                )));
+            }
+            if icon.starts_with(crate::icon::CUSTOM_PREFIX)
+                && crate::icon::get(&self.conn, icon)?.is_none()
+            {
+                return Err(Error::Invalid(format!(
+                    "アイコンの画像がありません: {icon}"
                 )));
             }
         }
@@ -1205,7 +1214,21 @@ impl Store {
             )?
             .query_map([], change_from_row)?
             .collect::<rusqlite::Result<_>>()?;
+        // 使っている画像だけを書き出す
+        let mut icons = Vec::new();
+        for w in &workspaces {
+            let Some(icon) = w.icon.as_deref().filter(|i| crate::icon::is_custom(i)) else {
+                continue;
+            };
+            if icons.iter().any(|(name, _)| name == icon) {
+                continue;
+            }
+            if let Some(png) = crate::icon::get(&self.conn, icon)? {
+                icons.push((icon.to_owned(), png));
+            }
+        }
         Ok(crate::archive::Data {
+            icons,
             workspaces,
             people,
             tasks,
@@ -1245,6 +1268,9 @@ impl Store {
             [],
             |r| r.get(0),
         )?;
+        for (name, png) in &data.icons {
+            crate::icon::put(&tx, name, png)?;
+        }
         for w in &data.workspaces {
             insert_workspace(&tx, w)?;
         }

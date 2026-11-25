@@ -47,6 +47,8 @@ pub struct Counts {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Data {
+    /// 自分で足したアイコンの画像（名前と PNG）。zip の `icons/<名前>.png` に 1 つずつ入る。
+    pub icons: Vec<(String, Vec<u8>)>,
     pub workspaces: Vec<Workspace>,
     pub people: Vec<Person>,
     pub tasks: Vec<Task>,
@@ -145,6 +147,10 @@ impl Data {
     }
 }
 
+fn icon_entry(name: &str) -> String {
+    format!("icons/{name}.png")
+}
+
 fn file_entry(hash: &str) -> String {
     format!("files/{hash}")
 }
@@ -185,6 +191,9 @@ pub fn export<W: Write + Seek>(store: &Store, out: W) -> Result<Manifest> {
         "data/attachments.json",
         serde_json::to_vec(&data.attachments)?,
     )?;
+    for (name, png) in &data.icons {
+        put(&icon_entry(name), png.clone())?;
+    }
     // 中身は 1 つずつ読んで書く（全部を一度にメモリへ載せない）。同じ中身は 1 回だけ
     let mut written = std::collections::HashSet::new();
     for a in &data.attachments {
@@ -257,8 +266,28 @@ fn read_zip<R: Read + Seek>(zip: &mut ZipArchive<R>) -> Result<(Manifest, Data)>
         .iter()
         .map(crate::defaults::clean)
         .collect::<Result<_>>()?;
+    let workspaces: Vec<Workspace> = read_json(zip, "data/workspaces.json")?;
+    let mut icons: Vec<(String, Vec<u8>)> = Vec::new();
+    for w in &workspaces {
+        let Some(icon) = w.icon.as_deref().filter(|i| crate::icon::is_custom(i)) else {
+            continue;
+        };
+        if icons.iter().any(|(name, _)| name == icon) {
+            continue;
+        }
+        let entry = icon_entry(icon);
+        if zip.index_for_name(&entry).is_none() {
+            return Err(Error::Invalid(format!(
+                "ワークスペース「{}」のアイコンの画像がありません",
+                w.name
+            )));
+        }
+        let limit = crate::icon::MAX_CUSTOM_ICON_BYTES as u64;
+        icons.push((icon.to_owned(), read_entry(zip, &entry, limit)?));
+    }
     let mut data = Data {
-        workspaces: read_json(zip, "data/workspaces.json")?,
+        icons,
+        workspaces,
         people: read_json(zip, "data/people.json")?,
         tasks: read_json(zip, "data/tasks.json")?,
         comments: read_json(zip, "data/comments.json")?,

@@ -4497,6 +4497,7 @@ dependencies = [
  "malakt-reminders",
  "malakt-update",
  "raw-window-handle",
+ "resvg 0.45.1",
  "serde",
  "serde_json",
  "tempfile",

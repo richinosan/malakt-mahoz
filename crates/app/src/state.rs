@@ -869,6 +869,48 @@ impl MainView {
         self.write(cx, |s| s.set_workspace_icon(id, icon, color));
     }
 
+    /// 画像ファイルを選んで、ワークスペースのアイコンにする。
+    pub fn add_icon_image(&mut self, id: Id, window: &mut Window, cx: &mut Context<Self>) {
+        let chosen = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("アイコンにする".into()),
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(paths))) = chosen.await else {
+                return;
+            };
+            let Some(path) = paths.first() else {
+                return;
+            };
+            // ウィンドウを閉じたあとなら、何もしない
+            let _ = this.update(cx, |this, cx| this.add_icon_file(&id, path, cx));
+        })
+        .detach();
+    }
+
+    /// 画像を小さくして保存し、ワークスペースのアイコンにする。色はそのまま。
+    pub fn add_icon_file(&mut self, id: &str, path: &std::path::Path, cx: &mut Context<Self>) {
+        let png = match crate::icons::shrink_file(path) {
+            Ok(png) => png,
+            Err(error) => {
+                self.error = Some(error.into());
+                cx.notify();
+                return;
+            }
+        };
+        let color = self
+            .workspaces
+            .iter()
+            .find(|w| w.id == id)
+            .and_then(|w| w.color.clone());
+        self.write(cx, |s| {
+            let icon = s.add_custom_icon(&png)?;
+            s.set_workspace_icon(id, Some(&icon), color.as_deref())
+        });
+    }
+
     // ---- 移動 ----
 
     /// 今のペインを、その場所にする。

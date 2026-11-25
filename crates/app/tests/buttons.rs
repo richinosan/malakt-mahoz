@@ -89,8 +89,9 @@ const MUST: &[&str] = &[
 /// ロックを設定したときだけ出るもの。ロックは tests/ui.rs で確かめる。
 const LOCK: &[&str] = &["lock-disable", "lock-save", "unlock"];
 
-/// アイコンを選ぶ画面のカテゴリ。5 つとも tests/ui.rs で押して確かめる。
-const ICON_PICKER: &[&str] = &["icon-category"];
+/// アイコンを選ぶ画面のもの。カテゴリは 5 つとも tests/ui.rs で押して確かめる。
+/// 画像を追加するボタンは OS のファイル選択を開くので、選んだあとの動きを tests/ui.rs で確かめる。
+const ICON_PICKER: &[&str] = &["icon-category", "icon-add-image"];
 
 /// 入力欄。名前が `-input` で終わるもののほかに、ここにあるもの。
 const INPUTS: &[&str] = &["ws-date", "ws-context", "def-categories"];
