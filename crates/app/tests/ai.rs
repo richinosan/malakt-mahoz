@@ -1420,6 +1420,68 @@ fn the_custom_context_reaches_the_ai(cx: &mut TestAppContext) {
     );
 }
 
+/// ワークスペースの設定に書いた「AI に伝えること」は、そのワークスペースを開いている間だけ AI に渡る。
+#[gpui_kit::test]
+fn the_workspace_context_reaches_the_ai(cx: &mut TestAppContext) {
+    let world = start(cx);
+    world.keys.set(Provider::Claude, "k").unwrap();
+    let workspace = cx.update(|cx| {
+        db::shared(cx).update(cx, |db, cx| {
+            let workspace = db.store.create_workspace(None, "仕事").unwrap();
+            cx.notify();
+            workspace.id
+        })
+    });
+    let (window, view) = open(cx, wide());
+    let session = session(cx);
+    cx.update(|cx| session.update(cx, |s, cx| s.set_context("敬語で答える", cx)));
+
+    // ワークスペースの設定で書いて保存する
+    ui(cx, window, |window, cx| {
+        view.update(cx, |v, cx| {
+            v.open_workspace_settings(&workspace, window, cx)
+        });
+    });
+    ui(cx, window, |window, cx| {
+        window.click("ws-context", cx);
+        window.input("PR のタスクは優先度を高にする", cx);
+        window.click("ws-settings-save", cx);
+    });
+    assert_eq!(
+        setting(cx, &malakt_mahoz::ai::workspace_context_key(&workspace)).as_deref(),
+        Some("PR のタスクは優先度を高にする")
+    );
+
+    // ほかの場所では、全体の分だけ
+    let pane = open_chat(cx, window, &view);
+    world.reply(text_reply("はい。"));
+    say(cx, window, &pane, "こんにちは");
+    wait(cx, "返事が来る", |s| !s.busy && s.items.len() >= 2);
+    let system = world.sent()[0].2["system"].as_str().unwrap().to_owned();
+    assert!(system.ends_with("敬語で答える"), "{system}");
+
+    // そのワークスペースを開くと、両方が渡る
+    ui(cx, window, |_, cx| {
+        view.update(cx, |v, cx| {
+            v.go(malakt_mahoz::state::Nav::Workspace(workspace.clone()), cx)
+        });
+    });
+    world.reply(text_reply("はい。"));
+    say(cx, window, &pane, "もう一度");
+    wait(cx, "返事が来る", |s| !s.busy && s.items.len() >= 4);
+    let system = world.sent()[1].2["system"].as_str().unwrap().to_owned();
+    assert!(
+        system.ends_with(
+            "敬語で答える\n\n今開いているワークスペース「仕事」についての前提と指示:\nPR のタスクは優先度を高にする"
+        ),
+        "{system}"
+    );
+
+    // 長すぎるものは保存しない
+    let long = "あ".repeat(malakt_mahoz::ai::MAX_WORKSPACE_CONTEXT_CHARS + 1);
+    assert!(malakt_mahoz::ai::workspace_context_error(&long).is_some());
+}
+
 /// Enter で送り、Shift+Enter は改行になる。
 #[gpui_kit::test]
 fn enter_sends_and_shift_enter_breaks_the_line(cx: &mut TestAppContext) {

@@ -4736,6 +4736,14 @@ impl MainView {
                             .child(label("説明の雛形"))
                             .child(Textarea::new(&self.inputs.def_description).h(px(96.))),
                     )
+                    .child(
+                        col().gap_1().child(label("AI に伝えること")).child(
+                            div()
+                                .id("ws-context")
+                                .child(Textarea::new(&self.inputs.ws_context).h(px(72.)))
+                                .test_support(),
+                        ),
+                    )
                     .when(any_link, |d| {
                         d.child(
                             col()
