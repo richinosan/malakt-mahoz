@@ -2233,6 +2233,49 @@ fn layouts_are_chosen_in_settings(cx: &mut TestAppContext) {
     assert!(cx.update(|cx| theme::overlay(cx)));
 }
 
+/// 1920 幅の画面でも、3 カラムにすると一覧・詳細・AI チャットの 3 つが並ぶ。
+#[gpui_kit::test]
+fn three_columns_fit_a_1920_wide_screen(cx: &mut TestAppContext) {
+    use malakt_mahoz::state::PANEL_MIN;
+    use malakt_mahoz::theme::Layout;
+    start(cx);
+    let task = cx.update(|cx| {
+        db::shared(cx).update(cx, |db, cx| {
+            let task = db.store.add_task_in(None, "切符を買う").unwrap();
+            cx.notify();
+            task.id
+        })
+    });
+    let scale = malakt_mahoz::UI_SCALE;
+    // 実際の画面の 1920×1080
+    let (window, view) = open(cx, size(px(1920.), px(1080.)));
+    cx.update(|cx| view.update(cx, |v, cx| v.go(Nav::All, cx)));
+    ui(cx, window, |window, cx| {
+        view.update(cx, |v, cx| {
+            v.open_panel(&task, window, cx);
+            let three = Layout::PATTERNS
+                .iter()
+                .find(|l| l.name == "3 カラム")
+                .unwrap();
+            v.apply_layout(three, window, cx);
+        })
+    });
+    ui(cx, window, |_, _| ());
+    assert!(cx.update(|cx| view.read(cx).ai_docked(cx)));
+    ui(cx, window, |window, _| {
+        let list = window.find(("title", 0usize)).bounds();
+        let detail = window.find("detail-panel").bounds();
+        let chat = window.find("ai-input").bounds();
+        // 左から、一覧・詳細・チャットの順に、重ならずに並ぶ
+        assert!(list.right() <= detail.left(), "{list:?} {detail:?}");
+        assert!(detail.right() <= chat.left(), "{detail:?} {chat:?}");
+        assert!(chat.right() <= px(1920.));
+        assert!(detail.size.width + px(1.) >= px(PANEL_MIN * scale));
+    });
+    // 一覧には、タイトルを読める幅が残る
+    assert!(cx.update(|cx| view.read(cx).list_width) >= 400.);
+}
+
 /// アイコンは検索して選べる。日本語でも探せ、見つからなければその旨が出る。
 #[gpui_kit::test]
 fn workspace_icon_is_found_by_search(cx: &mut TestAppContext) {

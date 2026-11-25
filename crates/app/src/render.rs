@@ -48,6 +48,8 @@ const PICKER_ICON_SIZE: Pixels = px(22.);
 const HEADER_HEIGHT: Pixels = px(84.);
 /// 詳細を右に並べても、一覧に残す幅。
 const LIST_MIN: f32 = 320.;
+/// 詳細を狭めてでも一覧に残したい幅。
+const LIST_ROOM: f32 = 400.;
 const ROW_HEIGHT: Pixels = px(60.);
 const CARD_HEIGHT: Pixels = px(96.);
 /// 一覧で、サブワークスペースの中の行を 1 段下げる幅。
@@ -6261,13 +6263,20 @@ impl MainView {
 impl MainView {
     /// 一覧と詳細の分け方。`own_width` は一覧と詳細を置く場所の幅。
     ///
-    /// 詳細は一覧の右に並ぶカラムで、一覧はその残りの幅に収まる。一覧に `LIST_MIN` を
-    /// 残せない狭さでは、詳細が全面を使う（`None`）。返すのは詳細の幅。
+    /// 詳細は一覧の右に並ぶカラムで、一覧はその残りの幅に収まる。幅が足りないときは、
+    /// 詳細を `PANEL_MIN` まで狭めて一覧に `LIST_ROOM` を残す（1920 幅の画面で AI チャットを
+    /// 右に並べても、一覧・詳細・チャットの 3 つが並ぶ）。詳細を `PANEL_MIN` にしても一覧に
+    /// `LIST_MIN` を残せない狭さでは、詳細が全面を使う（`None`）。返すのは詳細の幅。
     fn panel_split(&self, own_width: Pixels) -> Option<Pixels> {
-        if own_width < px(crate::state::PANEL_WIDTH + LIST_MIN) {
+        let least = px(crate::state::PANEL_MIN);
+        if own_width < least + px(LIST_MIN) {
             return None;
         }
-        Some(px(self.panel_width).min(own_width - px(LIST_MIN)))
+        Some(
+            px(self.panel_width)
+                .min((own_width - px(LIST_ROOM)).max(least))
+                .min(own_width - px(LIST_MIN)),
+        )
     }
 
     /// 詳細の境界をドラッグしている間だけ、全面に敷く。詳細の上でも一覧の上でもマウスを追い、
