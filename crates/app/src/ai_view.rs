@@ -27,6 +27,7 @@ use crate::db::{self, Db};
 use crate::render::app_icon;
 use crate::shadow::{Elevate, Elevation};
 use crate::state::{DropTarget, MainView};
+use crate::term::{self, TermPane};
 use crate::{ClearShell, StopAi};
 
 /// 参照する寸法を、画面全体の拡大率に合わせる。
@@ -192,6 +193,10 @@ pub struct AiPane {
     main: Option<WeakEntity<MainView>>,
     focus: FocusHandle,
     shell_focus: FocusHandle,
+    /// ターミナルの画面。
+    term: Entity<TermPane>,
+    /// シェルを、チャットの場所まで広げている。
+    pub shell_wide: bool,
     input: Entity<TextareaState>,
     key_input: Entity<InputState>,
     model_input: Entity<InputState>,
@@ -316,9 +321,11 @@ impl AiPane {
             state
         });
         let shell_input = cx.new(|cx| InputState::new(window, cx));
+        term::shared(cx).update(cx, |terms, cx| terms.load_profiles(cx));
 
         let subscriptions = vec![
             cx.observe(&session, |this, _, cx| this.sync(cx)),
+            cx.observe(&term::shared(cx), |_, _, cx| cx.notify()),
             cx.observe(&db, |_, _, cx| cx.notify()),
             cx.subscribe_in(&input, window, |this, _, event: &InputEvent, window, cx| {
                 // Enter で送り、Shift+Enter で改行する
@@ -424,6 +431,8 @@ impl AiPane {
             main,
             focus: cx.focus_handle(),
             shell_focus: cx.focus_handle(),
+            term: cx.new(TermPane::new),
+            shell_wide: false,
             input,
             key_input,
             model_input,
@@ -2335,6 +2344,9 @@ impl AiPane {
         let detached = self.mode == PaneMode::ShellWindow;
         let pane = cx.entity();
         let caret_of = self.shell_input.clone();
+        // 見ているのが AI のシェルか、ターミナルか
+        let on_ai = term::shared(cx).read(cx).active_tab().is_none();
+        let term_error = term::shared(cx).read(cx).error.clone();
 
         let header = row()
             .flex_none()
@@ -2345,32 +2357,52 @@ impl AiPane {
             .border_b_1()
             .border_color(theme.border)
             .bg(theme.background)
-            .child(app_icon("terminal").size_4())
-            .child(div().flex_1().min_w_0().pl_1().text_sm().child("シェル"))
-            .when(running, |d| {
+            .child(self.render_term_tabs(cx))
+            .when(running && on_ai, |d| {
                 d.child(
                     icon_button("ai-shell-kill", "square", "強制終了（Ctrl+C）")
                         .danger()
                         .on_click(cx.listener(|this, _, _, cx| this.stop(cx))),
                 )
             })
-            .child(
-                icon_button(
-                    "ai-shell-copy",
-                    if self.copied { "check" } else { "copy" },
-                    "すべてコピー",
+            .when(on_ai, |d| {
+                d.child(
+                    icon_button(
+                        "ai-shell-copy",
+                        if self.copied { "check" } else { "copy" },
+                        "すべてコピー",
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| this.copy_shell(cx))),
                 )
-                .on_click(cx.listener(|this, _, _, cx| this.copy_shell(cx))),
-            )
-            .child(
-                icon_button("ai-shell-clear", "eraser", "クリア（Ctrl+L）").on_click(cx.listener(
-                    |this, _, _, cx| {
-                        this.session.update(cx, |s, cx| s.clear_shell(cx));
-                    },
-                )),
-            )
+                .child(
+                    icon_button("ai-shell-clear", "eraser", "クリア（Ctrl+L）").on_click(
+                        cx.listener(|this, _, _, cx| {
+                            this.session.update(cx, |s, cx| s.clear_shell(cx));
+                        }),
+                    ),
+                )
+            })
             .when(!detached, |d| {
                 d.child(
+                    icon_button(
+                        "ai-shell-wide",
+                        if self.shell_wide {
+                            "minimize-2"
+                        } else {
+                            "maximize-2"
+                        },
+                        if self.shell_wide {
+                            "元の大きさに戻す"
+                        } else {
+                            "チャットの場所まで広げる"
+                        },
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.shell_wide = !this.shell_wide;
+                        cx.notify();
+                    })),
+                )
+                .child(
                     icon_button(
                         "ai-shell-detach",
                         "picture-in-picture-2",
@@ -2470,88 +2502,255 @@ impl AiPane {
             .min_w_0()
             .min_h_0()
             .child(header)
-            .child(
-                col()
-                    .id("ai-shell-screen")
-                    .relative()
-                    .flex_1()
-                    .min_h_0()
-                    .py_2()
-                    .bg(rgb(TERM_BG))
-                    .text_color(rgb(TERM_FG))
-                    .font_family(theme.mono_font_family.clone())
-                    .text_size(term_font(cx))
-                    .cursor_text()
-                    // どこをクリックしても、入力行に打てる
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.shell_input.update(cx, |s, cx| s.focus(window, cx));
-                    }))
-                    .child(
-                        canvas(
-                            move |bounds, window, cx| {
-                                pane.update(cx, |this, cx| {
-                                    this.set_shell_width(bounds.size.width, window, cx)
-                                });
-                            },
-                            |_, _, _, _| {},
+            .when_some(term_error, |d, error| {
+                d.child(
+                    row()
+                        .id("term-error")
+                        .flex_none()
+                        .px_3()
+                        .py_1()
+                        .gap_2()
+                        .text_xs()
+                        .text_color(theme.danger)
+                        .child(div().flex_1().min_w_0().child(error))
+                        .child(
+                            Button::new("term-error-close")
+                                .icon(app_icon("x"))
+                                .tooltip("閉じる")
+                                .ghost()
+                                .xsmall()
+                                .on_click(|_, _, cx| {
+                                    term::shared(cx).update(cx, |terms, cx| {
+                                        terms.error = None;
+                                        cx.notify();
+                                    })
+                                }),
                         )
-                        .absolute()
-                        .size_full(),
-                    )
-                    .child(lines)
-                    .child(
-                        row()
-                            .flex_none()
-                            .h(px(28.))
-                            .px(TERM_PAD)
-                            .gap_2()
-                            .child(
-                                div()
-                                    .id("ai-shell-prompt")
-                                    .flex_none()
-                                    .text_color(rgb(if running { TERM_DIM } else { TERM_PROMPT }))
-                                    .child(prompt)
-                                    .test_support(),
+                        .test_support(),
+                )
+            })
+            .when(!on_ai, |d| d.child(self.term.clone()))
+            .when(on_ai, |d| {
+                d.child(
+                    col()
+                        .id("ai-shell-screen")
+                        .relative()
+                        .flex_1()
+                        .min_h_0()
+                        .py_2()
+                        .bg(rgb(TERM_BG))
+                        .text_color(rgb(TERM_FG))
+                        .font_family(theme.mono_font_family.clone())
+                        .text_size(term_font(cx))
+                        .cursor_text()
+                        // どこをクリックしても、入力行に打てる
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.shell_input.update(cx, |s, cx| s.focus(window, cx));
+                        }))
+                        .child(
+                            canvas(
+                                move |bounds, window, cx| {
+                                    pane.update(cx, |this, cx| {
+                                        this.set_shell_width(bounds.size.width, window, cx)
+                                    });
+                                },
+                                |_, _, _, _| {},
                             )
-                            .child(
-                                div()
-                                    .id("ai-shell-input")
-                                    .flex_1()
-                                    .min_w_0()
-                                    .child(
-                                        Input::new(&self.shell_input)
-                                            .aria_label("コマンド")
-                                            .appearance(false)
-                                            .text_color(rgb(TERM_FG)),
-                                    )
-                                    .test_support(),
-                            ),
-                    )
-                    // 入力欄のカーソルはテーマの色（明るいテーマでは黒）なので、見える色で重ねて描く
-                    .child(
-                        canvas(
-                            |_, _, _| {},
-                            move |_, _, window, cx| {
-                                let state = caret_of.read(cx);
-                                if !state.focus_handle(cx).is_focused(window) {
-                                    return;
-                                }
-                                if let Some(caret) = state.prepaint_caret_geometry() {
-                                    let at = caret.cursor_bounds();
-                                    window.paint_quad(fill(
-                                        Bounds::new(at.origin, size(px(2.), at.size.height)),
-                                        rgb(TERM_FG),
-                                    ));
-                                }
-                            },
+                            .absolute()
+                            .size_full(),
                         )
-                        .absolute()
-                        .size_full(),
-                    ),
-            )
+                        .child(lines)
+                        .child(
+                            row()
+                                .flex_none()
+                                .h(px(28.))
+                                .px(TERM_PAD)
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .id("ai-shell-prompt")
+                                        .flex_none()
+                                        .text_color(rgb(if running {
+                                            TERM_DIM
+                                        } else {
+                                            TERM_PROMPT
+                                        }))
+                                        .child(prompt)
+                                        .test_support(),
+                                )
+                                .child(
+                                    div()
+                                        .id("ai-shell-input")
+                                        .flex_1()
+                                        .min_w_0()
+                                        .child(
+                                            Input::new(&self.shell_input)
+                                                .aria_label("コマンド")
+                                                .appearance(false)
+                                                .text_color(rgb(TERM_FG)),
+                                        )
+                                        .test_support(),
+                                ),
+                        )
+                        // 入力欄のカーソルはテーマの色（明るいテーマでは黒）なので、見える色で重ねて描く
+                        .child(
+                            canvas(
+                                |_, _, _| {},
+                                move |_, _, window, cx| {
+                                    let state = caret_of.read(cx);
+                                    if !state.focus_handle(cx).is_focused(window) {
+                                        return;
+                                    }
+                                    if let Some(caret) = state.prepaint_caret_geometry() {
+                                        let at = caret.cursor_bounds();
+                                        window.paint_quad(fill(
+                                            Bounds::new(at.origin, size(px(2.), at.size.height)),
+                                            rgb(TERM_FG),
+                                        ));
+                                    }
+                                },
+                            )
+                            .absolute()
+                            .size_full(),
+                        ),
+                )
+            })
             .test_support()
             .track_focus(&self.shell_focus)
             .into_any_element()
+    }
+
+    /// シェルの上に並べるタブ。AI のシェルと、開いているターミナル。
+    fn render_term_tabs(&self, cx: &mut Context<Self>) -> Div {
+        let theme = cx.theme().clone();
+        let shared = term::shared(cx);
+        let terms = shared.read(cx);
+        let active = terms.active_tab().map(|tab| tab.id);
+        let tab = |id: ElementId, icon: &str, label: SharedString, on: bool| {
+            row()
+                .id(id)
+                .h_7()
+                .min_w_0()
+                .max_w(px(150.))
+                .pl_2()
+                .pr_1()
+                .gap_1()
+                .rounded_md()
+                .text_xs()
+                .cursor_pointer()
+                .active(|s| s.opacity(0.6))
+                .when(on, |d| d.bg(theme.secondary))
+                .when(!on, |d| {
+                    d.text_color(theme.muted_foreground)
+                        .hover(|s| s.bg(theme.secondary_hover))
+                })
+                .child(app_icon(icon).size_3p5().flex_none())
+                .child(div().min_w_0().truncate().child(label))
+        };
+        let mut tabs = row().flex_1().min_w_0().gap_0p5().overflow_hidden().child(
+            tab(
+                "term-tab-ai".into(),
+                "sparkles",
+                "AI".into(),
+                active.is_none(),
+            )
+            .pr_2()
+            .on_click({
+                let shared = shared.clone();
+                move |_, _, cx| shared.update(cx, |terms, cx| terms.activate(None, cx))
+            })
+            .test_support(),
+        );
+        for item in &terms.tabs {
+            let id = item.id;
+            tabs = tabs.child(
+                tab(
+                    ("term-tab", id as usize).into(),
+                    "terminal",
+                    item.label(),
+                    active == Some(id),
+                )
+                .on_click({
+                    let shared = shared.clone();
+                    move |_, _, cx| shared.update(cx, |terms, cx| terms.activate(Some(id), cx))
+                })
+                .child(
+                    div()
+                        .id(("term-close", id as usize))
+                        .flex_none()
+                        .size_5()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded_sm()
+                        .hover(|s| s.bg(theme.muted))
+                        .active(|s| s.opacity(0.6))
+                        .child(app_icon("x").size_3())
+                        .on_click({
+                            let shared = shared.clone();
+                            move |_, _, cx| {
+                                cx.stop_propagation();
+                                shared.update(cx, |terms, cx| terms.close(id, cx));
+                            }
+                        })
+                        .test_support(),
+                )
+                .test_support(),
+            );
+        }
+        let profiles: Vec<(SharedString, SharedString)> = terms
+            .profiles()
+            .iter()
+            .map(|p| (p.id.clone().into(), p.name.clone().into()))
+            .collect();
+        let chosen: Option<SharedString> = terms.default_profile().map(|p| p.id.clone().into());
+        let new_tip: SharedString = match terms.default_profile() {
+            Some(profile) => format!("新しいターミナル（{}）", profile.name).into(),
+            None => "新しいターミナル".into(),
+        };
+        row()
+            .flex_1()
+            .min_w_0()
+            .gap_0p5()
+            .child(tabs)
+            .child(
+                Button::new("term-new")
+                    .icon(app_icon("plus"))
+                    .tooltip(new_tip)
+                    .ghost()
+                    .small()
+                    .on_click({
+                        let shared = shared.clone();
+                        move |_, _, cx| {
+                            shared.update(cx, |terms, cx| {
+                                terms.open(None, None, cx);
+                            })
+                        }
+                    }),
+            )
+            .child(
+                icon_button("term-shells", "chevron-down", "シェルを選ぶ")
+                    .dropdown_menu_with_anchor(Anchor::TopRight, move |mut menu, _, _| {
+                        for (id, name) in &profiles {
+                            let (shared, id) = (shared.clone(), id.clone());
+                            menu = menu.item(
+                                PopupMenuItem::new(name.clone())
+                                    // 「＋」で開くシェルに印を付ける
+                                    .icon(app_icon(if chosen.as_ref() == Some(&id) {
+                                        "check"
+                                    } else {
+                                        "terminal"
+                                    }))
+                                    .on_click(move |_, _, cx| {
+                                        shared.update(cx, |terms, cx| {
+                                            terms.open(Some(&id), None, cx);
+                                        })
+                                    }),
+                            );
+                        }
+                        menu
+                    }),
+            )
     }
 }
 
@@ -2572,6 +2771,8 @@ impl Render for AiPane {
         self.refresh_rows(cx);
         let width = window.viewport_size().width;
         let shell_docked = self.session.read(cx).shell_place == ShellPlace::Docked;
+        // シェルを広げている間は、チャットを出さない
+        let wide = self.shell_wide && shell_docked;
         // タスクをドラッグしている間は、チャットが落とし先になる
         let dragging = self.main.as_ref().is_some_and(|main| {
             main.read_with(cx, |main, _| {
@@ -2615,19 +2816,20 @@ impl Render for AiPane {
                 base.size_full()
                     .when(side_by_side, |d| d.flex_row())
                     .when(!side_by_side, |d| d.flex_col())
-                    .child(self.render_chat(cx))
+                    .when(!wide, |d| d.child(self.render_chat(cx)))
                     .when(shell_docked, |d| {
                         d.child(
                             div()
                                 .flex()
                                 .flex_col()
-                                .when(side_by_side, |d| {
+                                .when(wide, |d| d.flex_1().min_w_0().min_h_0())
+                                .when(side_by_side && !wide, |d| {
                                     d.w(relative(0.45))
                                         .h_full()
                                         .border_l_1()
                                         .border_color(theme.border)
                                 })
-                                .when(!side_by_side, |d| {
+                                .when(!side_by_side && !wide, |d| {
                                     d.h(relative(0.38)).border_t_1().border_color(theme.border)
                                 })
                                 .child(self.render_shell(cx)),
@@ -2747,13 +2949,14 @@ impl Render for AiPane {
                             .size_0(),
                         )
                     })
-                    .child(self.render_chat(cx))
+                    .when(!wide, |d| d.child(self.render_chat(cx)))
                     .when(shell_docked, |d| {
                         d.child(
                             div()
                                 .flex()
                                 .flex_col()
-                                .when(side_by_side, |d| {
+                                .when(wide, |d| d.flex_1().min_w_0().min_h_0())
+                                .when(side_by_side && !wide, |d| {
                                     d.w(px(widths.1))
                                         .flex_none()
                                         .h_full()
@@ -2763,7 +2966,7 @@ impl Render for AiPane {
                                         // チャットとシェルの境界
                                         .child(edge("ai-shell-resize", Resize::Shell))
                                 })
-                                .when(!side_by_side, |d| {
+                                .when(!side_by_side && !wide, |d| {
                                     d.h(relative(0.38))
                                         .flex_none()
                                         .border_t_1()

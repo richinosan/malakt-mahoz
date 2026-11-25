@@ -14,6 +14,7 @@ pub mod session;
 pub mod shadow;
 pub mod shortcuts;
 pub mod state;
+pub mod term;
 pub mod theme;
 pub mod update;
 
@@ -122,6 +123,7 @@ pub fn init_with(store: malakt_core::Store, ai: AiConfig, cx: &mut App) {
     db::init(store, cx);
     passkey::init(cx);
     ai::init(ai, cx);
+    term::init(cx);
     reminders::init(cx);
     update::init(cx);
     theme::init(cx);

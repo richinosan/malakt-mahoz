@@ -1,0 +1,13 @@
+[package]
+name = "malakt-term"
+description = "malakt-mahoz のターミナル（UI 非依存）。シェルの一覧、PTY、端末エミュレーション、キーとマウスの変換"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+alacritty_terminal = { version = "0.26", default-features = false }
+
+[dev-dependencies]
+tempfile = "3"

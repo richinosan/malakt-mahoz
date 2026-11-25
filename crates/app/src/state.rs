@@ -160,6 +160,8 @@ pub struct Inputs {
     pub def_categories: Entity<InputState>,
     pub def_description: Entity<TextareaState>,
     pub ws_context: Entity<TextareaState>,
+    /// ターミナルを始めるフォルダー。
+    pub ws_term_dir: Entity<InputState>,
     pub bulk_due: Entity<InputState>,
     pub bulk_categories: Entity<InputState>,
 }
@@ -356,6 +358,7 @@ impl MainView {
             comment: area(window, cx, "コメントを追加"),
             status_comment: area(window, cx, "コメントを追加"),
             ws_date: input(window, cx, "YYYY-MM-DD"),
+            ws_term_dir: input(window, cx, "~/work/project"),
             def_days: input(window, cx, "例: -7（7 日前）"),
             def_date: input(window, cx, "YYYY-MM-DD"),
             def_time: input(window, cx, "HH:MM（空なら日付だけ）"),
@@ -3020,9 +3023,10 @@ impl MainView {
             .and_then(|w| Ok((w, store.task_defaults(id)?)));
         let loaded = loaded.and_then(|(w, d)| {
             let context = store.setting(&crate::ai::workspace_context_key(id))?;
-            Ok((w, d, context.unwrap_or_default()))
+            let dir = store.setting(&crate::term::workspace_dir_key(id))?;
+            Ok((w, d, context.unwrap_or_default(), dir.unwrap_or_default()))
         });
-        let (workspace, defaults, context) = match loaded {
+        let (workspace, defaults, context, term_dir) = match loaded {
             Ok(loaded) => loaded,
             Err(error) => {
                 self.error = Some(error.to_string().into());
@@ -3048,6 +3052,7 @@ impl MainView {
             window,
             cx,
         );
+        set(&inputs.ws_term_dir.clone(), term_dir, window, cx);
         set(&inputs.def_days.clone(), days, window, cx);
         set(&inputs.def_date.clone(), date, window, cx);
         set(
@@ -3143,6 +3148,13 @@ impl MainView {
             return;
         }
         let context_key = crate::ai::workspace_context_key(&id);
+        let term_dir = read(&self.inputs.ws_term_dir).trim().to_owned();
+        if !term_dir.is_empty() && !crate::term::expand_dir(&term_dir).is_dir() {
+            self.error = Some(format!("フォルダーが見つかりません: {term_dir}").into());
+            cx.notify();
+            return;
+        }
+        let dir_key = crate::term::workspace_dir_key(&id);
         let saved = self.write(cx, |s| {
             // 先に両方を確かめて、片方だけ保存されることがないようにする
             malakt_core::defaults::clean(&defaults)?;
@@ -3152,6 +3164,10 @@ impl MainView {
             s.set_setting(
                 &context_key,
                 (!context.is_empty()).then_some(context.as_str()),
+            )?;
+            s.set_setting(
+                &dir_key,
+                (!term_dir.is_empty()).then_some(term_dir.as_str()),
             )
         });
         if saved.is_some() {
@@ -3361,6 +3377,73 @@ impl MainView {
                 pane.side = None;
                 pane.settings_open = false;
                 pane.focus_input(window, cx)
+            });
+        }
+        cx.notify();
+    }
+
+    /// あるタスクのためのターミナルを開く。ワークスペースに決めたフォルダーで始め、
+    /// タスクの ID・タイトル・ワークスペースの名前を環境変数で渡す。
+    pub fn open_task_terminal(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let store = &self.db.read(cx).store;
+        let loaded = store.task(id).and_then(|task| {
+            let dir = match &task.workspace_id {
+                Some(workspace) => store.setting(&crate::term::workspace_dir_key(workspace))?,
+                None => None,
+            };
+            Ok((task, dir))
+        });
+        let (task, dir) = match loaded {
+            Ok(loaded) => loaded,
+            Err(e) => {
+                self.error = Some(format!("タスクを読めませんでした: {e}").into());
+                cx.notify();
+                return;
+            }
+        };
+        let workspace = match &task.workspace_id {
+            Some(workspace) => self.workspace_name(Some(workspace)).to_string(),
+            None => String::new(),
+        };
+        let context = crate::term::TaskContext {
+            id: task.id.clone(),
+            title: task.title.clone(),
+            workspace,
+            dir: dir.map(|dir| crate::term::expand_dir(&dir)),
+        };
+        let opened = crate::term::shared(cx).update(cx, |terms, cx| {
+            terms.open(None, Some(context), cx).is_some()
+        });
+        // シェルを見える所に出す
+        let place = self.ai_session.read(cx).shell_place;
+        let mut in_window = false;
+        match place {
+            ShellPlace::Window(handle) => {
+                in_window = handle
+                    .update(cx, |_, window, _| window.activate_window())
+                    .is_ok();
+                if !in_window {
+                    // そのウィンドウはもうない
+                    self.ai_session.update(cx, |s, cx| {
+                        s.shell_place = ShellPlace::Docked;
+                        cx.notify();
+                    });
+                }
+            }
+            ShellPlace::Closed => self.ai_session.update(cx, |s, cx| {
+                s.shell_place = ShellPlace::Docked;
+                cx.notify();
+            }),
+            ShellPlace::Docked => {}
+        }
+        if !in_window && (!self.ai_open || self.ai_session.read(cx).chat_window.is_some()) {
+            self.toggle_ai(window, cx);
+        }
+        if opened {
+            // チャットを開くと入力欄に移るので、あらためてターミナルに移す
+            crate::term::shared(cx).update(cx, |terms, cx| {
+                terms.focus_wanted = true;
+                cx.notify();
             });
         }
         cx.notify();
@@ -3936,6 +4019,7 @@ bundled_icons! {
         "arrow-right",
         "arrow-left",
         "maximize-2",
+        "minimize-2",
         "rotate-ccw-clock",
         "rotate-ccw",
         "image",

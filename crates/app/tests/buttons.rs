@@ -110,7 +110,7 @@ const LOCK: &[&str] = &["lock-disable", "lock-save", "unlock"];
 const ICON_PICKER: &[&str] = &["icon-category", "icon-add-image"];
 
 /// 入力欄。名前が `-input` で終わるもののほかに、ここにあるもの。
-const INPUTS: &[&str] = &["ws-date", "ws-context", "def-categories"];
+const INPUTS: &[&str] = &["ws-date", "ws-context", "ws-term-dir", "def-categories"];
 
 /// 押しても画面とデータが変わらないのが正しいもの。ID（番号つきは番号まで）と理由。
 const QUIET: &[(&str, &str)] = &[
@@ -149,9 +149,10 @@ const QUIET: &[(&str, &str)] = &[
     ("comment-review", "コメントが空"),
 ];
 
-/// AI チャットの中は tests/ai.rs で確かめる。ここでは開け閉めだけを見る。
+/// AI チャットの中は tests/ai.rs で、ターミナルの中は tests/term.rs で確かめる。
+/// ここでは開け閉めだけを見る。
 fn ai_inside(name: &str) -> bool {
-    name.starts_with("ai-") && name != "ai-toggle"
+    name.starts_with("ai-") && name != "ai-toggle" || name.starts_with("term-")
 }
 
 struct World {
@@ -789,6 +790,8 @@ fn screens() -> Vec<(&'static str, Size<Pixels>, Setup)> {
 
 #[gpui_kit::test]
 fn every_button_responds(cx: &mut TestAppContext) {
+    // タスクから開くターミナルの出力は、別のスレッドから届く
+    cx.executor().allow_parking();
     cx.update(|cx| malakt_mahoz::init(Store::open_in_memory().unwrap(), cx));
     let quiet = |screen: &str, id: &ElementId| {
         let key = key_of(id);

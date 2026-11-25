@@ -11,7 +11,7 @@ mise run mutants    # ミューテーションテスト（cargo-mutants が必�
 ```
 
 - **ユニットテスト**: 各モジュールの中にあります
-- **シナリオテスト**: `crates/core/tests/scenario.rs` は、作成からエクスポート・インポートまでの流れを通します。`crates/app/tests/ui.rs` は、ヘッドレスのウィンドウを実際に開き、クリックと入力で操作して確かめます。`crates/app/tests/ai.rs` は、AI の返事だけを差し替えて、チャット・確認・シェル・別ウィンドウを同じように操作して確かめます
+- **シナリオテスト**: `crates/core/tests/scenario.rs` は、作成からエクスポート・インポートまでの流れを通します。`crates/app/tests/ui.rs` は、ヘッドレスのウィンドウを実際に開き、クリックと入力で操作して確かめます。`crates/app/tests/ai.rs` は、AI の返事だけを差し替えて、チャット・確認・シェル・別ウィンドウを同じように操作して確かめます。`crates/app/tests/term.rs` と `crates/term/tests/terminal.rs` は、本物のシェルを起こして、ターミナルをキーとマウスで操作して確かめます
 - **コミットの前の確認**: `mise run hooks` を 1 回実行すると、コミットのたびに書式・clippy・全部のテスト（`mise run verify`）が走り、通らなければコミットされません
 - **CI**: main に入ったものを、Linux・macOS・Windows で全部のテストにかけます。プルリクエストでは動きません
 - **ミューテーションテスト**: 週 1 回、cargo-mutants を実行し、生き残ったミュータントを分析してテストを足すプルリクエストを作ります（GitHub Actions の外で、定期実行のタスクとして動かしています）
