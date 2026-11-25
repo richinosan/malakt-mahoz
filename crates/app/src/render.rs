@@ -81,6 +81,26 @@ fn glass(color: Hsla, cx: &App) -> Hsla {
     }
 }
 
+/// 浮かせたパネルのすき間。
+const FLOAT_GAP: Pixels = px(8.);
+
+/// 浮かせたパネルの地（角丸のカード）。パネルの最初の子にして、中身の後ろに敷く。
+/// `edges` は上・右・下・左のすき間。隣のパネルと接する辺は半分にして、すき間をそろえる。
+fn floating_card(fill: Hsla, edges: [Pixels; 4], cx: &App) -> Div {
+    let [top, right, bottom, left] = edges;
+    div()
+        .absolute()
+        .top(top)
+        .right(right)
+        .bottom(bottom)
+        .left(left)
+        .rounded(px(16.))
+        .border_1()
+        .border_color(cx.theme().border)
+        .bg(fill)
+        .elevate(Elevation::Low, cx)
+}
+
 /// 画面の後ろに敷く画像。
 fn backdrop_layer(cx: &App) -> Option<Img> {
     let backdrop = crate::theme::backdrop(cx)?;
@@ -128,6 +148,25 @@ fn col() -> Div {
 }
 
 /// 押せる小さなラベル。選ばれているものは色を付ける。
+/// 進捗の棒。
+fn percent_bar(percent: u8, width: Pixels, cx: &App) -> Div {
+    let theme = cx.theme();
+    div()
+        .w(width)
+        .h(px(6.))
+        .flex_none()
+        .rounded_full()
+        .bg(theme.muted)
+        .overflow_hidden()
+        .child(
+            div()
+                .h_full()
+                .w(relative(f32::from(percent.min(100)) / 100.))
+                .rounded_full()
+                .bg(theme.primary),
+        )
+}
+
 fn chip(
     id: impl Into<ElementId>,
     label: impl Into<SharedString>,
@@ -541,13 +580,27 @@ impl MainView {
 
         let unread = self.unread_notices;
         let view = cx.entity().downgrade();
+        let floating = crate::theme::floating(cx);
+        let half = FLOAT_GAP / 2.;
         let inner = col()
             .id("sidebar")
             .size_full()
-            .bg(glass(theme.sidebar, cx))
+            .relative()
             .text_color(theme.sidebar_foreground)
+            // 浮かせるときも枠の幅は取っておき、中身の場所を変えない
             .border_r_1()
-            .border_color(theme.sidebar_border)
+            .border_color(theme.transparent)
+            .when(!floating, |d| {
+                d.bg(glass(theme.sidebar, cx))
+                    .border_color(theme.sidebar_border)
+            })
+            .when(floating, |d| {
+                d.child(floating_card(
+                    glass(theme.sidebar, cx),
+                    [FLOAT_GAP, half, FLOAT_GAP, FLOAT_GAP],
+                    cx,
+                ))
+            })
             // macOS は左上に信号機ボタンが乗るので、その分を空ける
             .when(cfg!(target_os = "macos"), |d| d.pt_6())
             .child(
@@ -557,7 +610,12 @@ impl MainView {
                     .px_4()
                     .gap_2()
                     .border_b_1()
-                    .border_color(theme.sidebar_border)
+                    // 浮かせたカードの中では、端から端までの線を引かない
+                    .border_color(if floating {
+                        theme.transparent
+                    } else {
+                        theme.sidebar_border
+                    })
                     .child(
                         col()
                             .flex_1()
@@ -891,12 +949,25 @@ impl MainView {
         let theme = cx.theme().clone();
         // バーの空いているところを掴むと、ウィンドウを動かせる。
         // Windows は OS に任せ、ほかは押したまま動かしたときに自分で動かし始める
+        let floating = crate::theme::floating(cx);
+        let half = FLOAT_GAP / 2.;
         let bar = row()
             .flex_none()
             .h(HEADER_HEIGHT)
+            .relative()
+            // 浮かせるときも枠の幅は取っておき、中身の場所を変えない
             .border_b_1()
-            .border_color(theme.border)
-            .bg(glass(theme.background, cx))
+            .border_color(theme.transparent)
+            .when(!floating, |d| {
+                d.border_color(theme.border).bg(glass(theme.background, cx))
+            })
+            .when(floating, |d| {
+                d.child(floating_card(
+                    glass(theme.popover, cx),
+                    [FLOAT_GAP, FLOAT_GAP, half, half],
+                    cx,
+                ))
+            })
             .when(cfg!(target_os = "windows"), |d| {
                 d.window_control_area(WindowControlArea::Drag)
             })
@@ -1159,6 +1230,7 @@ impl MainView {
                                 None => menu,
                             };
                             menu.separator()
+                                .item(item("キー操作", |this, _, cx| this.toggle_keys(cx)))
                                 .item(item("新しいウィンドウ", |_, window, cx| {
                                     window.dispatch_action(Box::new(NewWindow), cx)
                                 }))
@@ -2183,9 +2255,13 @@ impl MainView {
         let task = &self.tasks[self.visible[ix]];
         let id = task.id.clone();
         let active = self.panel.as_deref() == Some(id.as_str());
+        let cursor = self.cursor.as_deref() == Some(id.as_str());
         let closed = !task.status.is_open();
         let now = malakt_core::now_ms();
-        let arranging = self.ai_session.read(cx).arranging.contains(&task.id);
+        let arranging = {
+            let session = self.ai_session.read(cx);
+            session.arranging.contains(&task.id) || session.tracking.contains(&task.id)
+        };
 
         let select = {
             let id = id.clone();
@@ -2215,6 +2291,20 @@ impl MainView {
                     .bg(theme.secondary)
                     .text_xs()
                     .child(category.clone()),
+            );
+        }
+        if !closed && task.percent > 0 {
+            has_chips = true;
+            // 進んでいるタスクには、進捗の棒と数字を添える
+            chips = chips.child(
+                row()
+                    .flex_none()
+                    .gap_1()
+                    .items_center()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(percent_bar(task.percent, px(48.), cx))
+                    .child(format!("{}%", task.percent)),
             );
         }
         if !task.linked_workspace_ids.is_empty() {
@@ -2378,8 +2468,24 @@ impl MainView {
                     this.drag_task_over(DropTarget::Row(ix), event.position, cx)
                 }))
             })
-            .when(active, |d| d.bg(theme.accent.opacity(0.4)))
-            .when(!active, |d| d.hover(|s| s.bg(theme.muted.opacity(0.4))));
+            // キーで選んでいる行は、左の縁に線を出す
+            .when(cursor, |d| {
+                d.child(
+                    div()
+                        .id(("row-cursor", ix))
+                        .absolute()
+                        .left_0()
+                        .top_0()
+                        .bottom_0()
+                        .w(px(3.))
+                        .bg(theme.primary)
+                        .test_support(),
+                )
+            })
+            .when(active || cursor, |d| d.bg(theme.accent.opacity(0.4)))
+            .when(!active && !cursor, |d| {
+                d.hover(|s| s.bg(theme.muted.opacity(0.4)))
+            });
         let row_el = if table {
             base.h(ROW_HEIGHT)
                 .flex()
@@ -3056,7 +3162,45 @@ impl MainView {
         // AI が整えている間の印と、整えられなかった理由
         let ai_state = {
             let session = self.ai_session.read(cx);
-            if session.arranging.contains(&task.id) {
+            if session.tracking.contains(&task.id) {
+                // コメントからの更新中の印は「進捗」の行に出す（書いている途中の画面を動かさない）
+                None
+            } else if let Some(note) = session.track_notes.get(&task.id) {
+                let detail = note.clone();
+                let id = task.id.clone();
+                Some(
+                    row()
+                        .gap_1()
+                        .items_center()
+                        .text_sm()
+                        .text_color(theme.muted_foreground)
+                        .child(
+                            // 短い言葉だけを出し、くわしい理由はホバーで出す
+                            row()
+                                .id("ai-track-note")
+                                .gap_2()
+                                .items_center()
+                                .child(app_icon("sparkles").small().flex_none())
+                                .child(crate::ai::arrange_note_label(note))
+                                .tooltip(move |window, cx| {
+                                    gpui_kit::component::tooltip::Tooltip::new(detail.clone())
+                                        .build(window, cx)
+                                })
+                                .test_support(),
+                        )
+                        .child(
+                            Button::new("ai-track-retry")
+                                .icon(app_icon("refresh-cw"))
+                                .ghost()
+                                .xsmall()
+                                .tooltip("もう一度更新する")
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.ai_session.update(cx, |s, cx| s.retry_track(&id, cx));
+                                })),
+                        )
+                        .into_any_element(),
+                )
+            } else if session.arranging.contains(&task.id) {
                 Some(
                     row()
                         .id("ai-working")
@@ -3293,7 +3437,16 @@ impl MainView {
             );
         }
 
-        let mut percent = row().gap_1().flex_wrap();
+        let mut percent = row().gap_1().flex_wrap().items_center().child(
+            row()
+                .flex_none()
+                .gap_2()
+                .mr_1()
+                .items_center()
+                .text_sm()
+                .child(percent_bar(task.percent, px(64.), cx))
+                .child(format!("{}%", task.percent)),
+        );
         for (i, value) in [0u8, 25, 50, 75, 100].into_iter().enumerate() {
             percent = percent.child(
                 chip(
@@ -3305,6 +3458,34 @@ impl MainView {
                 .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                     this.edit_task(cx, |d| d.percent = value)
                 })),
+            );
+        }
+
+        // AI がコメントから更新している間の印と、変えたあとの元に戻すボタン。同じ場所に出す
+        if self.ai_session.read(cx).tracking.contains(&task.id) {
+            percent = percent.child(
+                div()
+                    .id("ai-tracking")
+                    .flex_none()
+                    .px_1()
+                    .child(Spinner::new().small())
+                    .tooltip(|window, cx| {
+                        gpui_kit::component::tooltip::Tooltip::new("AI がコメントから更新中")
+                            .build(window, cx)
+                    })
+                    .test_support(),
+            );
+        } else if let Some(tracked) = self.ai_session.read(cx).tracked_for(task) {
+            let id = task.id.clone();
+            percent = percent.child(
+                Button::new("ai-tracked-undo")
+                    .icon(app_icon("undo-2"))
+                    .ghost()
+                    .xsmall()
+                    .tooltip(format!("AI の更新（{tracked}）を元に戻す"))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.ai_session.update(cx, |s, cx| s.undo_track(&id, cx));
+                    })),
             );
         }
 
@@ -3851,7 +4032,7 @@ impl MainView {
     }
 
     /// 下に敷いたダイアログは `dialog-under`、いちばん上のものは `dialog` と名付ける。
-    fn dialog_as(
+    pub(crate) fn dialog_as(
         &self,
         id: &'static str,
         width: Pixels,
@@ -4066,6 +4247,24 @@ impl MainView {
                         ),
                     )
                     .child(reset("cards-reset", false)),
+            )
+            .child(
+                row()
+                    .gap_2()
+                    .child(label("パネル"))
+                    .child(
+                        div().flex_1().flex().child(
+                            Switch::new("float-switch")
+                                .label("カードにして浮かせる")
+                                .checked(crate::theme::floating(cx))
+                                .on_click(
+                                    cx.listener(|this, on: &bool, _, cx| {
+                                        this.set_floating(*on, cx)
+                                    }),
+                                ),
+                        ),
+                    )
+                    .child(reset("float-reset", false)),
             );
         let body = body.when_some(self.error.clone(), |d, error| {
             d.child(div().text_sm().text_color(theme.danger).child(error))
@@ -5553,12 +5752,18 @@ impl Render for MainView {
                     }
                 }))
             })
+            .map(|d| self.with_shortcuts(d, cx))
             .map(|d| self.with_drags(d, cx))
             .size_full()
             .relative()
             .flex()
             .flex_row()
-            .bg(theme.background)
+            // パネルを浮かせるときは、すき間に少し暗い地が見える
+            .bg(if crate::theme::floating(cx) {
+                theme.muted
+            } else {
+                theme.background
+            })
             .text_color(theme.foreground)
             .children(backdrop_layer(cx))
             .when(wide && sidebar, |d| d.child(self.render_sidebar(wide, cx)))
@@ -5575,8 +5780,25 @@ impl Render for MainView {
                             .min_h_0()
                             .relative()
                             // 背景の画像の上では、中身の後ろも薄く塗って文字を読めるようにする
-                            .when_some(crate::theme::backdrop(cx), |d, backdrop| {
-                                d.bg(theme.background.opacity(backdrop.alpha * 0.45))
+                            .map(|d| {
+                                let fill = match crate::theme::backdrop(cx) {
+                                    Some(backdrop) => {
+                                        theme.background.opacity(backdrop.alpha * 0.45)
+                                    }
+                                    None => theme.background,
+                                };
+                                if crate::theme::floating(cx) {
+                                    let half = FLOAT_GAP / 2.;
+                                    d.child(floating_card(
+                                        fill,
+                                        [half, FLOAT_GAP, FLOAT_GAP, half],
+                                        cx,
+                                    ))
+                                } else if crate::theme::backdrop(cx).is_some() {
+                                    d.bg(fill)
+                                } else {
+                                    d
+                                }
                             })
                             .items_stretch()
                             .child(

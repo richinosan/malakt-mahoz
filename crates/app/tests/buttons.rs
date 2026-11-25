@@ -50,6 +50,9 @@ const NOT_BUTTONS: &[&str] = &[
     "ws-settings-scroll",
     "home",
     "caret",
+    "row-cursor",
+    "keys-help",
+    "app-keys",
 ];
 
 /// 詳細のパネルの上の端に並ぶボタン。
@@ -80,6 +83,7 @@ const MUST: &[&str] = &[
     "clear-slider",
     "blur-slider",
     "cards-switch",
+    "float-switch",
 ];
 
 /// ロックを設定したときだけ出るもの。ロックは tests/ui.rs で確かめる。
@@ -474,6 +478,7 @@ fn fingerprint(cx: &mut TestAppContext, world: &World) -> String {
             "scene.clear",
             "scene.blur",
             "list.cards",
+            "panels.float",
         ] {
             data.push_str(&format!("{:?}", store.setting(key).unwrap()));
         }

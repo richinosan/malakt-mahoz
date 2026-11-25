@@ -1057,6 +1057,25 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// `since` かそれより後に書かれた・書き直されたコメントの、ID とタスクの ID と時刻。古い順。
+    pub fn comments_changed_since(&self, since: i64) -> Result<Vec<(Id, Id, i64)>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT id, task_id, updated_at FROM comments WHERE updated_at >= ?1 \
+             ORDER BY updated_at",
+        )?;
+        let rows = stmt.query_map(params![since], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// いちばん新しいコメントの時刻。コメントがなければ 0。
+    pub fn latest_comment_time(&self) -> Result<i64> {
+        Ok(self.conn.query_row(
+            "SELECT COALESCE(MAX(updated_at), 0) FROM comments",
+            [],
+            |r| r.get(0),
+        )?)
+    }
+
     /// 本文を書き直す。メンションも読み直す。
     pub fn update_comment(&mut self, id: &str, body: &str) -> Result<Comment> {
         let body = normalize(body).trim().to_owned();
@@ -2051,6 +2070,29 @@ mod tests {
         s.delete_task(&t.id).unwrap();
         assert!(matches!(s.delete_task(&t.id), Err(Error::NotFound(_))));
         assert!(s.changes(&t.id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn changed_comments_are_found_by_time() {
+        let mut s = Store::open_in_memory().unwrap();
+        let t = s.create_task(None, &draft("記事")).unwrap();
+        assert_eq!(s.latest_comment_time().unwrap(), 0);
+        let a = s.add_comment(&t.id, None, "書いた").unwrap();
+        assert_eq!(s.latest_comment_time().unwrap(), a.updated_at);
+        assert_eq!(
+            s.comments_changed_since(a.updated_at).unwrap(),
+            vec![(a.id.clone(), t.id.clone(), a.updated_at)]
+        );
+        assert!(s
+            .comments_changed_since(a.updated_at + 1)
+            .unwrap()
+            .is_empty());
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let edited = s.update_comment(&a.id, "書き直した").unwrap();
+        assert_eq!(
+            s.comments_changed_since(a.updated_at + 1).unwrap(),
+            vec![(a.id, t.id, edited.updated_at)]
+        );
     }
 
     #[test]
