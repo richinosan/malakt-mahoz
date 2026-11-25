@@ -6,12 +6,13 @@
 
 fn main() {
     let path = malakt_mahoz::database_path();
-    // 引数があれば、ウィンドウを開かずにコマンドとして動く（完了チケットの引き換えなど）
+    // 引数があれば、ウィンドウを開かずにコマンドとして動く（MCP サーバー、完了チケットの引き換えなど）
     let args: Vec<String> = std::env::args().skip(1).collect();
     if malakt_mahoz::cli::is_command(&args) {
         let code = malakt_mahoz::cli::run(
             &args,
             || malakt_core::Store::open(&path),
+            &mut std::io::stdin().lock(),
             &mut std::io::stdout(),
             &mut std::io::stderr(),
         );

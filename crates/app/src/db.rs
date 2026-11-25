@@ -13,6 +13,18 @@ pub struct Db {
     pub opened_dir: std::path::PathBuf,
     /// 最後に見た、データベースの外からの変更の番号。
     data_version: i64,
+    /// 外のコマンドに向けた「解除している」印を最後に書いた時刻（UNIX 秒）。書いていなければ `None`。
+    open_mark: Option<i64>,
+}
+
+/// 解除の印を書き直す間隔（秒）。[`lock::OPEN_FOR`] より十分短くする。
+const OPEN_MARK_EVERY: i64 = 60;
+
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 /// 共有データへの入口。どのウィンドウも同じ [`Db`] を見て、変更の通知を受ける。
@@ -42,6 +54,33 @@ impl Db {
             verifying: false,
             opened_dir,
             data_version,
+            open_mark: None,
+        }
+    }
+
+    /// 外のコマンド（MCP サーバーなど）に向けた「解除している」印を、今の状態に合わせる。
+    /// ロックが有効で解除している間は印を書き直し、ロックしている間は印を消す。
+    /// 起動時、解除・ロックのあと、それと定期的に呼ぶ。
+    pub fn sync_open_mark(&mut self, now: i64) {
+        let open = self.unlocked && lock::is_enabled(&self.store).unwrap_or(false);
+        if !open {
+            // ロックが無効なら印は要らない。前に書いた印や、落ちた実行が残した印も消す
+            if lock::mark_closed(&mut self.store).is_ok() {
+                self.open_mark = None;
+            }
+        } else if self
+            .open_mark
+            .is_none_or(|at| (now - at).abs() >= OPEN_MARK_EVERY)
+            && lock::mark_open(&mut self.store, now).is_ok()
+        {
+            self.open_mark = Some(now);
+        }
+    }
+
+    /// 解除の印を消す。アプリを閉じるときに呼ぶ。
+    pub fn close_open_mark(&mut self) {
+        if lock::mark_closed(&mut self.store).is_ok() {
+            self.open_mark = None;
         }
     }
 
@@ -80,7 +119,11 @@ pub fn init(mut store: Store, cx: &mut App) {
     // 自分はいつでも担当に選べるようにしておく
     let _ = store.ensure_self();
     let unlocked = !lock::is_enabled(&store).unwrap_or(false);
-    let db = cx.new(|_| Db::new(store, unlocked));
+    let db = cx.new(|_| {
+        let mut db = Db::new(store, unlocked);
+        db.sync_open_mark(unix_now());
+        db
+    });
     cx.set_global(Shared(db));
 }
 
@@ -93,25 +136,40 @@ pub fn lock_now(cx: &mut App) {
     shared(cx).update(cx, |db, cx| {
         if lock::is_enabled(&db.store).unwrap_or(false) {
             db.unlocked = false;
+            db.sync_open_mark(unix_now());
             db.clear_opened();
             cx.notify();
         }
     });
 }
 
-/// 外からの変更と日付の変わり目を見張る。1 分ごとに確かめ、変わっていたら全ウィンドウを読み直させる
+/// ロックの解除・有効化のあとに呼ぶ。外のコマンドに向けた印を、今の状態に合わせる。
+pub fn sync_open_mark(cx: &mut App) {
+    shared(cx).update(cx, |db, _| db.sync_open_mark(unix_now()));
+}
+
+/// アプリを閉じるときに呼ぶ。閉じたあとは、ロックが有効なら外のコマンドから読めない。
+pub fn close_open_mark(cx: &mut App) {
+    if let Some(shared) = cx.try_global::<Shared>() {
+        shared.0.clone().update(cx, |db, _| db.close_open_mark());
+    }
+}
+
+/// 外からの変更を見張る間隔。MCP サーバーやコマンドからの変更を、すぐ画面に出す。
+const WATCH_EVERY: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// 外からの変更と日付の変わり目を見張る。2 秒ごとに確かめ、変わっていたら全ウィンドウを読み直させる
 /// （読み直しのときに、期限が今日の通知も作られる）。
 pub fn watch(cx: &mut App) {
     cx.spawn(async move |cx| {
         let mut day = malakt_core::view::today();
         loop {
-            cx.background_executor()
-                .timer(std::time::Duration::from_secs(60))
-                .await;
+            cx.background_executor().timer(WATCH_EVERY).await;
             let today = malakt_core::view::today();
             let new_day = std::mem::replace(&mut day, today.clone()) != today;
             cx.update(|cx| {
                 shared(cx).update(cx, |db, cx| {
+                    db.sync_open_mark(unix_now());
                     if db.changed_outside() || new_day {
                         cx.notify();
                     }
@@ -120,4 +178,54 @@ pub fn watch(cx: &mut App) {
         }
     })
     .detach();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Db, OPEN_MARK_EVERY};
+    use malakt_core::{lock, Store};
+
+    #[test]
+    fn the_open_mark_follows_the_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("data.sqlite3");
+        // 外のコマンドと同じように、別の接続から見る
+        let outside = Store::open(&path).unwrap();
+        let allows = |now| lock::allows_outside(&outside, now).unwrap();
+
+        let mut store = Store::open(&path).unwrap();
+        lock::enable(&mut store).unwrap();
+        // 落ちた実行が残した印は、起動したとき（ロックしている）に消える
+        lock::mark_open(&mut store, 1_000).unwrap();
+        let mut db = Db::new(store, false);
+        db.sync_open_mark(1_000);
+        assert!(!allows(1_000));
+
+        // 解除すると読める。印は 1 分ごとに書き直す
+        db.unlocked = true;
+        db.sync_open_mark(1_000);
+        assert!(allows(1_000));
+        db.sync_open_mark(1_000 + OPEN_MARK_EVERY - 1);
+        assert!(!allows(1_001 + lock::OPEN_FOR));
+        db.sync_open_mark(1_000 + OPEN_MARK_EVERY);
+        assert!(allows(1_001 + lock::OPEN_FOR));
+
+        // ロックすると、すぐ読めなくなる
+        db.unlocked = false;
+        db.sync_open_mark(1_100);
+        assert!(!allows(1_100));
+
+        // 閉じるときも消す
+        db.unlocked = true;
+        db.sync_open_mark(1_200);
+        assert!(allows(1_200));
+        db.close_open_mark();
+        assert!(!allows(1_200));
+
+        // ロックが無効なら、印は書かない（読めるのは変わらない）
+        lock::disable(&mut db.store).unwrap();
+        db.sync_open_mark(1_300);
+        assert!(db.open_mark.is_none());
+        assert!(allows(9_999));
+    }
 }

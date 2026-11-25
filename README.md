@@ -37,6 +37,7 @@
 - **自動アップデート**: GitHub Releases の新しい版に入れ替え（[docs/update.md](docs/update.md)）
 - **完了チケット**: コマンドからタスクを完了にする（[docs/tickets.md](docs/tickets.md)）
 - **AI チャット**: `Ctrl/⌘ + J`（[docs/ai.md](docs/ai.md)）
+- **MCP サーバー**: Claude Code などのエージェントからタスクを読み書き（[docs/mcp.md](docs/mcp.md)）
 
 ## 起動とビルド
 
@@ -73,6 +74,7 @@ mise run mutants    # ミューテーションテスト（cargo-mutants が必�
 
 - [完了チケット](docs/tickets.md)
 - [AI チャット](docs/ai.md)
+- [Claude Code などから使う（MCP）](docs/mcp.md)
 - [リマインダーとの連携](docs/reminders.md)
 - [自動アップデート](docs/update.md)
 - [エクスポートの形式](docs/export.md)

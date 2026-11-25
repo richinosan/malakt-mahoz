@@ -2808,6 +2808,7 @@ impl MainView {
                 db.unlocked = true;
                 cx.notify();
             });
+            crate::db::sync_open_mark(cx);
         });
     }
 
@@ -2815,6 +2816,7 @@ impl MainView {
     pub fn enable_lock(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.with_passkey("ロックを有効にする", window, cx, |this, cx| {
             if this.write(cx, lock::enable).is_some() {
+                crate::db::sync_open_mark(cx);
                 this.notice = Some("ロックを有効にしました。".into());
             }
         });
@@ -2823,6 +2825,7 @@ impl MainView {
     pub fn disable_lock(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.with_passkey("ロックを無効にする", window, cx, |this, cx| {
             if this.write(cx, lock::disable).is_some() {
+                crate::db::sync_open_mark(cx);
                 this.notice = Some("ロックを無効にしました。".into());
             }
         });
