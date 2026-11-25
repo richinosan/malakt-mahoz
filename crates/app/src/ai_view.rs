@@ -20,7 +20,8 @@ use malakt_ai::keys::Source;
 use malakt_ai::{Effort, Provider};
 
 use crate::ai::{
-    self, Decision, Item, KeyState, LineKind, Session, ShellPlace, ToolState, Watch, WATCH_MINUTES,
+    self, Decision, Item, KeyState, LineKind, Run, Session, ShellPlace, ToolState, Watch,
+    WATCH_MINUTES,
 };
 use crate::db::{self, Db};
 use crate::render::app_icon;
@@ -98,6 +99,42 @@ const SUGGESTIONS: [&str; 3] = [
     "今週の予定をまとめて",
 ];
 
+/// チャットの場所に出す一覧。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Side {
+    /// 保存してある会話
+    Chats,
+    /// アプリが自動で始めた実行の履歴
+    Runs,
+}
+
+/// 実行 1 回分の中身。失敗の理由と、AI がしたこと。
+pub fn run_details(run: &Run, theme: &gpui_kit::component::Theme) -> Div {
+    let mut body = col().gap_1().px_3().pb_2().text_xs();
+    if let Some(error) = &run.error {
+        body = body.child(div().text_color(theme.danger).child(error.clone()));
+    }
+    for item in &run.items {
+        let (text, color) = match item {
+            Item::Tool { summary, state } => (
+                match state {
+                    ToolState::Failed(why) => format!("{summary}: {why}").into(),
+                    _ => summary.clone(),
+                },
+                theme.muted_foreground,
+            ),
+            // 失敗の理由は、上に出している
+            Item::Error(text) if run.error.as_ref() == Some(text) => continue,
+            Item::Error(text) => (text.clone(), theme.danger),
+            Item::User(text) | Item::Assistant(text) | Item::Notice(text) => {
+                (text.clone(), theme.foreground)
+            }
+        };
+        body = body.child(div().text_color(color).child(text));
+    }
+    body
+}
+
 fn icon_button(id: &'static str, icon: &str, tip: &'static str) -> Button {
     Button::new(id)
         .icon(app_icon(icon))
@@ -165,6 +202,10 @@ pub struct AiPane {
     /// 設定で、モデルの一覧を開いている。
     model_open: bool,
     pub settings_open: bool,
+    /// チャットの場所に出している一覧。
+    pub side: Option<Side>,
+    /// 実行履歴で、中身を開いている実行。
+    run_open: Option<String>,
     /// ドラッグしている境界。
     resize: Option<Resize>,
     /// 開いて見せている、ツール実行のまとまり（最初の行の番号）。
@@ -373,7 +414,7 @@ impl AiPane {
         if mode != PaneMode::ShellWindow && session.read(cx).key == KeyState::Unknown {
             session.update(cx, |s, cx| s.refresh_key(cx));
         }
-        let seen = session.read(cx).items.len();
+        let seen = session.read(cx).shown_items().len();
         Self {
             session,
             db,
@@ -388,6 +429,8 @@ impl AiPane {
             context_input,
             model_open: false,
             settings_open: false,
+            side: None,
+            run_open: None,
             resize: None,
             open_tools: std::collections::HashSet::new(),
             chat_scroll: ScrollHandle::new(),
@@ -450,7 +493,7 @@ impl AiPane {
 
     /// チャットの変化に合わせる。新しい行が出たら、いちばん下まで送る。
     fn sync(&mut self, cx: &mut Context<Self>) {
-        let items = self.session.read(cx).items.len();
+        let items = self.session.read(cx).shown_items().len();
         if items != self.seen {
             self.chat_scroll.scroll_to_bottom();
         }
@@ -1109,6 +1152,346 @@ impl AiPane {
 
     // ---- チャット ----
 
+    /// チャットからタスクを開く。メインのウィンドウに置いたチャットでだけ動く。
+    fn open_task(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(main) = &self.main {
+            // メインの画面がなくなっていれば、開く先がない
+            let _ = main.update(cx, |main, cx| main.open_panel(id, window, cx));
+        }
+    }
+
+    fn run_title(run_kind: ai::RunKind, tasks: &[(String, SharedString)]) -> String {
+        let titles: Vec<&str> = tasks.iter().map(|(_, title)| title.as_ref()).collect();
+        if titles.is_empty() {
+            run_kind.label().to_owned()
+        } else {
+            format!("{}: {}", run_kind.label(), titles.join("、"))
+        }
+    }
+
+    /// 入力欄の上に出す、動いている実行と失敗した実行。
+    fn render_tray(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let theme = cx.theme().clone();
+        let session = self.session.read(cx);
+        let running = session
+            .auto_running()
+            .map(|(kind, tasks)| (Self::run_title(kind, tasks), tasks.first().cloned()));
+        let failed: Vec<Run> = session
+            .runs
+            .iter()
+            .rev()
+            .filter(|run| run.error.is_some() && !run.seen)
+            .take(3)
+            .cloned()
+            .collect();
+        if running.is_none() && failed.is_empty() {
+            return None;
+        }
+        let line = || {
+            row()
+                .gap_2()
+                .items_center()
+                .h_7()
+                .px_2()
+                .rounded_md()
+                .text_xs()
+        };
+        let mut tray = col().id("ai-tray").gap_1().pb_2();
+        if let Some((title, task)) = running {
+            tray = tray.child(
+                line()
+                    .id("ai-running")
+                    .bg(theme.muted)
+                    .text_color(theme.muted_foreground)
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme.accent))
+                    .child(Spinner::new().small())
+                    .child(div().flex_1().min_w_0().truncate().child(title))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        if let Some((id, _)) = &task {
+                            this.open_task(id, window, cx);
+                        }
+                    }))
+                    .test_support(),
+            );
+        }
+        for (ix, run) in failed.into_iter().enumerate() {
+            let detail = run.error.clone().unwrap_or_default();
+            let task = run.tasks.first().map(|(id, _)| id.clone());
+            let (retry, dismiss) = (run.id.clone(), run.id.clone());
+            tray = tray.child(
+                line()
+                    .bg(theme.danger.opacity(0.12))
+                    .child(
+                        row()
+                            .id(("ai-failed", ix))
+                            .flex_1()
+                            .min_w_0()
+                            .gap_2()
+                            .items_center()
+                            .cursor_pointer()
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .text_color(theme.danger)
+                                    .child(app_icon("circle-x").size_3p5()),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .child(Self::run_title(run.kind, &run.tasks)),
+                            )
+                            .tooltip(move |window, cx| {
+                                gpui_kit::component::tooltip::Tooltip::new(detail.clone())
+                                    .build(window, cx)
+                            })
+                            .on_click(cx.listener(move |this, _, window, cx| match &task {
+                                Some(id) => this.open_task(id, window, cx),
+                                None => {
+                                    this.side = Some(Side::Runs);
+                                    cx.notify();
+                                }
+                            }))
+                            .test_support(),
+                    )
+                    .child(
+                        Button::new(("ai-failed-retry", ix))
+                            .icon(app_icon("refresh-cw"))
+                            .ghost()
+                            .xsmall()
+                            .tooltip("もう一度実行")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.session.update(cx, |s, cx| s.retry_run(&retry, cx));
+                            })),
+                    )
+                    .child(
+                        Button::new(("ai-failed-dismiss", ix))
+                            .icon(app_icon("x"))
+                            .ghost()
+                            .xsmall()
+                            .tooltip("表示を消す")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.session.update(cx, |s, cx| s.dismiss_run(&dismiss, cx));
+                            })),
+                    ),
+            );
+        }
+        Some(tray.test_support().into_any_element())
+    }
+
+    /// 保存してある会話の一覧。
+    fn render_chats(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let session = self.session.read(cx);
+        let now = malakt_core::now_ms();
+        let mut list = col().gap_1().p_2();
+        if session.chats.is_empty() {
+            list = list.child(
+                div()
+                    .id("ai-chats-empty")
+                    .pt_10()
+                    .text_center()
+                    .text_sm()
+                    .text_color(theme.muted_foreground)
+                    .child("会話はまだありません")
+                    .test_support(),
+            );
+        }
+        for (ix, chat) in session.chats.iter().enumerate() {
+            let (open, delete) = (chat.id.clone(), chat.id.clone());
+            let active = session.chat_id() == chat.id;
+            list = list.child(
+                row()
+                    .gap_2()
+                    .items_center()
+                    .px_2()
+                    .h_10()
+                    .rounded_md()
+                    .when(active, |d| d.bg(theme.muted))
+                    .hover(|s| s.bg(theme.muted))
+                    .child(
+                        row()
+                            .id(("ai-chat-row", ix))
+                            .flex_1()
+                            .min_w_0()
+                            .h_full()
+                            .gap_2()
+                            .items_center()
+                            .cursor_pointer()
+                            .child(
+                                div().flex_none().text_color(theme.muted_foreground).child(
+                                    app_icon(if chat.task.is_some() {
+                                        "list-todo"
+                                    } else {
+                                        "sparkles"
+                                    })
+                                    .size_4(),
+                                ),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_sm()
+                                    .child(chat.title.clone()),
+                            )
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child(malakt_core::view::format_relative(chat.updated, now)),
+                            )
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.session.update(cx, |s, cx| s.open_chat(&open, cx));
+                                this.side = None;
+                                this.focus_input(window, cx);
+                                cx.notify();
+                            }))
+                            .test_support(),
+                    )
+                    .child(
+                        Button::new(("ai-chat-delete", ix))
+                            .icon(app_icon("trash"))
+                            .ghost()
+                            .xsmall()
+                            .tooltip("会話を消す")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.session.update(cx, |s, cx| s.delete_chat(&delete, cx));
+                            })),
+                    ),
+            );
+        }
+        div()
+            .id("ai-chats-list")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .child(list)
+            .test_support()
+            .into_any_element()
+    }
+
+    /// アプリが自動で始めた実行の履歴。新しいものが上。
+    fn render_runs(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let session = self.session.read(cx);
+        let now = malakt_core::now_ms();
+        let mut list = col().gap_1().p_2();
+        if session.runs.is_empty() {
+            list = list.child(
+                div()
+                    .id("ai-runs-empty")
+                    .pt_10()
+                    .text_center()
+                    .text_sm()
+                    .text_color(theme.muted_foreground)
+                    .child("実行はまだありません")
+                    .test_support(),
+            );
+        }
+        for (ix, run) in session.runs.iter().rev().enumerate() {
+            let failed = run.error.is_some();
+            let opened = self.run_open.as_deref() == Some(run.id.as_str());
+            let (toggle, retry) = (run.id.clone(), run.id.clone());
+            let task = run.tasks.first().map(|(id, _)| id.clone());
+            let mut entry = col().rounded_md().hover(|s| s.bg(theme.muted)).child(
+                row()
+                    .gap_2()
+                    .items_center()
+                    .px_2()
+                    .h_10()
+                    .child(
+                        row()
+                            .id(("ai-run-row", ix))
+                            .flex_1()
+                            .min_w_0()
+                            .h_full()
+                            .gap_2()
+                            .items_center()
+                            .cursor_pointer()
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .text_color(if failed { theme.danger } else { theme.success })
+                                    .child(
+                                        app_icon(if failed { "circle-x" } else { "circle-check" })
+                                            .size_4(),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_sm()
+                                    .child(Self::run_title(run.kind, &run.tasks)),
+                            )
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child(malakt_core::view::format_relative(run.at, now)),
+                            )
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.run_open = if this.run_open.as_deref() == Some(toggle.as_str())
+                                {
+                                    None
+                                } else {
+                                    Some(toggle.clone())
+                                };
+                                cx.notify();
+                            }))
+                            .test_support(),
+                    )
+                    .when(failed, |d| {
+                        d.child(
+                            Button::new(("ai-run-retry", ix))
+                                .icon(app_icon("refresh-cw"))
+                                .ghost()
+                                .xsmall()
+                                .tooltip("もう一度実行")
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.session.update(cx, |s, cx| s.retry_run(&retry, cx));
+                                })),
+                        )
+                    })
+                    .when_some(task.filter(|_| self.main.is_some()), |d, task| {
+                        d.child(
+                            Button::new(("ai-run-task", ix))
+                                .icon(app_icon("list-todo"))
+                                .ghost()
+                                .xsmall()
+                                .tooltip("タスクを開く")
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.open_task(&task, window, cx);
+                                })),
+                        )
+                    }),
+            );
+            if opened {
+                entry = entry.child(
+                    run_details(run, &theme)
+                        .id(("ai-run-detail", ix))
+                        .test_support(),
+                );
+            }
+            list = list.child(entry);
+        }
+        div()
+            .id("ai-runs-list")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .child(list)
+            .test_support()
+            .into_any_element()
+    }
+
     fn render_item(&self, ix: usize, item: &Item, cx: &App) -> AnyElement {
         let theme = cx.theme();
         match item {
@@ -1554,6 +1937,23 @@ impl AiPane {
                 .child(div().flex_1().min_w_0().pl_1().text_sm().child("AI の設定"))
                 .children(badge)
                 .children(close)
+        } else if let Some(side) = self.side {
+            bar()
+                .pl_2()
+                .child(
+                    icon_button("ai-side-back", "arrow-left", "チャットに戻る").on_click(
+                        cx.listener(|this, _, _, cx| {
+                            this.side = None;
+                            cx.notify();
+                        }),
+                    ),
+                )
+                .child(div().flex_1().min_w_0().pl_1().text_sm().child(match side {
+                    Side::Chats => "会話",
+                    Side::Runs => "AI の実行履歴",
+                }))
+                .children(badge)
+                .children(close)
         } else {
             bar()
                 .child(app_icon("sparkles").size_4())
@@ -1566,6 +1966,14 @@ impl AiPane {
                         .child("AI チャット"),
                 )
                 .children(badge)
+                .child(
+                    icon_button("ai-chats", "history", "会話の一覧").on_click(cx.listener(
+                        |this, _, _, cx| {
+                            this.side = Some(Side::Chats);
+                            cx.notify();
+                        },
+                    )),
+                )
                 .child(
                     icon_button("ai-new-chat", "message-square-plus", "新しいチャット").on_click(
                         cx.listener(|this, _, _, cx| {
@@ -1609,6 +2017,14 @@ impl AiPane {
                                     |this, _, cx| this.detach(PaneMode::ChatWindow, cx),
                                 )
                             })
+                            .item(item(
+                                "AI の実行履歴",
+                                "list-todo",
+                                |this, _, cx| {
+                                    this.side = Some(Side::Runs);
+                                    cx.notify();
+                                },
+                            ))
                         },
                     ),
                 )
@@ -1616,7 +2032,7 @@ impl AiPane {
         };
 
         let mut list = col().gap_2().p_3();
-        if session.items.is_empty() {
+        if session.shown_items().is_empty() {
             let has_key = matches!(session.key, KeyState::Present { .. });
             let mut start = col().id("ai-empty").items_center().gap_2().pt_10().child(
                 div()
@@ -1652,7 +2068,7 @@ impl AiPane {
             }
             list = list.child(start.test_support());
         }
-        let items = &session.items;
+        let items = session.shown_items();
         let pane = cx.entity().downgrade();
         let mut ix = 0;
         while ix < items.len() {
@@ -1675,7 +2091,12 @@ impl AiPane {
                 |el, delta| el.opacity(delta),
             ));
         }
-        if busy && !session.own_command && session.pending.is_none() {
+        // 自動の実行は、入力欄の上に出す
+        if busy
+            && !session.own_command
+            && session.pending.is_none()
+            && session.auto_running().is_none()
+        {
             list = list.child(
                 row()
                     .id("ai-working")
@@ -1744,6 +2165,7 @@ impl AiPane {
                     .test_support()
             });
         let error = session.error.clone();
+        let tray = self.render_tray(cx);
         let pills = self.render_pills(cx);
         let attached = self.session.read(cx).attached.clone();
         let dropping = self.main.as_ref().is_some_and(|main| {
@@ -1765,6 +2187,12 @@ impl AiPane {
             .min_h_0()
             .child(header)
             .when(self.settings_open, |d| d.child(self.render_settings(cx)))
+            .when_some(self.side.filter(|_| !self.settings_open), |d, side| {
+                d.child(match side {
+                    Side::Chats => self.render_chats(cx),
+                    Side::Runs => self.render_runs(cx),
+                })
+            })
             .when_some(error, |d, error| {
                 d.child(
                     div()
@@ -1783,7 +2211,7 @@ impl AiPane {
                 div()
                     .id("ai-messages")
                     // 設定を開いている間は、設定がチャットの場所を全部使う
-                    .when(self.settings_open, |d| d.hidden())
+                    .when(self.settings_open || self.side.is_some(), |d| d.hidden())
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
@@ -1794,10 +2222,11 @@ impl AiPane {
             .child(
                 div()
                     .flex_none()
-                    .when(self.settings_open, |d| d.hidden())
+                    .when(self.settings_open || self.side.is_some(), |d| d.hidden())
                     .px_3()
                     .pb_3()
                     .pt_1()
+                    .children(tray)
                     .child(
                         // 入力欄と、サービス・モデル・effort・送信を 1 つの枠にまとめる
                         col()

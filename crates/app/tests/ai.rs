@@ -15,8 +15,8 @@ use malakt_ai::shell::Spec;
 use malakt_ai::{Effort, Provider};
 use malakt_core::{Scope, Status, Store, TaskDraft, TaskFilter};
 use malakt_mahoz::ai::{
-    self, Item, KeyState, LineKind, Session, ShellPlace, ToolState, Watch,
-    DEFAULT_WATCH_INSTRUCTION,
+    self, Item, KeyState, LineKind, RunKind, Session, ShellPlace, ToolState, Watch,
+    DEFAULT_WATCH_INSTRUCTION, MAX_CHATS,
 };
 use malakt_mahoz::{db, AiConfig, AiPane, MainView};
 use serde_json::{json, Value};
@@ -959,16 +959,14 @@ fn changes_on_github_are_reflected_into_tasks(cx: &mut TestAppContext) {
     assert!(message.contains("state: CLOSED"));
     assert!(message.contains(DEFAULT_WATCH_INSTRUCTION));
     assert_eq!(all_tasks(cx)[0].status, Status::Completed);
-    let items = read(cx, |s| s.items.clone());
+    // 会話には混ぜず、実行の記録に残す
+    assert!(read(cx, |s| s.items.is_empty()));
+    let run = read(cx, |s| s.runs.last().cloned().unwrap());
+    assert_eq!(run.kind, RunKind::Watch);
+    assert_eq!(run.tasks, vec![(task.clone(), "ログインの不具合".into())]);
+    assert_eq!(run.error, None);
     assert_eq!(
-        items[0],
-        Item::Notice(
-            "GitHub の定期チェック: https://github.com/o/r/issues/3 に更新がありました。AI がタスクに反映します。"
-                .into()
-        )
-    );
-    assert_eq!(
-        items.last(),
+        run.items.last(),
         Some(&Item::Assistant(
             "issue が閉じられたので、完了にしました。".into()
         ))
@@ -1693,7 +1691,7 @@ fn fetch_notes_never_reach_the_task(cx: &mut TestAppContext) {
     ));
     world.reply(text_reply("整えました。"));
     wait(cx, "AI が整え終わる", |s| {
-        !s.busy && !s.items.is_empty()
+        !s.busy && !s.runs.is_empty()
     });
     assert_eq!(world.sent().len(), 2);
     let message = world.sent()[0].2["messages"][0]["content"]
@@ -1721,7 +1719,7 @@ fn a_new_task_waits_for_the_key(cx: &mut TestAppContext) {
     let session = session(cx);
     cx.update(|cx| session.update(cx, |s, cx| s.save_key("k", cx)));
     wait(cx, "AI が整え終わる", |s| {
-        !s.busy && !s.items.is_empty()
+        !s.busy && !s.runs.is_empty()
     });
     assert_eq!(world.sent().len(), 1);
     assert!(read(cx, |s| s.arrange_notes.is_empty()));
@@ -1836,16 +1834,239 @@ fn the_chat_comes_back_after_a_restart(cx: &mut TestAppContext) {
         (&ui_state["open"], &ui_state["chat"], &ui_state["shell"]),
         (&json!(true), &json!("docked"), &json!("closed"))
     );
-    let chat: Value = serde_json::from_str(&setting(cx, "ai.chat").unwrap()).unwrap();
+    let index: Value = serde_json::from_str(&setting(cx, "ai.chats").unwrap()).unwrap();
+    let id = index["current"].as_str().unwrap().to_owned();
+    assert_eq!(index["chats"][0]["id"], json!(id));
+    assert_eq!(index["chats"][0]["title"], json!("こんにちは"));
+    let key = format!("ai.chat.{id}");
+    let chat: Value = serde_json::from_str(&setting(cx, &key).unwrap()).unwrap();
     assert_eq!(chat["items"][0], json!({"k": "user", "t": "こんにちは"}));
     assert_eq!(chat["items"][1], json!({"k": "assistant", "t": "はい"}));
     assert_eq!(chat["turns"].as_array().unwrap().len(), 2);
 
-    // 新しいチャットにすると、保存した会話も空になる
+    // 新しいチャットにしても、前の会話は一覧に残り、開き直せる
     ui(cx, window, |window, cx| window.click("ai-new-chat", cx));
     cx.run_until_parked();
-    let chat: Value = serde_json::from_str(&setting(cx, "ai.chat").unwrap()).unwrap();
-    assert_eq!(chat["items"], json!([]));
+    assert!(read(cx, |s| s.items.is_empty() && s.chats.len() == 1));
+    assert!(setting(cx, &key).is_some());
+    let index: Value = serde_json::from_str(&setting(cx, "ai.chats").unwrap()).unwrap();
+    assert_ne!(index["current"], json!(id));
+    ui(cx, window, |window, cx| window.click("ai-chats", cx));
+    ui(cx, window, |window, cx| {
+        window.click(("ai-chat-row", 0usize), cx)
+    });
+    assert_eq!(
+        read(cx, |s| s.items.clone()),
+        vec![
+            Item::User("こんにちは".into()),
+            Item::Assistant("はい".into())
+        ]
+    );
+    // 続きを送ると、前の会話も AI に渡る
+    world.reply(text_reply("続きです"));
+    say(cx, window, &pane, "それで？");
+    wait(cx, "返事が来る", |s| !s.busy && s.items.len() >= 4);
+    let sent = world.sent();
+    assert_eq!(
+        sent.last().unwrap().2["messages"].as_array().unwrap().len(),
+        3
+    );
+    assert_eq!(read(cx, |s| s.chats.len()), 1);
+
+    // 消すと、保存した中身も消える
+    ui(cx, window, |window, cx| window.click("ai-chats", cx));
+    ui(cx, window, |window, cx| {
+        window.click(("ai-chat-delete", 0usize), cx)
+    });
+    assert!(read(cx, |s| s.items.is_empty() && s.chats.is_empty()));
+    assert_eq!(setting(cx, &key), None);
+    ui(cx, window, |window, _| {
+        assert!(window.find("ai-chats-empty").visible())
+    });
+}
+
+/// 会話は決めた数までしか残さない。古いものから消える。
+#[gpui_kit::test]
+fn old_chats_are_dropped(cx: &mut TestAppContext) {
+    let world = start(cx);
+    world.keys.set(Provider::Claude, "k").unwrap();
+    let session = session(cx);
+    let mut first = String::new();
+    for n in 0..MAX_CHATS + 2 {
+        world.reply(text_reply("はい"));
+        cx.update(|cx| {
+            session.update(cx, |s, cx| {
+                assert!(s.send(&format!("会話 {n}"), String::new(), cx));
+            })
+        });
+        wait(cx, "返事が来る", |s| !s.busy && s.items.len() >= 2);
+        if n == 0 {
+            first = read(cx, |s| s.chat_id().to_owned());
+        }
+        cx.update(|cx| session.update(cx, |s, cx| s.clear(cx)));
+    }
+    cx.run_until_parked();
+    let chats = read(cx, |s| s.chats.clone());
+    assert_eq!(chats.len(), MAX_CHATS);
+    assert_eq!(chats[0].title, format!("会話 {}", MAX_CHATS + 1));
+    assert_eq!(setting(cx, &format!("ai.chat.{first}")), None);
+}
+
+/// 自動の実行は会話に混ぜない。動いている間は入力欄の上に出て、終わるとタスクの記録に残る。
+#[gpui_kit::test]
+fn automatic_runs_stay_out_of_the_chat(cx: &mut TestAppContext) {
+    let world = start(cx);
+    world.keys.set(Provider::Claude, "k").unwrap();
+    let (window, view) = open(cx, wide());
+    let pane = open_chat(cx, window, &view);
+    world.reply(text_reply("はい"));
+    say(cx, window, &pane, "こんにちは");
+    wait(cx, "返事が来る", |s| !s.busy && s.items.len() >= 2);
+
+    // gh が少しかかる間に、入力欄の上の表示を見る
+    *world.github.lock().unwrap() = if cfg!(windows) {
+        " & ping -n 2 127.0.0.1 > NUL".into()
+    } else {
+        "; sleep 0.5".into()
+    };
+    let task = new_task(cx, "https://github.com/o/r/issues/3");
+    wait(cx, "AI が整え始める", |s| s.auto_running().is_some());
+    ui(cx, window, |window, _| {
+        assert!(window.find("ai-running").visible());
+        assert!(window.try_find("ai-working").is_none());
+    });
+    assert_eq!(read(cx, |s| s.shown_items().len()), 2);
+    world.reply(tool_reply(
+        "t1",
+        "update_task",
+        json!({"id": task, "title": "ログインできない"}),
+    ));
+    world.reply(text_reply("タイトルを付け直しました。"));
+    wait(cx, "AI が整え終わる", |s| {
+        !s.busy && !s.runs.is_empty()
+    });
+    assert_eq!(read(cx, |s| s.items.len()), 2);
+    ui(cx, window, |window, _| {
+        assert!(window.try_find("ai-tray").is_none())
+    });
+    let run = read(cx, |s| s.runs_for(&task)[0].clone());
+    assert_eq!((run.kind, run.error.clone()), (RunKind::Arrange, None));
+    assert_eq!(
+        run.items.last(),
+        Some(&Item::Assistant("タイトルを付け直しました。".into()))
+    );
+    // 次に送る会話にも、自動の実行は入らない
+    world.reply(text_reply("どうも"));
+    say(cx, window, &pane, "ありがとう");
+    wait(cx, "返事が来る", |s| !s.busy && s.items.len() >= 4);
+    assert_eq!(
+        world.sent().last().unwrap().2["messages"]
+            .as_array()
+            .unwrap()
+            .len(),
+        3
+    );
+
+    // タスクの詳細で、記録を開ける
+    ui(cx, window, |window, cx| {
+        view.update(cx, |view, cx| view.open_panel(&task, window, cx));
+    });
+    ui(cx, window, |window, cx| window.click("ai-log", cx));
+    ui(cx, window, |window, _| {
+        assert!(window.find(("ai-log-run", 0usize)).visible())
+    });
+    // 実行履歴にも出る
+    menu(cx, window, 3);
+    ui(cx, window, |window, cx| {
+        window.click(("ai-run-row", 0usize), cx)
+    });
+    ui(cx, window, |window, _| {
+        assert!(window.find(("ai-run-detail", 0usize)).visible())
+    });
+
+    // 記録は次の起動にも残る
+    let saved: Value = serde_json::from_str(&setting(cx, "ai.runs").unwrap()).unwrap();
+    assert_eq!(saved[0]["kind"], json!("arrange"));
+    assert_eq!(saved[0]["tasks"][0]["id"], json!(task));
+}
+
+/// 失敗した実行は、入力欄の上に残る。やり直すか、消すまで出ている。
+#[gpui_kit::test]
+fn a_failed_run_stays_until_it_is_dismissed(cx: &mut TestAppContext) {
+    let world = start(cx);
+    world.keys.set(Provider::Claude, "k").unwrap();
+    let (window, view) = open(cx, wide());
+    let _pane = open_chat(cx, window, &view);
+    world.fail("529 overloaded");
+    let task = new_task(cx, "会場を予約する");
+    wait(cx, "失敗が記録される", |s| {
+        !s.busy && !s.runs.is_empty()
+    });
+    let run = read(cx, |s| s.runs[0].clone());
+    assert!(run.error.as_ref().unwrap().contains("529"), "{run:?}");
+    assert!(!run.seen);
+    assert!(read(cx, |s| s.items.is_empty()));
+    ui(cx, window, |window, _| {
+        assert!(window.find(("ai-failed", 0usize)).visible())
+    });
+    // 押すと、そのタスクが開く
+    ui(cx, window, |window, cx| {
+        window.click(("ai-failed", 0usize), cx)
+    });
+    cx.update(|cx| assert_eq!(view.read(cx).panel.as_deref(), Some(task.as_str())));
+    ui(cx, window, |window, cx| {
+        window.click(("ai-failed-dismiss", 0usize), cx)
+    });
+    ui(cx, window, |window, _| {
+        assert!(window.try_find("ai-tray").is_none())
+    });
+    // 履歴には残り、そこからやり直せる
+    menu(cx, window, 3);
+    world.reply(text_reply("そのままにしました。"));
+    ui(cx, window, |window, cx| {
+        window.click(("ai-run-retry", 0usize), cx)
+    });
+    wait(cx, "やり直しが終わる", |s| {
+        !s.busy && s.runs.len() == 2
+    });
+    assert_eq!(read(cx, |s| s.runs[1].error.clone()), None);
+}
+
+/// タスクの詳細から、そのタスクについての会話を開ける。
+#[gpui_kit::test]
+fn a_task_has_its_own_chat(cx: &mut TestAppContext) {
+    let world = start(cx);
+    world.keys.set(Provider::Claude, "k").unwrap();
+    let (window, view) = open(cx, wide());
+    let task = new_task(cx, "会場を予約する");
+    world.reply(text_reply("そのままにしました。"));
+    wait(cx, "AI が整え終わる", |s| {
+        !s.busy && !s.runs.is_empty()
+    });
+    ui(cx, window, |window, cx| {
+        view.update(cx, |view, cx| view.open_panel(&task, window, cx));
+    });
+    ui(cx, window, |window, cx| window.click("ai-task-chat", cx));
+    cx.update(|cx| assert!(view.read(cx).ai_open));
+    assert_eq!(
+        read(cx, |s| s.attached.clone()),
+        vec![(task.clone(), "会場を予約する".into())]
+    );
+    let pane = cx.update(|cx| view.read(cx).ai_pane.clone().unwrap());
+    world.reply(text_reply("予約の手順です"));
+    say(cx, window, &pane, "どう進める？");
+    wait(cx, "返事が来る", |s| !s.busy && s.items.len() >= 2);
+    cx.run_until_parked();
+    let chats = read(cx, |s| s.chats.clone());
+    assert_eq!(chats[0].title, "会場を予約する");
+    assert_eq!(chats[0].task.as_deref(), Some(task.as_str()));
+
+    // ほかの会話に移っても、タスクからは同じ会話に戻る
+    ui(cx, window, |window, cx| window.click("ai-new-chat", cx));
+    assert!(read(cx, |s| s.items.is_empty()));
+    ui(cx, window, |window, cx| window.click("ai-task-chat", cx));
+    assert_eq!(read(cx, |s| s.items.len()), 2);
+    assert_eq!(read(cx, |s| s.chats.len()), 1);
 }
 
 #[gpui_kit::test]
@@ -2362,7 +2583,7 @@ fn a_task_being_named_waits_for_its_title(cx: &mut TestAppContext) {
         window.press("enter", cx);
     });
     wait(cx, "AI が整え終わる", |s| {
-        !s.busy && !s.items.is_empty()
+        !s.busy && !s.runs.is_empty()
     });
     let sent = world.sent();
     assert_eq!(sent.len(), 1);

@@ -114,6 +114,118 @@ struct SavedUi {
 }
 
 /// 右に置くチャットとシェルの、最初の幅と選べる範囲（拡大率を掛ける前の値）。
+/// 会話の一覧。今の会話の ID も入れる。
+const CHATS_SETTING: &str = "ai.chats";
+/// アプリが自動で始めた AI の実行の記録。
+const RUNS_SETTING: &str = "ai.runs";
+/// 残しておく会話の数。超えたら、古いものから消す。
+pub const MAX_CHATS: usize = 30;
+/// 残しておく実行の記録の数。
+pub const MAX_RUNS: usize = 50;
+const MAX_RUN_ITEMS: usize = 30;
+const MAX_RUN_CHARS: usize = 2000;
+const MAX_TITLE_CHARS: usize = 40;
+
+fn chat_key(id: &str) -> String {
+    format!("ai.chat.{id}")
+}
+
+/// 一覧に出す会話。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatInfo {
+    pub id: String,
+    pub title: SharedString,
+    /// この会話を始めたタスク。
+    pub task: Option<String>,
+    pub updated: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunKind {
+    Arrange,
+    Track,
+    Watch,
+}
+
+impl RunKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Arrange => "タスクの整理",
+            Self::Track => "コメントからの更新",
+            Self::Watch => "GitHub の定期チェック",
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Arrange => "arrange",
+            Self::Track => "track",
+            Self::Watch => "watch",
+        }
+    }
+}
+
+/// アプリが自動で始めた AI の実行 1 回分。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Run {
+    pub id: String,
+    pub kind: RunKind,
+    /// 対象のタスク（ID と題）。
+    pub tasks: Vec<(String, SharedString)>,
+    pub at: i64,
+    /// 失敗した理由。
+    pub error: Option<SharedString>,
+    /// 失敗をもう見た。チャットの上には出さない。
+    pub seen: bool,
+    pub items: Vec<Item>,
+}
+
+fn item_json(item: &Item) -> Value {
+    match item {
+        Item::User(t) => serde_json::json!({"k": "user", "t": t}),
+        Item::Assistant(t) => serde_json::json!({"k": "assistant", "t": t}),
+        Item::Notice(t) => serde_json::json!({"k": "notice", "t": t}),
+        Item::Error(t) => serde_json::json!({"k": "error", "t": t}),
+        Item::Tool { summary, state } => {
+            let (state, detail) = match state {
+                ToolState::Done => ("done", None),
+                ToolState::Denied => ("denied", None),
+                ToolState::Failed(e) => ("failed", Some(e.to_string())),
+                ToolState::Running => ("failed", Some("中断しました".to_owned())),
+            };
+            serde_json::json!({"k": "tool", "t": summary, "s": state, "d": detail})
+        }
+    }
+}
+
+fn item_from(v: &Value) -> Item {
+    let t: SharedString = v["t"].as_str().unwrap_or_default().to_owned().into();
+    match v["k"].as_str() {
+        Some("user") => Item::User(t),
+        Some("assistant") => Item::Assistant(t),
+        Some("notice") => Item::Notice(t),
+        Some("tool") => Item::Tool {
+            summary: t,
+            state: match v["s"].as_str() {
+                Some("done") => ToolState::Done,
+                Some("denied") => ToolState::Denied,
+                _ => ToolState::Failed(v["d"].as_str().unwrap_or_default().to_owned().into()),
+            },
+        },
+        _ => Item::Error(t),
+    }
+}
+
+fn clip_chars(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        text.to_owned()
+    } else {
+        let mut out: String = text.chars().take(max).collect();
+        out.push('…');
+        out
+    }
+}
+
 pub const CHAT_WIDTH: f32 = 440.;
 pub const SHELL_WIDTH: f32 = 360.;
 pub const CHAT_MIN_WIDTH: f32 = 320.;
@@ -485,6 +597,22 @@ pub struct Session {
     pub attached: Vec<(String, SharedString)>,
     /// ユーザーが今開いているワークスペース。画面が書き込む。
     pub workspace: Option<String>,
+    /// 保存してある会話。新しいものが前。
+    pub chats: Vec<ChatInfo>,
+    /// 今の会話を始めたタスク（ID と題）。
+    pub chat_task: Option<(String, SharedString)>,
+    /// 古い形で保存してある会話を、まだ新しい形に移していない。
+    legacy_chat: bool,
+    /// アプリが自動で始めた実行の、始まる前の会話の長さ。終わったら、ここまで戻す。
+    auto_mark: Option<usize>,
+    /// 自動の実行の間、よけておく会話。AI には、その実行の分だけを送る。
+    held_turns: Vec<Turn>,
+    auto_kind: RunKind,
+    auto_tasks: Vec<(String, SharedString)>,
+    auto_error: Option<SharedString>,
+    /// アプリが自動で始めた実行の記録。新しいものが後ろ。
+    pub runs: Vec<Run>,
+    runs_dirty: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -514,6 +642,10 @@ impl Session {
         let auto_run;
         let ui: SavedUi;
         let chat: Option<Value>;
+        let mut chats = Vec::new();
+        let mut current = None;
+        let mut legacy_chat = false;
+        let mut runs = Vec::new();
         let arrange;
         let track;
         let context;
@@ -550,7 +682,67 @@ impl Session {
                     ],
                 })
                 .unwrap_or_default();
-            chat = read(CHAT_SETTING).and_then(|v| serde_json::from_str::<Value>(&v).ok());
+            if let Some(index) =
+                read(CHATS_SETTING).and_then(|v| serde_json::from_str::<Value>(&v).ok())
+            {
+                current = index["current"].as_str().map(str::to_owned);
+                for v in index["chats"].as_array().into_iter().flatten() {
+                    if let Some(id) = v["id"].as_str() {
+                        chats.push(ChatInfo {
+                            id: id.to_owned(),
+                            title: v["title"].as_str().unwrap_or_default().to_owned().into(),
+                            task: v["task"].as_str().map(str::to_owned),
+                            updated: v["updated"].as_i64().unwrap_or(0),
+                        });
+                    }
+                }
+            }
+            let saved = match &current {
+                Some(id) => read(&chat_key(id)),
+                None => {
+                    // 会話を 1 つだけ保存していたころの形
+                    let old = read(CHAT_SETTING);
+                    legacy_chat = old.is_some();
+                    old
+                }
+            };
+            chat = saved.and_then(|v| serde_json::from_str::<Value>(&v).ok());
+            for v in read(RUNS_SETTING)
+                .and_then(|v| serde_json::from_str::<Value>(&v).ok())
+                .as_ref()
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                runs.push(Run {
+                    id: v["id"].as_str().unwrap_or_default().to_owned(),
+                    kind: match v["kind"].as_str() {
+                        Some("track") => RunKind::Track,
+                        Some("watch") => RunKind::Watch,
+                        _ => RunKind::Arrange,
+                    },
+                    tasks: v["tasks"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .map(|t| {
+                            (
+                                t["id"].as_str().unwrap_or_default().to_owned(),
+                                t["title"].as_str().unwrap_or_default().to_owned().into(),
+                            )
+                        })
+                        .collect(),
+                    at: v["at"].as_i64().unwrap_or(0),
+                    error: v["error"].as_str().map(|e| e.to_owned().into()),
+                    seen: v["seen"].as_bool().unwrap_or(true),
+                    items: v["items"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .map(item_from)
+                        .collect(),
+                });
+            }
             auto_run = read("ai.auto_run").as_deref() == Some("1");
             arrange = read("ai.arrange").as_deref() != Some("0");
             track = read("ai.track").as_deref() != Some("0");
@@ -638,6 +830,16 @@ impl Session {
             place: String::new(),
             attached: Vec::new(),
             workspace: None,
+            chats,
+            chat_task: None,
+            legacy_chat,
+            auto_mark: None,
+            held_turns: Vec::new(),
+            auto_kind: RunKind::Arrange,
+            auto_tasks: Vec::new(),
+            auto_error: None,
+            runs,
+            runs_dirty: false,
             _subscriptions: Vec::new(),
         };
         this._subscriptions = vec![
@@ -662,6 +864,10 @@ impl Session {
         if let Some(chat) = chat {
             this.load_chat(&chat);
         }
+        if let Some(id) = current {
+            this.conversation = id;
+        }
+        this.chat_task = this.linked_task();
         this.saved_ui = this.ui_json();
         this.saved_chat = this.chat_mark();
         this.restart_watch(cx);
@@ -729,12 +935,228 @@ impl Session {
             }
         }
         let mark = self.chat_mark();
-        if !self.busy && mark != self.saved_chat {
-            let chat = self.chat_json();
-            if self.save_setting(CHAT_SETTING, &chat, cx) {
-                self.saved_chat = mark;
+        if !self.busy && mark != self.saved_chat && self.save_chat(cx) {
+            self.saved_chat = mark;
+        }
+        if self.runs_dirty {
+            let runs: Vec<Value> = self
+                .runs
+                .iter()
+                .map(|run| {
+                    serde_json::json!({
+                        "id": run.id,
+                        "kind": run.kind.as_str(),
+                        "tasks": run.tasks.iter().map(|(id, title)| {
+                            serde_json::json!({"id": id, "title": title})
+                        }).collect::<Vec<_>>(),
+                        "at": run.at,
+                        "error": run.error,
+                        "seen": run.seen,
+                        "items": run.items.iter().map(item_json).collect::<Vec<_>>(),
+                    })
+                })
+                .collect();
+            if self.save_setting(RUNS_SETTING, &Value::Array(runs).to_string(), cx) {
+                self.runs_dirty = false;
             }
         }
+    }
+
+    /// 今の会話を始めたタスク。一覧に書いてあるものから。
+    fn linked_task(&self) -> Option<(String, SharedString)> {
+        let info = self.chats.iter().find(|c| c.id == self.conversation)?;
+        Some((info.task.clone()?, info.title.clone()))
+    }
+
+    fn remove_setting(&mut self, key: &str, cx: &mut Context<Self>) -> bool {
+        let result = self.db.update(cx, |db, _| db.store.set_setting(key, None));
+        match result {
+            Ok(()) => true,
+            Err(e) => {
+                self.error = Some(format!("AI の会話を消せませんでした: {e}").into());
+                cx.notify();
+                false
+            }
+        }
+    }
+
+    fn save_index(&mut self, cx: &mut Context<Self>) -> bool {
+        let chats: Vec<Value> = self
+            .chats
+            .iter()
+            .map(|c| {
+                serde_json::json!({
+                    "id": c.id, "title": c.title, "task": c.task, "updated": c.updated,
+                })
+            })
+            .collect();
+        let index = serde_json::json!({"current": self.conversation, "chats": chats}).to_string();
+        self.save_setting(CHATS_SETTING, &index, cx)
+    }
+
+    /// 今の会話を保存し、一覧のいちばん前に置く。空の会話は一覧に出さない。
+    fn save_chat(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.items.is_empty() {
+            return self.save_index(cx);
+        }
+        let id = self.conversation.clone();
+        let chat = self.chat_json();
+        if !self.save_setting(&chat_key(&id), &chat, cx) {
+            return false;
+        }
+        let title: SharedString = match &self.chat_task {
+            Some((_, title)) => title.clone(),
+            None => self
+                .items
+                .iter()
+                .find_map(|item| match item {
+                    Item::User(text) => Some(clip_chars(
+                        text.lines().next().unwrap_or_default(),
+                        MAX_TITLE_CHARS,
+                    )),
+                    _ => None,
+                })
+                .unwrap_or_else(|| "新しいチャット".to_owned())
+                .into(),
+        };
+        self.chats.retain(|c| c.id != id);
+        self.chats.insert(
+            0,
+            ChatInfo {
+                id,
+                title,
+                task: self.chat_task.as_ref().map(|(id, _)| id.clone()),
+                updated: malakt_core::now_ms(),
+            },
+        );
+        // 古い会話から消すので、増え続けない
+        while self.chats.len() > MAX_CHATS {
+            let last = self.chats[self.chats.len() - 1].id.clone();
+            if !self.remove_setting(&chat_key(&last), cx) {
+                return false;
+            }
+            self.chats.pop();
+        }
+        if self.legacy_chat && self.remove_setting(CHAT_SETTING, cx) {
+            self.legacy_chat = false;
+        }
+        self.save_index(cx)
+    }
+
+    /// 今の会話の ID。
+    pub fn chat_id(&self) -> &str {
+        &self.conversation
+    }
+
+    /// 会話に出すもの。アプリが自動で始めた実行は、会話に混ぜない。
+    pub fn shown_items(&self) -> &[Item] {
+        let end = self
+            .auto_mark
+            .map_or(self.items.len(), |items| items.min(self.items.len()));
+        &self.items[..end]
+    }
+
+    /// 今動いている、アプリが自動で始めた実行。
+    pub fn auto_running(&self) -> Option<(RunKind, &[(String, SharedString)])> {
+        self.auto_mark
+            .map(|_| (self.auto_kind, self.auto_tasks.as_slice()))
+    }
+
+    /// あるタスクについての実行の記録。新しいものが前。
+    pub fn runs_for(&self, task: &str) -> Vec<&Run> {
+        self.runs
+            .iter()
+            .rev()
+            .filter(|run| run.tasks.iter().any(|(id, _)| id == task))
+            .collect()
+    }
+
+    /// 失敗を見たことにして、チャットの上から外す。
+    pub fn dismiss_run(&mut self, id: &str, cx: &mut Context<Self>) {
+        for run in &mut self.runs {
+            if run.id == id && !run.seen {
+                run.seen = true;
+                self.runs_dirty = true;
+            }
+        }
+        cx.notify();
+    }
+
+    /// 失敗した実行を、もう一度行う。
+    pub fn retry_run(&mut self, id: &str, cx: &mut Context<Self>) {
+        let Some(run) = self.runs.iter().find(|run| run.id == id).cloned() else {
+            return;
+        };
+        self.dismiss_run(id, cx);
+        match run.kind {
+            RunKind::Arrange => {
+                for (task, _) in &run.tasks {
+                    self.retry_arrange(task, cx);
+                }
+            }
+            RunKind::Track => {
+                for (task, _) in &run.tasks {
+                    self.retry_track(task, cx);
+                }
+            }
+            RunKind::Watch => {
+                self.check_github(cx);
+            }
+        }
+    }
+
+    fn begin_auto(&mut self, kind: RunKind, tasks: Vec<(String, SharedString)>) {
+        self.busy = true;
+        self.auto = true;
+        self.auto_mark = Some(self.items.len());
+        self.held_turns = std::mem::take(&mut self.turns);
+        self.auto_kind = kind;
+        self.auto_tasks = tasks;
+        self.auto_error = None;
+    }
+
+    /// 自動の実行で増えた分を会話から外し、記録に移す。
+    fn end_auto(&mut self) {
+        let Some(items) = self.auto_mark.take() else {
+            return;
+        };
+        let made = self.items.split_off(items.min(self.items.len()));
+        self.turns = std::mem::take(&mut self.held_turns);
+        let tasks = std::mem::take(&mut self.auto_tasks);
+        let error = self.auto_error.take();
+        let items: Vec<Item> = made
+            .into_iter()
+            .filter(|item| !matches!(item, Item::Notice(_)))
+            .map(|item| match item {
+                Item::Assistant(t) => Item::Assistant(clip_chars(&t, MAX_RUN_CHARS).into()),
+                Item::Error(t) => Item::Error(clip_chars(&t, MAX_RUN_CHARS).into()),
+                Item::Tool {
+                    summary,
+                    state: ToolState::Running,
+                } => Item::Tool {
+                    summary,
+                    state: ToolState::Failed("中断しました".into()),
+                },
+                other => other,
+            })
+            .collect();
+        // 何も起きなかった定期チェックは、記録しない
+        if items.is_empty() && error.is_none() && tasks.is_empty() {
+            return;
+        }
+        let skip = items.len().saturating_sub(MAX_RUN_ITEMS);
+        self.runs.push(Run {
+            id: malakt_core::new_id(),
+            kind: self.auto_kind,
+            tasks,
+            at: malakt_core::now_ms(),
+            seen: error.is_none(),
+            error,
+            items: items[skip..].to_vec(),
+        });
+        let over = self.runs.len().saturating_sub(MAX_RUNS);
+        self.runs.drain(..over);
+        self.runs_dirty = true;
     }
 
     /// 会話の終わりのほうを、決めた大きさまで。古いものから落とすので、増え続けない。
@@ -774,47 +1196,14 @@ impl Session {
         turns.reverse();
         let turns = turns.split_off(turns.len() - (self.turns.len() - start));
         let skip = self.items.len().saturating_sub(MAX_SAVED_ITEMS);
-        let items: Vec<Value> = self.items[skip..]
-            .iter()
-            .map(|item| match item {
-                Item::User(t) => serde_json::json!({"k": "user", "t": t}),
-                Item::Assistant(t) => serde_json::json!({"k": "assistant", "t": t}),
-                Item::Notice(t) => serde_json::json!({"k": "notice", "t": t}),
-                Item::Error(t) => serde_json::json!({"k": "error", "t": t}),
-                Item::Tool { summary, state } => {
-                    let (state, detail) = match state {
-                        ToolState::Done => ("done", None),
-                        ToolState::Denied => ("denied", None),
-                        ToolState::Failed(e) => ("failed", Some(e.to_string())),
-                        ToolState::Running => ("failed", Some("中断しました".to_owned())),
-                    };
-                    serde_json::json!({"k": "tool", "t": summary, "s": state, "d": detail})
-                }
-            })
-            .collect();
+        let items: Vec<Value> = self.items[skip..].iter().map(item_json).collect();
         serde_json::json!({"id": self.conversation, "items": items, "turns": turns}).to_string()
     }
 
     fn load_chat(&mut self, chat: &Value) {
         let text = |v: &Value| v["t"].as_str().unwrap_or_default().to_owned();
         for v in chat["items"].as_array().into_iter().flatten() {
-            let t: SharedString = text(v).into();
-            self.items.push(match v["k"].as_str() {
-                Some("user") => Item::User(t),
-                Some("assistant") => Item::Assistant(t),
-                Some("notice") => Item::Notice(t),
-                Some("tool") => Item::Tool {
-                    summary: t,
-                    state: match v["s"].as_str() {
-                        Some("done") => ToolState::Done,
-                        Some("denied") => ToolState::Denied,
-                        _ => {
-                            ToolState::Failed(v["d"].as_str().unwrap_or_default().to_owned().into())
-                        }
-                    },
-                },
-                _ => Item::Error(t),
-            });
+            self.items.push(item_from(v));
         }
         for v in chat["turns"].as_array().into_iter().flatten() {
             self.turns.push(match v["k"].as_str() {
@@ -1029,8 +1418,13 @@ impl Session {
     }
 
     fn arrange_tasks(&mut self, tasks: Vec<NewTask>, cx: &mut Context<Self>) {
-        self.busy = true;
-        self.auto = true;
+        self.begin_auto(
+            RunKind::Arrange,
+            tasks
+                .iter()
+                .map(|task| (task.id.clone(), task.title.clone().into()))
+                .collect(),
+        );
         self.arranging = tasks.iter().map(|task| task.id.clone()).collect();
         if let Some(known) = &mut self.known {
             for task in &tasks {
@@ -1043,10 +1437,17 @@ impl Session {
             // チャットがなくなっていれば、知らせる先もない
             let _ = this.update(cx, |this, cx| {
                 match result {
-                    Ok(notes) => this.arrange_notes.extend(notes),
+                    Ok(notes) => {
+                        if !notes.is_empty() {
+                            let all: Vec<&str> = notes.iter().map(|(_, n)| n.as_ref()).collect();
+                            this.auto_error = Some(all.join("\n").into());
+                        }
+                        this.arrange_notes.extend(notes)
+                    }
                     Err(error) => {
                         let note: SharedString =
                             format!("AI がタスクを整えられませんでした: {error}").into();
+                        this.auto_error = Some(note.clone());
                         this.items.push(Item::Error(note.clone()));
                         for id in ids {
                             this.arrange_notes.insert(id, note.clone());
@@ -1333,8 +1734,13 @@ impl Session {
         if tasks.is_empty() {
             return;
         }
-        self.busy = true;
-        self.auto = true;
+        self.begin_auto(
+            RunKind::Track,
+            tasks
+                .iter()
+                .map(|(task, _)| (task.id.clone(), task.title.clone().into()))
+                .collect(),
+        );
         self.tracking = tasks.iter().map(|(task, _)| task.id.clone()).collect();
         for id in &self.tracking {
             self.track_notes.remove(id);
@@ -1347,6 +1753,7 @@ impl Session {
                 if let Err(error) = result {
                     let note: SharedString =
                         format!("AI がコメントからタスクを更新できませんでした: {error}").into();
+                    this.auto_error = Some(note.clone());
                     this.items.push(Item::Error(note.clone()));
                     for id in ids {
                         this.track_notes.insert(id, note.clone());
@@ -1582,8 +1989,7 @@ impl Session {
         if self.busy || !self.db.read(cx).unlocked {
             return false;
         }
-        self.busy = true;
-        self.auto = true;
+        self.begin_auto(RunKind::Watch, Vec::new());
         self.task = Some(cx.spawn(async move |this, cx| {
             let result = Self::watch_run(&this, cx).await;
             // チャットがなくなっていれば、知らせる先もない
@@ -1594,9 +2000,9 @@ impl Session {
                         this.watch_status = Some(
                             format!("{} のチェックに失敗しました: {error}", now_label()).into(),
                         );
-                        this.items.push(Item::Error(
-                            format!("GitHub の定期チェック: {error}").into(),
-                        ));
+                        let note: SharedString = format!("GitHub の定期チェック: {error}").into();
+                        this.auto_error = Some(note.clone());
+                        this.items.push(Item::Error(note));
                     }
                 }
                 this.finish();
@@ -1609,6 +2015,7 @@ impl Session {
 
     /// 進行の後始末。
     fn finish(&mut self) {
+        self.end_auto();
         self.settle();
         self.busy = false;
         self.own_command = false;
@@ -1714,6 +2121,11 @@ impl Session {
         let urls: Vec<&str> = changed.iter().map(|(url, _, _)| url.as_str()).collect();
         this.update(cx, |s, cx| {
             s.watch_status = Some(status.clone().into());
+            s.auto_tasks = changed
+                .iter()
+                .flat_map(|(_, tasks, _)| tasks.iter())
+                .map(|(id, title)| (id.clone(), title.clone().into()))
+                .collect();
             s.items.push(Item::Notice(
                 format!(
                     "GitHub の定期チェック: {} に更新がありました。AI がタスクに反映します。",
@@ -1913,15 +2325,90 @@ impl Session {
     // ---- 会話 ----
 
     /// 新しい会話にする。
-    pub fn clear(&mut self, cx: &mut Context<Self>) {
-        self.stop(cx);
+    fn reset_chat(&mut self) {
         self.turns.clear();
         self.items.clear();
         self.allow_shell = false;
         self.attached.clear();
         self.conversation = malakt_core::new_id();
+        self.chat_task = None;
         self.error = None;
+    }
+
+    /// 新しい会話を始める。今の会話は一覧に残る。
+    pub fn clear(&mut self, cx: &mut Context<Self>) {
+        self.stop(cx);
+        self.persist(cx);
+        self.reset_chat();
         cx.notify();
+    }
+
+    /// 保存してある会話を開く。
+    pub fn open_chat(&mut self, id: &str, cx: &mut Context<Self>) {
+        if id == self.conversation {
+            return;
+        }
+        let Some(info) = self.chats.iter().find(|c| c.id == id).cloned() else {
+            return;
+        };
+        let chat = match self.db.read(cx).store.setting(&chat_key(id)) {
+            Ok(Some(text)) => serde_json::from_str::<Value>(&text).map_err(|e| e.to_string()),
+            Ok(None) => Err("保存した中身がありません".to_owned()),
+            Err(e) => Err(e.to_string()),
+        };
+        let chat = match chat {
+            Ok(chat) => chat,
+            Err(error) => {
+                self.error =
+                    Some(format!("会話「{}」を開けませんでした: {error}", info.title).into());
+                cx.notify();
+                return;
+            }
+        };
+        self.stop(cx);
+        self.persist(cx);
+        self.reset_chat();
+        self.load_chat(&chat);
+        self.conversation = info.id.clone();
+        self.chat_task = info.task.map(|task| (task, info.title));
+        self.saved_chat = self.chat_mark();
+        self.save_index(cx);
+        cx.notify();
+    }
+
+    /// 保存してある会話を消す。
+    pub fn delete_chat(&mut self, id: &str, cx: &mut Context<Self>) {
+        if !self.remove_setting(&chat_key(id), cx) {
+            return;
+        }
+        self.chats.retain(|c| c.id != id);
+        if id == self.conversation {
+            self.stop(cx);
+            self.reset_chat();
+            self.saved_chat = self.chat_mark();
+        }
+        self.save_index(cx);
+        cx.notify();
+    }
+
+    /// あるタスクについての会話を開く。まだなければ、タスクを添えた新しい会話を始める。
+    pub fn chat_about_task(&mut self, id: &str, title: SharedString, cx: &mut Context<Self>) {
+        if self.chat_task.as_ref().is_some_and(|(task, _)| task == id) {
+            return;
+        }
+        let have = self
+            .chats
+            .iter()
+            .find(|c| c.task.as_deref() == Some(id))
+            .map(|c| c.id.clone());
+        match have {
+            Some(chat) => self.open_chat(&chat, cx),
+            None => {
+                self.clear(cx);
+                self.chat_task = Some((id.to_owned(), title.clone()));
+                self.attach_task(id, title, cx);
+            }
+        }
     }
 
     /// タスクを入力欄に添える。同じタスクは 1 つだけ。
@@ -2004,6 +2491,13 @@ impl Session {
         }
         // タスクを捨てると、待っているところで止まる
         self.task = None;
+        if self.auto {
+            // 自動の実行は、会話に何も残さない
+            self.auto_error = Some("中止しました".into());
+            self.finish();
+            cx.notify();
+            return;
+        }
         self.finish();
         for item in &mut self.items {
             if let Item::Tool { state, .. } = item {

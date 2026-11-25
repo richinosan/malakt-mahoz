@@ -3503,6 +3503,79 @@ impl MainView {
             }
         };
 
+        // このタスクについての AI の記録と、AI と話すボタン
+        let ai_log = {
+            let session = self.ai_session.read(cx);
+            let runs = session.runs_for(&task.id);
+            let now = malakt_core::now_ms();
+            let id = task.id.clone();
+            let open = self.ai_log_open;
+            let mut log = col().gap_1().child(
+                row()
+                    .gap_1()
+                    .items_center()
+                    .text_sm()
+                    .text_color(theme.muted_foreground)
+                    .child(
+                        Button::new("ai-task-chat")
+                            .icon(app_icon("sparkles"))
+                            .ghost()
+                            .xsmall()
+                            .tooltip("このタスクについて AI と話す")
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.chat_about_task(&id, window, cx);
+                            })),
+                    )
+                    .when(!runs.is_empty(), |d| {
+                        d.child(
+                            row()
+                                .id("ai-log")
+                                .gap_1()
+                                .items_center()
+                                .px_1()
+                                .rounded_md()
+                                .cursor_pointer()
+                                .hover(|s| s.bg(theme.muted))
+                                .child(format!("AI の記録 {}", runs.len()))
+                                .child(
+                                    app_icon(if open {
+                                        "chevron-down"
+                                    } else {
+                                        "chevron-right"
+                                    })
+                                    .small(),
+                                )
+                                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                    this.ai_log_open = !this.ai_log_open;
+                                    cx.notify();
+                                }))
+                                .test_support(),
+                        )
+                    }),
+            );
+            if open {
+                for (ix, run) in runs.into_iter().enumerate() {
+                    log = log.child(
+                        col()
+                            .id(("ai-log-run", ix))
+                            .gap_1()
+                            .child(
+                                row()
+                                    .gap_2()
+                                    .px_3()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child(run.kind.label())
+                                    .child(malakt_core::view::format_relative(run.at, now)),
+                            )
+                            .child(crate::ai_view::run_details(run, &theme))
+                            .test_support(),
+                    );
+                }
+            }
+            log
+        };
+
         let status_actions = {
             let id = task.id.clone();
             let mut actions = row().gap_2().flex_wrap();
@@ -4044,6 +4117,7 @@ impl MainView {
                 .gap_4()
                 .child(title)
                 .children(ai_state)
+                .child(ai_log)
                 .child(
                     row()
                         .gap_3()
