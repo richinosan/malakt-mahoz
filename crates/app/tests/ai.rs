@@ -187,10 +187,19 @@ fn say(cx: &mut TestAppContext, window: AnyWindowHandle, pane: &Entity<AiPane>, 
 /// 設定を開く（開いていればそのまま）。
 fn open_settings(cx: &mut TestAppContext, window: AnyWindowHandle, pane: &Entity<AiPane>) {
     if !cx.update(|cx| pane.read(cx).settings_open) {
-        ui(cx, window, |window, cx| {
-            window.click("ai-settings-toggle", cx)
-        });
+        menu(cx, window, 0);
     }
+}
+
+/// チャットの「…」メニューの `n` 番目（0 から）を選ぶ。
+fn menu(cx: &mut TestAppContext, window: AnyWindowHandle, n: usize) {
+    ui(cx, window, |window, cx| window.click("ai-menu", cx));
+    ui(cx, window, |window, cx| {
+        for _ in 0..=n {
+            window.press("down", cx);
+        }
+        window.press("enter", cx);
+    });
 }
 
 fn text_reply(text: &str) -> Value {
@@ -247,9 +256,7 @@ fn the_key_is_saved_to_the_keychain_from_settings(cx: &mut TestAppContext) {
     let (window, view) = open(cx, wide());
     open_chat(cx, window, &view);
 
-    ui(cx, window, |window, cx| {
-        window.click("ai-settings-toggle", cx)
-    });
+    menu(cx, window, 0);
     ui(cx, window, |window, cx| {
         window.click("ai-key-input", cx);
         window.input("sk-ant-test-12345678", cx);
@@ -598,9 +605,7 @@ fn provider_model_and_effort_are_chosen_in_settings(cx: &mut TestAppContext) {
     world.keys.set(Provider::OpenCodeGo, "oc_sk_1").unwrap();
     let (window, view) = open(cx, wide());
     let pane = open_chat(cx, window, &view);
-    ui(cx, window, |window, cx| {
-        window.click("ai-settings-toggle", cx)
-    });
+    menu(cx, window, 0);
 
     // Claude のモデルと effort を変える
     // モデルは、開いた一覧から選ぶ。選ぶと一覧は閉じる
@@ -648,6 +653,9 @@ fn provider_model_and_effort_are_chosen_in_settings(cx: &mut TestAppContext) {
         KeyState::Present { .. }
     ));
     world.reply(json!({"choices": [{"finish_reason": "stop", "message": {"content": "やあ"}}]}));
+    ui(cx, window, |window, cx| {
+        window.click("ai-settings-toggle", cx)
+    });
     ui(cx, window, |window, cx| window.click("ai-new-chat", cx));
     say(cx, window, &pane, "こんにちは");
     let (url, headers, body) = world.sent()[1].clone();
@@ -734,7 +742,7 @@ fn chat_and_shell_detach_into_their_own_windows(cx: &mut TestAppContext) {
     assert_eq!(cx.update(|cx| cx.windows().len()), 1);
 
     // チャットを別ウィンドウへ。シェルはチャットの右に付いていく
-    ui(cx, window, |window, cx| window.click("ai-detach", cx));
+    menu(cx, window, 2);
     let chat_window = read(cx, |s| s.chat_window).expect("チャットが別ウィンドウに出る");
     cx.update(|cx| assert!(!view.read(cx).ai_docked(cx)));
     ui(cx, window, |window, _| {
@@ -759,7 +767,7 @@ fn chat_and_shell_detach_into_their_own_windows(cx: &mut TestAppContext) {
     );
 
     // 戻すと、メインのウィンドウの右に出る
-    ui(cx, chat_window, |window, cx| window.click("ai-attach", cx));
+    menu(cx, chat_window, 2);
     assert_eq!(read(cx, |s| s.chat_window), None);
     ui(cx, window, |window, _| {
         assert!(window.find("ai-chat").visible());
@@ -1027,9 +1035,7 @@ fn the_periodic_check_is_set_up_in_settings(cx: &mut TestAppContext) {
     world.keys.set(Provider::Claude, "k").unwrap();
     let (window, view) = open(cx, wide());
     open_chat(cx, window, &view);
-    ui(cx, window, |window, cx| {
-        window.click("ai-settings-toggle", cx)
-    });
+    menu(cx, window, 0);
     ui(cx, window, |window, cx| window.click("ai-watch", cx));
     ui(cx, window, |window, cx| {
         window.click(("ai-watch-minutes", 60usize), cx)
@@ -1106,9 +1112,7 @@ fn auto_run_skips_the_confirmations(cx: &mut TestAppContext) {
     world.reply(text_reply("実行しました。"));
     say(cx, window, &pane, "実行して");
     assert!(read(cx, |s| s.pending.is_some()));
-    ui(cx, window, |window, cx| {
-        window.click("ai-settings-toggle", cx)
-    });
+    menu(cx, window, 0);
     ui(cx, window, |window, cx| window.click("ai-auto", cx));
     wait(cx, "コマンドが終わる", |s| !s.busy);
     assert!(read(cx, |s| s.auto_run));
@@ -1616,7 +1620,7 @@ fn the_chat_comes_back_after_a_restart(cx: &mut TestAppContext) {
     let pane = open_chat(cx, window, &view);
     world.reply(text_reply("はい"));
     say(cx, window, &pane, "こんにちは");
-    ui(cx, window, |window, cx| window.click("ai-shell-toggle", cx));
+    menu(cx, window, 1);
     cx.run_until_parked();
     let ui_state: Value = serde_json::from_str(&setting(cx, "ai.ui").unwrap()).unwrap();
     assert_eq!(
