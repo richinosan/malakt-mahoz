@@ -6,6 +6,7 @@ use std::rc::Rc;
 use gpui_kit::component::color_picker::{ColorPickerEvent, ColorPickerState};
 use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
 use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
+use gpui_kit::component::slider::{SliderEvent, SliderState};
 use gpui_kit::component::text::TextViewState;
 use gpui_kit::component::WindowExt;
 use gpui_kit::*;
@@ -86,6 +87,8 @@ pub const NEW_WORKSPACE_NAME: &str = "新規ワークスペース";
 pub enum SubModal {
     /// 書体を選ぶ
     Font,
+    /// 背景の画像を選ぶ
+    Scene,
 }
 
 /// 詳細パネルで編集中の項目。
@@ -278,6 +281,9 @@ pub struct MainView {
     pub font_scroll: UniformListScrollHandle,
     /// アクセント、背景（ライト）、背景（ダーク）の色を選ぶところ。
     pub color_pickers: [Entity<ColorPickerState>; 3],
+    /// 面の透明度と、背景の画像のぼかし。
+    pub clear_slider: Entity<SliderState>,
+    pub blur_slider: Entity<SliderState>,
     /// 出入りの動きを付ける。テストでは止めて、すぐ最後の位置に出す
     pub motion: bool,
     pub today: String,
@@ -446,6 +452,33 @@ impl MainView {
                 }
             },
         ));
+        let slider = |max: u8, cx: &mut Context<Self>| {
+            cx.new(|_| SliderState::new().min(0.).max(f32::from(max)).step(1.))
+        };
+        let clear_slider = slider(crate::theme::MAX_CLEAR, cx);
+        let blur_slider = slider(100, cx);
+        subs.push(cx.subscribe_in(
+            &clear_slider,
+            window,
+            |this, _, event: &SliderEvent, _, cx| {
+                let (SliderEvent::Change(value) | SliderEvent::Release(value)) = event;
+                if let Err(error) = crate::theme::set_clear(value.end() as u8, cx) {
+                    this.error = Some(format!("透明度を保存できませんでした。{error}").into());
+                }
+                cx.notify();
+            },
+        ));
+        subs.push(cx.subscribe_in(
+            &blur_slider,
+            window,
+            |this, _, event: &SliderEvent, _, cx| {
+                let (SliderEvent::Change(value) | SliderEvent::Release(value)) = event;
+                if let Err(error) = crate::theme::set_blur(value.end() as u8, cx) {
+                    this.error = Some(error.into());
+                }
+                cx.notify();
+            },
+        ));
         let color_pickers = crate::theme::Slot::ALL.map(|slot| {
             let picker = cx.new(|cx| ColorPickerState::new(window, cx));
             subs.push(cx.subscribe_in(
@@ -556,7 +589,9 @@ impl MainView {
             notices: Vec::new(),
             unread_notices: 0,
             defaults_draft: TaskDefaults::default(),
-            error: crate::update::take_failure(cx),
+            // 起動のときに背景の画像を読めなかったら、最初のウィンドウが知らせる
+            error: crate::update::take_failure(cx)
+                .or_else(|| crate::theme::take_failure(cx).map(Into::into)),
             notice: None,
             sidebar_open: false,
             ai_open: false,
@@ -590,6 +625,8 @@ impl MainView {
             fonts: Vec::new(),
             font_scroll: UniformListScrollHandle::new(),
             color_pickers,
+            clear_slider,
+            blur_slider,
             pane_presets: Vec::new(),
             border_drag: None,
             window_place: None,
@@ -1877,6 +1914,68 @@ impl MainView {
             let color = crate::theme::shown(slot, cx);
             picker.update(cx, |picker, cx| picker.set_value(color, window, cx));
         }
+        let (clear, blur) = (crate::theme::clear(cx), crate::theme::blur(cx));
+        self.clear_slider
+            .update(cx, |s, cx| s.set_value(f32::from(clear), window, cx));
+        self.blur_slider
+            .update(cx, |s, cx| s.set_value(f32::from(blur), window, cx));
+    }
+
+    pub fn open_scene_picker(&mut self, cx: &mut Context<Self>) {
+        self.error = None;
+        self.sub_modal = Some(SubModal::Scene);
+        cx.notify();
+    }
+
+    /// 背景の画像を変える。読めない画像のときは、前のままにして理由を出す。
+    pub fn set_scene(
+        &mut self,
+        scene: crate::theme::Scene,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match crate::theme::set_scene(scene, cx) {
+            Ok(()) => self.error = None,
+            Err(error) => self.error = Some(error.into()),
+        }
+        // 背景の画像に合う色に変わるので、色を選ぶところも合わせる
+        self.sync_color_pickers(window, cx);
+        cx.notify();
+    }
+
+    /// 自分の画像を、OS のファイル選択で選ぶ。
+    pub fn pick_scene_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let chosen = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("背景の画像".into()),
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(paths))) = chosen.await else {
+                return;
+            };
+            let Some(path) = paths.into_iter().next() else {
+                return;
+            };
+            // ウィンドウを閉じたあとなら、することがない
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.set_scene(crate::theme::Scene::File(path), window, cx)
+            });
+        })
+        .detach();
+    }
+
+    /// タスクの一覧を、広い画面でもカードで出す。
+    pub fn set_cards(&mut self, on: bool, cx: &mut Context<Self>) {
+        match crate::theme::set_cards(on, cx) {
+            Ok(()) => self.error = None,
+            Err(error) => {
+                self.error =
+                    Some(format!("一覧の表示のしかたを保存できませんでした。{error}").into())
+            }
+        }
+        cx.notify();
     }
 
     pub fn open_font_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {

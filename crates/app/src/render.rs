@@ -1,6 +1,7 @@
 //! 画面の描画。状態は `state` にあり、ここは見た目だけを組み立てる。
 
 use std::ops::Range;
+use std::sync::Arc;
 
 use gpui_kit::base::{Disableable, TestSupportExt};
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants};
@@ -9,7 +10,9 @@ use gpui_kit::component::color_picker::ColorPicker;
 use gpui_kit::component::input::{Input, Textarea};
 use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu, PopupMenu, PopupMenuItem};
 use gpui_kit::component::scroll::ScrollableElement;
+use gpui_kit::component::slider::{Slider, SliderState};
 use gpui_kit::component::spinner::Spinner;
+use gpui_kit::component::switch::Switch;
 use gpui_kit::component::text::TextView;
 use gpui_kit::component::{ActiveTheme, Icon, IconName, Sizable};
 use gpui_kit::prelude::FluentBuilder;
@@ -66,6 +69,52 @@ impl Framed for Button {
         .border_color(theme.border)
         .elevate(Elevation::Low, cx)
     }
+}
+
+/// 背景の画像を出しているときは、面を透かして塗る。
+fn glass(color: Hsla, cx: &App) -> Hsla {
+    match crate::theme::backdrop(cx) {
+        Some(backdrop) => color.opacity(backdrop.alpha),
+        None => color,
+    }
+}
+
+/// 画面の後ろに敷く画像。
+fn backdrop_layer(cx: &App) -> Option<Img> {
+    let backdrop = crate::theme::backdrop(cx)?;
+    Some(
+        img(backdrop.image.clone())
+            .absolute()
+            .inset_0()
+            .size_full()
+            .object_fit(ObjectFit::Cover),
+    )
+}
+
+/// 同梱の画像の小さい絵。選ぶ画面に出す。
+fn scene_thumbnail(scene: &crate::theme::Scene, dark: bool) -> Option<Arc<Image>> {
+    use std::sync::OnceLock;
+    static MADE: OnceLock<[Option<Arc<Image>>; 4]> = OnceLock::new();
+    let made = MADE.get_or_init(|| {
+        use crate::theme::Scene;
+        [
+            (Scene::Sky, false),
+            (Scene::Sky, true),
+            (Scene::Forest, false),
+            (Scene::Forest, true),
+        ]
+        .map(|(scene, dark)| {
+            scene
+                .bundled(dark)
+                .map(|bytes| Arc::new(Image::from_bytes(ImageFormat::Jpeg, bytes.to_vec())))
+        })
+    });
+    let at = match scene {
+        crate::theme::Scene::Sky => 0,
+        crate::theme::Scene::Forest => 2,
+        _ => return None,
+    };
+    made[at + usize::from(dark)].clone()
 }
 
 fn row() -> Div {
@@ -240,7 +289,7 @@ fn card(cx: &App) -> Div {
         .rounded_lg()
         .border_1()
         .border_color(theme.border)
-        .bg(theme.popover)
+        .bg(glass(theme.popover, cx))
         .elevate(Elevation::Low, cx)
 }
 
@@ -493,7 +542,7 @@ impl MainView {
         let inner = col()
             .id("sidebar")
             .size_full()
-            .bg(theme.sidebar)
+            .bg(glass(theme.sidebar, cx))
             .text_color(theme.sidebar_foreground)
             .border_r_1()
             .border_color(theme.sidebar_border)
@@ -724,6 +773,10 @@ impl MainView {
                                         format!("配色の選択を保存できませんでした。{error}").into(),
                                     );
                                 }
+                                // ライトとダークで敷く画像が変わる。読めなかったら知らせる
+                                if let Some(error) = crate::theme::take_failure(cx) {
+                                    this.error = Some(error.into());
+                                }
                                 cx.notify();
                             })),
                     ),
@@ -841,7 +894,7 @@ impl MainView {
             .h(HEADER_HEIGHT)
             .border_b_1()
             .border_color(theme.border)
-            .bg(theme.background)
+            .bg(glass(theme.background, cx))
             .when(cfg!(target_os = "windows"), |d| {
                 d.window_control_area(WindowControlArea::Drag)
             })
@@ -1063,7 +1116,7 @@ impl MainView {
                                 .item(item("担当者", |this, window, cx| {
                                     this.open_people(window, cx)
                                 }))
-                                .item(item("フォントとカラー", |this, window, cx| {
+                                .item(item("見た目", |this, window, cx| {
                                     this.open_appearance(window, cx)
                                 }))
                                 .separator()
@@ -1172,7 +1225,7 @@ impl MainView {
                     .border_1()
                     .border_color(theme.border)
                     .rounded_lg()
-                    .bg(theme.popover)
+                    .bg(glass(theme.popover, cx))
                     .overflow_hidden()
                     .relative()
                     .child(
@@ -1205,7 +1258,7 @@ impl MainView {
                         .border_1()
                         .border_color(theme.border)
                         .rounded_lg()
-                        .bg(theme.popover)
+                        .bg(glass(theme.popover, cx))
                         .cursor_pointer()
                         .hover(|s| s.border_color(theme.primary))
                         .active(|s| s.bg(theme.accent))
@@ -1768,7 +1821,7 @@ impl MainView {
             .border_1()
             .border_color(theme.border)
             .rounded_lg()
-            .bg(theme.popover)
+            .bg(glass(theme.popover, cx))
             .elevate(Elevation::Low, cx)
             .overflow_hidden()
             .child(
@@ -3934,12 +3987,109 @@ impl MainView {
                     ))),
             );
         }
+        let scene = crate::theme::scene(cx);
+        let has_scene = scene != crate::theme::Scene::None;
+        let body = body
+            .child(
+                row()
+                    .gap_2()
+                    .child(label("背景の画像"))
+                    .child(
+                        row()
+                            .id("scene-open")
+                            .flex_1()
+                            .min_w_0()
+                            .h_8()
+                            .px_3()
+                            .gap_2()
+                            .rounded_md()
+                            .border_1()
+                            .border_color(theme.input)
+                            .cursor_pointer()
+                            .hover(|s| s.bg(theme.accent))
+                            .active(|s| s.bg(theme.primary.opacity(0.4)))
+                            .child(div().flex_1().truncate().child(scene.label()))
+                            .child(
+                                app_icon("chevron-right")
+                                    .small()
+                                    .text_color(theme.muted_foreground),
+                            )
+                            .on_click(
+                                cx.listener(|this, _: &ClickEvent, _, cx| {
+                                    this.open_scene_picker(cx)
+                                }),
+                            )
+                            .test_support(),
+                    )
+                    .child(reset("scene-reset", has_scene).on_click(cx.listener(
+                        |this, _, window, cx| this.set_scene(crate::theme::Scene::None, window, cx),
+                    ))),
+            )
+            // 透明度とぼかしは、背景の画像を出しているときだけ
+            .when(has_scene, |d| {
+                let slider = |id: &'static str, state: &Entity<SliderState>, name: &'static str| {
+                    div()
+                        .id(id)
+                        .flex_1()
+                        .child(Slider::new(state).accessibility_label(name))
+                        .test_support()
+                };
+                d.child(
+                    row()
+                        .gap_2()
+                        .child(label("透明度"))
+                        .child(slider("clear-slider", &self.clear_slider, "透明度"))
+                        .child(reset("clear-reset", false)),
+                )
+                .child(
+                    row()
+                        .gap_2()
+                        .child(label("ぼかし"))
+                        .child(slider("blur-slider", &self.blur_slider, "ぼかし"))
+                        .child(reset("blur-reset", false)),
+                )
+            })
+            .child(
+                row()
+                    .gap_2()
+                    .child(label("タスクの一覧"))
+                    .child(
+                        div().flex_1().flex().child(
+                            Switch::new("cards-switch")
+                                .label("カードで表示")
+                                .checked(crate::theme::cards(cx))
+                                .on_click(
+                                    cx.listener(|this, on: &bool, _, cx| this.set_cards(*on, cx)),
+                                ),
+                        ),
+                    )
+                    .child(reset("cards-reset", false)),
+            );
         let body = body.when_some(self.error.clone(), |d, error| {
             d.child(div().text_sm().text_color(theme.danger).child(error))
         });
-        let Some(SubModal::Font) = self.sub_modal else {
-            return self.dialog("フォントとカラー", body, cx);
+        let (title, width, over) = match self.sub_modal {
+            None => return self.dialog("見た目", body, cx),
+            Some(SubModal::Font) => ("フォント", px(400.), self.font_picker(cx)),
+            Some(SubModal::Scene) => ("背景の画像", px(668.), self.scene_picker(cx)),
         };
+        let over = self.dialog_as("dialog", width, title, over, cx);
+        let over = if self.motion {
+            over.with_animation("sub-modal-in", appear(140), |d, t| d.opacity(t))
+                .into_any_element()
+        } else {
+            over.into_any_element()
+        };
+        div()
+            .absolute()
+            .inset_0()
+            .child(self.dialog_as("dialog-under", px(460.), "見た目", body, cx))
+            .child(over)
+    }
+
+    /// この PC に入っている書体の一覧。
+    fn font_picker(&self, cx: &mut Context<Self>) -> Div {
+        let theme = cx.theme().clone();
         let current = self.current_font(cx);
         let found = self.found_fonts(cx);
         let none_found = found.is_empty();
@@ -3987,7 +4137,7 @@ impl MainView {
         // 右の端はスクロールバーの場所
         .pr_4()
         .size_full();
-        let picker = col()
+        col()
             .gap_3()
             .child(
                 Input::new(&self.inputs.font_search)
@@ -4010,19 +4160,100 @@ impl MainView {
                                 .child("見つかりません。"),
                         )
                     }),
-            );
-        let over = self.dialog_as("dialog", px(400.), "フォント", picker, cx);
-        let over = if self.motion {
-            over.with_animation("sub-modal-in", appear(140), |d, t| d.opacity(t))
-                .into_any_element()
-        } else {
-            over.into_any_element()
+            )
+    }
+
+    /// 背景の画像を選ぶ。同梱の画像は、今のライト/ダークの絵を小さく出す。
+    fn scene_picker(&self, cx: &mut Context<Self>) -> Div {
+        use crate::theme::Scene;
+        let theme = cx.theme().clone();
+        let dark = theme.is_dark();
+        let current = crate::theme::scene(cx);
+        let tile = |id: ElementId, selected: bool, picture: AnyElement, label: String| {
+            col()
+                .id(id)
+                .w(px(152.))
+                .gap_1()
+                .p_1()
+                .rounded_lg()
+                .cursor_pointer()
+                .border_2()
+                .border_color(if selected {
+                    theme.primary
+                } else {
+                    theme.transparent
+                })
+                .hover(|s| s.bg(theme.accent))
+                .active(|s| s.bg(theme.primary.opacity(0.4)))
+                .child(
+                    div()
+                        .h(px(80.))
+                        .rounded_md()
+                        .overflow_hidden()
+                        .border_1()
+                        .border_color(theme.border)
+                        .bg(theme.muted)
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(picture),
+                )
+                .child(div().text_sm().truncate().child(label))
         };
-        div()
-            .absolute()
-            .inset_0()
-            .child(self.dialog_as("dialog-under", px(460.), "フォントとカラー", body, cx))
-            .child(over)
+        let mut tiles = row().flex_wrap().items_start().gap_2();
+        for (ix, scene) in Scene::BUNDLED.into_iter().enumerate() {
+            let picture = match scene_thumbnail(&scene, dark) {
+                Some(image) => img(image)
+                    .size_full()
+                    .object_fit(ObjectFit::Cover)
+                    .into_any_element(),
+                None => app_icon("x")
+                    .text_color(theme.muted_foreground)
+                    .into_any_element(),
+            };
+            let chosen = scene.clone();
+            tiles = tiles.child(
+                tile(
+                    ("scene", ix).into(),
+                    current == scene,
+                    picture,
+                    scene.label(),
+                )
+                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                    this.set_scene(chosen.clone(), window, cx)
+                }))
+                .test_support(),
+            );
+        }
+        let own = matches!(current, Scene::File(_));
+        let label = if own {
+            current.label()
+        } else {
+            "画像を選ぶ".to_owned()
+        };
+        let picture = match (own, crate::theme::backdrop(cx)) {
+            (true, Some(backdrop)) => img(backdrop.image.clone())
+                .size_full()
+                .object_fit(ObjectFit::Cover)
+                .into_any_element(),
+            _ => app_icon("upload")
+                .text_color(theme.muted_foreground)
+                .into_any_element(),
+        };
+        tiles =
+            tiles.child(
+                tile("scene-file".into(), own, picture, label)
+                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                        this.pick_scene_file(window, cx)
+                    }))
+                    .test_support(),
+            );
+        col()
+            .gap_3()
+            .child(tiles)
+            .when_some(self.error.clone(), |d, error| {
+                d.child(div().text_sm().text_color(theme.danger).child(error))
+            })
     }
 
     fn workspace_options(&self, cx: &mut Context<Self>) -> Div {
@@ -5087,7 +5318,7 @@ impl MainView {
         let theme = cx.theme().clone();
         let bounds = self.pane_bounds.unwrap_or_default();
         let width = bounds.size.width;
-        let table = width >= px(880.);
+        let table = width >= px(880.) && !crate::theme::cards(cx);
         let sheet = width < px(1000.);
         self.list_width = f32::from(width) / crate::UI_SCALE;
         let main = match self.nav {
@@ -5100,7 +5331,10 @@ impl MainView {
             .map(|d| self.with_drags(d, cx))
             .size_full()
             .relative()
-            .bg(theme.background)
+            // ペインの後ろには、ウィンドウが敷いた画像が見えている
+            .when(crate::theme::backdrop(cx).is_none(), |d| {
+                d.bg(theme.background)
+            })
             .text_color(theme.foreground)
             .child(div().absolute().inset_0().child(main))
             .children(self.render_panel(sheet, cx))
@@ -5220,7 +5454,7 @@ impl Render for MainView {
             .map_or(main_width, |(_, rect)| main_width * rect.w);
         let split = self.layout.panes().len() > 1;
         // 表は、タイトルの列に読める幅が残るときだけ
-        let table = own_width >= px(880.);
+        let table = own_width >= px(880.) && !crate::theme::cards(cx);
         self.list_width = f32::from(own_width) / crate::UI_SCALE;
         let sheet = if split {
             own_width < px(1000.)
@@ -5290,6 +5524,7 @@ impl Render for MainView {
             .flex_row()
             .bg(theme.background)
             .text_color(theme.foreground)
+            .children(backdrop_layer(cx))
             .when(wide && sidebar, |d| d.child(self.render_sidebar(wide, cx)))
             .child(
                 col()
@@ -5303,6 +5538,10 @@ impl Render for MainView {
                             .flex_1()
                             .min_h_0()
                             .relative()
+                            // 背景の画像の上では、中身の後ろも薄く塗って文字を読めるようにする
+                            .when_some(crate::theme::backdrop(cx), |d, backdrop| {
+                                d.bg(theme.background.opacity(backdrop.alpha * 0.45))
+                            })
                             .items_stretch()
                             .child(
                                 // 画面を切り替えたときは、少し下から浮かび上がる
