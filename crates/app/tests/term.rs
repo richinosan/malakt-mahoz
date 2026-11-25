@@ -106,6 +106,16 @@ fn wait(cx: &mut TestAppContext, what: &str, f: impl Fn(&Terms) -> bool) {
     panic!("待っても起きませんでした: {what}\n画面:\n{shown:?}");
 }
 
+/// ターミナルのコピーと貼り付け。macOS は Cmd、ほかは Ctrl+Shift（Ctrl+C はプログラムに届ける）
+#[cfg(target_os = "macos")]
+const COPY: &str = "cmd-c";
+#[cfg(not(target_os = "macos"))]
+const COPY: &str = "ctrl-shift-c";
+#[cfg(target_os = "macos")]
+const PASTE: &str = "cmd-v";
+#[cfg(not(target_os = "macos"))]
+const PASTE: &str = "ctrl-shift-v";
+
 /// 見ているターミナルに、ちょうどその中身の行があるか（打ったコマンドの行とは区別する）。
 fn has_line(cx: &mut TestAppContext, line: &str) -> bool {
     screen(cx).text().lines().any(|shown| shown == line)
@@ -167,7 +177,8 @@ fn keys_go_to_the_program_not_to_the_app(cx: &mut TestAppContext) {
     let (window, view) = start(cx);
     open_terminal(cx, window);
     // Ctrl+C はプログラムを止める（AI の中止や、コピーにはならない）
-    run(cx, window, "sleep 60; echo not-reached");
+    // `;` だと、止められたあとに続きを動かすシェルがある（macOS の sh）ので、`&&` でつなぐ
+    run(cx, window, "sleep 60 && echo not-reached");
     ui(cx, window, |window, cx| window.press("ctrl-c", cx));
     run(cx, window, "echo after-$((1+1))");
     wait_text(cx, "after-2");
@@ -556,13 +567,13 @@ fn text_is_selected_copied_pasted_and_scrolled(cx: &mut TestAppContext) {
         terms(cx, |t| t.active_tab().unwrap().terminal.selected_text()).as_deref(),
         Some("copy-me-please")
     );
-    ui(cx, window, |window, cx| window.press("ctrl-shift-c", cx));
+    ui(cx, window, |window, cx| window.press(COPY, cx));
     let copied = cx.update(|cx| cx.read_from_clipboard().and_then(|item| item.text()));
     assert_eq!(copied.as_deref(), Some("copy-me-please"));
     // 貼り付ける
     cx.update(|cx| cx.write_to_clipboard(ClipboardItem::new_string("echo pasted-$((2*3))".into())));
     ui(cx, window, |window, cx| {
-        window.press("ctrl-shift-v", cx);
+        window.press(PASTE, cx);
         window.press("enter", cx);
     });
     wait_text(cx, "pasted-6");

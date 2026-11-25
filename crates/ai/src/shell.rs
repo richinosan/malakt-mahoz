@@ -193,6 +193,21 @@ fn program_path(program: &str) -> PathBuf {
     find_program(program, &dirs, &exts, |path| path.is_file()).unwrap_or_else(|| program.into())
 }
 
+/// 引数を足す。Windows の cmd に渡す 1 行は、cmd の書き方のまま渡す。
+/// ふつうに渡すと `"` が `\"` に書き換わり、cmd はそれを読めないので、引用符を含むコマンドが壊れる。
+fn add_args(command: &mut Command, spec: &Spec) {
+    #[cfg(windows)]
+    if let [flag, line] = spec.args.as_slice() {
+        if spec.program == "cmd" && flag == "/C" {
+            use std::os::windows::process::CommandExt;
+            // /S なら、cmd は外側の引用符を 1 組だけ外し、中はそのまま読む
+            command.raw_arg(format!("/S /C \"{line}\""));
+            return;
+        }
+    }
+    command.args(&spec.args);
+}
+
 /// コマンドを起こす。出力と終了は、別のスレッドから `on_event` に届く。
 /// 最後に必ず [`Event::Exit`] が 1 回届く。
 pub fn spawn(
@@ -200,8 +215,8 @@ pub fn spawn(
     on_event: impl Fn(Event) + Send + Sync + 'static,
 ) -> std::io::Result<Handle> {
     let mut command = Command::new(program_path(&spec.program));
+    add_args(&mut command, spec);
     command
-        .args(&spec.args)
         .envs(spec.env.iter().map(|(k, v)| (k, v)))
         .stdin(if spec.stdin.is_some() {
             Stdio::piped()
