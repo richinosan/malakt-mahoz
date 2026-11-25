@@ -33,7 +33,7 @@ const fn px(value: f32) -> Pixels {
 }
 
 /// アイコンを選ぶ画面に一度に出す数。それより多いときは検索で絞る。
-const ICONS_SHOWN: usize = 240;
+const ICONS_SHOWN: usize = 400;
 /// 見出しの枠（40px）の中のアイコンの大きさ。
 const TILE_ICON_SIZE: Pixels = px(24.);
 /// ホームのカードの枠（56px）の中のアイコンの大きさ。
@@ -395,6 +395,7 @@ impl MainView {
                         state.set_value("", window, cx);
                         state.focus(window, cx);
                     });
+                    this.icon_category = None;
                     this.modal = Modal::WorkspaceIcon(id);
                     cx.notify();
                 }))
@@ -4087,8 +4088,33 @@ impl MainView {
                     );
                 }
                 let query = self.inputs.icon_search.read(cx).value().to_string();
-                let found =
-                    crate::icons::search(&query, &crate::state::WORKSPACE_ICONS, ICONS_SHOWN);
+                let found = crate::icons::search(
+                    &query,
+                    self.icon_category,
+                    &crate::state::WORKSPACE_ICONS,
+                    ICONS_SHOWN,
+                );
+                // カテゴリはもう一度押すと外れる
+                let mut categories = row().gap_1();
+                for (ix, category) in crate::icons::Category::ALL.into_iter().enumerate() {
+                    let active = self.icon_category == Some(category);
+                    categories = categories.child(
+                        div()
+                            .rounded_md()
+                            .when(active, |d| d.bg(theme.secondary_hover))
+                            .child(
+                                Button::new(("icon-category", ix))
+                                    .icon(app_icon(category.icon()))
+                                    .ghost()
+                                    .large()
+                                    .tooltip(category.label())
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.icon_category = (!active).then_some(category);
+                                        cx.notify();
+                                    })),
+                            ),
+                    );
+                }
                 let none_found = found.is_empty();
                 let mut icons = row().gap_1().flex_wrap();
                 for (ix, name) in found.into_iter().enumerate() {
@@ -4129,9 +4155,15 @@ impl MainView {
                             .prefix(app_icon("search").small())
                             .cleanable(true),
                     )
+                    .child(categories)
                     .child(
                         div()
-                            .id("icon-list")
+                            // カテゴリごとに別のものにして、切り替えたら上から見せる
+                            .id((
+                                "icon-list",
+                                self.icon_category
+                                    .map_or(0, |category| category as usize + 1),
+                            ))
                             .h(px(320.))
                             .overflow_y_scrollbar()
                             .child(icons)

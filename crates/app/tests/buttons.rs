@@ -80,6 +80,9 @@ const MUST: &[&str] = &[
 /// ロックを設定したときだけ出るもの。ロックは tests/ui.rs で確かめる。
 const LOCK: &[&str] = &["lock-disable", "lock-save", "unlock"];
 
+/// アイコンを選ぶ画面のカテゴリ。5 つとも tests/ui.rs で押して確かめる。
+const ICON_PICKER: &[&str] = &["icon-category"];
+
 /// 入力欄。名前が `-input` で終わるもののほかに、ここにあるもの。
 const INPUTS: &[&str] = &[
     "nt-title",
@@ -783,6 +786,7 @@ fn every_button_responds(cx: &mut TestAppContext) {
                 && !ai_inside(name)
                 && !NEVER.contains(&name)
                 && !LOCK.contains(&name)
+                && !ICON_PICKER.contains(&name)
                 && !missed.contains(&name)
             {
                 missed.push(name);
