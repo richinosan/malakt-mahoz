@@ -2270,6 +2270,58 @@ impl Session {
         cx.notify();
     }
 
+    /// OpenCode のモデルの一覧を読んでおく。モデルごとに選べる effort を、選ぶ前に出すため。
+    /// API キーがなければ通信しない。
+    fn load_catalog(&mut self, cx: &mut Context<Self>) {
+        let provider = self.provider;
+        let Some(url) = provider.catalog_url() else {
+            return;
+        };
+        if !matches!(self.key, KeyState::Present { .. })
+            || self.catalog.as_ref().is_some_and(|(p, _)| *p == provider)
+        {
+            return;
+        }
+        let config = self.config.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { fetch_catalog(&config, url) })
+                .await;
+            // チャットがもうなければ、知らせる先もない
+            let _ = this.update(cx, |this, cx| {
+                match result {
+                    Ok(catalog) => this.catalog = Some((provider, Arc::new(catalog))),
+                    Err(e) => {
+                        this.error = Some(format!("モデルの一覧を取得できませんでした: {e}").into())
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// 今のモデルで、その effort を選べるか。モデルの一覧をまだ読んでいなければ、選べるものとして扱う。
+    pub fn effort_allowed(&self, effort: Effort) -> bool {
+        let Some(wire) = effort.wire() else {
+            return true;
+        };
+        if !self.provider.supports_effort() {
+            return false;
+        }
+        let Some((provider, catalog)) = &self.catalog else {
+            return true;
+        };
+        if *provider != self.provider {
+            return true;
+        }
+        match catalog.iter().find(|m| m.id == self.model()) {
+            Some(entry) => entry.efforts.iter().any(|e| e == wire),
+            None => true,
+        }
+    }
+
     pub fn set_effort(&mut self, effort: Effort, cx: &mut Context<Self>) {
         if self.effort == effort || !self.save_setting("ai.effort", effort.as_str(), cx) {
             return;
@@ -2309,6 +2361,7 @@ impl Session {
                 {
                     this.read_github(cx);
                 }
+                this.load_catalog(cx);
                 cx.notify();
             });
         })

@@ -854,6 +854,8 @@ impl AiPane {
 
         let mut efforts = row().gap_1().flex_wrap();
         for e in Effort::ALL {
+            // 今のモデルで選べない値は、薄くして押せなくする
+            let allowed = session.effort_allowed(e);
             efforts = efforts.child(
                 chip(
                     ("ai-effort", e as usize),
@@ -861,9 +863,12 @@ impl AiPane {
                     e == session.effort,
                     cx,
                 )
-                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                    this.session.update(cx, |s, cx| s.set_effort(e, cx));
-                }))
+                .when(!allowed, |d| d.opacity(0.4).cursor_default())
+                .when(allowed, |d| {
+                    d.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.session.update(cx, |s, cx| s.set_effort(e, cx));
+                    }))
+                })
                 .test_support(),
             );
         }
@@ -1973,19 +1978,31 @@ impl AiPane {
                 .into_any_element()
         });
         if provider.supports_effort() {
+            let allowed = Effort::ALL.map(|e| session.effort_allowed(e));
             pills.push(
                 pill("ai-pick-effort", effort.label().into(), "effort".into())
                     .dropdown_menu_with_anchor(Anchor::BottomLeft, move |mut menu, _, _| {
-                        for e in Effort::ALL {
+                        for (e, allowed) in Effort::ALL.into_iter().zip(allowed) {
                             let pane = pane.clone();
                             menu = menu.item(
-                                PopupMenuItem::new(e.label()).checked(e == effort).on_click(
-                                    move |_, _, cx| {
-                                        let _ = pane.update(cx, |this, cx| {
-                                            this.session.update(cx, |s, cx| s.set_effort(e, cx));
-                                        });
-                                    },
-                                ),
+                                // 選べない値は、文字を薄くして押せなくする
+                                (if allowed {
+                                    PopupMenuItem::new(e.label())
+                                } else {
+                                    PopupMenuItem::element(move |_, cx| {
+                                        div()
+                                            .text_color(cx.theme().muted_foreground.opacity(0.5))
+                                            .child(e.label())
+                                    })
+                                })
+                                .checked(e == effort)
+                                // 今のモデルで選べない値は押せない
+                                .disabled(!allowed)
+                                .on_click(move |_, _, cx| {
+                                    let _ = pane.update(cx, |this, cx| {
+                                        this.session.update(cx, |s, cx| s.set_effort(e, cx));
+                                    });
+                                }),
                             );
                         }
                         menu
