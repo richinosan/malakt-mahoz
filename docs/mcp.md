@@ -33,7 +33,13 @@ WSL の中から SQLite のファイル（`/mnt/c/...`）を直接開く方法�
 
 ### アプリのターミナルから
 
-アプリの中でターミナルを開くと、そのシェル（WSL の中を含む）の Claude Code に、上の登録が自動で入ります。手で登録する必要はありません（[docs/terminal.md](terminal.md)）。
+アプリの中でターミナルを開くと、そのシェル（WSL の中を含む）の Claude Code と Cursor に、上の登録が自動で入ります。手で登録する必要はありません（[docs/terminal.md](terminal.md)）。
+
+ターミナルのタブの右のプラグのボタンからも登録できます。Claude Code と Codex は、見ているシェルで有効なコマンドが入力の行に入ります。Cursor はその場で `~/.cursor/mcp.json` に書き足します。
+
+### Windows のコマンドの出力
+
+Windows のアプリは、起動のときに黒い窓を出さないように作ってあります。PowerShell やコマンドプロンプトから `malakt-mahoz.exe mcp config` のように呼ぶと、出力はそのターミナルに出ます。シェルはアプリの終わりを待たないので、出力は次のプロンプトのあとに出ます。ファイルに書くときは `malakt-mahoz.exe mcp config > mcp.json` のようにリダイレクトします。
 
 ### アプリのシェルから
 

@@ -9,6 +9,8 @@ fn main() {
     // 引数があれば、ウィンドウを開かずにコマンドとして動く（MCP サーバー、完了チケットの引き換えなど）
     let args: Vec<String> = std::env::args().skip(1).collect();
     if malakt_mahoz::cli::is_command(&args) {
+        // Windows のリリース版はコンソールを持たないので、呼び出したターミナルに出力をつなぐ
+        malakt_term::console::attach();
         let code = malakt_mahoz::cli::run(
             &args,
             || malakt_core::Store::open(&path),
@@ -34,7 +36,10 @@ fn main() {
             malakt_mahoz::db::clear_stale_opened();
             malakt_mahoz::init(store, cx);
             // ターミナルで動かす Claude Code から、このアプリのタスクを読み書きできるようにする
-            malakt_mahoz::term::shared(cx).update(cx, |terms, _| terms.register_mcp = true);
+            malakt_mahoz::term::shared(cx).update(cx, |terms, _| {
+                terms.register_mcp = true;
+                terms.cursor_home = dirs::home_dir();
+            });
             malakt_mahoz::reminders::connect_system(cx);
             malakt_mahoz::update::connect_system(cx);
             malakt_mahoz::db::watch(cx);

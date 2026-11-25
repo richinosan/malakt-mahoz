@@ -642,6 +642,11 @@ impl AiPane {
         .detach();
     }
 
+    /// ターミナルの画面。
+    pub fn term_pane(&self) -> Entity<TermPane> {
+        self.term.clone()
+    }
+
     pub fn focus_input(&self, window: &mut Window, cx: &mut Context<Self>) {
         self.input.update(cx, |s, cx| s.focus(window, cx));
     }
@@ -2379,7 +2384,14 @@ impl AiPane {
         let caret_of = self.shell_input.clone();
         // 見ているのが AI のシェルか、ターミナルか
         let on_ai = term::shared(cx).read(cx).active_tab().is_none();
-        let term_error = term::shared(cx).read(cx).error.clone();
+        // 失敗を先に出す。なければ、うまくいったことの知らせ
+        let (term_error, term_failed) = {
+            let terms = term::shared(cx).read(cx);
+            match (&terms.error, &terms.notice) {
+                (Some(error), _) => (Some(error.clone()), true),
+                (None, notice) => (notice.clone(), false),
+            }
+        };
 
         let header = row()
             .flex_none()
@@ -2546,7 +2558,11 @@ impl AiPane {
                         .py_1()
                         .gap_2()
                         .text_xs()
-                        .text_color(theme.danger)
+                        .text_color(if term_failed {
+                            theme.danger
+                        } else {
+                            theme.muted_foreground
+                        })
                         .child(div().flex_1().min_w_0().child(error))
                         .child(feel::gloss(
                             Button::new("term-error-close")
@@ -2557,6 +2573,7 @@ impl AiPane {
                                 .on_click(|_, _, cx| {
                                     term::shared(cx).update(cx, |terms, cx| {
                                         terms.error = None;
+                                        terms.notice = None;
                                         cx.notify();
                                     })
                                 }),
@@ -2786,6 +2803,35 @@ impl AiPane {
                         menu
                     }),
             )
+            .when(active.is_some(), |d| {
+                d.child(
+                    icon_button("term-mcp", "plug", "MCP に登録").dropdown_menu_with_anchor(
+                        Anchor::TopRight,
+                        |menu, _, _| {
+                            use crate::mcp_register::Agent;
+                            let typed = |name: &'static str, agent: Agent| {
+                                PopupMenuItem::new(name)
+                                    .icon(app_icon("terminal"))
+                                    .on_click(move |_, _, cx| {
+                                        term::shared(cx).update(cx, |terms, cx| {
+                                            terms.type_mcp_command(agent, cx);
+                                        })
+                                    })
+                            };
+                            menu.item(typed("Claude Code", Agent::Claude))
+                                .item(typed("Codex", Agent::Codex))
+                                .item(
+                                    PopupMenuItem::new("Cursor")
+                                        .icon(app_icon("plug"))
+                                        .on_click(|_, _, cx| {
+                                            term::shared(cx)
+                                                .update(cx, |terms, cx| terms.add_to_cursor(cx))
+                                        }),
+                                )
+                        },
+                    ),
+                )
+            })
     }
 }
 

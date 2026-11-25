@@ -90,6 +90,12 @@ pub struct Tab {
     /// プログラムが付けたタイトル。
     pub title: Option<SharedString>,
     pub terminal: Arc<Terminal>,
+    /// ドロップしたファイルの場所の書き方。
+    pub paths: malakt_term::PathStyle,
+    /// 開いたシェル。
+    pub profile: Profile,
+    /// シェルに渡した環境変数。
+    env: Vec<(String, String)>,
     /// 終わっていれば、終了コード（シグナルなら `None`）。
     pub exit: Option<Option<i32>>,
 }
@@ -104,6 +110,16 @@ impl Tab {
     }
 }
 
+/// PATH の最後に、このアプリのフォルダーを足す。もう入っているか、PATH に書けない場所なら `None`。
+fn path_with(before: &std::ffi::OsStr, dir: &std::path::Path) -> Option<String> {
+    let mut all: Vec<PathBuf> = std::env::split_paths(before).collect();
+    if all.iter().any(|have| have == dir) {
+        return None;
+    }
+    all.push(dir.to_owned());
+    std::env::join_paths(all).ok()?.into_string().ok()
+}
+
 /// 開いているターミナルの一覧。ウィンドウをまたいで 1 つ。
 pub struct Terms {
     db: Entity<Db>,
@@ -116,6 +132,10 @@ pub struct Terms {
     pub profile: Option<String>,
     next: u64,
     pub error: Option<SharedString>,
+    /// うまくいったことの知らせ。
+    pub notice: Option<SharedString>,
+    /// Cursor の設定を探すホーム。`None` なら、メニューから登録できない。
+    pub cursor_home: Option<PathBuf>,
     /// 開いたターミナルに、キーの入力先を移す。
     pub focus_wanted: bool,
     /// ターミナルを開いたときに、そこの Claude Code へ MCP サーバーを登録する。
@@ -154,6 +174,8 @@ impl Terms {
             profile,
             next: 1,
             error: None,
+            notice: None,
+            cursor_home: None,
             focus_wanted: false,
             register_mcp: false,
             registered: std::collections::HashSet::new(),
@@ -270,6 +292,15 @@ impl Terms {
                 options.env.push((name.to_owned(), value));
             }
         }
+        if found.kind != malakt_term::profile::Kind::Wsl {
+            // `malakt-mahoz mcp` のように、名前でこのアプリのコマンドを呼べるようにする
+            let exe = std::env::current_exe().ok();
+            let dir = exe.as_deref().and_then(std::path::Path::parent);
+            let before = std::env::var_os("PATH").unwrap_or_default();
+            if let Some(path) = dir.and_then(|dir| path_with(&before, dir)) {
+                options.env.push(("PATH".to_owned(), path));
+            }
+        }
         if found.kind == malakt_term::profile::Kind::Wsl {
             // WSL の中にも渡す
             let before = std::env::var("WSLENV").unwrap_or_default();
@@ -280,7 +311,7 @@ impl Terms {
         if let Some(locale) = default_locale(|name| std::env::var(name).ok()) {
             options.env.push(("LANG".to_owned(), locale.to_owned()));
         }
-        self.register_claude(&found, &options.env, cx);
+        self.register_agents(&found, &options.env, cx);
         let (tx, rx) = async_channel::unbounded();
         let terminal = match Terminal::spawn(&options, move |event| {
             // ターミナルを閉じたあとは、送れなくてよい
@@ -300,6 +331,9 @@ impl Terms {
             task: task.map(|task| task.title.into()),
             title: None,
             terminal,
+            paths: found.path_style(cfg!(windows)),
+            profile: found.clone(),
+            env: options.env.clone(),
             exit: None,
         });
         self.active = Some(id);
@@ -363,8 +397,59 @@ impl Terms {
         cx.notify();
     }
 
-    /// このシェルの Claude Code に、MCP サーバーを登録する。シェルごとに、起動してから 1 回だけ確かめる。
-    fn register_claude(
+    /// 見ているターミナルの入力の行に、このアプリを MCP に登録するコマンドを入れる。Enter は押さない。
+    pub fn type_mcp_command(&mut self, agent: crate::mcp_register::Agent, cx: &mut Context<Self>) {
+        let Some(tab) = self.active_tab().filter(|tab| tab.exit.is_none()) else {
+            return;
+        };
+        let command = crate::mcp_register::command(agent, &tab.profile.id, tab.paths);
+        tab.terminal.clear_selection();
+        tab.terminal.paste(&command);
+        self.focus_wanted = true;
+        cx.notify();
+    }
+
+    /// 見ているターミナルのシェルで使う Cursor に、MCP サーバーを登録する。
+    pub fn add_to_cursor(&mut self, cx: &mut Context<Self>) {
+        let Some(tab) = self.active_tab() else {
+            return;
+        };
+        let (profile, env) = (tab.profile.clone(), tab.env.clone());
+        let home = self.cursor_home.clone();
+        self.error = None;
+        self.notice = None;
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let exe = env.iter().find(|(name, _)| name == crate::mcp::ENV_BIN);
+                    let exe = exe.map(|(_, exe)| exe.clone()).unwrap_or_default();
+                    crate::mcp_register::register_cursor(&profile, &exe, &env, home.as_deref())
+                })
+                .await;
+            // アプリが終わっていれば、渡す先がない
+            let _ = this.update(cx, |this, cx| {
+                match result {
+                    Ok(Some(true)) => this.notice = Some("Cursor に登録しました。".into()),
+                    Ok(Some(false)) => this.notice = Some("Cursor に登録済みです。".into()),
+                    Ok(None) => {
+                        this.error =
+                            Some("Cursor のフォルダー（~/.cursor）が見つかりません。".into());
+                    }
+                    Err(reason) => {
+                        this.error =
+                            Some(format!("Cursor に登録できませんでした: {reason}").into());
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// このシェルの Claude Code と Cursor に、MCP サーバーを登録する。
+    /// シェルごとに、起動してから 1 回だけ確かめる。
+    fn register_agents(
         &mut self,
         profile: &Profile,
         env: &[(String, String)],
@@ -378,18 +463,36 @@ impl Terms {
         };
         self.registered.insert(profile.id.clone());
         let steps = crate::mcp_register::steps(profile, exe, cfg!(windows));
-        let env = env.to_vec();
+        let (profile, exe, env) = (profile.clone(), exe.clone(), env.to_vec());
         let name = profile.name.clone();
         cx.spawn(async move |this, cx| {
-            let result = cx
+            let failed = cx
                 .background_executor()
-                .spawn(async move { crate::mcp_register::register(&steps, &env) })
+                .spawn(async move {
+                    let mut failed = Vec::new();
+                    if let Err(reason) = crate::mcp_register::register(&steps, &env) {
+                        failed.push(format!("Claude Code: {reason}"));
+                    }
+                    let home = dirs::home_dir();
+                    if let Err(reason) =
+                        crate::mcp_register::register_cursor(&profile, &exe, &env, home.as_deref())
+                    {
+                        failed.push(format!("Cursor: {reason}"));
+                    }
+                    if let Err(reason) = crate::mcp_register::install_command(&profile, &env) {
+                        failed.push(format!("malakt-mahoz コマンド: {reason}"));
+                    }
+                    failed
+                })
                 .await;
-            if let Err(reason) = result {
+            if !failed.is_empty() {
                 // アプリが終わっていれば、渡す先がない
                 let _ = this.update(cx, |this, cx| {
                     this.fail(
-                        format!("{name} の Claude Code に MCP を登録できませんでした: {reason}"),
+                        format!(
+                            "{name} で MCP を登録できませんでした（{}）",
+                            failed.join("、")
+                        ),
                         cx,
                     );
                 });
@@ -624,6 +727,27 @@ impl TermPane {
         if let Some(text) = terminal.selected_text() {
             cx.write_to_clipboard(ClipboardItem::new_string(text));
         }
+    }
+
+    /// ドロップしたファイルの場所を、入力の行に入れる。Claude Code などは、画像の場所を画像として受け取る。
+    pub fn drop_paths(&mut self, paths: &[PathBuf], window: &mut Window, cx: &mut Context<Self>) {
+        let Some((terminal, style)) = self
+            .terms
+            .read(cx)
+            .active_tab()
+            .filter(|tab| tab.exit.is_none())
+            .map(|tab| (tab.terminal.clone(), tab.paths))
+        else {
+            return;
+        };
+        if paths.is_empty() {
+            return;
+        }
+        terminal.clear_selection();
+        terminal.paste(&malakt_term::drop_text(paths, style));
+        // 続けて打てるように、キーの入力先を移す
+        window.focus(&self.focus, cx);
+        cx.notify();
     }
 
     fn paste(&mut self, terminal: &Terminal, cx: &mut Context<Self>) {
@@ -1127,6 +1251,12 @@ impl Render for TermPane {
                 cx.listener(|this, event, _, cx| this.mouse_up(event, cx)),
             )
             .on_scroll(cx.listener(|this, event, _, cx| this.scroll(event, cx)))
+            .drag_over::<ExternalPaths>(|style, _, _, cx| {
+                style.border_2().border_color(cx.theme().primary)
+            })
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
+                this.drop_paths(paths.paths(), window, cx);
+            }))
             .when_some(exit, |d, code| {
                 let text = match code {
                     Some(code) => format!("シェルが終了しました（終了コード {code}）"),
@@ -1237,6 +1367,23 @@ mod tests {
         assert_eq!(default_locale(lang), None);
         let ctype = |name: &str| (name == "LC_CTYPE").then(|| "ja_JP.eucJP".to_owned());
         assert_eq!(default_locale(ctype), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_app_folder_is_added_to_the_path_once() {
+        use super::path_with;
+        use std::ffi::OsStr;
+        use std::path::Path;
+        let dir = Path::new("/Applications/Malakt Mahoz.app/Contents/MacOS");
+        assert_eq!(
+            path_with(OsStr::new("/usr/bin:/bin"), dir).as_deref(),
+            Some("/usr/bin:/bin:/Applications/Malakt Mahoz.app/Contents/MacOS")
+        );
+        let have = OsStr::new("/usr/bin:/Applications/Malakt Mahoz.app/Contents/MacOS");
+        assert_eq!(path_with(have, dir), None);
+        // 区切りの文字が入った場所は、PATH に書けない
+        assert_eq!(path_with(OsStr::new("/bin"), Path::new("/a:b")), None);
     }
 
     #[test]

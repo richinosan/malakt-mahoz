@@ -4057,6 +4057,7 @@ bundled_icons! {
         "arrow-left",
         "maximize-2",
         "minimize-2",
+        "plug",
         "rotate-ccw-clock",
         "rotate-ccw",
         "image",
