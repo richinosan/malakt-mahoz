@@ -1470,10 +1470,16 @@ fn completion_ticket_issued_here_and_redeemed_by_command(cx: &mut TestAppContext
         .map(|a| (*a).to_owned())
         .collect();
     let (mut out, mut err) = (Vec::new(), Vec::new());
-    let code = malakt_mahoz::cli::run(&args, || Store::open(&path), &mut out, &mut err);
+    let code = malakt_mahoz::cli::run(
+        &args,
+        || Store::open(&path),
+        &mut std::io::empty(),
+        &mut out,
+        &mut err,
+    );
     assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
 
-    // 1 分ごとの見張りが気づくのと同じことをする
+    // 見張りが気づくのと同じことをする
     cx.update(|cx| {
         db::shared(cx).update(cx, |db, cx| {
             assert!(db.changed_outside());

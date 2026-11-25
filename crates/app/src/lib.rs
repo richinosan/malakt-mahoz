@@ -5,6 +5,7 @@ pub mod ai_view;
 pub mod cli;
 pub mod db;
 pub mod icons;
+pub mod mcp;
 pub mod panes;
 pub mod passkey;
 pub mod reminders;

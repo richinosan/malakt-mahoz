@@ -2664,6 +2664,8 @@ impl Session {
         }
         let mut spec = Spec::shell(command);
         spec.cwd = Some(cwd);
+        // シェルから起動した Claude Code などが、このアプリのコマンドとデータを見つけられるようにする
+        spec.env = crate::mcp::shell_env();
         Self::run_command(this, spec, cx).await
     }
 

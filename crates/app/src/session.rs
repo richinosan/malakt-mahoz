@@ -87,6 +87,7 @@ pub fn saved(cx: &App) -> Vec<WindowState> {
 
 /// 終了を始める。このあと閉じるウィンドウは、次の起動で戻す。
 pub fn quitting(cx: &mut App) {
+    crate::db::close_open_mark(cx);
     cx.default_global::<Sessions>().quitting = true;
 }
 
