@@ -27,7 +27,7 @@ use gpui_kit::*;
 pub use ai::AiConfig;
 pub use ai_view::{AiPane, PaneMode};
 pub use db::{Db, Shared};
-pub use state::{anchor_at, Assets, CommentMode, MainView, Modal, Nav};
+pub use state::{anchor_at, Assets, CommentMode, MainView, Modal, Nav, NOTICE_FADE, NOTICE_LIFE};
 
 actions!(
     malakt,

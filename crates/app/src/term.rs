@@ -132,8 +132,15 @@ pub struct Terms {
     pub profile: Option<String>,
     next: u64,
     pub error: Option<SharedString>,
-    /// うまくいったことの知らせ。
+    /// うまくいったことの知らせ。`NOTICE_LIFE` たつと閉じる。
     pub notice: Option<SharedString>,
+    /// 知らせにマウスが乗っている。乗っている間は閉じない
+    notice_hovered: bool,
+    /// 時間がたった知らせ
+    notice_expired: bool,
+    /// 知らせが消えていく途中
+    pub notice_closing: bool,
+    notice_task: Option<Task<()>>,
     /// Cursor の設定を探すホーム。`None` なら、メニューから登録できない。
     pub cursor_home: Option<PathBuf>,
     /// 開いたターミナルに、キーの入力先を移す。
@@ -175,6 +182,10 @@ impl Terms {
             next: 1,
             error: None,
             notice: None,
+            notice_hovered: false,
+            notice_expired: false,
+            notice_closing: false,
+            notice_task: None,
             cursor_home: None,
             focus_wanted: false,
             register_mcp: false,
@@ -417,6 +428,72 @@ impl Terms {
     }
 
     /// 見ているターミナルのシェルで使う Cursor に、MCP サーバーを登録する。
+    /// うまくいったことの知らせを出す。`NOTICE_LIFE` たつと消えていく。
+    fn show_notice(&mut self, text: SharedString, cx: &mut Context<Self>) {
+        self.notice = Some(text);
+        // 知らせの行は出し直すたびに描き直すので、前のマウスの位置は残らない
+        self.notice_hovered = false;
+        self.notice_expired = false;
+        self.notice_closing = false;
+        self.notice_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(crate::state::NOTICE_LIFE)
+                .await;
+            // アプリが終わっていれば、閉じる知らせもない
+            let _ = this.update(cx, |this, cx| {
+                this.notice_expired = true;
+                this.close_notice_if_idle(cx);
+            });
+        }));
+        cx.notify();
+    }
+
+    /// 時間がたった知らせを、マウスが乗っていなければ消していく。
+    fn close_notice_if_idle(&mut self, cx: &mut Context<Self>) {
+        if self.notice.is_none()
+            || !self.notice_expired
+            || self.notice_hovered
+            || self.notice_closing
+        {
+            return;
+        }
+        // 失敗の後ろに隠れている知らせは、すぐ消す
+        if self.error.is_some() {
+            self.notice = None;
+            cx.notify();
+            return;
+        }
+        self.notice_closing = true;
+        self.notice_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(crate::state::NOTICE_FADE)
+                .await;
+            // アプリが終わっていれば、閉じる知らせもない
+            let _ = this.update(cx, |this, cx| {
+                if this.notice_closing {
+                    this.notice = None;
+                    this.notice_closing = false;
+                    cx.notify();
+                }
+            });
+        }));
+        cx.notify();
+    }
+
+    /// 知らせにマウスが乗った・離れた。乗っている間は閉じず、消えかけていたら戻す。
+    pub fn hover_notice(&mut self, hovered: bool, cx: &mut Context<Self>) {
+        self.notice_hovered = hovered;
+        if hovered {
+            if self.notice_closing {
+                self.notice_closing = false;
+                self.notice_task = None;
+                cx.notify();
+            }
+        } else {
+            self.close_notice_if_idle(cx);
+        }
+    }
+
     pub fn add_to_cursor(&mut self, cx: &mut Context<Self>) {
         let Some(tab) = self.active_tab() else {
             return;
@@ -437,8 +514,8 @@ impl Terms {
             // アプリが終わっていれば、渡す先がない
             let _ = this.update(cx, |this, cx| {
                 match result {
-                    Ok(Some(true)) => this.notice = Some("Cursor に登録しました。".into()),
-                    Ok(Some(false)) => this.notice = Some("Cursor に登録済みです。".into()),
+                    Ok(Some(true)) => this.show_notice("Cursor に登録しました。".into(), cx),
+                    Ok(Some(false)) => this.show_notice("Cursor に登録済みです。".into(), cx),
                     Ok(None) => {
                         this.error =
                             Some("Cursor のフォルダー（~/.cursor）が見つかりません。".into());

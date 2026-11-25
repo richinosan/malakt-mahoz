@@ -5075,3 +5075,89 @@ fn windows_minimized_with_the_main_window_come_back_together(cx: &mut TestAppCon
     // 戻したあとは、覚えが空になる
     assert!(cx.update(session::untuck).is_empty());
 }
+
+/// 画面の下の知らせは 3 分で閉じる。マウスが乗っている間は閉じず、失敗は閉じるまで出したまま。
+#[gpui_kit::test]
+fn notice_closes_after_three_minutes(cx: &mut TestAppContext) {
+    use malakt_mahoz::{NOTICE_FADE, NOTICE_LIFE};
+    let second = std::time::Duration::from_secs(1);
+    start(cx);
+    let (window, view) = open(cx, wide());
+    ui(cx, window, |window, cx| {
+        window.click("nav-all", cx);
+        window.click("quick-add", cx);
+        window.input("知らせを出すタスク", cx);
+        window.press("enter", cx);
+    });
+    let id = all_tasks(cx).remove(0).id;
+    let notice = |cx: &mut TestAppContext| cx.update(|cx| view.read(cx).notice.clone());
+    let set_status = |cx: &mut TestAppContext, status| {
+        cx.update(|cx| view.update(cx, |v, cx| v.set_status(&id, status, cx)));
+        ui(cx, window, |_, _| {});
+    };
+
+    set_status(cx, Status::Completed);
+    assert!(notice(cx).is_some());
+    cx.executor().advance_clock(NOTICE_LIFE - second);
+    cx.run_until_parked();
+    assert!(notice(cx).is_some());
+    cx.executor().advance_clock(second);
+    ui(cx, window, |window, _| {
+        assert!(window.try_find("notice").is_none());
+        assert!(window.try_find("notice-undo").is_none());
+    });
+    assert!(notice(cx).is_none());
+
+    // 出し直した知らせは、そこから 3 分
+    set_status(cx, Status::NeedsAction);
+    cx.executor().advance_clock(NOTICE_LIFE - second);
+    cx.run_until_parked();
+    set_status(cx, Status::Completed);
+    cx.executor().advance_clock(NOTICE_LIFE - second);
+    cx.run_until_parked();
+    assert!(notice(cx).is_some());
+    cx.executor().advance_clock(second);
+    cx.run_until_parked();
+    assert!(notice(cx).is_none());
+
+    // マウスが乗っている間は閉じず、離れたら閉じる
+    set_status(cx, Status::NeedsAction);
+    ui(cx, window, |window, cx| window.hover("notice", cx));
+    cx.executor().advance_clock(NOTICE_LIFE * 2);
+    cx.run_until_parked();
+    assert!(notice(cx).is_some());
+    ui(cx, window, |window, cx| window.hover("nav-all", cx));
+    assert!(notice(cx).is_none());
+
+    // 動きを付けているときは、薄くなってから消える。消えかけでも、乗れば戻る
+    cx.update(|cx| view.update(cx, |v, _| v.motion = true));
+    set_status(cx, Status::Completed);
+    cx.executor().advance_clock(NOTICE_LIFE);
+    cx.run_until_parked();
+    cx.update(|cx| assert!(view.read(cx).notice_clock.closing));
+    ui(cx, window, |window, cx| window.hover("notice", cx));
+    cx.executor().advance_clock(NOTICE_FADE * 2);
+    cx.run_until_parked();
+    cx.update(|cx| assert!(!view.read(cx).notice_clock.closing));
+    assert!(notice(cx).is_some());
+    ui(cx, window, |window, cx| window.hover("nav-all", cx));
+    cx.update(|cx| assert!(view.read(cx).notice_clock.closing));
+    cx.executor().advance_clock(NOTICE_FADE);
+    cx.run_until_parked();
+    assert!(notice(cx).is_none());
+
+    // 失敗は時間では閉じない
+    cx.update(|cx| {
+        view.update(cx, |v, cx| {
+            v.error = Some("保存できませんでした。".into());
+            cx.notify();
+        })
+    });
+    ui(cx, window, |_, _| {});
+    cx.executor().advance_clock(NOTICE_LIFE * 2);
+    cx.run_until_parked();
+    ui(cx, window, |window, _| {
+        assert!(window.try_find("notice").is_some())
+    });
+    cx.update(|cx| assert!(view.read(cx).error.is_some()));
+}

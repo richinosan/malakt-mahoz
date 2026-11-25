@@ -685,6 +685,16 @@ fn the_mcp_button_types_the_command_and_registers_cursor(cx: &mut TestAppContext
         window.click("term-error-close", cx)
     });
     assert!(terms(cx, |t| t.notice.is_none() && t.error.is_none()));
+
+    // 閉じなくても、3 分たつと薄くなって消える
+    pick_cursor(cx);
+    wait(cx, "登録済みの知らせ", |t| t.notice.is_some());
+    cx.executor().advance_clock(malakt_mahoz::NOTICE_LIFE);
+    cx.run_until_parked();
+    assert!(terms(cx, |t| t.notice_closing && t.notice.is_some()));
+    cx.executor().advance_clock(malakt_mahoz::NOTICE_FADE);
+    cx.run_until_parked();
+    assert!(terms(cx, |t| t.notice.is_none()));
 }
 
 /// マウスを受け取るプログラムには、クリックがそのまま届く。
