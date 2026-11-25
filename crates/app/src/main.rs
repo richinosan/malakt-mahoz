@@ -38,15 +38,7 @@ fn main() {
             malakt_mahoz::reminders::connect_system(cx);
             malakt_mahoz::update::connect_system(cx);
             malakt_mahoz::db::watch(cx);
-            // 最後のウィンドウを閉じたら終了する。新しい版を取ってあれば、ここで入れ替える
-            cx.on_window_closed(|cx, _| {
-                if cx.windows().is_empty() {
-                    malakt_mahoz::session::quitting(cx);
-                    malakt_mahoz::update::install_on_quit(cx);
-                    cx.quit();
-                }
-            })
-            .detach();
+            malakt_mahoz::quit_when_main_closes(cx);
             let (window, view) =
                 malakt_mahoz::open_saved_windows(cx).expect("ウィンドウを開けませんでした");
             // ロックしてあるなら、起動してすぐパスキーを求める

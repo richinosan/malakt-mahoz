@@ -4768,3 +4768,40 @@ fn clicking_outside_closes_the_top_dialog(cx: &mut TestAppContext) {
     ask(cx);
     assert_eq!(comment(cx), "");
 }
+
+/// メインのウィンドウを閉じると、追加のウィンドウと AI チャットのウィンドウも閉じる。
+/// 閉じたメインのウィンドウは、次の起動で追加のウィンドウと一緒に戻る。
+#[gpui_kit::test]
+fn closing_main_window_closes_the_others(cx: &mut TestAppContext) {
+    start(cx);
+    cx.update(malakt_mahoz::quit_when_main_closes);
+    let (main, _) = cx.update(|cx| malakt_mahoz::open_main_window(cx).unwrap());
+    let (second, second_view) = cx.update(|cx| malakt_mahoz::open_main_window(cx).unwrap());
+    let (third, _) = cx.update(|cx| malakt_mahoz::open_main_window(cx).unwrap());
+    cx.update(|cx| {
+        malakt_mahoz::open_ai_window(malakt_mahoz::PaneMode::ChatWindow, cx).unwrap();
+        second_view.update(cx, |v, cx| v.go(Nav::All, cx));
+    });
+    cx.run_until_parked();
+    assert_eq!(cx.update(|cx| cx.windows().len()), 4);
+
+    // 追加のウィンドウを閉じても、ほかのウィンドウは残る
+    cx.update_window(third, |_, window, _| window.remove_window())
+        .unwrap();
+    cx.run_until_parked();
+    assert_eq!(cx.update(|cx| cx.windows().len()), 3);
+    assert_eq!(cx.update(|cx| malakt_mahoz::session::saved(cx)).len(), 2);
+    assert!(cx.update_window(second, |_, _, _| ()).is_ok());
+
+    // メインを閉じると、全部閉じる
+    cx.update_window(main, |_, window, _| window.remove_window())
+        .unwrap();
+    cx.run_until_parked();
+    assert_eq!(cx.update(|cx| cx.windows().len()), 0);
+
+    // 次の起動では、メインと追加のウィンドウが戻る
+    let saved = cx.update(|cx| malakt_mahoz::session::saved(cx));
+    assert_eq!(saved.len(), 2);
+    assert_eq!(saved[0].nav, "home");
+    assert_eq!(saved[1].nav, "all");
+}
