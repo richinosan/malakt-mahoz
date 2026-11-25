@@ -25,7 +25,7 @@ use crate::ai::{
 use crate::db::{self, Db};
 use crate::render::app_icon;
 use crate::shadow::{Elevate, Elevation};
-use crate::state::MainView;
+use crate::state::{DropTarget, MainView};
 use crate::{ClearShell, StopAi};
 
 /// 参照する寸法を、画面全体の拡大率に合わせる。
@@ -88,22 +88,6 @@ fn short_path(path: &str) -> String {
 /// 現れるときの動き。
 fn appear() -> Animation {
     Animation::new(Duration::from_millis(160)).with_easing(ease_out_quint())
-}
-
-/// AI の発言の左に出す印。
-fn avatar(cx: &App) -> Div {
-    let theme = cx.theme();
-    div()
-        .flex_none()
-        .size_6()
-        .rounded_full()
-        .flex()
-        .items_center()
-        .justify_center()
-        .bg(theme.primary)
-        .text_color(theme.primary_foreground)
-        .elevate(Elevation::Low, cx)
-        .child(app_icon("sparkles").size_3())
 }
 
 /// アイコンだけのボタン。名前はホバーで出る。
@@ -1145,20 +1129,16 @@ impl AiPane {
                         .test_support(),
                 )
                 .into_any_element(),
+            // AI の返答は、枠も印も付けずにペインの幅いっぱいに出す
             Item::Assistant(text) => row()
                 .items_start()
-                .gap_2()
-                .child(avatar(cx))
                 .child(
                     div()
                         .id(("ai-assistant", ix))
                         .flex_1()
                         .min_w_0()
-                        .px_3()
-                        .py_2()
-                        .rounded_lg()
-                        .bg(theme.muted)
-                        .elevate(Elevation::Low, cx)
+                        .px_1()
+                        .py_1()
                         .text_sm()
                         // ドラッグで選んでコピーできる
                         .child(TextView::markdown(("ai-text", ix), text.clone()).selectable(true))
@@ -1703,7 +1683,7 @@ impl AiPane {
                     .items_center()
                     .text_xs()
                     .text_color(theme.muted_foreground)
-                    .child(avatar(cx))
+                    .px_1()
                     .child(Spinner::new().small())
                     .child(if session.command_running() {
                         "コマンドを実行中"
@@ -1765,6 +1745,16 @@ impl AiPane {
             });
         let error = session.error.clone();
         let pills = self.render_pills(cx);
+        let attached = self.session.read(cx).attached.clone();
+        let dropping = self.main.as_ref().is_some_and(|main| {
+            main.read_with(cx, |main, _| {
+                main.task_drag
+                    .as_ref()
+                    .and_then(|d| d.over.as_ref())
+                    .is_some_and(|(target, _)| *target == DropTarget::Chat)
+            })
+            .unwrap_or(false)
+        });
 
         col()
             .id("ai-chat")
@@ -1811,13 +1801,54 @@ impl AiPane {
                     .child(
                         // 入力欄と、サービス・モデル・effort・送信を 1 つの枠にまとめる
                         col()
+                            .id("ai-composer")
                             .rounded_lg()
                             .border_1()
                             .border_color(theme.input)
                             .bg(theme.background)
+                            // ドラッグ中のタスクが上にある間は、色を付ける
+                            .when(dropping, |d| {
+                                d.border_color(theme.primary)
+                                    .bg(theme.primary.opacity(0.15))
+                            })
                             .elevate(Elevation::Mid, cx)
                             .p_1()
                             .gap_1()
+                            .when(!attached.is_empty(), |d| {
+                                d.child(row().gap_1().flex_wrap().px_1().pt_1().children(
+                                    attached.iter().enumerate().map(|(ix, (id, title))| {
+                                        let id = id.clone();
+                                        row()
+                                            .id(("ai-attached", ix))
+                                            .max_w_full()
+                                            .gap_1()
+                                            .pl_2()
+                                            .pr_0p5()
+                                            .h_6()
+                                            .items_center()
+                                            .rounded_md()
+                                            .bg(theme.secondary)
+                                            .text_xs()
+                                            .child(app_icon("list-todo").size_3().flex_none())
+                                            .child(div().min_w_0().truncate().child(title.clone()))
+                                            .child(
+                                                Button::new(("ai-attached-remove", ix))
+                                                    .icon(app_icon("x"))
+                                                    .ghost()
+                                                    .xsmall()
+                                                    .tooltip("外す")
+                                                    .on_click(cx.listener(
+                                                        move |this, _, _, cx| {
+                                                            this.session.update(cx, |s, cx| {
+                                                                s.detach_task(&id, cx)
+                                                            });
+                                                        },
+                                                    )),
+                                            )
+                                            .test_support()
+                                    }),
+                                ))
+                            })
                             .child(
                                 div()
                                     .id("ai-input")
@@ -2104,10 +2135,37 @@ impl Render for AiPane {
         self.refresh_rows(cx);
         let width = window.viewport_size().width;
         let shell_docked = self.session.read(cx).shell_place == ShellPlace::Docked;
+        // タスクをドラッグしている間は、チャットが落とし先になる
+        let dragging = self.main.as_ref().is_some_and(|main| {
+            main.read_with(cx, |main, _| {
+                main.task_drag.as_ref().is_some_and(|d| d.moved)
+            })
+            .unwrap_or(false)
+        });
         let base = div()
             .flex()
             .bg(theme.background)
-            .text_color(theme.foreground);
+            .text_color(theme.foreground)
+            .when(dragging, |d| {
+                d.on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
+                    if let Some(main) = &this.main {
+                        // メインの画面がもうなければ、落とす先もない
+                        let _ = main.update(cx, |main, cx| {
+                            // チャットの上では、メインの画面にマウスの動きが届かない
+                            main.drag_task(event.position, cx);
+                            main.drag_task_over(DropTarget::Chat, event.position, cx)
+                        });
+                    }
+                }))
+                .on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, cx| {
+                        if let Some(main) = &this.main {
+                            let _ = main.update(cx, |main, cx| main.finish_task_drag(cx));
+                        }
+                    }),
+                )
+            });
         match self.mode {
             PaneMode::ShellWindow => base
                 .size_full()
@@ -2200,7 +2258,8 @@ impl Render for AiPane {
                             .top_0()
                             .bottom_0()
                             .right_0()
-                            .w(px(widths.0))
+                            // 重ねるときは、タスクの画面が左に見える幅までにする
+                            .w(px(widths.0.min(ai::CHAT_MIN_WIDTH + 60.)))
                             .max_w_full()
                             .border_l_1()
                             .border_color(theme.border)

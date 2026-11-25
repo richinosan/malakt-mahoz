@@ -127,15 +127,9 @@ fn works_right_after_first_launch(cx: &mut TestAppContext) {
         .update(|cx| view.read(cx).panel.clone())
         .expect("詳細が開く");
 
-    // 完了にする（コメントは書かない）
+    // 完了にする。ダイアログは出ず、すぐ変わる
     ui(cx, window, |window, cx| window.click("to-completed", cx));
-    cx.update(|cx| {
-        assert_eq!(
-            view.read(cx).modal,
-            Modal::Status(opened.clone(), Status::Completed)
-        );
-    });
-    ui(cx, window, |window, cx| window.click("status-submit", cx));
+    cx.update(|cx| assert_eq!(view.read(cx).modal, Modal::None));
     let task = store(cx, |s| s.task(&opened).unwrap());
     assert_eq!(task.status, Status::Completed);
     assert_eq!(task.percent, 100);
@@ -1750,6 +1744,7 @@ fn font_and_colors_are_chosen_in_settings(cx: &mut TestAppContext) {
     ui(cx, window, |window, cx| {
         view.update(cx, |v, cx| v.open_appearance(window, cx))
     });
+    ui(cx, window, |window, cx| window.click("details-toggle", cx));
     ui(cx, window, |window, cx| window.click("font-open", cx));
     cx.update(|cx| {
         view.update(cx, |v, cx| {
@@ -1784,6 +1779,7 @@ fn font_and_colors_are_chosen_in_settings(cx: &mut TestAppContext) {
     ui(cx, window, |window, cx| {
         view.update(cx, |v, cx| v.open_appearance(window, cx))
     });
+    ui(cx, window, |window, cx| window.click("details-toggle", cx));
     let pick = |cx: &mut TestAppContext, slot: usize, hex: &str| {
         let color = Color::parse(hex).unwrap();
         // 色の見本を押すと、色を選ぶところが開く
@@ -1883,6 +1879,7 @@ fn backdrop_and_cards_are_chosen_in_settings(cx: &mut TestAppContext) {
     ui(cx, window, |window, cx| {
         view.update(cx, |v, cx| v.open_appearance(window, cx))
     });
+    ui(cx, window, |window, cx| window.click("details-toggle", cx));
     ui(cx, window, |window, cx| {
         // 画像を出していないときは、透明度とぼかしは出ない
         assert!(window.try_find("clear-slider").is_none());
@@ -2008,6 +2005,137 @@ fn backdrop_and_cards_are_chosen_in_settings(cx: &mut TestAppContext) {
     assert_eq!(primary(cx), "#86600f");
 }
 
+/// 「見た目」のいちばん上でテーマを選ぶと、画像・色・カードがまとめて変わる。
+/// 今の見た目は自分のテーマとして保存でき、名前を変えられ、消せる。
+#[gpui_kit::test]
+fn themes_are_chosen_and_saved_in_settings(cx: &mut TestAppContext) {
+    use gpui_kit::component::ActiveTheme;
+    use malakt_mahoz::theme::{self, Choice, Color, Preset, Scene};
+    start(cx);
+    let (window, view) = open(cx, wide());
+    let saved = |cx: &mut TestAppContext, key: &str| store(cx, |s| s.setting(key).unwrap());
+    let hex = |color: gpui_kit::Hsla| Color::from(color).hex();
+    let stock: Vec<String> = Preset::recommended()
+        .iter()
+        .map(|p| p.name.clone())
+        .collect();
+    assert_eq!(stock[..3], ["標準", "ガラスと青い空", "ダークフォレスト"]);
+
+    ui(cx, window, |window, cx| {
+        view.update(cx, |v, cx| v.open_appearance(window, cx))
+    });
+    // 1 つずつ変える行は、「詳細」を押すまで出ない
+    ui(cx, window, |window, cx| {
+        assert!(window.try_find("font-open").is_none());
+        window.click("details-toggle", cx)
+    });
+    ui(cx, window, |window, cx| {
+        assert!(window.try_find("font-open").is_some());
+        window.click("details-toggle", cx)
+    });
+
+    // ダークフォレスト: 森の画像、ダーク、浮かせたパネル
+    ui(cx, window, |window, cx| {
+        window.click(("preset", 2usize), cx)
+    });
+    assert_eq!(saved(cx, "scene").as_deref(), Some("forest"));
+    assert_eq!(saved(cx, "theme").as_deref(), Some("dark"));
+    assert_eq!(saved(cx, "panels.float").as_deref(), Some("1"));
+    assert_eq!(saved(cx, "scene.clear").as_deref(), Some("45"));
+    assert!(cx.update(|cx| cx.theme().is_dark() && theme::backdrop(cx).is_some()));
+    assert!(cx.update(|cx| (theme::backdrop(cx).unwrap().alpha - 0.55).abs() < 0.001));
+    assert!(cx.update(|cx| Preset::recommended()[2].same_look(&theme::current("", cx))));
+
+    // 色だけのテーマ（さくら）は、画像を外して色を変える
+    let sakura = stock.iter().position(|n| n == "さくら").unwrap();
+    ui(cx, window, |window, cx| {
+        window.click(("preset", sakura), cx)
+    });
+    assert_eq!(saved(cx, "scene"), None);
+    assert_eq!(saved(cx, "theme").as_deref(), Some("light"));
+    assert_eq!(saved(cx, "panels.float"), None);
+    assert!(cx.update(|cx| theme::backdrop(cx).is_none()));
+    assert_eq!(hex(cx.update(|cx| cx.theme().background)), "#fdf1f5");
+    assert_eq!(hex(cx.update(|cx| cx.theme().primary)), "#c2477a");
+
+    // 少し変えてから保存すると、「マイテーマ 1」ができて、そのまま名前を書ける
+    ui(cx, window, |window, cx| {
+        view.update(cx, |v, cx| v.set_cards(true, cx));
+        window.click("preset-save", cx)
+    });
+    assert_eq!(
+        cx.update(|cx| view.read(cx).preset_naming),
+        Some(0),
+        "保存したテーマの名前を書いている"
+    );
+    ui(cx, window, |window, cx| window.input("桜とカード", cx));
+    ui(cx, window, |window, cx| window.press("enter", cx));
+    let own = cx.update(|cx| theme::own_presets(cx).unwrap());
+    assert_eq!(own.len(), 1);
+    assert_eq!(own[0].name, "桜とカード");
+    assert!(own[0].cards && own[0].mode == Some(Choice::Light));
+    assert_eq!(own[0].look.accent, Color::parse("#c2477a"));
+
+    // 標準に戻してから自分のテーマを選ぶと、保存したときの見た目に戻る
+    ui(cx, window, |window, cx| {
+        window.click(("preset", 0usize), cx)
+    });
+    assert_eq!(saved(cx, "color.accent"), None);
+    assert_eq!(saved(cx, "list.cards"), None);
+    assert_eq!(hex(cx.update(|cx| cx.theme().primary)), "#86600f");
+    ui(cx, window, |window, cx| {
+        window.click(("own-preset", 0usize), cx)
+    });
+    assert_eq!(saved(cx, "list.cards").as_deref(), Some("1"));
+    assert_eq!(hex(cx.update(|cx| cx.theme().background)), "#fdf1f5");
+
+    // 名前を押すと書き直せる。Esc は書きかけだけを捨てて、ダイアログは開いたまま
+    ui(cx, window, |window, cx| {
+        window.click(("own-preset-name", 0usize), cx)
+    });
+    ui(cx, window, |window, cx| window.input("x", cx));
+    ui(cx, window, |window, cx| window.press("escape", cx));
+    assert!(cx.update(|cx| {
+        let v = view.read(cx);
+        v.preset_naming.is_none() && v.modal == Modal::Appearance
+    }));
+    assert_eq!(
+        cx.update(|cx| theme::own_presets(cx).unwrap()[0].name.clone()),
+        "桜とカード"
+    );
+
+    // 開き直しても残る
+    ui(cx, window, |window, cx| window.press("escape", cx));
+    ui(cx, window, |window, cx| {
+        view.update(cx, |v, cx| v.open_appearance(window, cx))
+    });
+    assert_eq!(cx.update(|cx| view.read(cx).own_presets.len()), 1);
+
+    // 画像がなくなったテーマは使えない。前の見た目のまま、理由が出る
+    let gone = Preset {
+        name: "海".into(),
+        scene: Scene::File("/ない/海.png".into()),
+        ..own[0].clone()
+    };
+    ui(cx, window, |window, cx| {
+        view.update(cx, |v, cx| v.apply_preset(&gone, window, cx))
+    });
+    let error = cx.update(|cx| view.read(cx).error.clone()).unwrap();
+    assert!(
+        error.contains("海.png") && error.contains("テーマ「海」"),
+        "{error}"
+    );
+    assert_eq!(saved(cx, "scene"), None);
+
+    // 消しても、今の見た目は変わらない
+    ui(cx, window, |window, cx| {
+        window.click(("own-preset-delete", 0usize), cx)
+    });
+    assert_eq!(saved(cx, "presets"), None);
+    assert!(cx.update(|cx| view.read(cx).own_presets.is_empty()));
+    assert_eq!(hex(cx.update(|cx| cx.theme().background)), "#fdf1f5");
+}
+
 /// アイコンは検索して選べる。日本語でも探せ、見つからなければその旨が出る。
 #[gpui_kit::test]
 fn workspace_icon_is_found_by_search(cx: &mut TestAppContext) {
@@ -2043,7 +2171,7 @@ fn workspace_icon_is_found_by_search(cx: &mut TestAppContext) {
     // 日本語でも探せる
     ui(cx, window, |window, cx| {
         window.click("icon-search", cx);
-        window.press("ctrl-a", cx);
+        window.press("secondary-a", cx);
         window.input("猫", cx);
     });
     ui(cx, window, |window, cx| {
@@ -2064,7 +2192,7 @@ fn workspace_icon_is_found_by_search(cx: &mut TestAppContext) {
     });
     ui(cx, window, |window, cx| {
         window.click("icon-search", cx);
-        window.press("ctrl-a", cx);
+        window.press("secondary-a", cx);
         window.input("ぺんぎん", cx);
     });
     ui(cx, window, |window, cx| {
@@ -2090,7 +2218,7 @@ fn workspace_icon_is_found_by_search(cx: &mut TestAppContext) {
     // どのカテゴリのボタンも押せて、その中の先頭のアイコンを選べる
     ui(cx, window, |window, cx| {
         window.click("icon-search", cx);
-        window.press("ctrl-a", cx);
+        window.press("secondary-a", cx);
         window.press("backspace", cx);
     });
     for (ix, category) in malakt_mahoz::icons::Category::ALL.into_iter().enumerate() {
@@ -3783,4 +3911,191 @@ fn undo_redo_and_paste_work_with_keys(cx: &mut TestAppContext) {
     ui(cx, window, |window, cx| window.input("一", cx));
     key(cx, "secondary-z");
     assert_eq!(all_tasks(cx).len(), 3);
+}
+
+/// 自分の画像を足すと、小さくして保存され、ワークスペースのアイコンになる。足した画像はあとからも選べる。
+#[gpui_kit::test]
+fn an_image_becomes_a_workspace_icon(cx: &mut TestAppContext) {
+    start(cx);
+    let (window, view) = open(cx, wide());
+    let ws = cx.update(|cx| {
+        db::shared(cx).update(cx, |db, cx| {
+            cx.notify();
+            let ws = db.store.create_workspace(None, "Lorem").unwrap();
+            db.store
+                .set_workspace_icon(&ws.id, Some("rocket"), Some("orange"))
+                .unwrap();
+            ws.id
+        })
+    });
+    cx.run_until_parked();
+    cx.update(|cx| {
+        view.update(cx, |v, cx| {
+            v.modal = Modal::WorkspaceIcon(ws.clone());
+            cx.notify();
+        })
+    });
+    ui(cx, window, |window, _| {
+        assert!(window.find("icon-add-image").visible());
+        assert!(window.try_find(("ws-custom-icon", 0usize)).is_none());
+    });
+
+    let dir = tempfile::tempdir().unwrap();
+    // 開けないファイルは、名前を出して断る。アイコンはそのまま
+    let text = dir.path().join("notes.png");
+    std::fs::write(&text, "lorem ipsum").unwrap();
+    cx.update(|cx| view.update(cx, |v, cx| v.add_icon_file(&ws, &text, cx)));
+    cx.update(|cx| {
+        let error = view.read(cx).error.clone().unwrap();
+        assert!(error.contains("notes.png"), "{error}");
+    });
+    assert_eq!(
+        store(cx, |s| s.workspace(&ws).unwrap()).icon.as_deref(),
+        Some("rocket")
+    );
+    assert!(store(cx, |s| s.custom_icons().unwrap()).is_empty());
+
+    // SVG は色のまま小さな PNG になる
+    let svg = dir.path().join("logo.svg");
+    std::fs::write(
+        &svg,
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 400"><circle cx="200" cy="200" r="180" fill="#e5484d"/></svg>"##,
+    )
+    .unwrap();
+    cx.update(|cx| view.update(cx, |v, cx| v.add_icon_file(&ws, &svg, cx)));
+    cx.run_until_parked();
+    let saved = store(cx, |s| s.workspace(&ws).unwrap());
+    let custom = saved.icon.clone().unwrap();
+    assert!(malakt_core::icon::is_custom(&custom), "{custom}");
+    assert_eq!(saved.color.as_deref(), Some("orange"));
+    let png = store(cx, |s| s.custom_icon(&custom).unwrap()).unwrap();
+    assert!(png.len() < 16 * 1024, "{} バイト", png.len());
+    cx.update(|cx| assert_eq!(view.read(cx).error, None));
+    cx.update(|cx| {
+        assert!(malakt_mahoz::icons::custom_image(&custom, cx).is_some());
+    });
+
+    // ほかのアイコンにしても、足した画像は一覧の先頭に残っていて、押すと戻せる
+    ui(cx, window, |window, cx| {
+        assert!(window.find(("ws-custom-icon", 0usize)).visible());
+        window.click(("ws-icon", 13usize), cx)
+    });
+    assert_eq!(
+        store(cx, |s| s.workspace(&ws).unwrap()).icon.as_deref(),
+        Some("rocket")
+    );
+    ui(cx, window, |window, cx| {
+        window.click(("ws-custom-icon", 0usize), cx)
+    });
+    assert_eq!(
+        store(cx, |s| s.workspace(&ws).unwrap()).icon,
+        Some(custom.clone())
+    );
+
+    // 同じ画像をもう一度足しても増えない
+    cx.update(|cx| view.update(cx, |v, cx| v.add_icon_file(&ws, &svg, cx)));
+    assert_eq!(store(cx, |s| s.custom_icons().unwrap()), [custom]);
+
+    // 絞り込んでいる間は、足した画像を出さない
+    ui(cx, window, |window, cx| {
+        window.click(("icon-category", 0usize), cx)
+    });
+    ui(cx, window, |window, _| {
+        assert!(window.try_find(("ws-custom-icon", 0usize)).is_none());
+    });
+}
+
+/// 状態は押して選ぶとすぐ変わる。コメントを付けるときだけダイアログが開く。
+#[gpui_kit::test]
+fn status_changes_from_a_menu_without_a_dialog(cx: &mut TestAppContext) {
+    start(cx);
+    let (window, view) = open(cx, wide());
+    let id = cx.update(|cx| {
+        db::shared(cx).update(cx, |db, cx| {
+            cx.notify();
+            let draft = malakt_core::TaskDraft {
+                title: "Lorem ipsum".into(),
+                ..Default::default()
+            };
+            db.store.create_task(None, &draft).unwrap().id
+        })
+    });
+    ui(cx, window, |window, cx| window.click("nav-all", cx));
+    cx.run_until_parked();
+    let status = |cx: &mut TestAppContext| store(cx, |s| s.task(&id).unwrap()).status;
+
+    // 一覧の状態を押すとメニューが開く。2 つ目は「進行中」
+    ui(cx, window, |window, cx| {
+        window.click(("status", 0usize), cx)
+    });
+    cx.update(|cx| assert_eq!(view.read(cx).modal, Modal::None));
+    ui(cx, window, |window, cx| {
+        window.press("down", cx);
+        window.press("down", cx);
+        window.press("enter", cx);
+    });
+    assert_eq!(status(cx), Status::InProcess);
+    cx.update(|cx| assert_eq!(view.read(cx).modal, Modal::None));
+
+    // 最後の項目は「コメントを付けて変更…」。ここからだけダイアログが開く
+    ui(cx, window, |window, cx| {
+        window.click(("status", 0usize), cx)
+    });
+    ui(cx, window, |window, cx| {
+        window.press("up", cx);
+        window.press("enter", cx);
+    });
+    cx.update(|cx| {
+        assert_eq!(
+            view.read(cx).modal,
+            Modal::Status(id.clone(), Status::Completed)
+        );
+    });
+    ui(cx, window, |window, cx| {
+        window.input("dolor sit amet", cx);
+        window.click("status-submit", cx);
+    });
+    assert_eq!(status(cx), Status::Completed);
+    let comments = store(cx, |s| s.comments(&id).unwrap());
+    assert!(comments.iter().any(|c| c.is_completion_report()));
+
+    // 詳細のボタンも、押すとすぐ変わる
+    ui(cx, window, |window, cx| window.click("tab-closed", cx));
+    cx.update_window(window, |_, window, cx| {
+        view.update(cx, |v, cx| v.open_panel(&id, window, cx))
+    })
+    .unwrap();
+    cx.run_until_parked();
+    ui(cx, window, |window, cx| window.click("to-reopen", cx));
+    assert_eq!(status(cx), Status::NeedsAction);
+    cx.update(|cx| assert_eq!(view.read(cx).modal, Modal::None));
+    ui(cx, window, |window, cx| window.click("to-cancelled", cx));
+    assert_eq!(status(cx), Status::Cancelled);
+
+    // 知らせの「元に戻す」で、すぐ戻せる
+    ui(cx, window, |window, cx| window.click("notice-undo", cx));
+    assert_eq!(status(cx), Status::NeedsAction);
+    ui(cx, window, |window, _| {
+        assert!(window.try_find("notice-undo").is_none());
+    });
+    ui(cx, window, |window, cx| window.click("to-cancelled", cx));
+
+    // 詳細の状態からも選べる。1 つ目は「未着手」
+    ui(cx, window, |window, cx| window.click("p-status", cx));
+    ui(cx, window, |window, cx| {
+        window.press("down", cx);
+        window.press("enter", cx);
+    });
+    assert_eq!(status(cx), Status::NeedsAction);
+
+    // コメントを付けるボタンでダイアログが開く
+    ui(cx, window, |window, cx| {
+        window.click("status-with-comment", cx)
+    });
+    cx.update(|cx| {
+        assert_eq!(
+            view.read(cx).modal,
+            Modal::Status(id.clone(), Status::Completed)
+        );
+    });
 }

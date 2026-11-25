@@ -22,6 +22,7 @@ pub mod attachment;
 pub mod bulk;
 pub mod defaults;
 pub mod error;
+pub mod icon;
 pub mod links;
 pub mod lock;
 pub mod mention;

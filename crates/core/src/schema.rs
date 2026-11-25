@@ -194,6 +194,14 @@ const MIGRATIONS: &[&str] = &[
         PRIMARY KEY (kind, key)
     ) STRICT, WITHOUT ROWID;
     "#,
+    // 11: 自分で足したアイコンの画像（小さな PNG）
+    r#"
+    CREATE TABLE custom_icons (
+        name TEXT PRIMARY KEY NOT NULL,
+        data BLOB NOT NULL,
+        created_at INTEGER NOT NULL
+    ) STRICT, WITHOUT ROWID;
+    "#,
 ];
 
 pub(crate) fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
