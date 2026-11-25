@@ -5,6 +5,7 @@ pub mod console;
 pub mod drop;
 pub mod keys;
 pub mod profile;
+mod settle;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -377,7 +378,13 @@ impl Terminal {
             &Size { cols, rows },
             Listener(shared.clone()),
         )));
-        let event_loop = EventLoop::new(term.clone(), Listener(shared.clone()), pty, true, false)?;
+        let event_loop = EventLoop::new(
+            term.clone(),
+            Listener(shared.clone()),
+            settle::Pty::new(pty)?,
+            true,
+            false,
+        )?;
         *shared.sender.lock().unwrap() = Some(event_loop.channel());
         event_loop.spawn();
         Ok(Self { term, shared })

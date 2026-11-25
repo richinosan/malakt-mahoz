@@ -4572,6 +4572,8 @@ name = "malakt-term"
 version = "0.1.0"
 dependencies = [
  "alacritty_terminal",
+ "libc",
+ "polling",
  "tempfile",
 ]
 
