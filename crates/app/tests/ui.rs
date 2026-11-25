@@ -3247,3 +3247,81 @@ fn narrow_widths_keep_the_title_and_never_overlap(cx: &mut TestAppContext) {
         });
     }
 }
+
+/// 担当者は、ダイアログの中で「新規担当者」として増やし、その行で名前を書く。
+#[gpui_kit::test]
+fn people_are_added_and_named_in_the_list(cx: &mut TestAppContext) {
+    start(cx);
+    let (window, view) = open(cx, wide());
+    cx.update_window(window, |_, window, cx| {
+        view.update(cx, |v, cx| v.open_people(window, cx))
+    })
+    .unwrap();
+    let names = |cx: &mut TestAppContext| -> Vec<String> {
+        store(cx, |s| s.people().unwrap())
+            .into_iter()
+            .filter(|p| !p.is_self)
+            .map(|p| p.name)
+            .collect()
+    };
+
+    // 押すとすぐ増えて、名前が全部選ばれた入力欄になる
+    ui(cx, window, |window, cx| window.click("person-add", cx));
+    assert_eq!(names(cx), [malakt_mahoz::state::NEW_PERSON_NAME]);
+    cx.update(|cx| {
+        let view = view.read(cx);
+        assert!(view.person_naming.is_some());
+        assert_eq!(
+            view.inputs.name.read(cx).value().as_ref(),
+            malakt_mahoz::state::NEW_PERSON_NAME
+        );
+    });
+    ui(cx, window, |window, cx| {
+        assert!(window.find("person-input").visible());
+        window.input("佐藤", cx);
+        window.press("enter", cx);
+    });
+    assert_eq!(names(cx), ["佐藤"]);
+    cx.update(|cx| {
+        let view = view.read(cx);
+        assert_eq!(view.person_naming, None);
+        assert_eq!(view.modal, Modal::People);
+    });
+
+    // 名前を押すと書き直せる。Esc は書きかけを捨てて、ダイアログは開いたまま
+    let row = cx.update(|cx| {
+        let view = view.read(cx);
+        view.people.iter().position(|p| p.name == "佐藤").unwrap()
+    });
+    ui(cx, window, |window, cx| window.click(("person", row), cx));
+    ui(cx, window, |window, cx| window.input("捨てる名前", cx));
+    ui(cx, window, |window, cx| window.press("escape", cx));
+    assert_eq!(names(cx), ["佐藤"]);
+    cx.update(|cx| {
+        let view = view.read(cx);
+        assert_eq!(view.person_naming, None);
+        assert_eq!(view.modal, Modal::People);
+    });
+
+    // 書き直して、ほかの場所（追加のボタン）を押すと保存され、次の人が増える
+    ui(cx, window, |window, cx| window.click(("person", row), cx));
+    ui(cx, window, |window, cx| window.input("佐藤 花子", cx));
+    ui(cx, window, |window, cx| window.click("person-add", cx));
+    cx.run_until_parked();
+    let mut all = names(cx);
+    all.sort();
+    let mut expected = ["佐藤 花子", malakt_mahoz::state::NEW_PERSON_NAME].map(String::from);
+    expected.sort();
+    assert_eq!(all, expected);
+
+    // 空にして Enter を押すと、「新規担当者」のまま
+    ui(cx, window, |window, cx| {
+        window.press("backspace", cx);
+        window.press("enter", cx);
+    });
+    assert_eq!(names(cx).len(), 2);
+    assert!(names(cx).contains(&malakt_mahoz::state::NEW_PERSON_NAME.to_owned()));
+    // もう一度 Esc でダイアログが閉じる
+    ui(cx, window, |window, cx| window.press("escape", cx));
+    cx.update(|cx| assert_eq!(view.read(cx).modal, Modal::None));
+}

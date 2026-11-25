@@ -37,6 +37,8 @@ const fn px(value: f32) -> Pixels {
 
 /// アイコンを選ぶ画面に一度に出す数。それより多いときは検索で絞る。
 const ICONS_SHOWN: usize = 400;
+/// 担当者の一覧の 1 行の高さ。名前を書く入力欄と同じ高さにする。
+const PERSON_ROW_HEIGHT: Pixels = gpui_kit::px(34. * crate::UI_SCALE);
 /// 見出しの枠（40px）の中のアイコンの大きさ。
 const TILE_ICON_SIZE: Pixels = px(24.);
 /// ホームのカードの枠（56px）の中のアイコンの大きさ。
@@ -4499,10 +4501,51 @@ impl MainView {
                 let mut list = col().gap_1();
                 for (ix, p) in self.people.iter().enumerate() {
                     let id = p.id.clone();
+                    let name =
+                        if self.person_naming.as_ref() == Some(&p.id) {
+                            // その場で名前を書く。Enter かほかの場所を押すと保存、Esc で取り消し
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .on_mouse_down_out(cx.listener(|this, _, window, cx| {
+                                    this.save_person_name(window, cx)
+                                }))
+                                .child(
+                                    Input::new(&self.inputs.name)
+                                        .id("person-input")
+                                        .aria_label("名前")
+                                        .text_base()
+                                        .bg(theme.background)
+                                        .border_color(theme.ring)
+                                        .px_2(),
+                                )
+                                .into_any_element()
+                        } else {
+                            let id = id.clone();
+                            div()
+                                .id(("person", ix))
+                                .flex_1()
+                                .min_w_0()
+                                .h(PERSON_ROW_HEIGHT)
+                                .flex()
+                                .items_center()
+                                .px_2()
+                                .rounded_md()
+                                .border_1()
+                                .border_color(gpui_kit::transparent_black())
+                                .cursor_pointer()
+                                .hover(|s| s.bg(theme.muted))
+                                .child(div().truncate().child(p.name.clone()))
+                                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                                    this.rename_person(id.clone(), window, cx)
+                                }))
+                                .test_support()
+                                .into_any_element()
+                        };
                     list = list.child(
                         row()
                             .gap_2()
-                            .child(div().flex_1().truncate().child(p.name.clone()))
+                            .child(name)
                             .when(p.is_self, |d| {
                                 d.child(div().text_xs().text_color(theme.primary).child("自分"))
                             })
@@ -4518,22 +4561,15 @@ impl MainView {
                     );
                 }
                 let body = col().gap_3().child(list).child(
-                    row()
-                        .gap_2()
-                        .child(
-                            Input::new(&self.inputs.name)
-                                .id("person-input")
-                                .aria_label("名前")
-                                .flex_1(),
-                        )
-                        .child(
-                            Button::new("person-submit")
-                                .label("追加")
-                                .primary()
-                                .on_click(
-                                    cx.listener(|this, _, window, cx| this.submit_name(window, cx)),
-                                ),
-                        ),
+                    row().child(
+                        Button::new("person-add")
+                            .icon(app_icon("plus"))
+                            .framed(cx)
+                            .tooltip("担当者を追加")
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.add_person(window, cx)),
+                            ),
+                    ),
                 );
                 self.dialog("担当者", body, cx)
             }
