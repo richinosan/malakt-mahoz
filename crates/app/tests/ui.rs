@@ -3265,6 +3265,47 @@ fn narrow_widths_keep_the_title_and_never_overlap(cx: &mut TestAppContext) {
     }
 }
 
+/// 名前の書きかけを Esc で捨てたあと、もう一度 Esc を押すとダイアログが閉じる。
+#[gpui_kit::test]
+fn escape_after_cancelling_a_name_closes_what_is_open(cx: &mut TestAppContext) {
+    start(cx);
+    let (window, view) = open(cx, wide());
+    cx.update_window(window, |_, window, cx| {
+        view.update(cx, |v, cx| v.open_people(window, cx))
+    })
+    .unwrap();
+    ui(cx, window, |window, cx| window.click("person-add", cx));
+    ui(cx, window, |window, cx| window.press("enter", cx));
+    let row = cx.update(|cx| {
+        let people = &view.read(cx).people;
+        people
+            .iter()
+            .position(|p| p.name == malakt_mahoz::state::NEW_PERSON_NAME)
+            .unwrap()
+    });
+    ui(cx, window, |window, cx| window.click(("person", row), cx));
+    ui(cx, window, |window, cx| window.input("捨てる名前", cx));
+    ui(cx, window, |window, cx| window.press("escape", cx));
+    cx.update(|cx| {
+        let view = view.read(cx);
+        assert_eq!(view.person_naming, None);
+        assert_eq!(view.modal, Modal::People);
+    });
+    ui(cx, window, |window, cx| window.press("escape", cx));
+    cx.update(|cx| assert_eq!(view.read(cx).modal, Modal::None));
+
+    // ワークスペースの名前を捨てたあとも、キーが画面に届く
+    ui(cx, window, |window, cx| window.click("add-workspace", cx));
+    cx.run_until_parked();
+    cx.update(|cx| assert!(view.read(cx).workspace_naming.is_some()));
+    ui(cx, window, |window, cx| window.press("escape", cx));
+    cx.update(|cx| assert!(view.read(cx).workspace_naming.is_none()));
+    cx.update_window(window, |_, window, cx| {
+        assert!(view.read(cx).focus.is_focused(window));
+    })
+    .unwrap();
+}
+
 /// 担当者は、ダイアログの中で「新規担当者」として増やし、その行で名前を書く。
 #[gpui_kit::test]
 fn people_are_added_and_named_in_the_list(cx: &mut TestAppContext) {
