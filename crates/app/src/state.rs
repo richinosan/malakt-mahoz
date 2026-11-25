@@ -1620,6 +1620,10 @@ impl MainView {
             return;
         };
         match target {
+            DropTarget::Chat => {
+                self.ai_session
+                    .update(cx, |s, cx| s.attach_task(&drag.id, drag.title.clone(), cx));
+            }
             DropTarget::Workspace(workspace) => {
                 let old = self.tasks.iter().find(|t| t.id == drag.id);
                 if old.is_none_or(|t| t.workspace_id == workspace) {
@@ -3242,6 +3246,8 @@ pub enum DropTarget {
     Row(usize),
     /// このワークスペースへ移す。`None` は未所属。
     Workspace(Option<Id>),
+    /// AI チャットの入力欄に添える。
+    Chat,
 }
 
 /// 見出しのドラッグ。押し始めた位置から少し動くまでは、ただのクリックとして扱う。
