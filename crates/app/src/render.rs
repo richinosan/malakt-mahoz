@@ -272,7 +272,7 @@ fn notice_undo(cx: &mut Context<MainView>) -> impl IntoElement {
     Button::new("notice-undo")
         .icon(app_icon("undo-2").text_color(theme.primary_foreground))
         .ghost()
-        .xsmall()
+        .small()
         .tooltip("元に戻す")
         .on_click(cx.listener(|this, _, _, cx| {
             this.undo(false, cx);
@@ -611,7 +611,7 @@ impl MainView {
             let more = Button::new(("ws-more", ix))
                 .icon(app_icon("ellipsis"))
                 .ghost()
-                .xsmall()
+                .small()
                 .when(!active, |b| {
                     b.opacity(0.).group_hover(group.clone(), |s| s.opacity(1.))
                 })
@@ -814,7 +814,7 @@ impl MainView {
                                 Button::new("add-workspace")
                                     .icon(app_icon("plus"))
                                     .ghost()
-                                    .xsmall()
+                                    .small()
                                     .tooltip("ワークスペースを追加")
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.add_workspace(None, window, cx)
@@ -3444,7 +3444,7 @@ impl MainView {
                             Button::new("ai-track-retry")
                                 .icon(app_icon("refresh-cw"))
                                 .ghost()
-                                .xsmall()
+                                .small()
                                 .tooltip("もう一度更新する")
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.ai_session.update(cx, |s, cx| s.retry_track(&id, cx));
@@ -3492,7 +3492,7 @@ impl MainView {
                             Button::new("ai-note-retry")
                                 .icon(app_icon("refresh-cw"))
                                 .ghost()
-                                .xsmall()
+                                .small()
                                 .tooltip("もう一度整える")
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.ai_session.update(cx, |s, cx| s.retry_arrange(&id, cx));
@@ -3663,7 +3663,7 @@ impl MainView {
             ("1 週間後", Some(7)),
             ("クリア", None),
         ];
-        let mut due = row().gap_1().flex_wrap().child(
+        let mut due = row().gap_1p5().flex_wrap().child(
             Input::new(&self.inputs.due)
                 .id("due-input")
                 .aria_label("期限")
@@ -3687,7 +3687,7 @@ impl MainView {
             );
         }
 
-        let mut percent = row().gap_1().flex_wrap().items_center().child(
+        let mut percent = row().gap_1p5().flex_wrap().items_center().child(
             row()
                 .flex_none()
                 .gap_2()
@@ -3731,7 +3731,7 @@ impl MainView {
                 Button::new("ai-tracked-undo")
                     .icon(app_icon("undo-2"))
                     .ghost()
-                    .xsmall()
+                    .small()
                     .tooltip(format!("AI の更新（{tracked}）を元に戻す"))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.ai_session.update(cx, |s, cx| s.undo_track(&id, cx));
@@ -3739,7 +3739,7 @@ impl MainView {
             );
         }
 
-        let mut categories = row().gap_1().flex_wrap();
+        let mut categories = row().gap_1p5().flex_wrap();
         for (i, c) in task.categories.iter().enumerate() {
             let value = c.clone();
             categories =
@@ -4071,13 +4071,15 @@ impl MainView {
                 )
                 .child(
                     card(cx)
+                        // 行ごとにボタンが並ぶので、行の間を空ける
+                        .gap_3()
                         .child(status_chips)
                         .child(self.property("優先度", cx).child(prio_chips))
                         .child(self.property("担当", cx).child(people))
                         .child(
                             self.property("開始日", cx).child(
                                 row()
-                                    .gap_1()
+                                    .gap_1p5()
                                     .child(
                                         Input::new(&self.inputs.start)
                                             .id("start-input")
@@ -4775,7 +4777,7 @@ impl MainView {
                                 Button::new(("own-preset-delete", ix))
                                     .icon(app_icon("trash"))
                                     .ghost()
-                                    .xsmall()
+                                    .small()
                                     .tooltip("削除")
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         cx.stop_propagation();
