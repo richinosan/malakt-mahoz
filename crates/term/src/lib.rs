@@ -1,6 +1,8 @@
 //! ターミナル。シェルを PTY（Windows は ConPTY）で起こし、画面の中身を端末として解釈する。
 //! 画面には依存しない。描く側は [`Terminal::snapshot`] でマスの並びを受け取る。
 
+pub mod console;
+pub mod drop;
 pub mod keys;
 pub mod profile;
 
@@ -20,6 +22,7 @@ use alacritty_terminal::term::{self, Config, Term, TermMode};
 use alacritty_terminal::tty;
 use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor, Rgb};
 
+pub use drop::{drop_text, PathStyle};
 pub use keys::{Action, Button, Key};
 pub use profile::Profile;
 

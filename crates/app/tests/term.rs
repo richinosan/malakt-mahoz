@@ -547,6 +547,107 @@ fn text_is_selected_copied_pasted_and_scrolled(cx: &mut TestAppContext) {
     assert_eq!(screen(cx).offset, 0);
 }
 
+/// ファイルをドロップすると、その場所が入力の行に入る。空白のある場所は 1 つの引数として届く。
+#[gpui_kit::test]
+fn dropped_files_are_typed_as_paths(cx: &mut TestAppContext) {
+    let (window, view) = start(cx);
+    open_terminal(cx, window);
+    let dir = tempfile::tempdir().unwrap();
+    let image = dir.path().join("my photo.png");
+    let note = dir.path().join("note.txt");
+    std::fs::write(&image, "PNG-OK\n").unwrap();
+    std::fs::write(&note, "TXT-OK\n").unwrap();
+
+    ui(cx, window, |window, cx| window.input("cat ", cx));
+    let pane = cx.update(|cx| {
+        let pane = view.read(cx).ai_pane.clone().expect("チャットが開いている");
+        pane.read(cx).term_pane()
+    });
+    ui(cx, window, |window, cx| {
+        pane.update(cx, |pane, cx| {
+            pane.drop_paths(&[image.clone(), note.clone()], window, cx)
+        });
+    });
+    // 入力の行に、囲んだ場所が入る
+    wait_text(cx, "my photo.png' ");
+    // ドロップのあとは、そのまま打てる
+    ui(cx, window, |window, cx| window.press("enter", cx));
+    wait_text(cx, "PNG-OK\nTXT-OK\n");
+}
+
+/// MCP のボタンは、見ているシェルで有効な登録コマンドを入力の行に入れる。実行はしない。
+/// Cursor は、設定のファイルにその場で書き足す。
+#[gpui_kit::test]
+fn the_mcp_button_types_the_command_and_registers_cursor(cx: &mut TestAppContext) {
+    let (window, _view) = start(cx);
+    // AI のシェルを見ている間は、ボタンを出さない
+    ui(cx, window, |window, cx| window.click("ai-toggle", cx));
+    ui(cx, window, |window, _| {
+        assert!(window.try_find("term-mcp").is_none());
+    });
+    ui(cx, window, |window, cx| window.click("term-new", cx));
+    wait_text(cx, "$");
+    ui(cx, window, |_, _| {});
+
+    // 1 つ目は Claude Code
+    ui(cx, window, |window, cx| window.click("term-mcp", cx));
+    ui(cx, window, |window, cx| {
+        window.press("down", cx);
+        window.press("enter", cx);
+    });
+    // 長いコマンドは、画面の幅で折り返される
+    wait(cx, "登録のコマンド", |t| {
+        t.active_tab().is_some_and(|tab| {
+            tab.terminal
+                .snapshot()
+                .text()
+                .replace('\n', "")
+                .contains("$ claude mcp add --scope user malakt-mahoz -- \"$MALAKT_MAHOZ_BIN\" mcp")
+        })
+    });
+    // 入れただけで、実行していない。そのまま消せる
+    ui(cx, window, |window, cx| window.press("ctrl-u", cx));
+
+    // 3 つ目は Cursor。フォルダーがなければ、そう伝える
+    let home = tempfile::tempdir().unwrap();
+    cx.update(|cx| {
+        term::shared(cx).update(cx, |terms, _| {
+            terms.cursor_home = Some(home.path().to_owned())
+        })
+    });
+    let pick_cursor = |cx: &mut TestAppContext| {
+        ui(cx, window, |window, cx| window.click("term-mcp", cx));
+        ui(cx, window, |window, cx| {
+            window.press("down", cx);
+            window.press("down", cx);
+            window.press("down", cx);
+            window.press("enter", cx);
+        });
+    };
+    pick_cursor(cx);
+    wait(cx, "Cursor がない知らせ", |t| t.error.is_some());
+    assert_eq!(
+        terms(cx, |t| t.error.clone()).unwrap().to_string(),
+        "Cursor のフォルダー（~/.cursor）が見つかりません。"
+    );
+
+    std::fs::create_dir(home.path().join(".cursor")).unwrap();
+    pick_cursor(cx);
+    wait(cx, "登録の知らせ", |t| t.notice.is_some());
+    assert_eq!(
+        terms(cx, |t| t.notice.clone()).unwrap().to_string(),
+        "Cursor に登録しました。"
+    );
+    let saved = std::fs::read_to_string(home.path().join(".cursor/mcp.json")).unwrap();
+    let saved: serde_json::Value = serde_json::from_str(&saved).unwrap();
+    assert_eq!(saved["mcpServers"]["malakt-mahoz"]["args"][0], "mcp");
+    // 知らせは閉じられる
+    ui(cx, window, |window, cx| {
+        window.click("term-error-close", cx)
+    });
+    assert!(terms(cx, |t| t.notice.is_none() && t.error.is_none()));
+}
+
 /// マウスを受け取るプログラムには、クリックがそのまま届く。
 #[gpui_kit::test]
 fn clicks_reach_a_program_that_asks_for_the_mouse(cx: &mut TestAppContext) {
