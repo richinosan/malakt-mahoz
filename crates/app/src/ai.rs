@@ -220,28 +220,34 @@ pub struct Tracked {
     pub label: SharedString,
 }
 
-/// AI が変えたところを短い言葉にする。変えていなければ `None`。
-fn tracked_label(before: &malakt_core::Task, after: &malakt_core::Task) -> Option<String> {
+/// AI が変えたところを短い言葉にする。`now` があれば、今も AI が変えた値のままの項目だけを数える。
+/// 1 つもなければ `None`。
+fn tracked_label(
+    before: &malakt_core::Task,
+    after: &malakt_core::Task,
+    now: Option<&malakt_core::Task>,
+) -> Option<String> {
+    let now = now.unwrap_or(after);
     let mut parts = Vec::new();
-    if before.percent != after.percent {
+    if before.percent != after.percent && now.percent == after.percent {
         parts.push(format!("{}% → {}%", before.percent, after.percent));
     }
-    if before.status != after.status {
+    if before.status != after.status && now.status == after.status {
         parts.push(after.status.label().to_owned());
     }
-    if before.due != after.due {
+    if before.due != after.due && now.due == after.due {
         parts.push(match &after.due {
             Some(due) => format!("期限 {due}"),
             None => "期限なし".to_owned(),
         });
     }
-    if before.start != after.start {
+    if before.start != after.start && now.start == after.start {
         parts.push(match &after.start {
             Some(start) => format!("開始 {start}"),
             None => "開始日なし".to_owned(),
         });
     }
-    if before.priority != after.priority {
+    if before.priority != after.priority && now.priority == after.priority {
         parts.push(format!(
             "優先度 {}",
             malakt_core::view::Priority::of(after.priority).label()
@@ -249,6 +255,9 @@ fn tracked_label(before: &malakt_core::Task, after: &malakt_core::Task) -> Optio
     }
     (!parts.is_empty()).then(|| parts.join("・"))
 }
+
+/// コメントからの更新で、AI が `update_task` に渡せる項目。
+const TRACK_FIELDS: [&str; 6] = ["id", "percent", "status", "due", "start", "priority"];
 
 /// コメントからの更新で AI が呼べるツールか。タスクを読むことと、対象のタスクの更新だけができる。
 fn track_allows(name: &str, args: &Value, tracking: &[String]) -> bool {
@@ -1148,15 +1157,46 @@ impl Session {
         cx.notify();
     }
 
-    /// AI がコメントから更新して、そのままになっているタスクなら、その記録。
-    pub fn tracked_for(&self, task: &malakt_core::Task) -> Option<&Tracked> {
-        self.tracked.get(&task.id).filter(|t| {
-            let after = &t.after;
-            (task.status, task.percent, task.priority)
-                == (after.status, after.percent, after.priority)
-                && task.due == after.due
-                && task.start == after.start
-        })
+    /// AI がコメントから変えて、今もその値のままの項目（「0% → 60%・進行中」など）。
+    /// 元に戻せるものがなければ `None`。
+    pub fn tracked_for(&self, task: &malakt_core::Task) -> Option<String> {
+        let tracked = self.tracked.get(&task.id)?;
+        tracked_label(&tracked.before, &tracked.after, Some(task))
+    }
+
+    /// AI が `update_task` で変えた直後に、変える前の値を控える。
+    fn record_tracked(&mut self, before: malakt_core::Task, cx: &App) {
+        let Ok(after) = self.db.read(cx).store.task(&before.id) else {
+            return;
+        };
+        // 続けて更新したときは、最初の値まで戻せるようにする
+        let before = match self.tracked.remove(&before.id) {
+            Some(old) if old.after.updated_at == before.updated_at => old.before,
+            _ => before,
+        };
+        if let Some(label) = tracked_label(&before, &after, None) {
+            let label = label.into();
+            self.tracked.insert(
+                after.id.clone(),
+                Tracked {
+                    before,
+                    after,
+                    label,
+                },
+            );
+        }
+        // 覚えておく数には上限を付け、古い更新から忘れる
+        while self.tracked.len() > MAX_TRACK_UNDO {
+            let oldest = self
+                .tracked
+                .iter()
+                .min_by_key(|(_, t)| t.after.updated_at)
+                .map(|(id, _)| id.clone());
+            match oldest {
+                Some(id) => self.tracked.remove(&id),
+                None => break,
+            };
+        }
     }
 
     /// 更新できなかったタスクを、もう一度コメントから更新する。
@@ -1294,44 +1334,9 @@ impl Session {
         }
         let ids = self.tracking.clone();
         self.task = Some(cx.spawn(async move |this, cx| {
-            let before: Vec<malakt_core::Task> = tasks.iter().map(|(t, _)| t.clone()).collect();
             let result = Self::track_run(&this, tasks, cx).await;
             // チャットがなくなっていれば、知らせる先もない
             let _ = this.update(cx, |this, cx| {
-                // 途中で失敗しても、そこまでに変えた分は元に戻せるようにする
-                for before in before {
-                    let Ok(after) = this.db.read(cx).store.task(&before.id) else {
-                        continue;
-                    };
-                    // 続けて更新したときは、最初の値まで戻せるようにする
-                    let before = match this.tracked.remove(&before.id) {
-                        Some(old) if old.after.updated_at == before.updated_at => old.before,
-                        _ => before,
-                    };
-                    if let Some(label) = tracked_label(&before, &after) {
-                        let label = label.into();
-                        this.tracked.insert(
-                            after.id.clone(),
-                            Tracked {
-                                before,
-                                after,
-                                label,
-                            },
-                        );
-                    }
-                }
-                // 覚えておく数には上限を付け、古い更新から忘れる
-                while this.tracked.len() > MAX_TRACK_UNDO {
-                    let oldest = this
-                        .tracked
-                        .iter()
-                        .min_by_key(|(_, t)| t.after.updated_at)
-                        .map(|(id, _)| id.clone());
-                    match oldest {
-                        Some(id) => this.tracked.remove(&id),
-                        None => break,
-                    };
-                }
                 if let Err(error) = result {
                     let note: SharedString =
                         format!("AI がコメントからタスクを更新できませんでした: {error}").into();
@@ -2465,18 +2470,22 @@ impl Session {
                         // 自動の整理では、読めなかったことの注記をタスクに書かせない
                         let cleaned = (!s.arranging.is_empty())
                             .then(|| without_fetch_notes(&s.db.read(cx).store, &call.args));
-                        // コメントからの更新では、タイトルと説明を変えさせない
+                        // コメントからの更新では、進捗・状態・期限・開始日・優先度だけを変えさせる
                         let cleaned = if s.tracking.is_empty() {
                             cleaned
                         } else {
                             let mut args = call.args.clone();
                             if let Some(map) = args.as_object_mut() {
-                                map.remove("title");
-                                map.remove("description");
+                                map.retain(|key, _| TRACK_FIELDS.contains(&key.as_str()));
                             }
                             Some(args)
                         };
                         let args = cleaned.as_ref().unwrap_or(&call.args);
+                        // コメントからの更新では、AI が変える前の値を控えて、元に戻せるようにする
+                        let before = (!s.tracking.is_empty() && name == "update_task")
+                            .then(|| args.get("id").and_then(Value::as_str))
+                            .flatten()
+                            .and_then(|id| s.db.read(cx).store.task(id).ok());
                         let result = s.db.update(cx, |db, cx| {
                             // 自分が登録されていれば、コメントの書き手にする
                             let author = db
@@ -2491,6 +2500,9 @@ impl Session {
                             result
                         });
                         s.absorb(&waiting, cx);
+                        if let Some(before) = before {
+                            s.record_tracked(before, cx);
+                        }
                         // AI が書いたコメントは、もう見たものにする
                         if s.comment_mark.is_some() {
                             s.comment_mark = comment_mark(&s.db.read(cx).store);
