@@ -2145,6 +2145,128 @@ fn sidebar_toggles_and_keeps_its_width(cx: &mut TestAppContext) {
     cx.update(|cx| assert_eq!(second_view.read(cx).sidebar_width, SIDEBAR_MAX));
 }
 
+/// 左のメニューの矢印は、小さくても押しやすい大きさで押せる。
+#[gpui_kit::test]
+fn tree_caret_has_room_to_press(cx: &mut TestAppContext) {
+    start(cx);
+    cx.update(|cx| {
+        db::shared(cx).update(cx, |db, _| {
+            let ws = db.store.create_workspace(None, "文化祭").unwrap();
+            db.store.create_workspace(Some(&ws.id), "設営").unwrap();
+        })
+    });
+    let scale = malakt_mahoz::UI_SCALE;
+    let (window, _view) = open(cx, wide());
+    ui(cx, window, |window, cx| {
+        let caret = window.find(("caret", 0usize)).bounds();
+        assert!(caret.size.width >= px(22. * scale), "{caret:?}");
+        assert!(caret.size.height >= px(28. * scale), "{caret:?}");
+        // 行の名前とは重ならず、押すとたたむ
+        let name = window.find(("ws", 0usize)).bounds();
+        assert!(caret.right() <= name.left());
+        assert!(window.try_find(("ws", 1usize)).is_some());
+        window.click(("caret", 0usize), cx);
+    });
+    ui(cx, window, |window, _| {
+        assert!(window.try_find(("ws", 1usize)).is_none());
+    });
+}
+
+/// タスクの詳細は、左の境界をドラッグして幅を変えられる。幅は保存され、一覧より広くはならない。
+#[gpui_kit::test]
+fn detail_panel_resizes_and_keeps_its_width(cx: &mut TestAppContext) {
+    use malakt_mahoz::state::{PANEL_MAX, PANEL_MIN, PANEL_WIDTH};
+    start(cx);
+    let scale = malakt_mahoz::UI_SCALE;
+    let (window, view) = open(cx, win(1600., 800.));
+    ui(cx, window, |window, cx| {
+        window.click("nav-all", cx);
+        window.click("quick-add", cx);
+        window.input("会場を決める", cx);
+        window.press("enter", cx);
+    });
+    ui(cx, window, |window, cx| window.click(("title", 0usize), cx));
+    let width = |cx: &mut TestAppContext| {
+        let mut width = px(0.);
+        ui(cx, window, |window, _| {
+            // 左の枠の 1px を足すと、カラムの幅になる
+            width = window.find("detail-panel").bounds().size.width + px(1.);
+        });
+        width
+    };
+    assert_eq!(width(cx), px(PANEL_WIDTH * scale));
+    // 詳細は一覧の右に並ぶ。一覧の行は詳細の下に隠れない
+    let beside = |cx: &mut TestAppContext| {
+        ui(cx, window, |window, _| {
+            let panel = window.find("detail-panel").bounds();
+            let row = window.find(("title", 0usize)).bounds();
+            assert!(row.right() <= panel.left(), "一覧の行が詳細に隠れる");
+            assert!(row.size.width >= px(120. * scale), "一覧の行が狭すぎる");
+            let add = window.find("new-task-open").bounds();
+            assert!(add.right() <= panel.left(), "一覧のボタンが詳細に隠れる");
+        });
+    };
+    beside(cx);
+
+    // 境界を左へ動かすと広がり、右へ動かすと狭まる。範囲の外には出ない
+    cx.update(|cx| {
+        view.update(cx, |v, cx| {
+            v.start_panel_resize(1000., cx);
+            v.drag_panel(1000. - 100. * scale, cx);
+            assert_eq!(v.panel_width, PANEL_WIDTH + 100.);
+            v.drag_panel(99999., cx);
+            assert_eq!(v.panel_width, PANEL_MIN);
+            v.drag_panel(1000. - 200. * scale, cx);
+            v.finish_panel_resize(cx);
+            assert_eq!(v.panel_width, PANEL_WIDTH + 200.);
+            assert!(v.panel_resize.is_none());
+        })
+    });
+    assert_eq!(width(cx), px((PANEL_WIDTH + 200.) * scale));
+    let saved = store(cx, |s| s.setting("panel.width").unwrap());
+    assert_eq!(
+        saved.as_deref(),
+        Some((PANEL_WIDTH + 200.).to_string().as_str())
+    );
+
+    // いちばん広くしても、一覧の幅に収まる
+    cx.update(|cx| {
+        view.update(cx, |v, cx| {
+            v.start_panel_resize(1000., cx);
+            v.drag_panel(-99999., cx);
+            v.finish_panel_resize(cx);
+            assert_eq!(v.panel_width, PANEL_MAX);
+        })
+    });
+    beside(cx);
+
+    // 一覧を並べる幅がないウィンドウでは、詳細が全面を使う。境界は出ない
+    let (narrow, narrow_view) = open(cx, win(900., 800.));
+    ui(cx, narrow, |window, cx| {
+        narrow_view.update(cx, |v, cx| v.go(Nav::All, cx));
+        window.render_frame(cx);
+        window.click(("title", 0usize), cx);
+    });
+    ui(cx, narrow, |window, _| {
+        let panel = window.find("detail-panel").bounds();
+        let sidebar = malakt_mahoz::state::SIDEBAR_WIDTH;
+        assert_eq!(panel.size.width, px((900. - sidebar) * scale));
+        assert!(window.try_find("panel-resize").is_none());
+    });
+    cx.update_window(narrow, |_, window, _| window.remove_window())
+        .unwrap();
+
+    // 新しく開いたウィンドウも同じ幅で始まる。境界のダブルクリックで最初の幅に戻る
+    let (_second, second_view) = open(cx, wide());
+    cx.update(|cx| {
+        assert_eq!(second_view.read(cx).panel_width, PANEL_MAX);
+        view.update(cx, |v, cx| v.reset_panel_width(cx));
+    });
+    assert_eq!(width(cx), px(PANEL_WIDTH * scale));
+    let saved = store(cx, |s| s.setting("panel.width").unwrap());
+    assert_eq!(saved.as_deref(), Some(PANEL_WIDTH.to_string().as_str()));
+}
+
 /// 表の列は、幅を変え、並べ替え、隠せる。見出しのメニューで並び順を変えられる。どれも保存される。
 #[gpui_kit::test]
 fn table_columns_resize_reorder_hide_and_sort(cx: &mut TestAppContext) {
