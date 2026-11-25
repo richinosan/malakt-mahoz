@@ -194,6 +194,17 @@ pub struct Outcome {
     pub errors: Vec<String>,
 }
 
+/// Windows の予約した通知の id の長さ。Windows が受け付けるのは 15 文字まで。
+pub const TOAST_ID_CHARS: usize = 12;
+const _: () = assert!(TOAST_ID_CHARS <= 15);
+
+/// タスクから決まる、Windows の予約した通知の id。
+pub fn toast_id(task_id: &str) -> String {
+    let mut id = digest(&[task_id]);
+    id.truncate(TOAST_ID_CHARS);
+    id
+}
+
 /// 中身の要約（FNV-1a、16 進 16 桁）。版が変わっても同じ値になる。
 pub fn digest(parts: &[&str]) -> String {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
@@ -464,5 +475,21 @@ impl Os for Memory {
     fn drop_item(&mut self, external: &str) -> std::result::Result<(), String> {
         self.items.remove(external);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Windows は、16 文字の id を「大きすぎます」と断る。
+    #[test]
+    fn toast_ids_fit_the_windows_limit_and_stay_the_same() {
+        let a = toast_id("01JDF3Z8Q4X7M2N5P9R6S1T0VW");
+        let b = toast_id("01JDF3Z8Q4X7M2N5P9R6S1T0VX");
+        assert_eq!(a.chars().count(), TOAST_ID_CHARS);
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_ne!(a, b);
+        assert_eq!(a, toast_id("01JDF3Z8Q4X7M2N5P9R6S1T0VW"));
     }
 }
