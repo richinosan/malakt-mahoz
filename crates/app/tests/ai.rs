@@ -15,7 +15,7 @@ use malakt_ai::shell::Spec;
 use malakt_ai::{Effort, Provider};
 use malakt_core::{Scope, Status, Store, TaskDraft, TaskFilter};
 use malakt_mahoz::ai::{
-    self, Item, KeyState, LineKind, RunKind, Session, ShellPlace, ToolState, Watch,
+    self, GithubAccount, Item, KeyState, LineKind, RunKind, Session, ShellPlace, ToolState, Watch,
     DEFAULT_WATCH_INSTRUCTION, MAX_CHATS,
 };
 use malakt_mahoz::{db, AiConfig, AiPane, MainView};
@@ -31,6 +31,8 @@ struct World {
     sent: Sent,
     /// gh が返す中身に付け足す文字。変えると「GitHub 側で変化があった」ことになる。
     github: Arc<Mutex<String>>,
+    /// gh にログインしているアカウント。`None` はログインしていない。
+    account: Arc<Mutex<Option<String>>>,
     replies: Arc<Mutex<VecDeque<Result<Value, String>>>>,
     fetched: Arc<Mutex<Vec<String>>>,
 }
@@ -60,6 +62,7 @@ fn start_with(cx: &mut TestAppContext, store: Store) -> World {
         keys: Arc::new(MemoryKeys::default()),
         sent: Sent::default(),
         github: Arc::default(),
+        account: Arc::default(),
         replies: Arc::default(),
         fetched: Arc::default(),
     };
@@ -69,6 +72,7 @@ fn start_with(cx: &mut TestAppContext, store: Store) -> World {
         world.fetched.clone(),
     );
     let github = world.github.clone();
+    let account = world.account.clone();
     let config = AiConfig {
         keys: world.keys.clone(),
         env: Arc::new(|_| None),
@@ -101,6 +105,10 @@ fn start_with(cx: &mut TestAppContext, store: Store) -> World {
         gh: Arc::new(move |link| {
             let state = github.lock().unwrap().clone();
             Spec::shell(&format!("echo fetched {}{state}", link.url()))
+        }),
+        whoami: Arc::new(move |_| match &*account.lock().unwrap() {
+            Some(login) => vec![Spec::shell("exit 1"), Spec::shell(&format!("echo {login}"))],
+            None => vec![Spec::shell("exit 1")],
         }),
     };
     cx.update(|cx| malakt_mahoz::init_with(store, config, cx));
@@ -552,6 +560,41 @@ fn the_stop_button_cancels_a_pending_confirmation(cx: &mut TestAppContext) {
     ui(cx, window, |window, cx| window.click("ai-stop", cx));
     assert!(read(cx, |s| !s.busy && s.pending.is_none()));
     assert!(read(cx, |s| s.shell.is_empty()), "コマンドは動いていない");
+}
+
+/// gh にログインしているアカウントを読み、設定に出して、AI に伝える。
+#[gpui_kit::test]
+fn the_github_account_is_read_from_gh(cx: &mut TestAppContext) {
+    let world = start(cx);
+    world.keys.set(Provider::Claude, "k").unwrap();
+    let (window, view) = open(cx, wide());
+    let pane = open_chat(cx, window, &view);
+    open_settings(cx, window, &pane);
+
+    // ログインしていない
+    ui(cx, window, |window, cx| window.click("ai-github-read", cx));
+    wait(cx, "アカウントを読み終わる", |s| {
+        *s.github() == GithubAccount::Missing
+    });
+    ui(cx, window, |window, _| {
+        assert!(window.find("ai-github-account").visible());
+    });
+
+    // ログインしたあとに読み直すと、名前が出る。先に失敗したコマンドの次を試している
+    *world.account.lock().unwrap() = Some("octo-cat".into());
+    ui(cx, window, |window, cx| window.click("ai-github-read", cx));
+    wait(cx, "アカウントを読み終わる", |s| {
+        *s.github() == GithubAccount::Login("octo-cat".into())
+    });
+    // シェルには出さない
+    assert_eq!(read(cx, |s| s.shell.len()), 0);
+
+    // AI には、メッセージの補足で伝える
+    world.reply(text_reply("はい"));
+    say(cx, window, &pane, "自分のレビュー待ちは？");
+    wait(cx, "返事が来る", |s| !s.busy);
+    let body = world.sent()[0].2.to_string();
+    assert!(body.contains("ユーザーの GitHub アカウントは octo-cat です"));
 }
 
 /// メッセージに GitHub のリンクがあると、gh で中身を取ってきて AI に渡す。

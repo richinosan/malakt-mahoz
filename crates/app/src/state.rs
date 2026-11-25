@@ -4173,6 +4173,7 @@ bundled_icons! {
         "square",
         "arrow-up",
         "refresh-cw",
+        "github",
         "check",
         "play",
         "menu",

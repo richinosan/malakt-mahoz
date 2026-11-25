@@ -411,6 +411,8 @@ pub struct AiConfig {
     pub get: Arc<GetFn>,
     /// GitHub のリンクを取りに行くコマンド。
     pub gh: Arc<dyn Fn(&Link) -> Spec + Send + Sync>,
+    /// `gh` にログインしているアカウントを調べるコマンド（引数は、GitHub に通信してよいか）。
+    pub whoami: Arc<dyn Fn(bool) -> Vec<Spec> + Send + Sync>,
 }
 
 impl Default for AiConfig {
@@ -421,8 +423,52 @@ impl Default for AiConfig {
             post: Arc::new(malakt_ai::http::post_json),
             get: Arc::new(malakt_ai::http::get_text),
             gh: Arc::new(Link::gh),
+            whoami: Arc::new(github::whoami),
         }
     }
+}
+
+/// `gh` にログインしている、ユーザーの GitHub のアカウント。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GithubAccount {
+    /// まだ調べていない
+    Unknown,
+    Login(SharedString),
+    /// `gh` がないか、ログインしていない
+    Missing,
+}
+
+/// `gh` の返事を待つ長さ。過ぎたら止める。
+const WHOAMI_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// コマンドを順に試して、最初に読めたアカウントの名前を返す。シェルの画面には出さない。
+fn read_login(specs: &[Spec]) -> Option<String> {
+    specs.iter().find_map(|spec| {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let handle = shell::spawn(spec, move |event| {
+            // 待つのをやめたあとの出力は、送れなくてよい
+            let _ = tx.send(event);
+        })
+        .ok()?;
+        let until = std::time::Instant::now() + WHOAMI_TIMEOUT;
+        let mut stdout = String::new();
+        loop {
+            match rx.recv_timeout(until.saturating_duration_since(std::time::Instant::now())) {
+                Ok(shell::Event::Stdout(line)) => {
+                    stdout.push_str(&line);
+                    stdout.push('\n');
+                }
+                Ok(shell::Event::Stderr(_)) => {}
+                Ok(shell::Event::Exit(Some(0))) => return github::parse_login(&stdout),
+                Ok(shell::Event::Exit(_)) => return None,
+                Err(_) => {
+                    // 止められなくても、このコマンドの結果は使わない
+                    let _ = handle.kill();
+                    return None;
+                }
+            }
+        }
+    })
 }
 
 /// 選んでいるサービスの API キーの状態。
@@ -515,6 +561,9 @@ pub struct Session {
     models: HashMap<Provider, String>,
     pub effort: Effort,
     pub key: KeyState,
+    github: GithubAccount,
+    /// アカウントを読みに行った回数。古い結果を使わないために数える。
+    github_read: u64,
     /// サービスから取ってきたモデルの一覧。
     pub listed: Vec<SharedString>,
     /// サービスの一覧にあった、モデルの表示名。
@@ -778,6 +827,8 @@ impl Session {
             models,
             effort,
             key: KeyState::Unknown,
+            github: GithubAccount::Unknown,
+            github_read: 0,
             listed: Vec::new(),
             model_names,
             catalog: None,
@@ -2252,6 +2303,44 @@ impl Session {
                 };
                 this.arrange_retry = true;
                 this.track_retry = true;
+                // 設定に名前がなかったアカウントを、GitHub に聞く
+                if matches!(this.key, KeyState::Present { .. })
+                    && this.github == GithubAccount::Missing
+                {
+                    this.read_github(cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// ユーザーの GitHub のアカウント。
+    pub fn github(&self) -> &GithubAccount {
+        &self.github
+    }
+
+    /// ユーザーの GitHub のアカウントを、`gh` から読み直す。
+    /// API キーがなければ、`gh` の設定を読むだけで、GitHub には通信しない。
+    pub fn read_github(&mut self, cx: &mut Context<Self>) {
+        let specs = (self.config.whoami)(matches!(self.key, KeyState::Present { .. }));
+        self.github_read += 1;
+        let read = self.github_read;
+        cx.spawn(async move |this, cx| {
+            let login = cx
+                .background_executor()
+                .spawn(async move { read_login(&specs) })
+                .await;
+            // チャットがもうなければ、知らせる先もない
+            let _ = this.update(cx, |this, cx| {
+                // あとから読み直していたら、そちらの結果を使う
+                if this.github_read != read {
+                    return;
+                }
+                this.github = match login {
+                    Some(login) => GithubAccount::Login(login.into()),
+                    None => GithubAccount::Missing,
+                };
                 cx.notify();
             });
         })
@@ -2789,8 +2878,11 @@ impl Session {
         // 最初の指示は会話の間変えない。日付と今の画面は、最後のメッセージに添える
         let system = this
             .update(cx, |s, cx| {
-                let note =
-                    tools::turn_note(&malakt_core::view::now(), place, &s.workspace_context(cx));
+                let mut extra = s.workspace_context(cx);
+                if let GithubAccount::Login(login) = &s.github {
+                    extra = format!("{}\n{extra}", github::account_note(login));
+                }
+                let note = tools::turn_note(&malakt_core::view::now(), place, &extra);
                 if let Some(Turn::User(message)) = s.turns.last_mut() {
                     message.push_str(&note);
                 }
