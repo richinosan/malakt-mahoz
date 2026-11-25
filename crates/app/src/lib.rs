@@ -164,6 +164,8 @@ pub fn init_with(store: malakt_core::Store, ai: AiConfig, cx: &mut App) {
         items: vec![
             MenuItem::action("新しいタスク", shortcuts::NewTask),
             MenuItem::action("新しいウィンドウ", NewWindow),
+            MenuItem::action("元に戻す", shortcuts::Undo),
+            MenuItem::action("やり直す", shortcuts::Redo),
             MenuItem::action("検索", shortcuts::Find),
             MenuItem::action("AI チャット", ToggleAi),
             MenuItem::action("全画面", shortcuts::ToggleFullscreen),

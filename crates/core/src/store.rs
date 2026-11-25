@@ -14,6 +14,8 @@ use crate::{schema, Error, Result};
 /// 書き込みはすべてトランザクションで行う。複数ウィンドウからは 1 つの `Store` を共有する。
 pub struct Store {
     pub(crate) conn: Connection,
+    /// 元に戻す・やり直しの段（`undo`）。
+    pub(crate) history: crate::undo::History,
 }
 
 /// ディスクの使用量（バイト）。
@@ -108,7 +110,11 @@ impl Store {
         conn.pragma_update(None, "foreign_keys", "ON")?;
         conn.set_prepared_statement_cache_capacity(64);
         schema::migrate(&mut conn)?;
-        Ok(Self { conn })
+        crate::undo::install(&conn)?;
+        Ok(Self {
+            conn,
+            history: Default::default(),
+        })
     }
 
     // ---- ワークスペース ----

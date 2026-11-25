@@ -3442,3 +3442,104 @@ fn standard_keys_work_on_the_list(cx: &mut TestAppContext) {
     key(cx, "secondary-,");
     cx.update(|cx| assert_eq!(view.read(cx).modal, Modal::Appearance));
 }
+
+/// Ctrl+Z で元に戻し、Ctrl+Y でやり直す。編集、削除、画面の外からの変更（AI など）、貼り付けのどれも戻せる。
+#[gpui_kit::test]
+fn undo_redo_and_paste_work_with_keys(cx: &mut TestAppContext) {
+    start(cx);
+    let ws = cx.update(|cx| {
+        db::shared(cx).update(cx, |db, _| {
+            let ws = db.store.create_workspace(None, "仕事").unwrap();
+            for title in ["一", "二"] {
+                let draft = malakt_core::TaskDraft {
+                    title: title.into(),
+                    ..Default::default()
+                };
+                db.store.create_task(Some(&ws.id), &draft).unwrap();
+            }
+            ws.id
+        })
+    });
+    let (window, view) = open(cx, wide());
+    cx.update(|cx| view.update(cx, |v, cx| v.go(Nav::Workspace(ws.clone()), cx)));
+    let key =
+        |cx: &mut TestAppContext, key: &str| ui(cx, window, |window, cx| window.press(key, cx));
+    let titles = |cx: &mut TestAppContext| {
+        let mut titles: Vec<String> = all_tasks(cx).into_iter().map(|t| t.title).collect();
+        titles.sort();
+        titles
+    };
+    ui(cx, window, |window, cx| {
+        view.read(cx).focus.clone().focus(window, cx)
+    });
+    let first = cx.update(|cx| {
+        let v = view.read(cx);
+        v.tasks[v.visible[0]].id.clone()
+    });
+
+    // タイトルを変えて、戻して、やり直す
+    key(cx, "down");
+    key(cx, "f2");
+    ui(cx, window, |window, cx| {
+        window.input("一番", cx);
+        window.press("enter", cx);
+    });
+    key(cx, "escape");
+    assert_eq!(store(cx, |s| s.task(&first).unwrap()).title, "一番");
+    key(cx, "secondary-z");
+    assert_eq!(store(cx, |s| s.task(&first).unwrap()).title, "一");
+    key(cx, "secondary-shift-z");
+    assert_eq!(store(cx, |s| s.task(&first).unwrap()).title, "一番");
+
+    // 削除を戻す
+    key(cx, "delete");
+    ui(cx, window, |window, cx| {
+        window.click("confirm-delete-tasks", cx)
+    });
+    assert_eq!(titles(cx), ["二"]);
+    key(cx, "secondary-z");
+    assert_eq!(titles(cx), ["一番", "二"]);
+
+    // 画面の操作を通らない変更（AI が変えた分）も、1 つ前の操作として戻せる
+    cx.update(|cx| {
+        db::shared(cx).update(cx, |db, cx| {
+            let mut draft = malakt_core::TaskDraft::from(&db.store.task(&first).unwrap());
+            draft.priority = 1;
+            db.store.update_task(&first, &draft).unwrap();
+            cx.notify();
+        })
+    });
+    cx.run_until_parked();
+    key(cx, "secondary-z");
+    let task = store(cx, |s| s.task(&first).unwrap());
+    assert_eq!((task.title.as_str(), task.priority), ("一番", 0));
+
+    // 文字を貼り付けると、1 行が 1 つのタスクになる。戻すと、まとめて消える
+    cx.update(|cx| {
+        cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(
+            "牛乳を買う\n\nhttps://example.com/a\n".into(),
+        ))
+    });
+    key(cx, "secondary-v");
+    assert_eq!(
+        titles(cx),
+        ["https://example.com/a", "一番", "二", "牛乳を買う"]
+    );
+    assert!(all_tasks(cx)
+        .iter()
+        .all(|t| t.workspace_id.as_deref() == Some(ws.as_str())));
+    key(cx, "secondary-z");
+    assert_eq!(titles(cx), ["一番", "二"]);
+
+    // コピーしたタスクを貼り付けると、写しができる
+    key(cx, "home");
+    key(cx, "secondary-c");
+    key(cx, "secondary-v");
+    assert_eq!(titles(cx), ["一番", "一番", "二"]);
+
+    // 入力欄の中の Ctrl+Z は文字の編集で、タスクは戻らない
+    key(cx, "secondary-f");
+    ui(cx, window, |window, cx| window.input("一", cx));
+    key(cx, "secondary-z");
+    assert_eq!(all_tasks(cx).len(), 3);
+}
