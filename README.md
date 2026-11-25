@@ -13,6 +13,7 @@
 | --- | --- |
 | ![ホーム](docs/images/home.png) | ![タスクの詳細](docs/images/detail.png) |
 | ![ペイン](docs/images/panes.png) | ![AI チャットとシェル](docs/images/ai.png) |
+| ![テーマの見本](docs/images/themes.png) | ![テーマ「ガラスと青い空」](docs/images/theme-sky.png) |
 
 ![ダークモード](docs/images/dark.png)
 
@@ -28,6 +29,7 @@
 - **ホーム**: 期限が 30 日以内のタスクと期限が過ぎたタスク
 - **通知**: 期限が今日のタスクと、ほかの人からの完了報告
 - **ペイン**: 画面を分けて、配置をプリセットとして保存
+- **見た目**: テーマ 10 個、背景の画像、書体、色。自分のテーマを保存
 - **マルチウィンドウ**: `Ctrl/⌘ + N`
 - **ロック**: パスキー（Windows Hello、Touch ID、fprintd）。`Ctrl/⌘ + L`
 - **エクスポート / インポート**: 全データを zip 1 つに書き出し、別の端末で取り込み
