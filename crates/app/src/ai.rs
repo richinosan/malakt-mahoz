@@ -710,30 +710,26 @@ impl Session {
         }
     }
 
-    /// 全体の分と、今開いているワークスペースの分を合わせた、AI に伝える前提と指示。
-    fn whole_context(&self, cx: &App) -> String {
+    /// 今開いているワークスペースについての、AI に伝える前提と指示。
+    fn workspace_context(&self, cx: &App) -> String {
         let store = &self.db.read(cx).store;
-        let mut context = self.context.clone();
         let Some(id) = &self.workspace else {
-            return context;
+            return String::new();
         };
-        // 読めなければ、全体の分だけを渡す（次の操作でデータベースのエラーとして出る）
+        // 読めなければ添えない（次の操作でデータベースのエラーとして出る）
         let own = store
             .setting(&workspace_context_key(id))
             .ok()
             .flatten()
             .unwrap_or_default();
-        if !own.trim().is_empty() {
-            let name = store.workspace(id).map(|w| w.name).unwrap_or_default();
-            if !context.is_empty() {
-                context.push_str("\n\n");
-            }
-            context.push_str(&format!(
-                "今開いているワークスペース「{name}」についての前提と指示:\n{}",
-                own.trim()
-            ));
+        if own.trim().is_empty() {
+            return String::new();
         }
-        context
+        let name = store.workspace(id).map(|w| w.name).unwrap_or_default();
+        format!(
+            "ワークスペース「{name}」についての前提と指示:\n{}",
+            own.trim()
+        )
     }
 
     /// いつも AI に伝える前提と指示を保存する。
@@ -1654,12 +1650,20 @@ impl Session {
         })?
         .0;
 
-        let context = this
-            .read_with(cx, |s, cx| s.whole_context(cx))
+        // 最初の指示は会話の間変えない。日付と今の画面は、最後のメッセージに添える
+        let system = this
+            .update(cx, |s, cx| {
+                let note =
+                    tools::turn_note(&malakt_core::view::today(), place, &s.workspace_context(cx));
+                if let Some(Turn::User(message)) = s.turns.last_mut() {
+                    message.push_str(&note);
+                }
+                tools::system_prompt(&s.context)
+            })
             .map_err(gone)?;
-        let system = tools::system_prompt(&malakt_core::view::today(), place, &context);
+        let mut recovered = false;
         for _ in 0..MAX_ROUNDS {
-            let (wire, reply) = Self::complete(
+            let result = Self::complete(
                 this,
                 config,
                 provider,
@@ -1670,7 +1674,22 @@ impl Session {
                 &system,
                 cx,
             )
-            .await?;
+            .await;
+            let (wire, reply) = match result {
+                // 設定やアプリの更新で最初の指示が変わると、前の考えのブロックをサーバーが断る。
+                // 考えのブロックを外して、1 度だけやり直す
+                Err(error) if !recovered && wire::is_thinking_mismatch(&error) => {
+                    recovered = true;
+                    let stripped = this
+                        .update(cx, |s, _| wire::strip_thinking(&mut s.turns))
+                        .map_err(gone)?;
+                    if !stripped {
+                        return Err(error);
+                    }
+                    continue;
+                }
+                result => result?,
+            };
             let calls = reply.calls.clone();
             let first_tool = this
                 .update(cx, |s, cx| {

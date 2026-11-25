@@ -514,6 +514,39 @@ fn cursor_parse(response: &Value) -> Result<Reply, String> {
     Ok(reply)
 }
 
+/// 会話の中の、考えた内容のブロックをすべて外す。外したものがあれば `true`。
+/// 最初の指示やツールが変わったあとは、前の考えのブロックを送り返すとサーバーが断る。
+/// すべて外せば、そのまま続けられる。
+pub fn strip_thinking(turns: &mut [Turn]) -> bool {
+    let mut stripped = false;
+    for turn in turns {
+        let Turn::Assistant { raw, .. } = turn else {
+            continue;
+        };
+        let Some((Wire::Messages, Value::Array(blocks))) = raw else {
+            continue;
+        };
+        let before = blocks.len();
+        blocks.retain(|block| {
+            !matches!(
+                block["type"].as_str(),
+                Some("thinking" | "redacted_thinking")
+            )
+        });
+        stripped |= blocks.len() != before;
+        if blocks.is_empty() {
+            // 残るものがなければ、文とツールの呼び出しから組み立て直す
+            *raw = None;
+        }
+    }
+    stripped
+}
+
+/// サーバーが、考えた内容のブロックを別の会話のものとして断ったか。
+pub fn is_thinking_mismatch(error: &str) -> bool {
+    error.contains("`signature` in `thinking` block")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -650,6 +683,30 @@ mod tests {
         let messages = body["messages"].as_array().unwrap();
         assert_eq!(messages.len(), 3);
         assert_eq!(messages[2]["content"][1]["tool_use_id"], "b");
+    }
+
+    #[test]
+    fn thinking_blocks_are_stripped_from_every_turn() {
+        let raw = json!([
+            {"type": "thinking", "thinking": "", "signature": "sig"},
+            {"type": "redacted_thinking", "data": "x"},
+            {"type": "tool_use", "id": "a", "name": "list_tasks", "input": {}},
+        ]);
+        let mut turns = conversation(Some((Wire::Messages, raw)));
+        assert!(strip_thinking(&mut turns));
+        let tools = tools();
+        let body = body(Wire::Messages, &request(&turns, &tools, Effort::Default));
+        assert_eq!(
+            body["messages"][1]["content"],
+            json!([{"type": "tool_use", "id": "a", "name": "list_tasks", "input": {}}])
+        );
+        assert!(!strip_thinking(&mut turns));
+        assert!(is_thinking_mismatch(
+            "サーバーがエラーを返しました（400）。messages.1.content.0: Invalid `signature` in `thinking` block."
+        ));
+        assert!(!is_thinking_mismatch(
+            "サーバーがエラーを返しました（429）。"
+        ));
     }
 
     #[test]

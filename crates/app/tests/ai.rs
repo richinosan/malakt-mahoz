@@ -40,6 +40,10 @@ impl World {
         self.replies.lock().unwrap().push_back(Ok(value));
     }
 
+    fn fail(&self, error: &str) {
+        self.replies.lock().unwrap().push_back(Err(error.into()));
+    }
+
     fn sent(&self) -> Vec<Request> {
         self.sent.lock().unwrap().clone()
     }
@@ -349,7 +353,10 @@ fn the_ai_creates_a_task_and_the_list_updates(cx: &mut TestAppContext) {
     assert!(headers.contains(&("x-api-key".into(), "sk-ant-1".into())));
     assert_eq!(first["model"], "claude-opus-5-5");
     assert!(first.get("output_config").is_none(), "effort は標準のまま");
-    assert!(first["system"].as_str().unwrap().contains("すべてのタスク"));
+    // 今の画面は、最初の指示ではなくメッセージに添える
+    let first_message = first["messages"][0]["content"].as_str().unwrap();
+    assert!(first_message.contains("すべてのタスク"), "{first_message}");
+    assert!(!first["system"].as_str().unwrap().contains("すべてのタスク"));
     assert!(first["tools"].as_array().unwrap().len() >= 10);
     // 2 回目は、返ってきたブロックをそのまま返し、ツールの結果を付ける
     let messages = sent[1].2["messages"].as_array().unwrap();
@@ -522,7 +529,10 @@ fn ctrl_c_kills_the_running_command(cx: &mut TestAppContext) {
     let messages = world.sent()[1].2["messages"].as_array().unwrap().clone();
     assert_eq!(messages[2]["content"][0]["tool_use_id"], "t1");
     assert_eq!(messages[2]["content"][0]["is_error"], true);
-    assert_eq!(messages[3]["content"], "もういいよ");
+    assert!(messages[3]["content"]
+        .as_str()
+        .unwrap()
+        .starts_with("もういいよ\n\n（アプリからの補足）"));
 }
 
 /// 「止める」ボタンでも止まる。確認を待っている間でも止められる。
@@ -1368,9 +1378,8 @@ fn a_new_task_is_arranged_by_the_ai(cx: &mut TestAppContext) {
     assert!(message.contains(&format!("## タスク（id: {task}）")));
     assert!(message.contains("fetched https://github.com/o/r/pull/7"));
     // 今見ている画面も伝える
-    let system = sent[0].2["system"].as_str().unwrap();
-    assert!(system.contains("すべてのタスク"), "{system}");
-    assert!(system.contains("のレビュー（ID: "), "{system}");
+    assert!(message.contains("すべてのタスク"), "{message}");
+    assert!(message.contains("のレビュー（ID: "), "{message}");
     assert_eq!(all_tasks(cx)[0].title, "ログインを直す PR のレビュー");
     assert!(read(cx, |s| s.arranging.is_empty()));
     ui(cx, window, |window, _| {
@@ -1459,6 +1468,11 @@ fn the_workspace_context_reaches_the_ai(cx: &mut TestAppContext) {
     wait(cx, "返事が来る", |s| !s.busy && s.items.len() >= 2);
     let system = world.sent()[0].2["system"].as_str().unwrap().to_owned();
     assert!(system.ends_with("敬語で答える"), "{system}");
+    let first = world.sent()[0].2["messages"][0]["content"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(!first.contains("前提と指示"), "{first}");
 
     // そのワークスペースを開くと、両方が渡る
     ui(cx, window, |_, cx| {
@@ -1469,17 +1483,64 @@ fn the_workspace_context_reaches_the_ai(cx: &mut TestAppContext) {
     world.reply(text_reply("はい。"));
     say(cx, window, &pane, "もう一度");
     wait(cx, "返事が来る", |s| !s.busy && s.items.len() >= 4);
-    let system = world.sent()[1].2["system"].as_str().unwrap().to_owned();
+    // 最初の指示は変えず、ワークスペースの分はメッセージに添える
+    let second = world.sent()[1].2.clone();
+    assert_eq!(second["system"].as_str().unwrap(), system);
+    let message = second["messages"][2]["content"].as_str().unwrap();
     assert!(
-        system.ends_with(
-            "敬語で答える\n\n今開いているワークスペース「仕事」についての前提と指示:\nPR のタスクは優先度を高にする"
+        message.ends_with(
+            "ワークスペース「仕事」についての前提と指示:\nPR のタスクは優先度を高にする"
         ),
-        "{system}"
+        "{message}"
     );
+    // 前のメッセージは、送ったときのまま
+    assert_eq!(second["messages"][0]["content"].as_str().unwrap(), first);
 
     // 長すぎるものは保存しない
     let long = "あ".repeat(malakt_mahoz::ai::MAX_WORKSPACE_CONTEXT_CHARS + 1);
     assert!(malakt_mahoz::ai::workspace_context_error(&long).is_some());
+}
+
+/// 設定を変えて最初の指示が変わると、前の考えのブロックをサーバーが断る。
+/// 考えのブロックを外してやり直し、エラーは出さない。
+#[gpui_kit::test]
+fn a_rejected_thinking_block_is_dropped_and_retried(cx: &mut TestAppContext) {
+    let world = start(cx);
+    world.keys.set(Provider::Claude, "k").unwrap();
+    let (window, view) = open(cx, wide());
+    let pane = open_chat(cx, window, &view);
+    world.reply(json!({"stop_reason": "end_turn", "content": [
+        {"type": "thinking", "thinking": "", "signature": "sig"},
+        {"type": "text", "text": "はい。"},
+    ]}));
+    say(cx, window, &pane, "こんにちは");
+    wait(cx, "返事が来る", |s| !s.busy && s.items.len() >= 2);
+
+    let session = session(cx);
+    cx.update(|cx| session.update(cx, |s, cx| s.set_context("敬語で答える", cx)));
+    world.fail(
+        "サーバーがエラーを返しました（400）。messages.1.content.0: Invalid `signature` in `thinking` block. The block is bound to a different conversation.",
+    );
+    world.reply(text_reply("かしこまりました。"));
+    say(cx, window, &pane, "もう一度");
+    wait(cx, "返事が来る", |s| !s.busy && s.items.len() >= 4);
+
+    let sent = world.sent();
+    assert_eq!(sent.len(), 3);
+    assert_eq!(sent[1].2["messages"][1]["content"][0]["type"], "thinking");
+    assert_eq!(
+        sent[2].2["messages"][1]["content"],
+        json!([{"type": "text", "text": "はい。"}])
+    );
+    let items = read(cx, |s| s.items.clone());
+    assert!(
+        !items.iter().any(|item| matches!(item, Item::Error(_))),
+        "{items:?}"
+    );
+    assert_eq!(
+        items.last(),
+        Some(&Item::Assistant("かしこまりました。".into()))
+    );
 }
 
 /// Enter で送り、Shift+Enter は改行になる。
@@ -1501,10 +1562,10 @@ fn enter_sends_and_shift_enter_breaks_the_line(cx: &mut TestAppContext) {
     wait(cx, "返事が来る", |s| !s.busy && s.items.len() >= 2);
     let sent = world.sent();
     assert_eq!(sent.len(), 1);
-    assert_eq!(
-        sent[0].2["messages"][0]["content"].as_str().unwrap(),
-        "1 行目\n2 行目"
-    );
+    assert!(sent[0].2["messages"][0]["content"]
+        .as_str()
+        .unwrap()
+        .starts_with("1 行目\n2 行目\n\n（アプリからの補足）"));
 }
 
 /// リンクを読めなかったタスクは AI に渡さず、元のまま残す。
