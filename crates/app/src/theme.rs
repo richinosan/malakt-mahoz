@@ -25,6 +25,7 @@ const FLOAT: &str = "panels.float";
 const PRESETS: &str = "presets";
 const OVERLAY: &str = "panel.overlay";
 const DENSITY: &str = "density";
+const FEEL: &str = "feel";
 /// 背景の画像を出したときの、面の透明度とぼかしの最初の値（0〜100）。
 pub const DEFAULT_CLEAR: u8 = 40;
 pub const DEFAULT_BLUR: u8 = 30;
@@ -119,6 +120,8 @@ pub struct Backdrop {
 #[derive(Default)]
 struct Shown {
     backdrop: Option<Backdrop>,
+    /// 乗せたとき・押したときの描き方。描くたびに読むので、ここに持っておく。
+    feel: Feel,
     /// 起動のときに画像を読めなかった理由。最初のウィンドウが画面に出す。
     failed: Option<String>,
 }
@@ -230,6 +233,71 @@ impl Density {
     }
 }
 
+/// 乗せたとき・押したとき・選んでいるときの描き方。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Feel {
+    /// 配色の色で塗る
+    #[default]
+    Standard,
+    /// 白い反射と縁の光。押すと沈む
+    Glass,
+    /// 文字の色を薄く重ねるだけ
+    Crisp,
+    /// アクセントの色を薄く重ねる
+    Tint,
+}
+
+impl Feel {
+    pub const ALL: [Feel; 4] = [Feel::Standard, Feel::Glass, Feel::Crisp, Feel::Tint];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Feel::Standard => "標準",
+            Feel::Glass => "ガラス",
+            Feel::Crisp => "くっきり",
+            Feel::Tint => "色づく",
+        }
+    }
+
+    fn key(self) -> Option<&'static str> {
+        match self {
+            Feel::Standard => None,
+            Feel::Glass => Some("glass"),
+            Feel::Crisp => Some("crisp"),
+            Feel::Tint => Some("tint"),
+        }
+    }
+
+    fn from_key(key: Option<&str>) -> Self {
+        match key {
+            Some("glass") => Feel::Glass,
+            Some("crisp") => Feel::Crisp,
+            Some("tint") => Feel::Tint,
+            _ => Feel::Standard,
+        }
+    }
+}
+
+/// 今の、乗せたとき・押したときの描き方。
+pub fn feel(cx: &App) -> Feel {
+    cx.try_global::<Shown>()
+        .map(|shown| shown.feel)
+        .unwrap_or_default()
+}
+
+fn saved_feel(cx: &App) -> Feel {
+    let store = &db::shared(cx).read(cx).store;
+    Feel::from_key(store.setting(FEEL).ok().flatten().as_deref())
+}
+
+/// 乗せたとき・押したときの描き方を変える。
+pub fn set_feel(feel: Feel, cx: &mut App) -> malakt_core::Result<()> {
+    db::shared(cx).update(cx, |db, _| db.store.set_setting(FEEL, feel.key()))?;
+    cx.global_mut::<Shown>().feel = feel;
+    cx.refresh_windows();
+    Ok(())
+}
+
 /// 保存してある、一覧の行の詰め方。
 pub fn density(cx: &App) -> Density {
     let store = &db::shared(cx).read(cx).store;
@@ -270,6 +338,7 @@ pub struct Preset {
     pub cards: bool,
     pub floating: bool,
     pub density: Density,
+    pub feel: Feel,
 }
 
 impl Preset {
@@ -284,6 +353,7 @@ impl Preset {
             cards: false,
             floating: false,
             density: Density::Standard,
+            feel: Feel::Standard,
         }
     }
 
@@ -295,6 +365,7 @@ impl Preset {
             clear,
             blur,
             floating: true,
+            feel: Feel::Glass,
             ..Preset::plain(name)
         }
     }
@@ -311,6 +382,7 @@ impl Preset {
                 light: page.filter(|_| !dark),
                 dark: page.filter(|_| dark),
             },
+            feel: Feel::Tint,
             ..Preset::plain(name)
         }
     }
@@ -330,6 +402,7 @@ impl Preset {
             .map(|name| (*name).to_owned());
         let dense = |mut preset: Preset, font: Option<String>| {
             preset.density = Density::Compact;
+            preset.feel = Feel::Crisp;
             preset.look.font = font;
             preset
         };
@@ -370,6 +443,7 @@ impl Preset {
             && self.cards == other.cards
             && self.floating == other.floating
             && self.density == other.density
+            && self.feel == other.feel
     }
 
     /// このテーマで画面がダークになるか。決めていないテーマは `fallback`。
@@ -408,6 +482,7 @@ impl Preset {
             "cards": self.cards,
             "floating": self.floating,
             "density": self.density.key(),
+            "feel": self.feel.key(),
         })
     }
 
@@ -430,6 +505,7 @@ impl Preset {
             cards: value["cards"].as_bool()?,
             floating: value["floating"].as_bool()?,
             density: Density::from_key(text("density")),
+            feel: Feel::from_key(text("feel")),
         })
     }
 }
@@ -881,6 +957,7 @@ pub fn current(name: &str, cx: &App) -> Preset {
         cards: cards(cx),
         floating: floating(cx),
         density: density(cx),
+        feel: feel(cx),
     }
 }
 
@@ -931,6 +1008,7 @@ pub fn apply_preset(preset: &Preset, window: &mut Window, cx: &mut App) -> Resul
         (CARDS, flag(preset.cards)),
         (FLOAT, flag(preset.floating)),
         (DENSITY, preset.density.key().map(str::to_owned)),
+        (FEEL, preset.feel.key().map(str::to_owned)),
     ];
     let saved = db::shared(cx).update(cx, |db, _| {
         values
@@ -940,6 +1018,7 @@ pub fn apply_preset(preset: &Preset, window: &mut Window, cx: &mut App) -> Resul
     // 途中まで保存されたときも、画面は保存されている中身に合わせる
     install(&with_scene(self::look(cx), &scene(cx)), cx);
     apply(choice(cx), Some(window), cx);
+    cx.global_mut::<Shown>().feel = saved_feel(cx);
     let alpha = 1. - f32::from(clear(cx)) / 100.;
     if let Some(backdrop) = cx.global_mut::<Shown>().backdrop.as_mut() {
         backdrop.alpha = alpha;
@@ -1120,6 +1199,7 @@ pub fn fonts(cx: &App) -> Vec<String> {
 /// 配色を読み込んで、保存してある選択で塗る。`gpui_kit::init` のあとに 1 回呼ぶ。
 pub fn init(cx: &mut App) {
     cx.set_global(Shown::default());
+    cx.global_mut::<Shown>().feel = saved_feel(cx);
     install(&with_scene(look(cx), &scene(cx)), cx);
     apply(choice(cx), None, cx);
 }

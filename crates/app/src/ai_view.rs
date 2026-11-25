@@ -25,6 +25,7 @@ use crate::ai::{
 };
 use crate::db::{self, Db};
 use crate::render::app_icon;
+use crate::render::Lit;
 use crate::shadow::{Elevate, Elevation};
 use crate::state::{DropTarget, MainView};
 use crate::term::{self, TermPane};
@@ -788,7 +789,7 @@ impl AiPane {
                         .text_sm()
                         .cursor_pointer()
                         .when(active, |d| d.bg(theme.accent))
-                        .hover(|s| s.bg(theme.muted))
+                        .lit(theme.muted, cx)
                         .active(|s| s.opacity(0.6))
                         .child(
                             div()
@@ -1215,7 +1216,7 @@ impl AiPane {
                     .bg(theme.muted)
                     .text_color(theme.muted_foreground)
                     .cursor_pointer()
-                    .hover(|s| s.bg(theme.accent))
+                    .lit(theme.accent, cx)
                     .child(Spinner::new().small())
                     .child(div().flex_1().min_w_0().truncate().child(title))
                     .on_click(cx.listener(move |this, _, window, cx| {
@@ -1321,7 +1322,7 @@ impl AiPane {
                     .h_10()
                     .rounded_md()
                     .when(active, |d| d.bg(theme.muted))
-                    .hover(|s| s.bg(theme.muted))
+                    .lit(theme.muted, cx)
                     .child(
                         row()
                             .id(("ai-chat-row", ix))
@@ -1661,7 +1662,7 @@ impl AiPane {
                     .text_xs()
                     .cursor_pointer()
                     .rounded_md()
-                    .hover(|s| s.bg(theme.muted))
+                    .lit(theme.muted, cx)
                     .active(|s| s.opacity(0.6))
                     .child(
                         app_icon(if open {
@@ -2642,7 +2643,7 @@ impl AiPane {
                 .when(on, |d| d.bg(theme.secondary))
                 .when(!on, |d| {
                     d.text_color(theme.muted_foreground)
-                        .hover(|s| s.bg(theme.secondary_hover))
+                        .lit(theme.secondary_hover, cx)
                 })
                 .child(app_icon(icon).size_3p5().flex_none())
                 .child(div().min_w_0().truncate().child(label))
@@ -2683,7 +2684,7 @@ impl AiPane {
                         .items_center()
                         .justify_center()
                         .rounded_sm()
-                        .hover(|s| s.bg(theme.muted))
+                        .lit(theme.muted, cx)
                         .active(|s| s.opacity(0.6))
                         .child(app_icon("x").size_3())
                         .on_click({

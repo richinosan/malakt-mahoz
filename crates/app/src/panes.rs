@@ -12,6 +12,7 @@ use malakt_core::panes::{resize_step, Action, Dir, Keys, Layout, PaneId, Rect, P
 
 use crate::db;
 use crate::render::app_icon;
+use crate::render::Lit;
 use crate::session::WindowState;
 use crate::shadow::{Elevate, Elevation};
 use crate::state::{MainView, Nav};
@@ -537,7 +538,7 @@ impl MainView {
                         .w(relative(within.w))
                         .cursor_row_resize()
                 })
-                .hover(|s| s.bg(theme.primary.opacity(0.5)))
+                .lit(theme.primary.opacity(0.5), cx)
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |this, _, _, cx| {
