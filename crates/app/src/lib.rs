@@ -228,7 +228,7 @@ pub(crate) fn open_window_with(
         icon: window_icon(),
         ..gpui_kit::component::TitleBar::window_options()
     };
-    gpui_kit::open_window(options, cx, |window, cx| {
+    let opened = gpui_kit::open_window(options, cx, |window, cx| {
         cx.new(|cx| {
             let mut view = MainView::new(window, cx);
             if let Some(state) = &saved {
@@ -237,7 +237,28 @@ pub(crate) fn open_window_with(
             view.track_session(window, cx);
             view
         })
+    })?;
+    session::set_main(opened.1.entity_id(), opened.0, cx);
+    Ok(opened)
+}
+
+/// メインのウィンドウ（最初に開いた 1 枚）を閉じたら、ほかのウィンドウ（追加のウィンドウ、
+/// 別ウィンドウに出したペイン、AI チャット、シェル）もすべて閉じて終了する。
+/// 閉じたウィンドウは次の起動で戻す。新しい版を取ってあれば、ここで入れ替える。
+pub fn quit_when_main_closes(cx: &mut App) {
+    cx.on_window_closed(|cx, _| {
+        if session::is_quitting(cx) || !(session::main_closed(cx) || cx.windows().is_empty()) {
+            return;
+        }
+        session::quitting(cx);
+        for window in cx.windows() {
+            // もう閉じたウィンドウは、そのままでよい
+            let _ = window.update(cx, |_, window, _| window.remove_window());
+        }
+        update::install_on_quit(cx);
+        cx.quit();
     })
+    .detach();
 }
 
 /// AI チャット、またはシェルだけのウィンドウを開く。

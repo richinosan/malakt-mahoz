@@ -1,7 +1,9 @@
 //! 前に閉じたときの画面。ウィンドウごとに、見ていた場所・絞り込み・開いていた詳細・位置と大きさを
 //! 設定に残し、次に起動したときに戻す。
 
-use gpui_kit::{px, App, Bounds, Context, EntityId, Global, Pixels, Window, WindowBounds};
+use gpui_kit::{
+    px, AnyWindowHandle, App, Bounds, Context, EntityId, Global, Pixels, Window, WindowBounds,
+};
 use malakt_core::view::{AssigneeFilter, Priority, Sort, Tab};
 use malakt_core::{Role, Status};
 use serde::{Deserialize, Serialize};
@@ -72,6 +74,8 @@ struct Sessions {
     windows: Vec<(EntityId, WindowState)>,
     /// 終了の途中。閉じていくウィンドウを一覧から外さない。
     quitting: bool,
+    /// メインのウィンドウ（最初に開いた 1 枚）。閉じるとアプリが終了する。
+    main: Option<(EntityId, AnyWindowHandle)>,
 }
 
 impl Global for Sessions {}
@@ -89,6 +93,24 @@ pub fn saved(cx: &App) -> Vec<WindowState> {
 pub fn quitting(cx: &mut App) {
     crate::db::close_open_mark(cx);
     cx.default_global::<Sessions>().quitting = true;
+}
+
+/// 最初に開いたウィンドウをメインにする。もう決まっていれば変えない。
+pub(crate) fn set_main(view: EntityId, window: AnyWindowHandle, cx: &mut App) {
+    cx.default_global::<Sessions>()
+        .main
+        .get_or_insert((view, window));
+}
+
+/// メインのウィンドウを閉じたか。メインを開いていないうちは `false`。
+pub fn main_closed(cx: &mut App) -> bool {
+    let main = cx.default_global::<Sessions>().main;
+    main.is_some_and(|(_, window)| !cx.windows().contains(&window))
+}
+
+/// 終了を始めたあとか。
+pub fn is_quitting(cx: &mut App) -> bool {
+    cx.default_global::<Sessions>().quitting
 }
 
 fn save(cx: &mut App) {
@@ -296,8 +318,10 @@ impl MainView {
         let id = cx.entity_id();
         cx.on_release(move |_, cx| {
             let sessions = cx.default_global::<Sessions>();
-            // 最後の 1 枚と、終了で閉じるウィンドウは、次の起動で戻すので残す
-            if sessions.quitting || sessions.windows.len() <= 1 {
+            // 最後の 1 枚と、終了で閉じるウィンドウは、次の起動で戻すので残す。
+            // メインを閉じるとアプリが終了するので、メインも残す
+            let main = sessions.main.is_some_and(|(view, _)| view == id);
+            if sessions.quitting || main || sessions.windows.len() <= 1 {
                 return;
             }
             sessions.windows.retain(|(window, _)| *window != id);
