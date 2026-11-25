@@ -2069,6 +2069,23 @@ fn a_task_has_its_own_chat(cx: &mut TestAppContext) {
     assert_eq!(read(cx, |s| s.chats.len()), 1);
 }
 
+/// モデルは名前で出す。サービスの一覧にあった名前は、次の起動でも使う。
+#[gpui_kit::test]
+fn models_are_shown_by_name(cx: &mut TestAppContext) {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .set_setting("ai.model_names", Some(r#"{"glm-5.3":"GLM 5.3"}"#))
+        .unwrap();
+    let world = start_with(cx, store);
+    world.keys.set(Provider::Claude, "k").unwrap();
+    assert_eq!(read(cx, |s| s.model_label("glm-5.3")), "GLM 5.3");
+    assert_eq!(
+        read(cx, |s| s.model_label("claude-opus-5-5")),
+        "Claude Opus 5.5"
+    );
+    assert_eq!(read(cx, |s| s.model_label("kimi-k3")), "kimi-k3");
+}
+
 #[gpui_kit::test]
 fn a_saved_chat_is_shown_at_startup(cx: &mut TestAppContext) {
     let mut store = Store::open_in_memory().unwrap();

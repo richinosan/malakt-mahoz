@@ -115,6 +115,9 @@ struct SavedUi {
 
 /// 右に置くチャットとシェルの、最初の幅と選べる範囲（拡大率を掛ける前の値）。
 /// 会話の一覧。今の会話の ID も入れる。
+/// サービスの一覧にあった、モデルの表示名（ID ごと）。
+const MODEL_NAMES_SETTING: &str = "ai.model_names";
+const MAX_MODEL_NAMES: usize = 300;
 const CHATS_SETTING: &str = "ai.chats";
 /// アプリが自動で始めた AI の実行の記録。
 const RUNS_SETTING: &str = "ai.runs";
@@ -514,6 +517,8 @@ pub struct Session {
     pub key: KeyState,
     /// サービスから取ってきたモデルの一覧。
     pub listed: Vec<SharedString>,
+    /// サービスの一覧にあった、モデルの表示名。
+    model_names: HashMap<String, String>,
     catalog: Option<(Provider, Arc<Vec<CatalogModel>>)>,
     turns: Vec<Turn>,
     pub items: Vec<Item>,
@@ -643,6 +648,7 @@ impl Session {
         let ui: SavedUi;
         let chat: Option<Value>;
         let mut chats = Vec::new();
+        let mut model_names = HashMap::new();
         let mut current = None;
         let mut legacy_chat = false;
         let mut runs = Vec::new();
@@ -682,6 +688,11 @@ impl Session {
                     ],
                 })
                 .unwrap_or_default();
+            if let Some(names) =
+                read(MODEL_NAMES_SETTING).and_then(|v| serde_json::from_str(&v).ok())
+            {
+                model_names = names;
+            }
             if let Some(index) =
                 read(CHATS_SETTING).and_then(|v| serde_json::from_str::<Value>(&v).ok())
             {
@@ -768,6 +779,7 @@ impl Session {
             effort,
             key: KeyState::Unknown,
             listed: Vec::new(),
+            model_names,
             catalog: None,
             turns: Vec::new(),
             items: Vec::new(),
@@ -2147,6 +2159,14 @@ impl Session {
         Ok(status)
     }
 
+    /// モデルの、画面に出す名前。サービスの一覧にあればその名前、なければ ID から作る。
+    pub fn model_label(&self, id: &str) -> SharedString {
+        match self.model_names.get(id) {
+            Some(name) => name.clone().into(),
+            None => provider::display_name(id).into(),
+        }
+    }
+
     pub fn model(&self) -> &str {
         self.models
             .get(&self.provider)
@@ -2276,7 +2296,7 @@ impl Session {
                         return Ok(catalog
                             .iter()
                             .filter(|m| m.api.is_some())
-                            .map(|m| m.id.clone())
+                            .map(|m| (m.id.clone(), m.name.clone()))
                             .collect::<Vec<_>>());
                     }
                     if provider != Provider::Claude {
@@ -2299,7 +2319,12 @@ impl Session {
                         .as_array()
                         .into_iter()
                         .flatten()
-                        .filter_map(|m| m["id"].as_str().map(str::to_owned))
+                        .filter_map(|m| {
+                            Some((
+                                m["id"].as_str()?.to_owned(),
+                                m["display_name"].as_str().map(str::to_owned),
+                            ))
+                        })
                         .collect())
                 })
                 .await;
@@ -2308,9 +2333,37 @@ impl Session {
                     return;
                 }
                 match result {
-                    Ok(ids) => {
+                    Ok(models) => {
                         this.error = None;
-                        this.listed = ids.into_iter().map(SharedString::from).collect();
+                        let mut changed = false;
+                        for (id, name) in &models {
+                            if let Some(name) = name.as_ref().filter(|name| !name.is_empty()) {
+                                changed |= this.model_names.get(id) != Some(name);
+                                this.model_names.insert(id.clone(), name.clone());
+                            }
+                        }
+                        this.listed = models
+                            .into_iter()
+                            .map(|(id, _)| SharedString::from(id))
+                            .collect();
+                        // 次の起動でも名前を出せるように残す。一覧にあるモデルの分だけ
+                        if changed {
+                            if this.model_names.len() > MAX_MODEL_NAMES {
+                                let listed = this.listed.clone();
+                                this.model_names
+                                    .retain(|id, _| listed.iter().any(|have| have == id));
+                            }
+                            match serde_json::to_string(&this.model_names) {
+                                Ok(json) => {
+                                    this.save_setting(MODEL_NAMES_SETTING, &json, cx);
+                                }
+                                Err(e) => {
+                                    this.error = Some(
+                                        format!("モデルの名前を保存できませんでした: {e}").into(),
+                                    )
+                                }
+                            }
+                        }
                     }
                     Err(e) => {
                         this.error = Some(format!("モデルの一覧を取得できませんでした: {e}").into())

@@ -796,7 +796,20 @@ impl AiPane {
                                 .flex_none()
                                 .when(active, |d| d.child(app_icon("check").size_4())),
                         )
-                        .child(div().flex_1().min_w_0().truncate().child(m))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .child(session.model_label(&m)),
+                        )
+                        .tooltip({
+                            let id = m.clone();
+                            move |window, cx| {
+                                gpui_kit::component::tooltip::Tooltip::new(id.clone())
+                                    .build(window, cx)
+                            }
+                        })
                         .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                             this.session.update(cx, |s, cx| s.set_model(&chosen, cx));
                             this.model_input
@@ -1784,7 +1797,8 @@ impl AiPane {
                 all
             });
         let pane = cx.entity().downgrade();
-        let pill = |id: &'static str, label: SharedString, tip: &'static str| {
+        let labels: Vec<SharedString> = models.iter().map(|m| session.model_label(m)).collect();
+        let pill = |id: &'static str, label: SharedString, tip: SharedString| {
             Button::new(id)
                 .ghost()
                 .small()
@@ -1795,73 +1809,76 @@ impl AiPane {
         let mut pills = Vec::new();
         pills.push({
             let pane = pane.clone();
-            pill("ai-pick-provider", provider.label().into(), "サービス")
-                .dropdown_menu_with_anchor(Anchor::BottomLeft, move |mut menu, _, _| {
-                    for p in Provider::ALL {
-                        let pane = pane.clone();
-                        menu = menu.item(
-                            PopupMenuItem::new(p.label())
-                                .checked(p == provider)
-                                .on_click(move |_, _, cx| {
-                                    // チャットを閉じたあとなら、反映する先がない
-                                    let _ = pane.update(cx, |this, cx| {
-                                        this.session.update(cx, |s, cx| s.set_provider(p, cx));
-                                    });
-                                }),
-                        );
-                    }
-                    menu
-                })
-                .into_any_element()
+            pill(
+                "ai-pick-provider",
+                provider.label().into(),
+                "サービス".into(),
+            )
+            .dropdown_menu_with_anchor(Anchor::BottomLeft, move |mut menu, _, _| {
+                for p in Provider::ALL {
+                    let pane = pane.clone();
+                    menu = menu.item(
+                        PopupMenuItem::new(p.label())
+                            .checked(p == provider)
+                            .on_click(move |_, _, cx| {
+                                // チャットを閉じたあとなら、反映する先がない
+                                let _ = pane.update(cx, |this, cx| {
+                                    this.session.update(cx, |s, cx| s.set_provider(p, cx));
+                                });
+                            }),
+                    );
+                }
+                menu
+            })
+            .into_any_element()
         });
         pills.push({
             let pane = pane.clone();
-            let shown: SharedString = if model.is_empty() {
-                "標準のモデル".into()
+            // 名前を出し、ID はホバーで出す
+            let (shown, tip): (SharedString, SharedString) = if model.is_empty() {
+                ("標準のモデル".into(), "モデル".into())
             } else {
-                model.clone().into()
+                (session.model_label(&model), model.clone().into())
             };
             div()
                 .min_w_0()
                 .overflow_hidden()
-                .child(
-                    pill("ai-pick-model", shown, "モデル").dropdown_menu_with_anchor(
-                        Anchor::BottomLeft,
-                        move |mut menu, _, _| {
-                            for m in models.iter() {
-                                let m = m.clone();
-                                let pane = pane.clone();
-                                let chosen = m.clone();
-                                menu = menu.item(
-                                    PopupMenuItem::new(m.clone())
-                                        .checked(m.as_ref() == model)
-                                        .on_click(move |_, _, cx| {
-                                            let _ = pane.update(cx, |this, cx| {
-                                                this.session
-                                                    .update(cx, |s, cx| s.set_model(&chosen, cx));
-                                            });
-                                        }),
-                                );
-                            }
+                .child(pill("ai-pick-model", shown, tip).dropdown_menu_with_anchor(
+                    Anchor::BottomLeft,
+                    move |mut menu, _, _| {
+                        for (m, label) in models.iter().zip(&labels) {
+                            let m = m.clone();
                             let pane = pane.clone();
-                            menu.separator()
-                                .item(PopupMenuItem::new("ほかのモデル…").on_click(
-                                    move |_, _, cx| {
+                            let chosen = m.clone();
+                            menu = menu.item(
+                                PopupMenuItem::new(label.clone())
+                                    .checked(m.as_ref() == model)
+                                    .on_click(move |_, _, cx| {
                                         let _ = pane.update(cx, |this, cx| {
-                                            this.settings_open = true;
-                                            this.model_open = true;
-                                            cx.notify();
+                                            this.session
+                                                .update(cx, |s, cx| s.set_model(&chosen, cx));
                                         });
-                                    },
-                                ))
-                        },
-                    ),
-                )
+                                    }),
+                            );
+                        }
+                        let pane = pane.clone();
+                        menu.separator()
+                            .item(
+                                PopupMenuItem::new("ほかのモデル…").on_click(move |_, _, cx| {
+                                    let _ = pane.update(cx, |this, cx| {
+                                        this.settings_open = true;
+                                        this.model_open = true;
+                                        cx.notify();
+                                    });
+                                }),
+                            )
+                    },
+                ))
                 .into_any_element()
         });
         if provider.supports_effort() {
             pills.push(
-                pill("ai-pick-effort", effort.label().into(), "effort")
+                pill("ai-pick-effort", effort.label().into(), "effort".into())
                     .dropdown_menu_with_anchor(Anchor::BottomLeft, move |mut menu, _, _| {
                         for e in Effort::ALL {
                             let pane = pane.clone();
