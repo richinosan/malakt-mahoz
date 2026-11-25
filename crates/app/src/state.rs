@@ -13,6 +13,7 @@ use malakt_core::bulk::{self, BulkOp, ListMode};
 use malakt_core::notice::Notice;
 use malakt_core::ticket::IssuedTicket;
 use malakt_core::view::{self, ListQuery};
+use malakt_core::when;
 use malakt_core::{
     archive, lock, mention, Anchor, Attachment, Change, Comment, DueRule, Id, NewComment, Person,
     Scope, Status, Store, Task as Todo, TaskDefaults, TaskDraft, TaskFilter, Workspace,
@@ -129,6 +130,7 @@ pub struct Inputs {
     pub subtask: Entity<InputState>,
     pub start: Entity<InputState>,
     pub due: Entity<InputState>,
+    pub due_time: Entity<InputState>,
     pub category: Entity<InputState>,
     pub description: Entity<TextareaState>,
     pub comment: Entity<TextareaState>,
@@ -292,8 +294,9 @@ impl MainView {
             name: input(window, cx, "名前"),
             title: input(window, cx, "タイトル"),
             subtask: input(window, cx, "サブタスクを追加…"),
-            start: input(window, cx, "YYYY-MM-DD"),
-            due: input(window, cx, "YYYY-MM-DD"),
+            start: input(window, cx, "日付 時刻"),
+            due: input(window, cx, "日付"),
+            due_time: input(window, cx, "時刻"),
             category: input(window, cx, "カテゴリを追加して Enter"),
             description: area(window, cx, "説明"),
             comment: area(window, cx, "コメントを追加"),
@@ -309,11 +312,11 @@ impl MainView {
                 cx,
                 "例: このワークスペースのタスクは優先度を高にする",
             ),
-            bulk_due: input(window, cx, "YYYY-MM-DD（時刻は続けて HH:MM）"),
+            bulk_due: input(window, cx, "11/27 14:00"),
             bulk_categories: input(window, cx, "「、」で区切って入力"),
             nt_title: input(window, cx, "タイトル"),
-            nt_start: input(window, cx, "YYYY-MM-DD（時刻は続けて HH:MM）"),
-            nt_due: input(window, cx, "YYYY-MM-DD（時刻は続けて HH:MM）"),
+            nt_start: input(window, cx, "11/27 14:00"),
+            nt_due: input(window, cx, "11/27 14:00"),
             nt_categories: input(window, cx, "「、」で区切って入力"),
             nt_description: area(window, cx, "説明"),
         };
@@ -389,6 +392,33 @@ impl MainView {
         on_enter!(subtask, submit_subtask);
         on_enter!(start, save_start);
         on_enter!(due, save_due);
+        on_enter!(due_time, save_due_time);
+        // 期限は、書き換えてからほかの場所を押したときにも保存する
+        subs.push(cx.subscribe_in(
+            &inputs.due,
+            window,
+            |this, input, event: &InputEvent, window, cx| {
+                if matches!(event, InputEvent::Blur) {
+                    let due = this.current_due().unwrap_or_default();
+                    if input.read(cx).value().trim() != malakt_core::date_of(&due) {
+                        this.save_due(window, cx);
+                    }
+                }
+            },
+        ));
+        subs.push(cx.subscribe_in(
+            &inputs.due_time,
+            window,
+            |this, input, event: &InputEvent, window, cx| {
+                if matches!(event, InputEvent::Blur) {
+                    let due = this.current_due().unwrap_or_default();
+                    let time = malakt_core::time_of(&due).unwrap_or_default();
+                    if input.read(cx).value().trim() != time {
+                        this.save_due_time(window, cx);
+                    }
+                }
+            },
+        ));
         on_enter!(category, submit_category);
         subs.push(cx.subscribe_in(
             &inputs.font_search,
@@ -882,16 +912,28 @@ impl MainView {
         self.editing = None;
         self.assignee_picker = false;
         self.reload(cx);
-        if let Some(detail) = &self.detail {
-            let start = detail.task.start.clone().unwrap_or_default();
-            let due = detail.task.due.clone().unwrap_or_default();
-            self.inputs
-                .start
-                .update(cx, |s, cx| s.set_value(start, window, cx));
-            self.inputs
-                .due
-                .update(cx, |s, cx| s.set_value(due, window, cx));
+        self.fill_when_inputs(window, cx);
+    }
+
+    /// 詳細の開始日と期限の入力欄に、保存されている値を入れる。期限は日付と時刻の欄に分ける。
+    fn fill_when_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(detail) = &self.detail else { return };
+        let start = detail.task.start.clone().unwrap_or_default();
+        let due = detail.task.due.clone().unwrap_or_default();
+        let date = malakt_core::date_of(&due).to_owned();
+        let time = malakt_core::time_of(&due).unwrap_or_default().to_owned();
+        for (input, value) in [
+            (&self.inputs.start, start),
+            (&self.inputs.due, date),
+            (&self.inputs.due_time, time),
+        ] {
+            input.update(cx, |s, cx| s.set_value(value, window, cx));
         }
+    }
+
+    /// 詳細のタスクの、いまの期限。
+    fn current_due(&self) -> Option<String> {
+        self.detail.as_ref()?.task.due.clone()
     }
 
     pub fn close_panel(&mut self, cx: &mut Context<Self>) {
@@ -965,24 +1007,60 @@ impl MainView {
         }
     }
 
-    pub fn save_start(&mut self, _: &mut Window, cx: &mut Context<Self>) {
-        let value = self.inputs.start.read(cx).value().to_string();
+    pub fn save_start(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let text = self.inputs.start.read(cx).value().to_string();
+        let base = self.detail.as_ref().and_then(|d| d.task.start.clone());
+        let value = when::resolve(&text, &view::now(), base.as_deref());
         self.edit_task(cx, |d| d.start = Some(value));
+        self.after_when_edit(window, cx);
     }
 
-    pub fn save_due(&mut self, _: &mut Window, cx: &mut Context<Self>) {
-        let value = self.inputs.due.read(cx).value().to_string();
+    /// 期限の日付の欄を保存する。「11/27」「明日」「来週金曜 14時」のような書き方も読む。
+    /// 日付だけを書いたときは、時刻の欄の時刻を残す。
+    pub fn save_due(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let text = self.inputs.due.read(cx).value().to_string();
+        let current = self.current_due();
+        let mut value = when::resolve(&text, &view::now(), None);
+        if let Some(time) = current.as_deref().and_then(malakt_core::time_of) {
+            if malakt_core::is_valid_date(&value) {
+                value = format!("{value} {time}");
+            }
+        }
         self.edit_task(cx, |d| d.due = Some(value));
+        self.after_when_edit(window, cx);
     }
 
-    /// 期限を今日から `days` 日後にする。`None` なら期限をなくす。
-    pub fn set_due_in(&mut self, days: Option<i64>, window: &mut Window, cx: &mut Context<Self>) {
-        let value = days.map(|d| view::add_days(&self.today, d));
-        let text = value.clone().unwrap_or_default();
-        self.inputs
-            .due
-            .update(cx, |s, cx| s.set_value(text, window, cx));
+    /// 期限の時刻の欄を保存する。空にすると日付だけの期限に戻る。期限がなければ今日の時刻にする。
+    pub fn save_due_time(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let text = self.inputs.due_time.read(cx).value().trim().to_owned();
+        let current = self.current_due();
+        let value = if text.is_empty() {
+            current
+                .as_deref()
+                .map(|due| malakt_core::date_of(due).to_owned())
+        } else {
+            Some(when::resolve(&text, &view::now(), current.as_deref()))
+        };
         self.edit_task(cx, |d| d.due = value);
+        self.after_when_edit(window, cx);
+    }
+
+    /// 保存できたら、入力欄を保存した形（`2026-11-27` と `14:00`）に直す。
+    /// 保存できなかったときは、書いたものを残す。
+    fn after_when_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.error.is_none() {
+            self.reload(cx);
+            self.fill_when_inputs(window, cx);
+        }
+    }
+
+    /// 期限を今日から `days` 日後にする。時刻は残す。`None` なら期限をなくす。
+    pub fn set_due_in(&mut self, days: Option<i64>, window: &mut Window, cx: &mut Context<Self>) {
+        let current = self.current_due();
+        let value =
+            days.map(|d| view::with_time_of(&view::add_days(&self.today, d), current.as_deref()));
+        self.edit_task(cx, |d| d.due = value);
+        self.after_when_edit(window, cx);
     }
 
     pub fn clear_start(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1528,6 +1606,7 @@ impl MainView {
             None
         } else {
             let value = self.inputs.bulk_due.read(cx).value().trim().to_owned();
+            let value = when::resolve(&value, &view::now(), None);
             if value.is_empty() {
                 self.error = Some("期限を入力してください。".into());
                 cx.notify();
@@ -1651,8 +1730,10 @@ impl MainView {
         let some = |value: String| (!value.is_empty()).then_some(value);
         let mut draft = self.new_task.clone();
         draft.title = read(&self.inputs.nt_title);
-        draft.start = some(read(&self.inputs.nt_start));
-        draft.due = some(read(&self.inputs.nt_due));
+        let now = view::now();
+        let when = |value: String| some(when::resolve(&value, &now, None));
+        draft.start = when(read(&self.inputs.nt_start));
+        draft.due = when(read(&self.inputs.nt_due));
         draft.categories = split_list(self.inputs.nt_categories.read(cx).value().as_ref());
         draft.description = self.inputs.nt_description.read(cx).value().to_string();
         let workspace = self.current_workspace().map(str::to_owned);
@@ -2379,7 +2460,7 @@ impl MainView {
         defaults.due = match defaults.due {
             DueRule::None => DueRule::None,
             DueRule::Fixed { .. } => DueRule::Fixed {
-                date: read(&self.inputs.def_date),
+                date: when::resolve(&read(&self.inputs.def_date), &view::now(), None),
             },
             DueRule::Relative { .. } => {
                 let text = read(&self.inputs.def_days);
@@ -2408,7 +2489,7 @@ impl MainView {
         defaults.due_time = read(&self.inputs.def_time);
         defaults.categories = split_list(&read(&self.inputs.def_categories));
         defaults.description = self.inputs.def_description.read(cx).value().to_string();
-        let date = read(&self.inputs.ws_date);
+        let date = when::resolve(&read(&self.inputs.ws_date), &view::now(), None);
         let context = self.inputs.ws_context.read(cx).value().trim().to_owned();
         if let Some(error) = crate::ai::workspace_context_error(&context) {
             self.error = Some(error.into());

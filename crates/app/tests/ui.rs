@@ -1152,14 +1152,14 @@ fn bulk_changes_and_full_new_task_form(cx: &mut TestAppContext) {
 
     // 期限: 正しくない値は断り、ダイアログを開いたままにする
     ui(cx, window, |window, cx| window.click("bulk-due", cx));
-    set(cx, |v| &v.inputs.bulk_due, "来週");
+    set(cx, |v| &v.inputs.bulk_due, "そのうち");
     ui(cx, window, |window, cx| window.click("bulk-due-submit", cx));
     cx.update(|cx| {
         let view = view.read(cx);
         assert_eq!(view.modal, Modal::BulkDue);
         assert!(view.error.is_some());
     });
-    set(cx, |v| &v.inputs.bulk_due, "2026-12-24 18:00");
+    set(cx, |v| &v.inputs.bulk_due, "2026/12/24 午後6時");
     ui(cx, window, |window, cx| window.click("bulk-due-submit", cx));
     let due = |cx: &mut TestAppContext, id: &str| store(cx, |s| s.task(id).unwrap().due);
     assert_eq!(due(cx, &shown[1]).as_deref(), Some("2026-12-24 18:00"));
@@ -1221,8 +1221,8 @@ fn bulk_changes_and_full_new_task_form(cx: &mut TestAppContext) {
             "見積もりを取る"
         );
     });
-    set(cx, |v| &v.inputs.nt_due, "2026-12-01");
-    set(cx, |v| &v.inputs.nt_start, "2026-11-30 09:00");
+    set(cx, |v| &v.inputs.nt_due, "2026年12月1日");
+    set(cx, |v| &v.inputs.nt_start, "2026.11.30 9時");
     set(cx, |v| &v.inputs.nt_categories, "経理");
     ui(cx, window, |window, cx| {
         window.click(("nt-prio", 1usize), cx)
@@ -1538,6 +1538,99 @@ fn title_is_edited_in_place(cx: &mut TestAppContext) {
     });
     assert_eq!(all_tasks(cx)[0].title, "牛乳を買うと卵");
     assert!(cx.update(|cx| view.read(cx).editing.is_none()));
+}
+
+/// 詳細の期限は、日付の欄と時刻の欄で決める。「明日」「11/27 14時」のような書き方も読み、
+/// 保存すると欄は保存した形に直る。一覧のメニューで日付を変えても時刻は残る。
+#[gpui_kit::test]
+fn due_takes_a_time_and_many_spellings(cx: &mut TestAppContext) {
+    use malakt_core::view::{add_days, today};
+    start(cx);
+    let (window, view) = open(cx, wide());
+    ui(cx, window, |window, cx| {
+        window.click("nav-all", cx);
+        window.click("quick-add", cx);
+        window.input("資料を出す", cx);
+        window.press("enter", cx);
+    });
+    ui(cx, window, |window, cx| window.click(("title", 0usize), cx));
+    let due = |cx: &mut TestAppContext| all_tasks(cx)[0].due.clone();
+    let shown = |cx: &mut TestAppContext| {
+        cx.update(|cx| {
+            let inputs = &view.read(cx).inputs;
+            (
+                inputs.due.read(cx).value().to_string(),
+                inputs.due_time.read(cx).value().to_string(),
+            )
+        })
+    };
+    let type_in = |cx: &mut TestAppContext, id: &'static str, text: &'static str| {
+        ui(cx, window, |window, cx| {
+            window.click(id, cx);
+            window.press("secondary-a", cx);
+            window.press("backspace", cx);
+            if !text.is_empty() {
+                window.input(text, cx);
+            }
+            window.press("enter", cx);
+        });
+    };
+
+    // 時刻だけを入れると、今日のその時刻になる
+    type_in(cx, "due-time-input", "14時");
+    assert_eq!(due(cx), Some(format!("{} 14:00", today())));
+    assert_eq!(shown(cx), (today(), "14:00".to_owned()));
+
+    // 日付だけを書き換えても、時刻は残る
+    type_in(cx, "due-input", "明日");
+    let tomorrow = add_days(&today(), 1);
+    assert_eq!(due(cx), Some(format!("{tomorrow} 14:00")));
+    assert_eq!(shown(cx), (tomorrow.clone(), "14:00".to_owned()));
+
+    // 日付の欄に時刻まで書くと、両方が変わる
+    type_in(cx, "due-input", "2027/1/5 午後3時半");
+    assert_eq!(due(cx).as_deref(), Some("2027-01-05 15:30"));
+    assert_eq!(shown(cx), ("2027-01-05".to_owned(), "15:30".to_owned()));
+    type_in(cx, "due-time-input", "9:05");
+    assert_eq!(due(cx).as_deref(), Some("2027-01-05 09:05"));
+
+    // 読めない書き方は断り、書いたものと元の期限を残す
+    type_in(cx, "due-time-input", "25時");
+    assert!(cx.update(|cx| view.read(cx).error.is_some()));
+    assert_eq!(due(cx).as_deref(), Some("2027-01-05 09:05"));
+    assert_eq!(shown(cx).1, "25時");
+
+    // 時刻を空にすると、日付だけの期限に戻る
+    type_in(cx, "due-time-input", "");
+    assert_eq!(due(cx).as_deref(), Some("2027-01-05"));
+    assert!(cx.update(|cx| view.read(cx).error.is_none()));
+
+    // ボタンで日付を変えても時刻は残り、クリアで両方の欄が空になる
+    type_in(cx, "due-time-input", "2pm");
+    ui(cx, window, |window, cx| window.click(("p-due", 1usize), cx));
+    assert_eq!(due(cx), Some(format!("{tomorrow} 14:00")));
+    assert_eq!(shown(cx), (tomorrow.clone(), "14:00".to_owned()));
+
+    // 書き換えてからほかの場所を押しても保存する
+    cx.update_window(window, |_, window, _| window.activate_window())
+        .unwrap();
+    cx.run_until_parked();
+    ui(cx, window, |window, cx| {
+        window.click("due-time-input", cx);
+        window.press("secondary-a", cx);
+        window.press("backspace", cx);
+        window.input("18:00", cx);
+    });
+    ui(cx, window, |window, cx| window.click("due-input", cx));
+    assert_eq!(due(cx), Some(format!("{tomorrow} 18:00")));
+
+    ui(cx, window, |window, cx| window.click(("p-due", 3usize), cx));
+    assert_eq!(due(cx), None);
+    assert_eq!(shown(cx), (String::new(), String::new()));
+
+    // 開始日も同じ書き方を読む
+    type_in(cx, "start-input", "20270104 10時");
+    assert_eq!(all_tasks(cx)[0].start.as_deref(), Some("2027-01-04 10:00"));
 }
 
 /// 上のバーの配色のボタンで、画面の色がその場で変わり、選択が保存される。

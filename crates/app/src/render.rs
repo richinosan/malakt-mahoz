@@ -2067,14 +2067,19 @@ impl MainView {
             .collect()
     }
 
-    /// 期限の選択肢。今日からの日数で決める。
+    /// 期限の選択肢。今日からの日数で決める。いまの期限に時刻があれば、時刻は残す。
     fn due_options(&self, current: Option<&str>) -> Vec<(SharedString, bool, Option<String>)> {
         let mut options: Vec<(SharedString, bool, Option<String>)> =
             [("今日", 0), ("明日", 1), ("1 週間後", 7), ("1 か月後", 30)]
                 .into_iter()
                 .map(|(label, days)| {
                     let date = view::add_days(&self.today, days);
-                    (label.into(), current == Some(date.as_str()), Some(date))
+                    let checked = current.map(malakt_core::date_of) == Some(date.as_str());
+                    (
+                        label.into(),
+                        checked,
+                        Some(view::with_time_of(&date, current)),
+                    )
                 })
                 .collect();
         options.push(("なし".into(), current.is_none(), None));
@@ -3179,10 +3184,21 @@ impl MainView {
                 .small()
                 .w(px(128.)),
         );
+        due = due.child(
+            Input::new(&self.inputs.due_time)
+                .id("due-time-input")
+                .aria_label("期限の時刻")
+                .small()
+                .w(px(72.)),
+        );
         for (i, (label, days)) in due_buttons.into_iter().enumerate() {
-            due = due.child(chip(("p-due", i), label, false, cx).on_click(cx.listener(
-                move |this, _: &ClickEvent, window, cx| this.set_due_in(days, window, cx),
-            )));
+            due = due.child(
+                chip(("p-due", i), label, false, cx)
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        this.set_due_in(days, window, cx)
+                    }))
+                    .test_support(),
+            );
         }
 
         let mut percent = row().gap_1().flex_wrap();

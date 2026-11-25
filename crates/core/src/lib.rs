@@ -12,6 +12,7 @@
 //! - `lock`: アプリロック
 //! - `mention`: コメントの `@名前`
 //! - `view`: 一覧の絞り込みや並べ替え
+//! - `when`: 期限や開始の入力（いろいろな書き方）を読む
 
 #![cfg_attr(test, allow(clippy::cloned_ref_to_slice_refs))]
 
@@ -33,6 +34,7 @@ pub mod tasklink;
 pub mod text;
 pub mod ticket;
 pub mod view;
+pub mod when;
 
 pub use error::{Error, Result};
 pub use model::*;

@@ -941,7 +941,7 @@ impl Session {
              次のタスクが新しく作られたか、新しいリンクが書かれました。それぞれのタスクを update_task で整えてください。\n\
              - タイトルは、中身が一目で分かる短い言葉にする。URL が入っているタイトルは、リンク先の題を元に付け直す（「〜のレビュー」のようにユーザーが書いた目的は残す）。\n\
              - 説明には、リンクの URL と要点を書く。ユーザーが書いた文は消さない。\n\
-             - 中身から分かる範囲で、優先度や期限を入れる。\n\
+             - 中身から分かる範囲で、優先度や期限を入れる。期限の時刻が分かるときは、時刻も入れる。\n\
              - 直すところがなければ、何も変えない。\n\
              - タスクを新しく作らない。消さない。\n\
              - タイトルと説明には、タスクの中身だけを書く。読めなかったリンクや、確かめられなかったことについての注記を書かない。\n",
@@ -1676,7 +1676,7 @@ impl Session {
         let system = this
             .update(cx, |s, cx| {
                 let note =
-                    tools::turn_note(&malakt_core::view::today(), place, &s.workspace_context(cx));
+                    tools::turn_note(&malakt_core::view::now(), place, &s.workspace_context(cx));
                 if let Some(Turn::User(message)) = s.turns.last_mut() {
                     message.push_str(&note);
                 }
