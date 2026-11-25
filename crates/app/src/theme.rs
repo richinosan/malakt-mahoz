@@ -3,10 +3,12 @@
 //! ライトは白の地に黒のインクとハニーゴールド、ダークは黒の地にハニーゴールド。
 //! フォーカスの輪はどちらもアイスブルー。文字と背景のコントラストは 4.5:1 以上。
 
+use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use gpui_kit::component::{Theme, ThemeMode, ThemeSet};
-use gpui_kit::{App, Hsla, Rgba, Window, WindowAppearance};
+use gpui_kit::{App, Global, Hsla, RenderImage, Rgba, Window, WindowAppearance};
 
 use crate::db;
 
@@ -14,6 +16,102 @@ const SETTING: &str = "theme";
 const FONT: &str = "font.family";
 /// 同梱している書体。何も選んでいないときに使う。
 pub const DEFAULT_FONT: &str = "LINE Seed JP";
+
+const SCENE: &str = "scene";
+const SCENE_CLEAR: &str = "scene.clear";
+const SCENE_BLUR: &str = "scene.blur";
+const CARDS: &str = "list.cards";
+/// 背景の画像を出したときの、面の透明度とぼかしの最初の値（0〜100）。
+pub const DEFAULT_CLEAR: u8 = 40;
+pub const DEFAULT_BLUR: u8 = 30;
+/// 面をこれより透かすと文字が読めなくなる。
+pub const MAX_CLEAR: u8 = 70;
+
+/// 画面の後ろに敷く画像。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum Scene {
+    #[default]
+    None,
+    /// 青い空（ダークでは夜空）
+    Sky,
+    /// 森（ダークでは夜の森）
+    Forest,
+    /// 自分で選んだ画像
+    File(PathBuf),
+}
+
+impl Scene {
+    pub const BUNDLED: [Scene; 3] = [Scene::None, Scene::Sky, Scene::Forest];
+
+    pub fn label(&self) -> String {
+        match self {
+            Scene::None => "なし".into(),
+            Scene::Sky => "ガラスと青い空".into(),
+            Scene::Forest => "ダークフォレスト".into(),
+            Scene::File(path) => path.file_name().map_or_else(
+                || path.display().to_string(),
+                |n| n.to_string_lossy().into(),
+            ),
+        }
+    }
+
+    fn key(&self) -> Option<String> {
+        match self {
+            Scene::None => None,
+            Scene::Sky => Some("sky".into()),
+            Scene::Forest => Some("forest".into()),
+            Scene::File(path) => Some(format!("file:{}", path.display())),
+        }
+    }
+
+    fn from_key(key: &str) -> Self {
+        match key {
+            "sky" => Scene::Sky,
+            "forest" => Scene::Forest,
+            _ => key
+                .strip_prefix("file:")
+                .map_or(Scene::None, |path| Scene::File(path.into())),
+        }
+    }
+
+    /// 同梱の画像（JPEG）。
+    pub fn bundled(&self, dark: bool) -> Option<&'static [u8]> {
+        Some(match (self, dark) {
+            (Scene::Sky, false) => include_bytes!("../assets/scenes/sky-light.jpg"),
+            (Scene::Sky, true) => include_bytes!("../assets/scenes/sky-dark.jpg"),
+            (Scene::Forest, false) => include_bytes!("../assets/scenes/forest-light.jpg"),
+            (Scene::Forest, true) => include_bytes!("../assets/scenes/forest-dark.jpg"),
+            _ => return None,
+        })
+    }
+
+    /// この画像に合う色（アクセント、ライトの地、ダークの地）。自分で選んだ色があれば、そちらを使う。
+    fn colors(&self) -> Option<[Color; 3]> {
+        let hex = match self {
+            Scene::Sky => ["#1f6fd0", "#eaf3fc", "#0c1830"],
+            Scene::Forest => ["#4f8a3c", "#edf4ea", "#0b1712"],
+            _ => return None,
+        };
+        Some(hex.map(|hex| Color::parse(hex).expect("正しい色")))
+    }
+}
+
+/// 今、画面の後ろに敷いている画像。
+pub struct Backdrop {
+    pub image: Arc<RenderImage>,
+    /// 画像の上に重ねる面の濃さ（0〜1）。
+    pub alpha: f32,
+    made_from: (Scene, bool, u8),
+}
+
+#[derive(Default)]
+struct Shown {
+    backdrop: Option<Backdrop>,
+    /// 起動のときに画像を読めなかった理由。最初のウィンドウが画面に出す。
+    failed: Option<String>,
+}
+
+impl Global for Shown {}
 
 /// 自分で変えられる色。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -386,9 +484,178 @@ pub fn look(cx: &App) -> Look {
     }
 }
 
-/// 今の画面の色。選んでいないものは同梱の配色の色。
+fn number(cx: &App, key: &str, default: u8, max: u8) -> u8 {
+    db::shared(cx)
+        .read(cx)
+        .store
+        .setting(key)
+        .ok()
+        .flatten()
+        .and_then(|value| value.parse::<u8>().ok())
+        .map_or(default, |value| value.min(max))
+}
+
+/// 保存してある背景の画像。
+pub fn scene(cx: &App) -> Scene {
+    let key = db::shared(cx).read(cx).store.setting(SCENE).ok().flatten();
+    key.map_or(Scene::None, |key| Scene::from_key(&key))
+}
+
+/// 面の透明度（0〜`MAX_CLEAR`）。
+pub fn clear(cx: &App) -> u8 {
+    number(cx, SCENE_CLEAR, DEFAULT_CLEAR, MAX_CLEAR)
+}
+
+/// 画像のぼかし（0〜100）。
+pub fn blur(cx: &App) -> u8 {
+    number(cx, SCENE_BLUR, DEFAULT_BLUR, 100)
+}
+
+/// タスクの一覧を、広い画面でもカードで出す。
+pub fn cards(cx: &App) -> bool {
+    let store = &db::shared(cx).read(cx).store;
+    store.setting(CARDS).ok().flatten().as_deref() == Some("1")
+}
+
+/// 今、画面の後ろに敷いている画像。
+pub fn backdrop(cx: &App) -> Option<&Backdrop> {
+    cx.try_global::<Shown>()?.backdrop.as_ref()
+}
+
+/// 起動のときに画像を読めなかった理由を、1 回だけ受け取る。
+pub fn take_failure(cx: &mut App) -> Option<String> {
+    cx.try_global::<Shown>()?;
+    cx.global_mut::<Shown>().failed.take()
+}
+
+/// 背景の画像を変える。読めない画像のときは、何も変えずに理由を返す。
+pub fn set_scene(scene: Scene, cx: &mut App) -> Result<(), String> {
+    let dark = Theme::global(cx).mode.is_dark();
+    // 先に読んで確かめる。読めなければ保存もしない
+    let image = render(&scene, dark, blur(cx))?;
+    let key = scene.key();
+    db::shared(cx)
+        .update(cx, |db, _| db.store.set_setting(SCENE, key.as_deref()))
+        .map_err(|error| format!("背景の画像の選択を保存できませんでした。{error}"))?;
+    let alpha = 1. - f32::from(clear(cx)) / 100.;
+    let made_from = (scene, dark, blur(cx));
+    cx.global_mut::<Shown>().backdrop = image.map(|image| Backdrop {
+        image,
+        alpha,
+        made_from,
+    });
+    reload(cx);
+    Ok(())
+}
+
+/// 面の透明度を変える。
+pub fn set_clear(value: u8, cx: &mut App) -> malakt_core::Result<()> {
+    let value = value.min(MAX_CLEAR);
+    db::shared(cx).update(cx, |db, _| {
+        db.store.set_setting(SCENE_CLEAR, Some(&value.to_string()))
+    })?;
+    if let Some(backdrop) = cx.global_mut::<Shown>().backdrop.as_mut() {
+        backdrop.alpha = 1. - f32::from(value) / 100.;
+    }
+    cx.refresh_windows();
+    Ok(())
+}
+
+/// 画像のぼかしを変える。
+pub fn set_blur(value: u8, cx: &mut App) -> Result<(), String> {
+    let value = value.min(100);
+    db::shared(cx)
+        .update(cx, |db, _| {
+            db.store.set_setting(SCENE_BLUR, Some(&value.to_string()))
+        })
+        .map_err(|error| format!("ぼかしを保存できませんでした。{error}"))?;
+    sync_backdrop(cx)?;
+    cx.refresh_windows();
+    Ok(())
+}
+
+/// タスクの一覧をカードで出すかどうかを変える。
+pub fn set_cards(on: bool, cx: &mut App) -> malakt_core::Result<()> {
+    db::shared(cx).update(cx, |db, _| db.store.set_setting(CARDS, on.then_some("1")))?;
+    cx.refresh_windows();
+    Ok(())
+}
+
+/// 保存してある画像・ぼかしと、今のライト/ダークに合わせて、敷く画像を作り直す。
+fn sync_backdrop(cx: &mut App) -> Result<(), String> {
+    let wanted = (scene(cx), Theme::global(cx).mode.is_dark(), blur(cx));
+    if backdrop(cx).is_some_and(|b| b.made_from == wanted) {
+        return Ok(());
+    }
+    let alpha = 1. - f32::from(clear(cx)) / 100.;
+    let made = render(&wanted.0, wanted.1, wanted.2);
+    let shown = cx.global_mut::<Shown>();
+    match made {
+        Ok(image) => {
+            shown.backdrop = image.map(|image| Backdrop {
+                image,
+                alpha,
+                made_from: wanted,
+            });
+            Ok(())
+        }
+        Err(error) => {
+            shown.backdrop = None;
+            Err(error)
+        }
+    }
+}
+
+/// 敷く画像を作る。ぼかすときは小さくしてからぼかす（引き伸ばして描くので、粗さは見えない）。
+fn render(scene: &Scene, dark: bool, blur: u8) -> Result<Option<Arc<RenderImage>>, String> {
+    let decoded = match scene {
+        Scene::None => return Ok(None),
+        Scene::File(path) => {
+            let name = path.display();
+            let bytes = std::fs::read(path)
+                .map_err(|error| format!("背景の画像 {name} を読めませんでした。{error}"))?;
+            image::load_from_memory(&bytes).map_err(|error| {
+                format!(
+                    "背景の画像 {name} を開けませんでした（PNG か JPEG を選んでください）。{error}"
+                )
+            })?
+        }
+        bundled => image::load_from_memory(bundled.bundled(dark).expect("同梱の画像"))
+            .expect("同梱の画像は正しい JPEG"),
+    };
+    let width = if blur == 0 { 1920 } else { 480 };
+    let small = if decoded.width() > width {
+        decoded.resize(width, u32::MAX, image::imageops::FilterType::Triangle)
+    } else {
+        decoded
+    };
+    let mut pixels = small.into_rgba8();
+    if blur > 0 {
+        let sigma = f32::from(blur) * 0.12 * pixels.width() as f32 / 480.;
+        pixels = image::imageops::blur(&pixels, sigma);
+    }
+    // 描く側は BGRA で持つ
+    for pixel in pixels.pixels_mut() {
+        pixel.0.swap(0, 2);
+    }
+    Ok(Some(Arc::new(RenderImage::new(vec![image::Frame::new(
+        pixels,
+    )]))))
+}
+
+/// 自分で選んだ色がないところに、背景の画像に合う色を入れる。
+fn with_scene(mut look: Look, scene: &Scene) -> Look {
+    if let Some([accent, light, dark]) = scene.colors() {
+        look.accent.get_or_insert(accent);
+        look.light.get_or_insert(light);
+        look.dark.get_or_insert(dark);
+    }
+    look
+}
+
+/// 今の画面の色。選んでいないものは、背景の画像に合う色か、同梱の配色の色。
 pub fn shown(slot: Slot, cx: &App) -> Color {
-    if let Some(color) = look(cx).color(slot) {
+    if let Some(color) = with_scene(look(cx), &scene(cx)).color(slot) {
         return color;
     }
     let theme = Theme::global(cx);
@@ -417,7 +684,8 @@ pub fn fonts(cx: &App) -> Vec<String> {
 
 /// 配色を読み込んで、保存してある選択で塗る。`gpui_kit::init` のあとに 1 回呼ぶ。
 pub fn init(cx: &mut App) {
-    install(&look(cx), cx);
+    cx.set_global(Shown::default());
+    install(&with_scene(look(cx), &scene(cx)), cx);
     apply(choice(cx), None, cx);
 }
 
@@ -446,7 +714,7 @@ pub fn set_color(slot: Slot, color: Option<Color>, cx: &mut App) -> malakt_core:
 }
 
 fn reload(cx: &mut App) {
-    install(&look(cx), cx);
+    install(&with_scene(look(cx), &scene(cx)), cx);
     let mode = Theme::global(cx).mode;
     repaint(mode, cx);
 }
@@ -658,6 +926,10 @@ fn apply(choice: Choice, window: Option<&mut Window>, cx: &mut App) {
 
 fn repaint(mode: ThemeMode, cx: &mut App) {
     Theme::change(mode, None, cx);
+    // ライトとダークで、敷く画像が変わる
+    if let Err(error) = sync_backdrop(cx) {
+        cx.global_mut::<Shown>().failed = Some(error);
+    }
     // 配色を読み込むと文字の大きさが配色の値に戻るので、そのたびに拡大率を掛け直す
     Theme::update(cx, |theme| {
         theme.font_size *= crate::TEXT_SCALE;

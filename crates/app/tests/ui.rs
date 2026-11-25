@@ -1693,6 +1693,140 @@ fn font_and_colors_are_chosen_in_settings(cx: &mut TestAppContext) {
     );
 }
 
+/// 設定の「見た目」で、背景の画像・透明度・ぼかし・カード表示を変えられ、開き直しても残る。
+#[gpui_kit::test]
+fn backdrop_and_cards_are_chosen_in_settings(cx: &mut TestAppContext) {
+    use gpui_kit::component::ActiveTheme;
+    use malakt_mahoz::state::SubModal;
+    use malakt_mahoz::theme::{self, Color, Scene};
+    start(cx);
+    cx.update(|cx| {
+        db::shared(cx).update(cx, |db, cx| {
+            db.store.add_task_in(None, "切符を買う").unwrap();
+            cx.notify();
+        })
+    });
+    let (window, view) = open(cx, wide());
+    cx.update(|cx| view.update(cx, |v, cx| v.go(Nav::All, cx)));
+    let saved = |cx: &mut TestAppContext, key: &str| store(cx, |s| s.setting(key).unwrap());
+    let primary = |cx: &mut TestAppContext| cx.update(|cx| Color::from(cx.theme().primary).hex());
+    ui(cx, window, |window, cx| {
+        theme::set(theme::Choice::Light, window, cx).unwrap()
+    });
+    assert!(cx.update(|cx| theme::backdrop(cx).is_none()));
+
+    // 背景の画像の一覧は、設定の上に重なって開く。選ぶと、その画像に合う色になる
+    ui(cx, window, |window, cx| {
+        view.update(cx, |v, cx| v.open_appearance(window, cx))
+    });
+    ui(cx, window, |window, cx| {
+        // 画像を出していないときは、透明度とぼかしは出ない
+        assert!(window.try_find("clear-slider").is_none());
+        window.click("scene-open", cx)
+    });
+    assert_eq!(
+        cx.update(|cx| view.read(cx).sub_modal),
+        Some(SubModal::Scene)
+    );
+    ui(cx, window, |window, cx| window.click(("scene", 1usize), cx));
+    assert_eq!(saved(cx, "scene").as_deref(), Some("sky"));
+    assert!(cx.update(|cx| theme::backdrop(cx).is_some()));
+    assert_eq!(primary(cx), "#1f6fd0");
+    ui(cx, window, |window, cx| window.press("escape", cx));
+    assert!(cx.update(|cx| {
+        let v = view.read(cx);
+        v.sub_modal.is_none() && v.modal == Modal::Appearance
+    }));
+
+    // 透明度とぼかしは、押したところの値になる
+    let alpha = |cx: &mut TestAppContext| cx.update(|cx| theme::backdrop(cx).unwrap().alpha);
+    let before = alpha(cx);
+    ui(cx, window, |window, cx| {
+        let slider = window.find("clear-slider").bounds();
+        let right = gpui_kit::point(slider.size.width * 0.9, slider.size.height / 2.);
+        window.click_at("clear-slider", right, cx)
+    });
+    assert!(alpha(cx) < before, "透明度を上げると、面が薄くなる");
+    assert_eq!(
+        saved(cx, "scene.clear").and_then(|v| v.parse::<u8>().ok()),
+        Some(cx.update(|cx| theme::clear(cx)))
+    );
+    assert!(cx.update(|cx| theme::clear(cx)) > theme::DEFAULT_CLEAR);
+    ui(cx, window, |window, cx| window.click("blur-slider", cx));
+    assert_eq!(saved(cx, "scene.blur").as_deref(), Some("50"));
+
+    // 自分で選んだ色は、画像に合う色より優先する
+    ui(cx, window, |window, cx| {
+        view.update(cx, |v, cx| {
+            v.set_color(theme::Slot::Accent, Color::parse("#b3344f"), window, cx)
+        })
+    });
+    assert_eq!(primary(cx), "#b3344f");
+    ui(cx, window, |window, cx| window.click("accent-reset", cx));
+    assert_eq!(primary(cx), "#1f6fd0");
+
+    // カードで表示にすると、広い画面でも表の見出しがなくなる
+    ui(cx, window, |window, cx| {
+        assert!(window.try_find(("col-head", 0usize)).is_some());
+        window.click("cards-switch", cx)
+    });
+    assert_eq!(saved(cx, "list.cards").as_deref(), Some("1"));
+    ui(cx, window, |window, _| {
+        assert!(window.try_find(("col-head", 0usize)).is_none())
+    });
+
+    // 起動し直しても残る。ダークでは夜の絵に変わる
+    let day = cx.update(|cx| theme::backdrop(cx).unwrap().image.id);
+    cx.update(theme::init);
+    assert!(cx.update(|cx| theme::backdrop(cx).is_some()));
+    ui(cx, window, |window, cx| {
+        theme::set(theme::Choice::Dark, window, cx).unwrap()
+    });
+    assert_ne!(cx.update(|cx| theme::backdrop(cx).unwrap().image.id), day);
+
+    // 自分の画像。読めない画像は、前のままにして理由を出す
+    let dir = tempfile::tempdir().unwrap();
+    let missing = dir.path().join("ない.png");
+    let broken = dir.path().join("壊れた.png");
+    std::fs::write(&broken, b"png?").unwrap();
+    for bad in [missing, broken] {
+        ui(cx, window, |window, cx| {
+            view.update(cx, |v, cx| {
+                v.set_scene(Scene::File(bad.clone()), window, cx)
+            })
+        });
+        let error = cx.update(|cx| view.read(cx).error.clone()).unwrap();
+        assert!(error.contains(&bad.display().to_string()), "{error}");
+        assert_eq!(saved(cx, "scene").as_deref(), Some("sky"));
+    }
+    let own = dir.path().join("海.png");
+    image::RgbaImage::from_pixel(8, 8, image::Rgba([20, 80, 160, 255]))
+        .save(&own)
+        .unwrap();
+    ui(cx, window, |window, cx| {
+        view.update(cx, |v, cx| {
+            v.set_scene(Scene::File(own.clone()), window, cx)
+        })
+    });
+    assert!(cx.update(|cx| view.read(cx).error.is_none()));
+    assert_eq!(cx.update(|cx| theme::scene(cx)), Scene::File(own.clone()));
+    assert_eq!(cx.update(|cx| theme::scene(cx).label()), "海.png");
+    // 画像がなくなっていたら、次の起動では画像なしで始めて、理由を知らせる
+    std::fs::remove_file(&own).unwrap();
+    cx.update(theme::init);
+    assert!(cx.update(|cx| theme::backdrop(cx).is_none()));
+    assert!(cx.update(theme::take_failure).unwrap().contains("海.png"));
+
+    // 標準に戻すと、画像も、画像に合わせた色もなくなる
+    ui(cx, window, |window, cx| window.click("scene-reset", cx));
+    assert_eq!(saved(cx, "scene"), None);
+    assert!(cx.update(|cx| theme::backdrop(cx).is_none()));
+    ui(cx, window, |window, cx| {
+        theme::set(theme::Choice::Light, window, cx).unwrap()
+    });
+    assert_eq!(primary(cx), "#86600f");
+}
+
 /// アイコンは検索して選べる。日本語でも探せ、見つからなければその旨が出る。
 #[gpui_kit::test]
 fn workspace_icon_is_found_by_search(cx: &mut TestAppContext) {
