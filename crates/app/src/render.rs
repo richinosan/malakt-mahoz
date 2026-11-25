@@ -77,6 +77,25 @@ fn col() -> Div {
 }
 
 /// 押せる小さなラベル。選ばれているものは色を付ける。
+/// 進捗の棒。
+fn percent_bar(percent: u8, width: Pixels, cx: &App) -> Div {
+    let theme = cx.theme();
+    div()
+        .w(width)
+        .h(px(6.))
+        .flex_none()
+        .rounded_full()
+        .bg(theme.muted)
+        .overflow_hidden()
+        .child(
+            div()
+                .h_full()
+                .w(relative(f32::from(percent.min(100)) / 100.))
+                .rounded_full()
+                .bg(theme.primary),
+        )
+}
+
 fn chip(
     id: impl Into<ElementId>,
     label: impl Into<SharedString>,
@@ -2088,7 +2107,10 @@ impl MainView {
         let active = self.panel.as_deref() == Some(id.as_str());
         let closed = !task.status.is_open();
         let now = malakt_core::now_ms();
-        let arranging = self.ai_session.read(cx).arranging.contains(&task.id);
+        let arranging = {
+            let session = self.ai_session.read(cx);
+            session.arranging.contains(&task.id) || session.tracking.contains(&task.id)
+        };
 
         let select = {
             let id = id.clone();
@@ -2118,6 +2140,20 @@ impl MainView {
                     .bg(theme.secondary)
                     .text_xs()
                     .child(category.clone()),
+            );
+        }
+        if !closed && task.percent > 0 {
+            has_chips = true;
+            // 進んでいるタスクには、進捗の棒と数字を添える
+            chips = chips.child(
+                row()
+                    .flex_none()
+                    .gap_1()
+                    .items_center()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(percent_bar(task.percent, px(48.), cx))
+                    .child(format!("{}%", task.percent)),
             );
         }
         if !task.linked_workspace_ids.is_empty() {
@@ -2959,7 +2995,45 @@ impl MainView {
         // AI が整えている間の印と、整えられなかった理由
         let ai_state = {
             let session = self.ai_session.read(cx);
-            if session.arranging.contains(&task.id) {
+            if session.tracking.contains(&task.id) {
+                // コメントからの更新中の印は「進捗」の行に出す（書いている途中の画面を動かさない）
+                None
+            } else if let Some(note) = session.track_notes.get(&task.id) {
+                let detail = note.clone();
+                let id = task.id.clone();
+                Some(
+                    row()
+                        .gap_1()
+                        .items_center()
+                        .text_sm()
+                        .text_color(theme.muted_foreground)
+                        .child(
+                            // 短い言葉だけを出し、くわしい理由はホバーで出す
+                            row()
+                                .id("ai-track-note")
+                                .gap_2()
+                                .items_center()
+                                .child(app_icon("sparkles").small().flex_none())
+                                .child(crate::ai::arrange_note_label(note))
+                                .tooltip(move |window, cx| {
+                                    gpui_kit::component::tooltip::Tooltip::new(detail.clone())
+                                        .build(window, cx)
+                                })
+                                .test_support(),
+                        )
+                        .child(
+                            Button::new("ai-track-retry")
+                                .icon(app_icon("refresh-cw"))
+                                .ghost()
+                                .xsmall()
+                                .tooltip("もう一度更新する")
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.ai_session.update(cx, |s, cx| s.retry_track(&id, cx));
+                                })),
+                        )
+                        .into_any_element(),
+                )
+            } else if session.arranging.contains(&task.id) {
                 Some(
                     row()
                         .id("ai-working")
@@ -3185,7 +3259,16 @@ impl MainView {
             )));
         }
 
-        let mut percent = row().gap_1().flex_wrap();
+        let mut percent = row().gap_1().flex_wrap().items_center().child(
+            row()
+                .flex_none()
+                .gap_2()
+                .mr_1()
+                .items_center()
+                .text_sm()
+                .child(percent_bar(task.percent, px(64.), cx))
+                .child(format!("{}%", task.percent)),
+        );
         for (i, value) in [0u8, 25, 50, 75, 100].into_iter().enumerate() {
             percent = percent.child(
                 chip(
@@ -3197,6 +3280,34 @@ impl MainView {
                 .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                     this.edit_task(cx, |d| d.percent = value)
                 })),
+            );
+        }
+
+        // AI がコメントから更新している間の印と、変えたあとの元に戻すボタン。同じ場所に出す
+        if self.ai_session.read(cx).tracking.contains(&task.id) {
+            percent = percent.child(
+                div()
+                    .id("ai-tracking")
+                    .flex_none()
+                    .px_1()
+                    .child(Spinner::new().small())
+                    .tooltip(|window, cx| {
+                        gpui_kit::component::tooltip::Tooltip::new("AI がコメントから更新中")
+                            .build(window, cx)
+                    })
+                    .test_support(),
+            );
+        } else if let Some(tracked) = self.ai_session.read(cx).tracked_for(task) {
+            let id = task.id.clone();
+            percent = percent.child(
+                Button::new("ai-tracked-undo")
+                    .icon(app_icon("undo-2"))
+                    .ghost()
+                    .xsmall()
+                    .tooltip(format!("AI の更新（{}）を元に戻す", tracked.label))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.ai_session.update(cx, |s, cx| s.undo_track(&id, cx));
+                    })),
             );
         }
 

@@ -359,6 +359,10 @@ impl MainView {
             cx.observe_in(&db, window, |this, _, window, cx| {
                 this.deliver_notices(window, cx)
             }),
+            // AI やほかのウィンドウが開始日と期限を変えたら、詳細の入力欄も合わせる
+            cx.observe_in(&db, window, |this, _, window, cx| {
+                this.sync_dates(window, cx)
+            }),
         ];
         macro_rules! on_enter {
             ($field:ident, $method:ident) => {
@@ -891,6 +895,23 @@ impl MainView {
             self.inputs
                 .due
                 .update(cx, |s, cx| s.set_value(due, window, cx));
+        }
+    }
+
+    /// 詳細の開始日と期限の入力欄を、タスクの今の値に合わせる。入力している途中の欄は変えない。
+    fn sync_dates(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(detail) = &self.detail else { return };
+        let pairs = [
+            (self.inputs.start.clone(), detail.task.start.clone()),
+            (self.inputs.due.clone(), detail.task.due.clone()),
+        ];
+        for (input, value) in pairs {
+            let value = value.unwrap_or_default();
+            input.update(cx, |s, cx| {
+                if s.value().as_ref() != value && !s.focus_handle(cx).is_focused(window) {
+                    s.set_value(value, window, cx);
+                }
+            });
         }
     }
 
