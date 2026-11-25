@@ -3264,3 +3264,181 @@ fn narrow_widths_keep_the_title_and_never_overlap(cx: &mut TestAppContext) {
         });
     }
 }
+
+/// ふつうのキーで操作する。↑↓ で選び、Enter で開き、F2 で名前を変え、Delete で確認を出して消す。
+/// 入力欄の中では、同じキーは文字の編集のまま。
+#[gpui_kit::test]
+fn standard_keys_work_on_the_list(cx: &mut TestAppContext) {
+    start(cx);
+    let ws = cx.update(|cx| {
+        db::shared(cx).update(cx, |db, _| {
+            let ws = db.store.create_workspace(None, "仕事").unwrap();
+            for title in ["一", "二", "三"] {
+                let draft = malakt_core::TaskDraft {
+                    title: title.into(),
+                    ..Default::default()
+                };
+                db.store.create_task(Some(&ws.id), &draft).unwrap();
+            }
+            ws.id
+        })
+    });
+    let (window, view) = open(cx, wide());
+    cx.update(|cx| view.update(cx, |v, cx| v.go(Nav::Workspace(ws.clone()), cx)));
+    let key =
+        |cx: &mut TestAppContext, key: &str| ui(cx, window, |window, cx| window.press(key, cx));
+    let id_at = |cx: &mut TestAppContext, ix: usize| {
+        cx.update(|cx| {
+            let v = view.read(cx);
+            v.tasks[v.visible[ix]].id.clone()
+        })
+    };
+    let (first, second, third) = (id_at(cx, 0), id_at(cx, 1), id_at(cx, 2));
+    ui(cx, window, |window, cx| {
+        view.read(cx).focus.clone().focus(window, cx)
+    });
+
+    // 何も選んでいないときの F2 は、見ているワークスペースの名前の変更
+    key(cx, "f2");
+    cx.update(|cx| {
+        let naming = view.read(cx).workspace_naming.clone();
+        assert_eq!(naming.map(|n| n.id), Some(ws.clone()));
+    });
+    // 名前の入力欄の中では、↓ や Delete は一覧に届かない
+    key(cx, "down");
+    key(cx, "delete");
+    cx.update(|cx| {
+        let v = view.read(cx);
+        assert_eq!(v.cursor, None);
+        assert_eq!(v.modal, Modal::None);
+    });
+    ui(cx, window, |window, cx| {
+        window.input("しごと", cx);
+        window.press("enter", cx);
+    });
+    assert_eq!(store(cx, |s| s.workspace(&ws).unwrap()).name, "しごと");
+
+    // ↓ で 1 行目、もう一度で 2 行目。End と Home で端へ
+    key(cx, "down");
+    cx.update(|cx| assert_eq!(view.read(cx).cursor, Some(first.clone())));
+    ui(cx, window, |window, _| {
+        assert!(window.try_find(("row-cursor", 0usize)).is_some())
+    });
+    key(cx, "down");
+    cx.update(|cx| assert_eq!(view.read(cx).cursor, Some(second.clone())));
+    key(cx, "end");
+    cx.update(|cx| assert_eq!(view.read(cx).cursor, Some(third.clone())));
+    key(cx, "home");
+    cx.update(|cx| assert_eq!(view.read(cx).cursor, Some(first.clone())));
+
+    // Shift+↓ で続けてチェックが付き、Space で 1 行ずつ変わる
+    key(cx, "shift-down");
+    cx.update(|cx| {
+        assert_eq!(
+            view.read(cx).selected_ids(),
+            [first.clone(), second.clone()]
+        )
+    });
+    key(cx, "space");
+    cx.update(|cx| assert_eq!(view.read(cx).selected_ids(), std::slice::from_ref(&first)));
+    key(cx, "secondary-a");
+    cx.update(|cx| assert_eq!(view.read(cx).selected_ids().len(), 3));
+    key(cx, "escape");
+    cx.update(|cx| assert!(view.read(cx).selected.is_empty()));
+
+    // Ctrl+C でリンクがクリップボードに入る
+    key(cx, "secondary-c");
+    let copied = cx.update(|cx| cx.read_from_clipboard().and_then(|item| item.text()));
+    assert_eq!(copied, Some(malakt_core::tasklink::url(&second)));
+
+    // Enter で開き、Esc で閉じる
+    key(cx, "enter");
+    cx.update(|cx| assert_eq!(view.read(cx).panel, Some(second.clone())));
+    key(cx, "escape");
+    cx.update(|cx| assert_eq!(view.read(cx).panel, None));
+
+    // F2 でタイトルをその場で変える
+    key(cx, "f2");
+    cx.update(|cx| {
+        let v = view.read(cx);
+        assert_eq!(v.panel, Some(second.clone()));
+        assert_eq!(v.editing, Some(malakt_mahoz::state::Editing::Title));
+    });
+    ui(cx, window, |window, cx| {
+        window.input("二の次", cx);
+        window.press("enter", cx);
+    });
+    assert_eq!(store(cx, |s| s.task(&second).unwrap()).title, "二の次");
+    key(cx, "escape");
+
+    // Ctrl+D で複製。できたタスクが選ばれる
+    key(cx, "secondary-d");
+    let tasks = all_tasks(cx);
+    assert_eq!(tasks.len(), 4);
+    let copy = tasks.iter().find(|t| t.title == "二の次 のコピー").unwrap();
+    assert_eq!(copy.workspace_id.as_deref(), Some(ws.as_str()));
+    cx.update(|cx| assert_eq!(view.read(cx).cursor, Some(copy.id.clone())));
+
+    // Delete は確認を出す。Esc でやめると消えない
+    key(cx, "delete");
+    cx.update(|cx| {
+        assert_eq!(
+            view.read(cx).modal,
+            Modal::DeleteTasks(vec![copy.id.clone()])
+        )
+    });
+    key(cx, "escape");
+    assert_eq!(all_tasks(cx).len(), 4);
+    key(cx, "delete");
+    ui(cx, window, |window, cx| {
+        window.click("confirm-delete-tasks", cx)
+    });
+    assert_eq!(all_tasks(cx).len(), 3);
+
+    // Ctrl+F で検索欄へ。その中の Delete や ↓ は文字の編集で、一覧は動かない
+    key(cx, "home");
+    key(cx, "secondary-f");
+    ui(cx, window, |window, cx| window.input("三", cx));
+    cx.update(|cx| assert_eq!(view.read(cx).visible.len(), 1));
+    key(cx, "delete");
+    key(cx, "down");
+    key(cx, "f2");
+    cx.update(|cx| {
+        let v = view.read(cx);
+        assert_eq!(v.modal, Modal::None);
+        assert_eq!(v.editing, None);
+        assert_eq!(v.cursor, Some(first.clone()));
+    });
+
+    // Esc で検索欄を出て、もう一度で行の選択も外れる。そのあとの F2 はワークスペースの名前
+    key(cx, "escape");
+    key(cx, "escape");
+    cx.update(|cx| assert_eq!(view.read(cx).cursor, None));
+
+    // Ctrl+N で新しいタスクができて、そのままタイトルを書ける
+    key(cx, "secondary-n");
+    ui(cx, window, |window, cx| {
+        window.input("四", cx);
+        window.press("enter", cx);
+    });
+    let tasks = all_tasks(cx);
+    assert_eq!(tasks.len(), 4);
+    assert!(tasks.iter().any(|t| t.title == "四"));
+    key(cx, "escape");
+
+    // F1 でキーの一覧、Ctrl+, でフォントとカラー
+    key(cx, "f1");
+    cx.update(|cx| {
+        assert_eq!(
+            view.read(cx).pane_overlay,
+            Some(malakt_mahoz::panes::PaneOverlay::Help)
+        )
+    });
+    ui(cx, window, |window, _| {
+        assert!(window.try_find("app-keys").is_some())
+    });
+    key(cx, "f1");
+    cx.update(|cx| assert_eq!(view.read(cx).pane_overlay, None));
+    key(cx, "secondary-,");
+    cx.update(|cx| assert_eq!(view.read(cx).modal, Modal::Appearance));
+}
