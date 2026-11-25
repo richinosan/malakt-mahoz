@@ -1865,6 +1865,297 @@ fn pane_widths_are_kept(cx: &mut TestAppContext) {
     );
 }
 
+/// 前からあるタスクを 1 つ入れて始める（新しいタスクを整えるほうが動かないようにする）。
+fn start_with_task(cx: &mut TestAppContext, title: &str) -> (World, String) {
+    let mut store = Store::open_in_memory().unwrap();
+    let draft = TaskDraft {
+        title: title.into(),
+        ..Default::default()
+    };
+    let task = store.create_task(None, &draft).unwrap();
+    (start_with(cx, store), task.id)
+}
+
+fn add_comment(cx: &mut TestAppContext, task: &str, body: &str) -> String {
+    cx.update(|cx| {
+        db::shared(cx).update(cx, |db, cx| {
+            let comment = db.store.add_comment(task, None, body).unwrap();
+            cx.notify();
+            comment.id
+        })
+    })
+}
+
+/// コメントを書いてからの待ち時間を進める。
+fn settle_comments(cx: &mut TestAppContext) {
+    cx.run_until_parked();
+    cx.executor().advance_clock(ai::TRACK_DELAY);
+    wait(cx, "AI が更新し終わる", |s| !s.busy);
+}
+
+/// 画面でコメントを書くと、少し待ってから AI が進捗と状態を更新する。
+/// 変えたところは詳細に出て、ボタンで元に戻せる。
+#[gpui_kit::test]
+fn a_comment_updates_the_progress(cx: &mut TestAppContext) {
+    let (world, task) = start_with_task(cx, "記事を書く");
+    world.keys.set(Provider::Claude, "k").unwrap();
+    // コメント欄は詳細の下のほうにあるので、縦に長いウィンドウで開く
+    let (window, view) = open(cx, size(px(2000.), px(2400.)));
+    ui(cx, window, |window, cx| window.click("nav-all", cx));
+    ui(cx, window, |window, cx| window.click(("title", 0usize), cx));
+    cx.update_window(window, |_, window, cx| {
+        view.update(cx, |v, cx| {
+            v.inputs.comment.update(cx, |s, cx| {
+                s.set_value("導入と本文は書いた。あとは図を 2 枚".to_owned(), window, cx)
+            })
+        })
+    })
+    .unwrap();
+    ui(cx, window, |window, cx| window.click("comment-submit", cx));
+
+    // 待ち時間の前には送らない
+    assert!(world.sent().is_empty());
+    world.reply(tool_reply(
+        "t1",
+        "update_task",
+        json!({"id": task, "percent": 60, "status": "in_process", "due": "2026-12-01"}),
+    ));
+    world.reply(text_reply("進捗を 60% にしました。"));
+    settle_comments(cx);
+
+    let sent = world.sent();
+    assert_eq!(sent.len(), 2);
+    let message = sent[0].2["messages"][0]["content"].as_str().unwrap();
+    assert!(
+        message.contains(&format!("## タスク（id: {task}）")),
+        "{message}"
+    );
+    assert!(
+        message.contains("導入と本文は書いた。あとは図を 2 枚"),
+        "{message}"
+    );
+    let now = all_tasks(cx).remove(0);
+    assert_eq!((now.percent, now.status), (60, Status::InProcess));
+    let label = read(cx, |s| s.tracked[&task].label.clone());
+    assert_eq!(label.as_ref(), "0% → 60%・進行中・期限 2026-12-01");
+    // 開いている詳細の期限の欄にも出る
+    cx.update(|cx| {
+        assert_eq!(
+            view.read(cx).inputs.due.read(cx).value().as_ref(),
+            "2026-12-01"
+        );
+    });
+    ui(cx, window, |window, _| {
+        assert!(window.try_find("ai-tracked-undo").is_some());
+    });
+
+    // AI が変えた分では、もう一度動かない
+    settle_comments(cx);
+    assert_eq!(world.sent().len(), 2);
+
+    // 元に戻すと、前の進捗と状態になる
+    ui(cx, window, |window, cx| window.click("ai-tracked-undo", cx));
+    let now = all_tasks(cx).remove(0);
+    assert_eq!(
+        (now.percent, now.status, now.due),
+        (0, Status::NeedsAction, None)
+    );
+    cx.update(|cx| {
+        assert_eq!(view.read(cx).inputs.due.read(cx).value().as_ref(), "");
+    });
+    ui(cx, window, |window, _| {
+        assert!(window.try_find("ai-tracked-undo").is_none());
+    });
+    assert_eq!(world.sent().len(), 2);
+}
+
+/// 続けて書いたコメントと書き直しは、手が止まってから 1 回にまとめて送る。
+/// 手で進捗を変えると、そのあとに元に戻しても手で変えた値が残る。
+#[gpui_kit::test]
+fn comments_are_sent_once_after_a_pause(cx: &mut TestAppContext) {
+    let (world, task) = start_with_task(cx, "引っ越しの準備");
+    world.keys.set(Provider::Claude, "k").unwrap();
+    cx.run_until_parked();
+    let first = add_comment(cx, &task, "箱を買った");
+    cx.run_until_parked();
+    cx.executor().advance_clock(ai::TRACK_DELAY / 2);
+    cx.run_until_parked();
+    add_comment(cx, &task, "台所を詰めた");
+    cx.run_until_parked();
+    cx.executor().advance_clock(ai::TRACK_DELAY / 2);
+    cx.run_until_parked();
+    assert!(world.sent().is_empty(), "書いている間は送らない");
+
+    world.reply(tool_reply(
+        "t1",
+        "update_task",
+        json!({"id": task, "percent": 30, "due": "2026-12-20"}),
+    ));
+    world.reply(text_reply("更新しました。"));
+    settle_comments(cx);
+    assert_eq!(world.sent().len(), 2);
+    let message = world.sent()[0].2["messages"][0]["content"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(message.contains("箱を買った") && message.contains("台所を詰めた"));
+    let label = read(cx, |s| s.tracked[&task].label.clone());
+    assert_eq!(label.as_ref(), "0% → 30%・期限 2026-12-20");
+
+    // コメントを書き直しても動く。続けて更新した分は、最初の値まで戻せる
+    std::thread::sleep(Duration::from_millis(2));
+    cx.update(|cx| {
+        db::shared(cx).update(cx, |db, cx| {
+            db.store
+                .update_comment(&first, "箱を買って、半分詰めた")
+                .unwrap();
+            cx.notify();
+        })
+    });
+    world.reply(tool_reply(
+        "t2",
+        "update_task",
+        json!({"id": task, "percent": 50}),
+    ));
+    world.reply(text_reply("更新しました。"));
+    settle_comments(cx);
+    assert_eq!(world.sent().len(), 4);
+    let label = read(cx, |s| s.tracked[&task].label.clone());
+    assert_eq!(label.as_ref(), "0% → 50%・期限 2026-12-20");
+
+    // 手で進捗を変えたあとに戻すと、手で変えた進捗は残り、期限だけが戻る
+    cx.update(|cx| {
+        db::shared(cx).update(cx, |db, cx| {
+            let mut draft = TaskDraft::from(&db.store.task(&task).unwrap());
+            draft.percent = 75;
+            db.store.update_task(&task, &draft).unwrap();
+            cx.notify();
+        })
+    });
+    let session = session(cx);
+    cx.update(|cx| session.update(cx, |s, cx| s.undo_track(&task, cx)));
+    let now = all_tasks(cx).remove(0);
+    assert_eq!((now.percent, now.due), (75, None));
+}
+
+/// API キーがなければ、コメントを書いてもどこにも通信せず、何も出さない。オフにしても同じ。
+#[gpui_kit::test]
+fn comments_stay_offline_without_a_key_or_when_turned_off(cx: &mut TestAppContext) {
+    let (world, task) = start_with_task(cx, "記事を書く");
+    cx.run_until_parked();
+    add_comment(cx, &task, "半分書いた");
+    settle_comments(cx);
+    assert!(world.sent().is_empty());
+    assert!(read(cx, |s| s.track_notes.is_empty() && s.items.is_empty()));
+
+    world.keys.set(Provider::Claude, "k").unwrap();
+    let session = session(cx);
+    cx.update(|cx| {
+        session.update(cx, |s, cx| {
+            s.refresh_key(cx);
+            s.set_track(false, cx);
+        })
+    });
+    add_comment(cx, &task, "8 割書いた");
+    settle_comments(cx);
+    assert!(world.sent().is_empty());
+    assert_eq!(setting(cx, "ai.track").as_deref(), Some("0"));
+
+    // オンに戻しても、オフの間のコメントでは動かない
+    cx.update(|cx| session.update(cx, |s, cx| s.set_track(true, cx)));
+    settle_comments(cx);
+    assert!(world.sent().is_empty());
+}
+
+/// AI に届かなかったときは、短い言葉とやり直しのボタンを出す。やり直すと更新される。
+#[gpui_kit::test]
+fn a_failed_update_from_a_comment_can_be_retried(cx: &mut TestAppContext) {
+    let (world, task) = start_with_task(cx, "記事を書く");
+    world.keys.set(Provider::Claude, "k").unwrap();
+    let (window, _view) = open(cx, wide());
+    ui(cx, window, |window, cx| window.click("nav-all", cx));
+    ui(cx, window, |window, cx| window.click(("title", 0usize), cx));
+    add_comment(cx, &task, "半分書いた");
+    world.fail("connection refused");
+    settle_comments(cx);
+    let note = read(cx, |s| s.track_notes[&task].clone());
+    assert_eq!(ai::arrange_note_label(&note), "AI に接続できませんでした");
+    ui(cx, window, |window, _| {
+        assert!(window.try_find("ai-track-note").is_some());
+    });
+
+    world.reply(tool_reply(
+        "t1",
+        "update_task",
+        json!({"id": task, "percent": 50}),
+    ));
+    world.reply(text_reply("更新しました。"));
+    ui(cx, window, |window, cx| window.click("ai-track-retry", cx));
+    wait(cx, "AI が更新し終わる", |s| !s.busy);
+    assert_eq!(all_tasks(cx)[0].percent, 50);
+    assert!(read(cx, |s| s.track_notes.is_empty()));
+    ui(cx, window, |window, _| {
+        assert!(window.try_find("ai-track-note").is_none());
+    });
+}
+
+/// コメントからの更新では、タイトルと説明を変えず、ほかのタスクにも触らず、コメントも書かない。
+#[gpui_kit::test]
+fn an_update_from_a_comment_touches_only_that_task(cx: &mut TestAppContext) {
+    let (world, task) = start_with_task(cx, "記事を書く");
+    world.keys.set(Provider::Claude, "k").unwrap();
+    let session = session(cx);
+    cx.update(|cx| session.update(cx, |s, cx| s.set_arrange(false, cx)));
+    let other = new_task(cx, "買い物");
+    cx.run_until_parked();
+    add_comment(cx, &task, "ほぼ終わり");
+    world.reply(tool_reply(
+        "t1",
+        "update_task",
+        json!({"id": task, "title": "記事（ほぼ完成）", "description": "メモ", "percent": 90}),
+    ));
+    world.reply(tool_reply(
+        "t2",
+        "update_task",
+        json!({"id": other, "percent": 90}),
+    ));
+    world.reply(tool_reply(
+        "t3",
+        "add_comment",
+        json!({"task_id": task, "body": "進捗を更新しました"}),
+    ));
+    world.reply(text_reply("更新しました。"));
+    settle_comments(cx);
+    assert_eq!(world.sent().len(), 4);
+    let tasks = all_tasks(cx);
+    let find = |id: &str| tasks.iter().find(|t| t.id == id).unwrap();
+    let now = find(&task);
+    assert_eq!(
+        (now.title.as_str(), now.description.as_str(), now.percent),
+        ("記事を書く", "", 90)
+    );
+    assert_eq!(find(&other).percent, 0);
+    let comments = cx.update(|cx| db::shared(cx).read(cx).store.comments(&task).unwrap());
+    assert_eq!(comments.len(), 1);
+}
+
+/// 「設定」のスイッチで、コメントからの更新を切れる。
+#[gpui_kit::test]
+fn updates_from_comments_are_turned_off_in_settings(cx: &mut TestAppContext) {
+    let (world, task) = start_with_task(cx, "記事を書く");
+    world.keys.set(Provider::Claude, "k").unwrap();
+    let (window, view) = open(cx, wide());
+    open_chat(cx, window, &view);
+    menu(cx, window, 0);
+    assert!(read(cx, |s| s.track));
+    ui(cx, window, |window, cx| window.click("ai-track", cx));
+    assert!(!read(cx, |s| s.track));
+    assert_eq!(setting(cx, "ai.track").as_deref(), Some("0"));
+    add_comment(cx, &task, "半分書いた");
+    settle_comments(cx);
+    assert!(world.sent().is_empty());
+}
+
 fn first_workspace(cx: &mut TestAppContext) -> malakt_core::Workspace {
     cx.update(|cx| db::shared(cx).read(cx).store.workspaces().unwrap())
         .remove(0)
