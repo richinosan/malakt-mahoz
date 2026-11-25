@@ -113,6 +113,8 @@ pub fn init_with(store: malakt_core::Store, ai: AiConfig, cx: &mut App) {
     // OS の通知に出るアプリの名前。通知を出す前に決めておく
     cx.set_app_identity(APP_ID, APP_NAME);
     gpui_kit::init(cx);
+    // 部品の中の文言（色を選ぶところの「パレット」など）も日本語にする
+    gpui_kit::component::set_locale("ja");
     load_fonts(cx);
     db::init(store, cx);
     passkey::init(cx);

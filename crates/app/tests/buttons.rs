@@ -40,6 +40,9 @@ const NOT_BUTTONS: &[&str] = &[
     "list-page",
     "icon-list",
     "icon-search",
+    "dialog-under",
+    "font-list",
+    "font-search",
     "history-list",
     "notices-scroll",
     "new-task-scroll",
@@ -59,6 +62,17 @@ const NEVER: &[&str] = &[
     "window-maximize",
     "window-restore",
     "window-close",
+];
+
+/// フォントとカラーの設定で、必ず押すもの。
+const MUST: &[&str] = &[
+    "font-open",
+    "font",
+    "font-reset",
+    "accent-reset",
+    "light-reset",
+    "dark-reset",
+    "color-open",
 ];
 
 /// ロックを設定したときだけ出るもの。ロックは tests/ui.rs で確かめる。
@@ -95,6 +109,7 @@ const QUIET: &[(&str, &str)] = &[
     ("bulk-mode#0", "今選んでいる変え方"),
     ("bulk-cat-mode#0", "今選んでいる変え方"),
     ("ticket-who#0", "今選んでいる人"),
+    ("font#0", "今選んでいるフォント"),
     // 入力が空のときは送らない
     ("pane-keys#0", "今選んでいるキーの割り当て"),
     ("quick-add-submit", "タイトルが空"),
@@ -186,6 +201,8 @@ fn fresh(cx: &mut TestAppContext, size: Size<Pixels>) -> World {
             let _ = window.update(cx, |_, window, _| window.remove_window());
         }
         db::shared(cx).update(cx, |db, _| db.store = store);
+        // 前の画面で変えた書体と色を、新しいデータ（何も選んでいない）に合わせて戻す
+        malakt_mahoz::theme::init(cx);
         cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(String::new()));
     });
     cx.run_until_parked();
@@ -385,7 +402,7 @@ fn fingerprint(cx: &mut TestAppContext, world: &World) -> String {
     cx.update(|cx| {
         let v = world.view.read(cx);
         let state = format!(
-            "{} {:?} {:?} {:?} {:?} {:?} {:?} {:?} {:?} {:?} {:?} {:?} {:?} {} {} {} {} {} {} {} {} {:?} {} {} {} {} {:?} {:?} {:?} {:?} {:?} {:?} {:?} {:?} {:?}",
+            "{} {:?} {:?} {:?} {:?} {:?} {:?} {:?} {:?} {:?} {:?} {:?} {:?} {:?} {} {} {} {} {} {} {} {} {:?} {} {} {} {} {:?} {:?} {:?} {:?} {:?} {:?} {:?} {:?} {:?}",
             v.layout.encode(),
             v.pane_keys,
             v.pane_overlay,
@@ -393,6 +410,7 @@ fn fingerprint(cx: &mut TestAppContext, world: &World) -> String {
             v.nav,
             v.panel,
             v.modal,
+            v.sub_modal,
             v.editing,
             v.comment_mode,
             v.query,
@@ -439,15 +457,28 @@ fn fingerprint(cx: &mut TestAppContext, world: &World) -> String {
                 store.changes(&task.id).unwrap().len()
             ));
         }
-        for key in ["theme", "table.columns", "sidebar.width"] {
+        for key in [
+            "theme",
+            "table.columns",
+            "sidebar.width",
+            "font.family",
+            "color.accent",
+            "color.background.light",
+            "color.background.dark",
+        ] {
             data.push_str(&format!("{:?}", store.setting(key).unwrap()));
         }
         let theme = gpui_kit::component::Theme::global(cx);
         let clipboard = cx.read_from_clipboard().and_then(|item| item.text());
         format!(
-            "{elements}\n{state}\n{data}\n{} {:?} {clipboard:?} {}",
+            "{elements}\n{state}\n{data}\n{:?} {} {:?} {:?} {} {clipboard:?} {}",
+            v.color_pickers
+                .each_ref()
+                .map(|picker| (picker.read(cx).is_open(), picker.read(cx).value())),
             theme.mode.is_dark(),
             theme.background,
+            theme.primary,
+            theme.font_family,
             cx.windows().len()
         )
     })
@@ -542,6 +573,37 @@ fn screens() -> Vec<(&'static str, Size<Pixels>, Setup)> {
         ),
         ("担当者のダイアログ", wide, |cx, w| {
             with_view(cx, w, |v, window, cx| v.open_people(window, cx))
+        }),
+        ("フォントとカラー", wide, |cx, w| {
+            with_view(cx, w, |v, window, cx| v.open_appearance(window, cx))
+        }),
+        (
+            "フォントとカラーを変えたところ",
+            wide,
+            |cx, w| {
+                use malakt_mahoz::theme::{Color, Slot};
+                with_view(cx, w, |v, window, cx| {
+                    v.set_font(Some("Noto Sans"), cx);
+                    for (slot, hex) in [
+                        (Slot::Accent, "#1d4ed8"),
+                        (Slot::Light, "#fdf6e3"),
+                        (Slot::Dark, "#002b36"),
+                    ] {
+                        v.set_color(slot, Color::parse(hex), window, cx);
+                    }
+                    v.open_appearance(window, cx)
+                })
+            },
+        ),
+        ("フォントの一覧", wide, |cx, w| {
+            with_view(cx, w, |v, window, cx| {
+                v.open_appearance(window, cx);
+                v.open_font_picker(window, cx);
+                // この PC に入っている書体の代わり
+                v.fonts = ["LINE Seed JP", "Noto Sans", "Noto Serif"]
+                    .map(String::from)
+                    .to_vec();
+            })
         }),
         ("担当を選んでいる詳細", wide, |cx, w| {
             let task = w.task.clone();
@@ -703,6 +765,13 @@ fn every_button_responds(cx: &mut TestAppContext) {
                 missed.push(name);
             }
         }
+    }
+    // ボタンの部品で作っていない押せるもの（行や色の見本）は、名前で確かめる
+    for name in MUST {
+        assert!(
+            pressed.contains(*name),
+            "{name} を押していない: {pressed:?}"
+        );
     }
     assert!(
         missed.is_empty(),
