@@ -2471,7 +2471,7 @@ impl Session {
                         let cleaned = (!s.arranging.is_empty())
                             .then(|| without_fetch_notes(&s.db.read(cx).store, &call.args));
                         // コメントからの更新では、進捗・状態・期限・開始日・優先度だけを変えさせる
-                        let cleaned = if s.tracking.is_empty() {
+                        let cleaned = if s.tracking.is_empty() || name != "update_task" {
                             cleaned
                         } else {
                             let mut args = call.args.clone();

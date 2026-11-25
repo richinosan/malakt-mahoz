@@ -2124,6 +2124,8 @@ fn an_update_from_a_comment_touches_only_that_task(cx: &mut TestAppContext) {
         "update_task",
         json!({"id": other, "percent": 90}),
     ));
+    // 読むだけのツールは、渡した条件のまま使える
+    world.reply(tool_reply("t4", "list_tasks", json!({"query": "買い物"})));
     world.reply(tool_reply(
         "t3",
         "add_comment",
@@ -2131,7 +2133,19 @@ fn an_update_from_a_comment_touches_only_that_task(cx: &mut TestAppContext) {
     ));
     world.reply(text_reply("更新しました。"));
     settle_comments(cx);
-    assert_eq!(world.sent().len(), 4);
+    let sent = world.sent();
+    assert_eq!(sent.len(), 5);
+    // `list_tasks` の結果は、次のリクエストの最後のメッセージで AI に返る
+    let listed = sent[3].2["messages"]
+        .as_array()
+        .unwrap()
+        .last()
+        .unwrap()
+        .to_string();
+    assert!(
+        listed.contains("買い物") && !listed.contains("記事を書く"),
+        "{listed}"
+    );
     let tasks = all_tasks(cx);
     let find = |id: &str| tasks.iter().find(|t| t.id == id).unwrap();
     let now = find(&task);
