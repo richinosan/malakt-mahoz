@@ -2208,6 +2208,17 @@ impl MainView {
         cx.notify();
     }
 
+    /// 乗せたとき・押したときの描き方を変える。
+    pub fn set_feel(&mut self, feel: crate::theme::Feel, cx: &mut Context<Self>) {
+        match crate::theme::set_feel(feel, cx) {
+            Ok(()) => self.error = None,
+            Err(error) => {
+                self.error = Some(format!("ホバーの設定を保存できませんでした。{error}").into())
+            }
+        }
+        cx.notify();
+    }
+
     /// 1 つずつ変える行（詳細）を開く・閉じる。
     pub fn toggle_appearance_details(&mut self, cx: &mut Context<Self>) {
         self.appearance_details = !self.appearance_details;

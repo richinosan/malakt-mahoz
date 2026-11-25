@@ -96,12 +96,13 @@ trait Framed {
 impl Framed for Button {
     fn framed(self, cx: &App) -> Self {
         let theme = cx.theme();
+        let (hover, active) = feel::button(theme.accent, theme.primary.opacity(0.4), cx);
         self.custom(
             ButtonCustomVariant::new(cx)
                 .color(theme.background)
                 .foreground(theme.foreground)
-                .hover(theme.accent)
-                .active(theme.primary.opacity(0.4)),
+                .hover(hover)
+                .active(active),
         )
         // 部品は地を透かして塗るので、下の影が透けて暗く見える。地の色で塗りつぶす
         .bg(theme.background)
@@ -110,6 +111,138 @@ impl Framed for Button {
         .elevate(Elevation::Low, cx)
     }
 }
+
+/// 乗せたとき・押したとき・選んでいるときの塗り方。テーマの `Feel` で変わる。
+/// 乗せた部品 1 つにだけ塗るので、描く量は増えない。
+pub(crate) mod feel {
+    use super::*;
+    use crate::theme::Feel;
+
+    fn white(alpha: f32) -> Hsla {
+        gpui_kit::white().opacity(alpha)
+    }
+
+    fn edge(color: Hsla, offset: f32, blur: f32, inset: bool) -> BoxShadow {
+        BoxShadow {
+            color,
+            offset: point(px(0.), px(offset)),
+            blur_radius: px(blur),
+            spread_radius: px(0.),
+            inset,
+        }
+    }
+
+    /// ガラスの面。上が明るい反射。
+    fn sheen(top: f32, bottom: f32) -> Background {
+        linear_gradient(
+            180.,
+            linear_color_stop(white(top), 0.),
+            linear_color_stop(white(bottom), 1.),
+        )
+    }
+
+    /// 乗せたとき。
+    pub fn hover(s: StyleRefinement, color: Hsla, cx: &App) -> StyleRefinement {
+        let theme = cx.theme();
+        let dark = theme.mode.is_dark();
+        match crate::theme::feel(cx) {
+            Feel::Standard => s.bg(color),
+            Feel::Glass => {
+                let (top, bottom) = if dark { (0.2, 0.05) } else { (0.6, 0.2) };
+                s.bg(sheen(top, bottom)).shadow(vec![
+                    // 上の縁の光と、外ににじむ光
+                    edge(white(if dark { 0.45 } else { 0.9 }), 1., 0., true),
+                    edge(white(if dark { 0.14 } else { 0.5 }), 0., 8., false),
+                ])
+            }
+            Feel::Crisp => s.bg(theme.foreground.opacity(0.08)),
+            Feel::Tint => s.bg(theme.primary.opacity(0.14)),
+        }
+    }
+
+    /// 押している間。
+    pub fn press(s: StyleRefinement, color: Hsla, cx: &App) -> StyleRefinement {
+        let theme = cx.theme();
+        match crate::theme::feel(cx) {
+            Feel::Standard => s.bg(color),
+            // 上が暗く下が明るい。面が沈んで見える
+            Feel::Glass => s
+                .bg(linear_gradient(
+                    180.,
+                    linear_color_stop(gpui_kit::black().opacity(0.16), 0.),
+                    linear_color_stop(white(0.1), 1.),
+                ))
+                .shadow(vec![edge(gpui_kit::black().opacity(0.3), 1., 3., true)]),
+            Feel::Crisp => s.bg(theme.foreground.opacity(0.16)),
+            Feel::Tint => s.bg(theme.primary.opacity(0.28)),
+        }
+    }
+
+    /// 枠つきのボタンの、乗せたときと押している間の色。部品が 1 色しか受け取らないので、面の色だけを変える。
+    pub fn button(hover: Hsla, active: Hsla, cx: &App) -> (Hsla, Hsla) {
+        let theme = cx.theme();
+        let dark = theme.mode.is_dark();
+        match crate::theme::feel(cx) {
+            Feel::Standard => (hover, active),
+            Feel::Glass => (
+                theme.background.blend(white(if dark { 0.22 } else { 0.8 })),
+                theme.background.blend(gpui_kit::black().opacity(0.18)),
+            ),
+            Feel::Crisp => (
+                theme.background.blend(theme.foreground.opacity(0.08)),
+                theme.background.blend(theme.foreground.opacity(0.16)),
+            ),
+            Feel::Tint => (
+                theme.background.blend(theme.primary.opacity(0.14)),
+                theme.background.blend(theme.primary.opacity(0.28)),
+            ),
+        }
+    }
+
+    /// 選んでいる行や項目の面。
+    pub fn selected<E: Styled>(el: E, color: Hsla, cx: &App) -> E {
+        let theme = cx.theme();
+        let dark = theme.mode.is_dark();
+        match crate::theme::feel(cx) {
+            Feel::Standard => el.bg(color),
+            Feel::Glass => {
+                let (top, bottom) = if dark { (0.16, 0.08) } else { (0.7, 0.4) };
+                el.bg(sheen(top, bottom)).shadow(vec![edge(
+                    white(if dark { 0.35 } else { 0.9 }),
+                    1.,
+                    0.,
+                    true,
+                )])
+            }
+            Feel::Crisp => el.bg(theme.foreground.opacity(0.12)),
+            Feel::Tint => el.bg(theme.primary.opacity(0.2)),
+        }
+    }
+
+    /// 浮かせたパネルの縁。ガラスのときは細い光の線にする。
+    pub fn rim(cx: &App) -> Hsla {
+        match crate::theme::feel(cx) {
+            Feel::Glass => white(if cx.theme().mode.is_dark() { 0.22 } else { 0.7 }),
+            _ => cx.theme().border,
+        }
+    }
+}
+
+/// 乗せたときの塗り方を、テーマに合わせて付ける。
+pub(crate) trait Lit: InteractiveElement + Sized {
+    fn lit(self, color: Hsla, cx: &App) -> Self {
+        self.hover(|s| feel::hover(s, color, cx))
+    }
+}
+impl<E: InteractiveElement> Lit for E {}
+
+/// 押している間の塗り方を、テーマに合わせて付ける。
+pub(crate) trait Sunk: StatefulInteractiveElement + Sized {
+    fn sunk(self, color: Hsla, cx: &App) -> Self {
+        self.active(|s| feel::press(s, color, cx))
+    }
+}
+impl<E: StatefulInteractiveElement> Sunk for E {}
 
 /// 背景の画像を出しているときは、面を透かして塗る。
 fn glass(color: Hsla, cx: &App) -> Hsla {
@@ -138,7 +271,7 @@ fn floating_card(fill: Hsla, edges: [Pixels; 4], cx: &App) -> Div {
         .left(left)
         .rounded(px(16.))
         .border_1()
-        .border_color(cx.theme().border)
+        .border_color(feel::rim(cx))
         .bg(fill)
         .elevate(Elevation::Low, cx)
 }
@@ -234,8 +367,7 @@ fn chip(
                 .border_color(theme.primary)
         })
         .when(!active, |d| {
-            d.border_color(theme.border)
-                .hover(|s| s.bg(theme.secondary_hover))
+            d.border_color(theme.border).lit(theme.secondary_hover, cx)
         })
         .child(label.into())
 }
@@ -482,9 +614,9 @@ impl MainView {
             .text_sm()
             .cursor_pointer()
             .when(active, |d| {
-                d.bg(theme.accent).text_color(theme.accent_foreground)
+                feel::selected(d, theme.accent, cx).text_color(theme.accent_foreground)
             })
-            .when(!active, |d| d.hover(|s| s.bg(theme.accent.opacity(0.6))))
+            .when(!active, |d| d.lit(theme.accent.opacity(0.6), cx))
             .active(|s| s.bg(theme.accent).opacity(0.8))
             .child(icon)
             .child(div().flex_1().truncate().child(label.into()))
@@ -562,8 +694,8 @@ impl MainView {
                     .rounded_md()
                     .cursor_pointer()
                     .text_color(theme.muted_foreground)
-                    .hover(|s| s.bg(theme.muted))
-                    .active(|s| s.bg(theme.primary.opacity(0.4)))
+                    .lit(theme.muted, cx)
+                    .sunk(theme.primary.opacity(0.4), cx)
                     .child(
                         app_icon(if collapsed {
                             "chevron-right"
@@ -868,7 +1000,7 @@ impl MainView {
                 .w(px(6.))
                 .cursor_col_resize()
                 .when(resizing, |d| d.bg(theme.ring))
-                .hover(|s| s.bg(theme.ring))
+                .lit(theme.ring, cx)
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(|this, event: &MouseDownEvent, _, cx| {
@@ -1452,7 +1584,7 @@ impl MainView {
                         .bg(glass(theme.popover, cx))
                         .cursor_pointer()
                         .hover(|s| s.border_color(theme.primary))
-                        .active(|s| s.bg(theme.accent))
+                        .sunk(theme.accent, cx)
                         .child(
                             div()
                                 .size(px(44.))
@@ -1518,7 +1650,7 @@ impl MainView {
             .border_b_1()
             .border_color(theme.border)
             .cursor_pointer()
-            .hover(|s| s.bg(theme.list_hover))
+            .lit(theme.list_hover, cx)
             .child(
                 div()
                     .flex_1()
@@ -2182,7 +2314,7 @@ impl MainView {
                                     .w(px(6.))
                                     .cursor_col_resize()
                                     .when(resizing, |d| d.bg(theme.ring))
-                                    .hover(|s| s.bg(theme.ring))
+                                    .lit(theme.ring, cx)
                                     .on_mouse_down(
                                         MouseButton::Left,
                                         cx.listener(move |this, event: &MouseDownEvent, _, cx| {
@@ -2231,8 +2363,8 @@ impl MainView {
                     .rounded_md()
                     .cursor_pointer()
                     .when(open.is_some(), |d| d.bg(theme.accent))
-                    .hover(|s| s.bg(theme.accent))
-                    .active(|s| s.bg(theme.primary.opacity(0.4)))
+                    .lit(theme.accent, cx)
+                    .sunk(theme.primary.opacity(0.4), cx)
                     .child(label)
                     .when_some(current, |d, descending| {
                         d.child(
@@ -2425,8 +2557,8 @@ impl MainView {
                         .test_support(),
                 )
             })
-            .when(!cursor, |d| d.hover(|s| s.bg(theme.muted.opacity(0.4))))
-            .active(|s| s.bg(theme.accent.opacity(0.6)))
+            .when(!cursor, |d| d.lit(theme.muted.opacity(0.4), cx))
+            .sunk(theme.accent.opacity(0.6), cx)
             // 矢印は、タスクの行のチェックボックスの列に置く
             .child(
                 row()
@@ -2446,7 +2578,7 @@ impl MainView {
                             .rounded_md()
                             .text_color(theme.muted_foreground)
                             .hover(|s| s.bg(theme.accent).text_color(theme.foreground))
-                            .active(|s| s.bg(theme.primary.opacity(0.4)))
+                            .sunk(theme.primary.opacity(0.4), cx)
                             .child(
                                 app_icon(if open {
                                     "chevron-down"
@@ -2746,10 +2878,10 @@ impl MainView {
                         .test_support(),
                 )
             })
-            .when(active || cursor, |d| d.bg(theme.accent.opacity(0.4)))
-            .when(!active && !cursor, |d| {
-                d.hover(|s| s.bg(theme.muted.opacity(0.4)))
-            });
+            .when(active || cursor, |d| {
+                feel::selected(d, theme.accent.opacity(0.4), cx)
+            })
+            .when(!active && !cursor, |d| d.lit(theme.muted.opacity(0.4), cx));
         let row_el = if table {
             base.h(task_height(true, self.row_density))
                 .flex()
@@ -3114,7 +3246,7 @@ impl MainView {
                 let open = task.id.clone();
                 card.cursor_pointer()
                     .hover(|s| s.border_color(theme.primary))
-                    .active(|s| s.bg(theme.accent))
+                    .sunk(theme.accent, cx)
                     .child(status_badge(task.status, cx).flex_none())
                     .child(
                         div()
@@ -3218,7 +3350,7 @@ impl MainView {
                 .text_xs()
                 .font_weight(FontWeight::BOLD)
                 .text_color(theme.muted_foreground)
-                .hover(|s| s.bg(theme.accent))
+                .lit(theme.accent, cx)
                 .tooltip({
                     let text = roles.labels();
                     move |window, cx| {
@@ -3243,7 +3375,7 @@ impl MainView {
             .py_1()
             .rounded_md()
             .cursor_pointer()
-            .hover(|s| s.bg(theme.accent.opacity(0.4)))
+            .lit(theme.accent.opacity(0.4), cx)
             .when(self.assignee_picker, |d| d.bg(theme.accent.opacity(0.4)))
             .child(list)
             .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
@@ -3278,8 +3410,8 @@ impl MainView {
                         .px_3()
                         .py_2()
                         .cursor_pointer()
-                        .hover(|s| s.bg(theme.accent.opacity(0.4)))
-                        .active(|s| s.bg(theme.accent))
+                        .lit(theme.accent.opacity(0.4), cx)
+                        .sunk(theme.accent, cx)
                         .child(
                             div()
                                 .size_5()
@@ -3328,7 +3460,7 @@ impl MainView {
                             .when(!on, |d| {
                                 d.bg(theme.background)
                                     .border_color(theme.border)
-                                    .hover(|s| s.bg(theme.accent))
+                                    .lit(theme.accent, cx)
                             })
                             .active(|s| s.opacity(0.7))
                             .child(div().font_weight(FontWeight::BOLD).child(role.code()))
@@ -3417,7 +3549,7 @@ impl MainView {
                     .font_weight(FontWeight::BOLD)
                     .when(!open, |d| d.text_color(theme.muted_foreground))
                     .cursor_pointer()
-                    .hover(|s| s.bg(theme.muted))
+                    .lit(theme.muted, cx)
                     .child(task.title.clone())
                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                         this.start_editing(Editing::Title, window, cx)
@@ -3563,7 +3695,7 @@ impl MainView {
                                 .px_1()
                                 .rounded_md()
                                 .cursor_pointer()
-                                .hover(|s| s.bg(theme.muted))
+                                .lit(theme.muted, cx)
                                 .child(format!("AI の記録 {}", runs.len()))
                                 .child(
                                     app_icon(if open {
@@ -4384,7 +4516,7 @@ impl MainView {
                             .w(px(6.))
                             .cursor_col_resize()
                             .when(self.panel_resize.is_some(), |d| d.bg(theme.ring))
-                            .hover(|s| s.bg(theme.ring))
+                            .lit(theme.ring, cx)
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(|this, event: &MouseDownEvent, _, cx| {
@@ -4517,8 +4649,8 @@ impl MainView {
             .cursor_pointer()
             .text_sm()
             .text_color(theme.muted_foreground)
-            .hover(|s| s.bg(theme.accent))
-            .active(|s| s.bg(theme.primary.opacity(0.4)))
+            .lit(theme.accent, cx)
+            .sunk(theme.primary.opacity(0.4), cx)
             .child(
                 app_icon(if open {
                     "chevron-down"
@@ -4546,8 +4678,8 @@ impl MainView {
                         .border_1()
                         .border_color(theme.input)
                         .cursor_pointer()
-                        .hover(|s| s.bg(theme.accent))
-                        .active(|s| s.bg(theme.primary.opacity(0.4)))
+                        .lit(theme.accent, cx)
+                        .sunk(theme.primary.opacity(0.4), cx)
                         .child(div().flex_1().truncate().child(font))
                         .child(
                             app_icon("chevron-right")
@@ -4606,8 +4738,8 @@ impl MainView {
                             .border_1()
                             .border_color(theme.input)
                             .cursor_pointer()
-                            .hover(|s| s.bg(theme.accent))
-                            .active(|s| s.bg(theme.primary.opacity(0.4)))
+                            .lit(theme.accent, cx)
+                            .sunk(theme.primary.opacity(0.4), cx)
                             .child(div().flex_1().truncate().child(scene.label()))
                             .child(
                                 app_icon("chevron-right")
@@ -4672,6 +4804,31 @@ impl MainView {
                         ),
                     )
                     .child(reset("density-reset", false)),
+            )
+            .child(
+                row()
+                    .gap_2()
+                    .child(label("ホバー"))
+                    .child(
+                        row().flex_1().gap_1().children(
+                            crate::theme::Feel::ALL
+                                .into_iter()
+                                .enumerate()
+                                .map(|(ix, feel)| {
+                                    chip(
+                                        ("feel", ix),
+                                        feel.label(),
+                                        crate::theme::feel(cx) == feel,
+                                        cx,
+                                    )
+                                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                        this.set_feel(feel, cx)
+                                    }))
+                                    .test_support()
+                                }),
+                        ),
+                    )
+                    .child(reset("feel-reset", false)),
             )
             .child(
                 row()
@@ -4785,8 +4942,8 @@ impl MainView {
                 } else {
                     theme.transparent
                 })
-                .hover(|s| s.bg(theme.accent))
-                .active(|s| s.bg(theme.primary.opacity(0.4)))
+                .lit(theme.accent, cx)
+                .sunk(theme.primary.opacity(0.4), cx)
         };
         // 見本は、そのテーマの画像と色で、浮かせたパネルの形を小さく描く
         let picture = |preset: &Preset| {
@@ -4907,7 +5064,7 @@ impl MainView {
                 name(preset.name.clone().into())
                     .id(("own-preset-name", ix))
                     .rounded_sm()
-                    .hover(|s| s.bg(theme.muted))
+                    .lit(theme.muted, cx)
                     .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                         cx.stop_propagation();
                         this.rename_preset(ix, window, cx)
@@ -5067,8 +5224,8 @@ impl MainView {
                     } else {
                         theme.transparent
                     })
-                    .hover(|s| s.bg(theme.accent))
-                    .active(|s| s.bg(theme.primary.opacity(0.4)))
+                    .lit(theme.accent, cx)
+                    .sunk(theme.primary.opacity(0.4), cx)
                     .child(picture(&layout))
                     .child(div().h_6().px_1().text_sm().truncate().child(layout.name))
                     .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
@@ -5105,8 +5262,8 @@ impl MainView {
                             .rounded_md()
                             .cursor_pointer()
                             .when(selected, |d| d.bg(theme.accent))
-                            .hover(|s| s.bg(theme.accent.opacity(0.6)))
-                            .active(|s| s.bg(theme.primary.opacity(0.4)))
+                            .lit(theme.accent.opacity(0.6), cx)
+                            .sunk(theme.primary.opacity(0.4), cx)
                             // 名前は、その書体で出す
                             .child(
                                 div()
@@ -5176,8 +5333,8 @@ impl MainView {
                 } else {
                     theme.transparent
                 })
-                .hover(|s| s.bg(theme.accent))
-                .active(|s| s.bg(theme.primary.opacity(0.4)))
+                .lit(theme.accent, cx)
+                .sunk(theme.primary.opacity(0.4), cx)
                 .child(
                     div()
                         .h(px(80.))
@@ -5320,7 +5477,7 @@ impl MainView {
                             } else {
                                 theme.transparent
                             })
-                            .hover(|s| s.bg(theme.secondary_hover))
+                            .lit(theme.secondary_hover, cx)
                             .child(
                                 div()
                                     .size_4()
@@ -5405,7 +5562,7 @@ impl MainView {
                             } else {
                                 theme.transparent
                             })
-                            .hover(|s| s.bg(theme.secondary_hover))
+                            .lit(theme.secondary_hover, cx)
                             .child(workspace_icon(Some(&name), None, PICKER_ICON_SIZE, cx))
                             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                                 this.set_workspace_icon(&ws, Some(&name), color.as_deref(), cx)
@@ -5431,7 +5588,7 @@ impl MainView {
                             } else {
                                 theme.transparent
                             })
-                            .hover(|s| s.bg(theme.secondary_hover))
+                            .lit(theme.secondary_hover, cx)
                             .child(workspace_icon(
                                 Some(name),
                                 color.as_deref(),
@@ -5581,7 +5738,7 @@ impl MainView {
                                 .border_1()
                                 .border_color(gpui_kit::transparent_black())
                                 .cursor_pointer()
-                                .hover(|s| s.bg(theme.muted))
+                                .lit(theme.muted, cx)
                                 .child(div().truncate().child(p.name.clone()))
                                 .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                                     this.rename_person(id.clone(), window, cx)
@@ -5853,7 +6010,7 @@ impl MainView {
                             .p_2()
                             .rounded_md()
                             .cursor_pointer()
-                            .hover(|s| s.bg(theme.secondary_hover))
+                            .lit(theme.secondary_hover, cx)
                             .when(n.is_unread(), |d| d.bg(theme.secondary))
                             .child(
                                 div()

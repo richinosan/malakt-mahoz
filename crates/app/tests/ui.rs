@@ -2384,6 +2384,53 @@ fn density_and_editor_themes(cx: &mut TestAppContext) {
     assert_eq!(row(cx), standard);
 }
 
+/// 乗せたとき・押したときの描き方（ホバー）は「テーマ」の詳細で選べ、テーマにも含まれる。
+#[gpui_kit::test]
+fn hover_feel_follows_the_theme(cx: &mut TestAppContext) {
+    use malakt_mahoz::theme::{self, Feel, Preset};
+    start(cx);
+    let (window, view) = open(cx, wide());
+    let saved = |cx: &mut TestAppContext| store(cx, |s| s.setting("feel").unwrap());
+    let feel = |cx: &mut TestAppContext| cx.update(|cx| theme::feel(cx));
+    assert_eq!(feel(cx), Feel::Standard);
+
+    ui(cx, window, |window, cx| {
+        view.update(cx, |v, cx| v.open_appearance(window, cx))
+    });
+    // テーマを選ぶと、そのテーマの描き方になる
+    let presets = Preset::recommended();
+    let pick = |cx: &mut TestAppContext, name: &str| {
+        let ix = presets.iter().position(|p| p.name == name).unwrap();
+        ui(cx, window, |window, cx| window.click(("preset", ix), cx));
+    };
+    pick(cx, "ガラスと青い空");
+    assert_eq!(feel(cx), Feel::Glass);
+    assert_eq!(saved(cx).as_deref(), Some("glass"));
+    pick(cx, "エディタ風");
+    assert_eq!(feel(cx), Feel::Crisp);
+    pick(cx, "さくら");
+    assert_eq!(feel(cx), Feel::Tint);
+    pick(cx, "標準");
+    assert_eq!(feel(cx), Feel::Standard);
+    assert_eq!(saved(cx), None);
+
+    // 詳細の「ホバー」でも選べる
+    ui(cx, window, |window, cx| window.click("details-toggle", cx));
+    for (ix, key) in [(1usize, "glass"), (2, "crisp"), (3, "tint")] {
+        ui(cx, window, |window, cx| window.click(("feel", ix), cx));
+        assert_eq!(saved(cx).as_deref(), Some(key));
+        assert_eq!(feel(cx), Feel::ALL[ix]);
+    }
+    ui(cx, window, |window, cx| window.click(("feel", 0usize), cx));
+    assert_eq!(saved(cx), None);
+    assert_eq!(feel(cx), Feel::Standard);
+
+    // 自分のテーマにも入る
+    cx.update(|cx| theme::set_feel(Feel::Glass, cx).unwrap());
+    assert_eq!(cx.update(|cx| theme::current("x", cx)).feel, Feel::Glass);
+    cx.update(|cx| theme::set_feel(Feel::Standard, cx).unwrap());
+}
+
 /// アイコンは検索して選べる。日本語でも探せ、見つからなければその旨が出る。
 #[gpui_kit::test]
 fn workspace_icon_is_found_by_search(cx: &mut TestAppContext) {
