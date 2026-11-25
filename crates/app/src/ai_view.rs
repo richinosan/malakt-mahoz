@@ -8,9 +8,10 @@ use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{
     Copy as CopyText, Input, InputEvent, InputState, MoveDown, MoveUp, Textarea, TextareaState,
 };
-use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
+use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::switch::Switch;
+use gpui_kit::component::text::TextView;
 use gpui_kit::component::{ActiveTheme, Disableable, Selectable, Sizable};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
@@ -1105,8 +1106,23 @@ impl AiPane {
                         .bg(theme.muted)
                         .elevate(Elevation::Low, cx)
                         .text_sm()
-                        .child(text.clone())
-                        .test_support(),
+                        // ドラッグで選んでコピーできる
+                        .child(TextView::markdown(("ai-text", ix), text.clone()).selectable(true))
+                        .test_support()
+                        // 右クリックで、返答を丸ごとコピーする
+                        .context_menu({
+                            let text = text.clone();
+                            move |menu, _, _| {
+                                let text = text.clone();
+                                menu.item(PopupMenuItem::new("返答をコピー").on_click(
+                                    move |_, _, cx| {
+                                        cx.write_to_clipboard(ClipboardItem::new_string(
+                                            text.to_string(),
+                                        ));
+                                    },
+                                ))
+                            }
+                        }),
                 )
                 .into_any_element(),
             Item::Tool { summary, state } => {
