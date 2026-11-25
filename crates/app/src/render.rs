@@ -2972,15 +2972,37 @@ impl MainView {
                 )
             } else {
                 session.arrange_notes.get(&task.id).map(|note| {
+                    let detail = note.clone();
+                    let id = task.id.clone();
                     row()
-                        .id("ai-note")
-                        .gap_2()
-                        .items_start()
+                        .gap_1()
+                        .items_center()
                         .text_sm()
                         .text_color(theme.muted_foreground)
-                        .child(app_icon("sparkles").small().flex_none().mt_1())
-                        .child(div().min_w_0().child(note.clone()))
-                        .test_support()
+                        .child(
+                            // 短い言葉だけを出し、くわしい理由はホバーで出す
+                            row()
+                                .id("ai-note")
+                                .gap_2()
+                                .items_center()
+                                .child(app_icon("sparkles").small().flex_none())
+                                .child(crate::ai::arrange_note_label(note))
+                                .tooltip(move |window, cx| {
+                                    gpui_kit::component::tooltip::Tooltip::new(detail.clone())
+                                        .build(window, cx)
+                                })
+                                .test_support(),
+                        )
+                        .child(
+                            Button::new("ai-note-retry")
+                                .icon(app_icon("refresh-cw"))
+                                .ghost()
+                                .xsmall()
+                                .tooltip("もう一度整える")
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.ai_session.update(cx, |s, cx| s.retry_arrange(&id, cx));
+                                })),
+                        )
                         .into_any_element()
                 })
             }
