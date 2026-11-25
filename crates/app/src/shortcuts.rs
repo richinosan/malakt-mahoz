@@ -351,10 +351,25 @@ impl MainView {
             return false;
         }
         let last = self.visible.len() - 1;
-        let to = match self.cursor_index() {
-            Some(at) => at.saturating_add_signed(by).min(last),
-            None if by < 0 => last,
-            None => 0,
+        // 見出しを選んでいるときは、その行から進む向きにある最初のタスクへ移る
+        let beside = self.cursor_folder().map(|(row, _)| {
+            let task = |row: &ListRow| match *row {
+                ListRow::Task { index, .. } => Some(index),
+                ListRow::Folder { .. } => None,
+            };
+            if by < 0 {
+                self.rows[..row].iter().rev().find_map(task)
+            } else {
+                self.rows[row..].iter().find_map(task)
+            }
+        });
+        let to = match (self.cursor_index(), beside) {
+            (Some(at), _) => at.saturating_add_signed(by).min(last),
+            (None, Some(Some(at))) => at,
+            // その向きにタスクがなければ、動かさない
+            (None, Some(None)) => return true,
+            (None, None) if by < 0 => last,
+            (None, None) => 0,
         };
         let id = self.tasks[self.visible[to]].id.clone();
         let from = self
