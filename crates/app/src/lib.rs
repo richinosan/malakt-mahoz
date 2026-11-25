@@ -285,11 +285,16 @@ pub fn open_ai_window(mode: PaneMode, cx: &mut App) -> Result<AnyWindowHandle> {
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
         window_min_size: Some(size(px(320.), px(280.))),
+        // メインのウィンドウと同じく、OS のタイトルバーは出さず、中の細いバーで代える
         titlebar: Some(TitlebarOptions {
             title: Some(title.into()),
-            ..Default::default()
+            ..gpui_kit::component::TitleBar::title_bar_options()
         }),
-        ..Default::default()
+        #[cfg(target_os = "linux")]
+        window_decorations: Some(WindowDecorations::Client),
+        app_id: Some(APP_ID.into()),
+        icon: window_icon(),
+        ..gpui_kit::component::TitleBar::window_options()
     };
     gpui_kit::open_window(options, cx, |window, cx| {
         cx.new(|cx| AiPane::new(mode, None, window, cx))
