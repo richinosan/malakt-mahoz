@@ -49,12 +49,16 @@ const NOT_BUTTONS: &[&str] = &[
     "notices-scroll",
     "ws-settings-scroll",
     "home",
-    "caret",
     "row-cursor",
     "folder-cursor",
     "keys-help",
     "app-keys",
 ];
+
+/// 押せるものの縦と横の、いちばん小さい大きさ（拡大率を掛ける前の値）。
+const MIN_HIT: f32 = 17.5;
+/// スイッチは部品の高さが決まっている。ラベルごと押せるので、横に広い。
+const WIDE_SWITCHES: &[&str] = &["cards-switch", "float-switch"];
 
 /// 詳細のパネルの上の端に並ぶボタン。
 const PANEL_BAR: &[&str] = &["copy-link", "ticket-open", "close-panel"];
@@ -390,6 +394,23 @@ fn overlapping(cx: &mut TestAppContext, world: &World) -> Vec<String> {
             }
         }
         pairs
+    })
+    .unwrap()
+}
+
+/// 押しにくいほど小さいもの。縦か横が `MIN_HIT` に届かないものを並べる。
+fn too_small(cx: &mut TestAppContext, world: &World) -> Vec<String> {
+    let ids = targets(cx, world);
+    let least = px(MIN_HIT * malakt_mahoz::UI_SCALE);
+    cx.update_window(world.window, |_, window, _| {
+        ids.iter()
+            .filter(|id| !WIDE_SWITCHES.contains(&name_of(id).as_str()))
+            .filter_map(|id| {
+                let size = window.find(id.clone()).bounds().size;
+                (size.width < least || size.height < least)
+                    .then(|| format!("{}（{:?} × {:?}）", key_of(id), size.width, size.height))
+            })
+            .collect()
     })
     .unwrap()
 }
@@ -748,6 +769,7 @@ fn every_button_responds(cx: &mut TestAppContext) {
     let mut dead: Vec<String> = Vec::new();
     let mut pressed: BTreeSet<String> = BTreeSet::new();
     let mut overlaps: Vec<String> = Vec::new();
+    let mut small: Vec<String> = Vec::new();
 
     for (screen, size, setup) in screens() {
         let world = fresh(cx, size);
@@ -759,6 +781,12 @@ fn every_button_responds(cx: &mut TestAppContext) {
             overlapping(cx, &world)
                 .into_iter()
                 .map(|pair| format!("{screen} > {pair}")),
+        );
+
+        small.extend(
+            too_small(cx, &world)
+                .into_iter()
+                .map(|one| format!("{screen} > {one}")),
         );
 
         for one in &first {
@@ -807,6 +835,11 @@ fn every_button_responds(cx: &mut TestAppContext) {
         overlaps.is_empty(),
         "押せるものが重なっている:\n{}",
         overlaps.join("\n")
+    );
+    assert!(
+        small.is_empty(),
+        "押せる範囲が小さすぎるものがある:\n{}",
+        small.join("\n")
     );
     println!("押したもの {} 種類", pressed.len());
     let source = [

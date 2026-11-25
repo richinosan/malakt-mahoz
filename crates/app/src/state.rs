@@ -249,6 +249,10 @@ pub struct MainView {
     pub sidebar_width: f32,
     /// 左のメニューの境界をドラッグしている間だけ `true`。
     pub sidebar_resizing: bool,
+    /// タスクの詳細の幅（拡大率を掛ける前の値）。左の境界をドラッグして変えられ、保存される。
+    pub panel_width: f32,
+    /// 詳細の境界をドラッグしている間の、押した位置（ウィンドウの中の x）とそのときの幅。
+    pub panel_resize: Option<(f32, f32)>,
     /// 上のバーの空いているところを押している間だけ `true`（ウィンドウを動かし始めるため）。
     pub header_pressed: bool,
     /// 表の列。並び順どおり。幅と、隠しているかを持つ。
@@ -656,6 +660,8 @@ impl MainView {
             sidebar_hidden: false,
             sidebar_width: SIDEBAR_WIDTH,
             sidebar_resizing: false,
+            panel_width: PANEL_WIDTH,
+            panel_resize: None,
             header_pressed: false,
             assignee_picker: false,
             columns: Column::ALL.map(TableColumn::new).to_vec(),
@@ -702,6 +708,7 @@ impl MainView {
                 }
             }));
         this.load_sidebar_width(cx);
+        this.load_panel_width(cx);
         this.load_columns(cx);
         this.load_pane_keys(cx);
         this.load_pane_presets(cx);
@@ -2454,6 +2461,57 @@ impl MainView {
         self.finish_sidebar_drag(cx);
     }
 
+    // ---- タスクの詳細の幅 ----
+
+    /// 保存してある幅を読む。
+    fn load_panel_width(&mut self, cx: &App) {
+        let saved = self.db.read(cx).store.setting(PANEL_WIDTH_SETTING);
+        if let Ok(Some(saved)) = saved {
+            if let Ok(width) = saved.parse::<f32>() {
+                self.panel_width = width.clamp(PANEL_MIN, PANEL_MAX);
+            }
+        }
+    }
+
+    /// 詳細の左の境界を押して、幅を変え始める。`x` はウィンドウの中の位置。
+    pub fn start_panel_resize(&mut self, x: f32, cx: &mut Context<Self>) {
+        // 行を押したまま離した合図が届いていないと、タスクのドラッグが残っている
+        self.task_drag = None;
+        self.panel_resize = Some((x, self.panel_width));
+        cx.notify();
+    }
+
+    /// ドラッグ中の幅。境界は詳細の左にあるので、左へ動かすと広がる。
+    pub fn drag_panel(&mut self, x: f32, cx: &mut Context<Self>) {
+        let Some((start_x, start_width)) = self.panel_resize else {
+            return;
+        };
+        let width = (start_width - (x - start_x) / crate::UI_SCALE)
+            .clamp(PANEL_MIN, PANEL_MAX)
+            .round();
+        if width != self.panel_width {
+            self.panel_width = width;
+            cx.notify();
+        }
+    }
+
+    /// ドラッグを終えて、幅を保存する。
+    pub fn finish_panel_resize(&mut self, cx: &mut Context<Self>) {
+        if self.panel_resize.take().is_none() {
+            return;
+        }
+        let width = self.panel_width.to_string();
+        self.write(cx, |s| s.set_setting(PANEL_WIDTH_SETTING, Some(&width)));
+        cx.notify();
+    }
+
+    /// 境界をダブルクリックして、最初の幅に戻す。
+    pub fn reset_panel_width(&mut self, cx: &mut Context<Self>) {
+        self.panel_width = PANEL_WIDTH;
+        self.panel_resize = Some((0., PANEL_WIDTH));
+        self.finish_panel_resize(cx);
+    }
+
     /// 開いているタスクへのリンクをクリップボードに入れる。
     pub fn copy_task_link(&mut self, id: &str, cx: &mut Context<Self>) {
         cx.write_to_clipboard(ClipboardItem::new_string(malakt_core::tasklink::url(id)));
@@ -3382,6 +3440,11 @@ pub const SIDEBAR_WIDTH: f32 = 256.;
 pub const SIDEBAR_MIN: f32 = 200.;
 pub const SIDEBAR_MAX: f32 = 480.;
 const SIDEBAR_WIDTH_SETTING: &str = "sidebar.width";
+/// タスクの詳細の幅。境界をドラッグして変えられる。
+pub const PANEL_WIDTH: f32 = 544.;
+pub const PANEL_MIN: f32 = 400.;
+pub const PANEL_MAX: f32 = 1600.;
+const PANEL_WIDTH_SETTING: &str = "panel.width";
 
 /// 表の列（タイトルのほか）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

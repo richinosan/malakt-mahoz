@@ -46,7 +46,8 @@ const CARD_ICON_SIZE: Pixels = px(32.);
 /// アイコンを選ぶ画面のアイコンの大きさ。
 const PICKER_ICON_SIZE: Pixels = px(22.);
 const HEADER_HEIGHT: Pixels = px(84.);
-const PANEL_WIDTH: Pixels = px(544.);
+/// 詳細を右に並べても、一覧に残す幅。
+const LIST_MIN: f32 = 320.;
 const ROW_HEIGHT: Pixels = px(60.);
 const CARD_HEIGHT: Pixels = px(96.);
 /// 一覧で、サブワークスペースの中の行を 1 段下げる幅。
@@ -533,12 +534,21 @@ impl MainView {
                 div().w_4().flex_none().into_any_element()
             } else {
                 let id = id.clone();
+                // 矢印は小さいまま、押せる範囲は行の高さいっぱいで、左へも広げる
                 div()
                     .id(("caret", ix))
-                    .w_4()
+                    .w(px(22.))
+                    .ml(px(-8.))
+                    .self_stretch()
+                    .flex()
                     .flex_none()
+                    .items_center()
+                    .justify_center()
+                    .rounded_md()
                     .cursor_pointer()
                     .text_color(theme.muted_foreground)
+                    .hover(|s| s.bg(theme.muted))
+                    .active(|s| s.bg(theme.primary.opacity(0.4)))
                     .child(
                         app_icon(if collapsed {
                             "chevron-right"
@@ -551,6 +561,7 @@ impl MainView {
                         cx.stop_propagation();
                         this.toggle_collapsed(&id, cx);
                     }))
+                    .test_support()
                     .into_any_element()
             };
             let group = SharedString::from(format!("ws-row-{ix}"));
@@ -1358,6 +1369,9 @@ impl MainView {
                     .child(div().flex_1())
                     .child(
                         Checkbox::new("due-mine")
+                            // 見た目はそのままで、押せる範囲を上下に広げる
+                            .py(px(4.))
+                            .my(px(-4.))
                             .label("自分の担当だけ")
                             .checked(self.due_mine)
                             .on_click(cx.listener(|this, checked: &bool, _, cx| {
@@ -2075,6 +2089,9 @@ impl MainView {
             .child(
                 div().w_6().flex_none().child(
                     Checkbox::new("select-all")
+                        // 見た目はそのままで、押せる範囲を上下に広げる
+                        .py(px(4.))
+                        .my(px(-4.))
                         .accessibility_label("表示中のタスクをすべて選択")
                         .checked(all)
                         .indeterminate(!all && !self.selected.is_empty())
@@ -2506,6 +2523,9 @@ impl MainView {
             let id = id.clone();
             div().w_6().flex_none().child(
                 Checkbox::new(("select", ix))
+                    // 見た目はそのままで、押せる範囲を上下に広げる
+                    .py(px(4.))
+                    .my(px(-4.))
                     .accessibility_label(format!("「{}」を選択", task.title))
                     .checked(self.selected.contains(&task.id))
                     .on_click(
@@ -3337,7 +3357,9 @@ impl MainView {
         )
     }
 
-    fn render_panel(&self, sheet: bool, cx: &mut Context<Self>) -> Option<Div> {
+    /// タスクの詳細。`width` があれば一覧の右に並ぶカラム、なければ全面のシート。
+    fn render_panel(&self, width: Option<Pixels>, cx: &mut Context<Self>) -> Option<Div> {
+        let sheet = width.is_none();
         let detail = self.detail.as_ref()?;
         let theme = cx.theme().clone();
         let task = &detail.task;
@@ -4220,11 +4242,8 @@ impl MainView {
                 .right_0()
                 .bottom_0()
                 .when(sheet, |d| d.left_0())
-                .when(!sheet, |d| {
-                    d.w(PANEL_WIDTH)
-                        .border_l_1()
-                        .border_color(theme.border)
-                        .elevate(Elevation::High, cx)
+                .when_some(width, |d, width| {
+                    d.w(width).border_l_1().border_color(theme.border)
                 })
                 .bg(theme.background)
                 .occlude()
@@ -4244,7 +4263,34 @@ impl MainView {
                                 .child(content),
                         )
                         .test_support(),
-                ),
+                )
+                // 左の境界をドラッグして幅を変える。ダブルクリックで最初の幅に戻す
+                .when(!sheet, |d| {
+                    d.child(
+                        div()
+                            .id("panel-resize")
+                            .absolute()
+                            .top_0()
+                            .bottom_0()
+                            .left(px(-3.))
+                            .w(px(6.))
+                            .cursor_col_resize()
+                            .when(self.panel_resize.is_some(), |d| d.bg(theme.ring))
+                            .hover(|s| s.bg(theme.ring))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                                    cx.stop_propagation();
+                                    if event.click_count >= 2 {
+                                        this.reset_panel_width(cx);
+                                    } else {
+                                        this.start_panel_resize(event.position.x.into(), cx);
+                                    }
+                                }),
+                            )
+                            .test_support(),
+                    )
+                }),
         )
     }
 
@@ -6002,6 +6048,42 @@ impl MainView {
 }
 
 impl MainView {
+    /// 一覧と詳細の分け方。`own_width` は一覧と詳細を置く場所の幅。
+    ///
+    /// 詳細は一覧の右に並ぶカラムで、一覧はその残りの幅に収まる。一覧に `LIST_MIN` を
+    /// 残せない狭さでは、詳細が全面を使う（`None`）。返すのは詳細の幅。
+    fn panel_split(&self, own_width: Pixels) -> Option<Pixels> {
+        if own_width < px(crate::state::PANEL_WIDTH + LIST_MIN) {
+            return None;
+        }
+        Some(px(self.panel_width).min(own_width - px(LIST_MIN)))
+    }
+
+    /// 詳細の境界をドラッグしている間だけ、全面に敷く。詳細の上でも一覧の上でもマウスを追い、
+    /// 下にあるものには触らせない。
+    fn panel_drag_layer(&self, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
+        self.panel_resize?;
+        Some(
+            div()
+                .id("panel-drag")
+                .absolute()
+                .inset_0()
+                .occlude()
+                .cursor_col_resize()
+                .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
+                    if event.pressed_button == Some(MouseButton::Left) {
+                        this.drag_panel(f32::from(event.position.x), cx);
+                    } else {
+                        this.finish_panel_resize(cx);
+                    }
+                }))
+                .on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, cx| this.finish_panel_resize(cx)),
+                ),
+        )
+    }
+
     /// ドラッグの途中は、どこにマウスがあっても追えるように、いちばん外の要素で受ける。
     fn with_drags(&self, d: Stateful<Div>, cx: &mut Context<Self>) -> Stateful<Div> {
         d.when(self.border_drag.is_some(), |d| {
@@ -6086,9 +6168,12 @@ impl MainView {
         let theme = cx.theme().clone();
         let bounds = self.pane_bounds.unwrap_or_default();
         let width = bounds.size.width;
-        let table = width >= px(880.) && !crate::theme::cards(cx);
-        let sheet = width < px(1000.);
-        self.list_width = f32::from(width) / crate::UI_SCALE;
+        let panel_width = self.panel_split(width);
+        // 詳細を開いている間、一覧はその左の残りの幅に収まる
+        let beside = panel_width.filter(|_| self.detail.is_some());
+        let list_width = width - beside.unwrap_or(px(0.));
+        let table = list_width >= px(880.) && !crate::theme::cards(cx);
+        self.list_width = f32::from(list_width) / crate::UI_SCALE;
         let main = match self.nav {
             Nav::Home => self.render_home(table, cx).into_any_element(),
             _ => self.render_list(table, cx).into_any_element(),
@@ -6104,8 +6189,17 @@ impl MainView {
                 d.bg(theme.background)
             })
             .text_color(theme.foreground)
-            .child(div().absolute().inset_0().child(main))
-            .children(self.render_panel(sheet, cx))
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .left_0()
+                    .w(list_width)
+                    .child(main),
+            )
+            .children(self.render_panel(panel_width, cx))
+            .children(self.panel_drag_layer(cx))
             // ドラッグ中のタスクは、マウスに付いて動く
             .children(self.task_drag.as_ref().filter(|d| d.moved).map(|drag| {
                 div()
@@ -6226,15 +6320,13 @@ impl Render for MainView {
             .into_iter()
             .find(|(id, _)| *id == self.primary)
             .map_or(main_width, |(_, rect)| main_width * rect.w);
-        let split = self.layout.panes().len() > 1;
+        let panel_width = self.panel_split(own_width);
+        // 詳細を開いている間、一覧はその左の残りの幅に収まる
+        let beside = panel_width.filter(|_| self.detail.is_some());
+        let list_width = own_width - beside.unwrap_or(px(0.));
         // 表は、タイトルの列に読める幅が残るときだけ
-        let table = own_width >= px(880.) && !crate::theme::cards(cx);
-        self.list_width = f32::from(own_width) / crate::UI_SCALE;
-        let sheet = if split {
-            own_width < px(1000.)
-        } else {
-            width < px(1000.)
-        };
+        let table = list_width >= px(880.) && !crate::theme::cards(cx);
+        self.list_width = f32::from(list_width) / crate::UI_SCALE;
 
         let main = if !wide && sidebar {
             // 狭い画面でメニューを開いているあいだは、メニューだけを見せる
@@ -6251,7 +6343,7 @@ impl Render for MainView {
         };
 
         // 詳細は右から入り、ダイアログはふわっと出る
-        let panel = self.render_panel(sheet, cx).map(|panel| {
+        let panel = self.render_panel(panel_width, cx).map(|panel| {
             if !self.motion {
                 return panel.into_any_element();
             }
@@ -6347,13 +6439,22 @@ impl Render for MainView {
                                         .size_full()
                                         .relative()
                                         .child(
-                                            div().absolute().inset_0().child(main).with_animation(
-                                                ElementId::Name(
-                                                    format!("page-{:?}", self.nav).into(),
+                                            div()
+                                                .absolute()
+                                                .top_0()
+                                                .bottom_0()
+                                                .left_0()
+                                                .right(beside.unwrap_or(px(0.)))
+                                                .child(main)
+                                                .with_animation(
+                                                    ElementId::Name(
+                                                        format!("page-{:?}", self.nav).into(),
+                                                    ),
+                                                    appear(160),
+                                                    |page, t| {
+                                                        page.top(px(8.) * (1. - t)).opacity(t)
+                                                    },
                                                 ),
-                                                appear(160),
-                                                |page, t| page.top(px(8.) * (1. - t)).opacity(t),
-                                            ),
                                         )
                                         .children(panel)
                                         .into_any_element();
@@ -6382,6 +6483,7 @@ impl Render for MainView {
                     .truncate()
                     .child(drag.title.clone())
             }))
+            .children(self.panel_drag_layer(cx))
             .children(self.render_pane_overlay(cx))
             .children(self.render_modal(cx).map(|modal| {
                 if !self.motion {
@@ -6408,6 +6510,8 @@ impl Render for MainView {
                             .child(
                                 row()
                                     .id("notice")
+                                    // 下に重なったボタンまで押さない
+                                    .occlude()
                                     .gap_3()
                                     .px_3()
                                     .py_2()
