@@ -334,8 +334,10 @@ impl AiPane {
             cx.observe(&db, |_, _, cx| cx.notify()),
             cx.subscribe_in(&input, window, |this, _, event: &InputEvent, window, cx| {
                 // Enter で送り、Shift+Enter で改行する
-                if matches!(event, InputEvent::PressEnter { shift: false, .. }) {
-                    this.submit(window, cx);
+                match event {
+                    InputEvent::PressEnter { shift: false, .. } => this.submit(window, cx),
+                    InputEvent::Change => this.absorb_task_links(window, cx),
+                    _ => {}
                 }
             }),
             cx.subscribe_in(
@@ -661,6 +663,8 @@ impl AiPane {
     }
 
     pub fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // 貼ってすぐ送っても、リンクはタスクとして添える
+        self.absorb_task_links(window, cx);
         let text = self.input.read(cx).value().to_string();
         if self.send_text(&text, cx) {
             self.input.update(cx, |s, cx| s.set_value("", window, cx));
@@ -1540,6 +1544,39 @@ impl AiPane {
             .child(list)
             .test_support()
             .into_any_element()
+    }
+
+    /// 入力欄に貼られたタスクのリンクを、ドラッグしたときと同じように入力欄に添える。
+    /// リンクの文字は入力欄から消す。タスクが見つからないリンクは、文字のまま残す。
+    fn absorb_task_links(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let text = self.input.read(cx).value().to_string();
+        let mut found: Vec<(String, SharedString)> = Vec::new();
+        {
+            let store = &self.db.read(cx).store;
+            for id in malakt_core::tasklink::find(&text) {
+                if let Ok(task) = store.task(id) {
+                    found.push((id.to_owned(), task.title.into()));
+                }
+            }
+        }
+        if found.is_empty() {
+            return;
+        }
+        // 長い ID から消すと、頭が同じ別の ID のリンクを壊さない
+        let mut rest = text;
+        let mut by_length = found.clone();
+        by_length.sort_by_key(|(id, _)| std::cmp::Reverse(id.len()));
+        for (id, _) in &by_length {
+            rest = rest.replace(&malakt_core::tasklink::url(id), "");
+        }
+        self.session.update(cx, |s, cx| {
+            for (id, title) in found {
+                s.attach_task(&id, title, cx);
+            }
+        });
+        let rest = rest.trim().to_owned();
+        self.input.update(cx, |s, cx| s.set_value(rest, window, cx));
+        cx.notify();
     }
 
     fn render_item(&self, ix: usize, item: &Item, cx: &App) -> AnyElement {

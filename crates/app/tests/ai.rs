@@ -2069,6 +2069,47 @@ fn a_task_has_its_own_chat(cx: &mut TestAppContext) {
     assert_eq!(read(cx, |s| s.chats.len()), 1);
 }
 
+/// 入力欄に貼ったタスクのリンクは、ドラッグしたときと同じように入力欄に添えられる。
+#[gpui_kit::test]
+fn a_pasted_task_link_is_attached(cx: &mut TestAppContext) {
+    let world = start(cx);
+    world.keys.set(Provider::Claude, "k").unwrap();
+    let (window, view) = open(cx, wide());
+    let task = new_task(cx, "会場を予約する");
+    world.reply(text_reply("そのままにしました。"));
+    wait(cx, "AI が整え終わる", |s| {
+        !s.busy && !s.runs.is_empty()
+    });
+    let pane = open_chat(cx, window, &view);
+
+    // タスクが見つからないリンクは、文字のまま残る
+    world.reply(text_reply("予約の手順です"));
+    say(
+        cx,
+        window,
+        &pane,
+        &format!("malakt-mahoz://task/{task} malakt-mahoz://task/nothing どう進める？"),
+    );
+    wait(cx, "返事が来る", |s| !s.busy && s.items.len() >= 2);
+    assert_eq!(
+        read(cx, |s| s.items[0].clone()),
+        Item::User("「会場を予約する」\nmalakt-mahoz://task/nothing どう進める？".into())
+    );
+    let sent = world.sent();
+    let message = sent.last().unwrap().2["messages"][0]["content"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        message.contains("[添えたタスク「会場を予約する」]"),
+        "{message}"
+    );
+    assert!(
+        !message.contains(&format!("malakt-mahoz://task/{task}")),
+        "{message}"
+    );
+}
+
 /// モデルは名前で出す。サービスの一覧にあった名前は、次の起動でも使う。
 #[gpui_kit::test]
 fn models_are_shown_by_name(cx: &mut TestAppContext) {
