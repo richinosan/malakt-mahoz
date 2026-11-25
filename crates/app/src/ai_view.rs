@@ -169,6 +169,7 @@ pub struct AiPane {
     model_input: Entity<InputState>,
     /// 定期チェックの指示。
     watch_input: Entity<TextareaState>,
+    context_input: Entity<TextareaState>,
     /// モデルの入力欄に出している値。
     /// 設定で、モデルの一覧を開いている。
     model_open: bool,
@@ -271,6 +272,13 @@ impl AiPane {
         let watch_input = cx.new(|cx| {
             let mut state = TextareaState::new(window, cx).placeholder("AI への指示");
             state.set_value(instruction, window, cx);
+            state
+        });
+        let context = session.read(cx).context.clone();
+        let context_input = cx.new(|cx| {
+            let mut state =
+                TextareaState::new(window, cx).placeholder("例: PR のタスクは優先度を高にする");
+            state.set_value(context, window, cx);
             state
         });
         let shell_input = cx.new(|cx| InputState::new(window, cx));
@@ -386,6 +394,7 @@ impl AiPane {
             key_input,
             model_input,
             watch_input,
+            context_input,
             model_open: false,
             settings_open: false,
             resize: None,
@@ -984,6 +993,27 @@ impl AiPane {
                             let on = *on;
                             this.session.update(cx, |s, cx| s.set_auto_run(on, cx));
                         })),
+                ),
+            )
+            .child(
+                section().child(label("いつも AI に伝えること")).child(
+                    row()
+                        .gap_1()
+                        .items_end()
+                        .child(
+                            div()
+                                .id("ai-context")
+                                .flex_1()
+                                .min_w_0()
+                                .child(Textarea::new(&self.context_input).h(px(72.)))
+                                .test_support(),
+                        )
+                        .child(
+                            icon_button("ai-context-save", "check", "保存").on_click(cx.listener(|this, _, _, cx| {
+                                let text = this.context_input.read(cx).value().to_string();
+                                this.session.update(cx, |s, cx| s.set_context(&text, cx));
+                            })),
+                        ),
                 ),
             )
             .child(

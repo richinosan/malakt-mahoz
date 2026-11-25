@@ -1379,6 +1379,43 @@ fn a_new_task_is_arranged_by_the_ai(cx: &mut TestAppContext) {
     let _ = view;
 }
 
+/// 設定に書いた「いつも AI に伝えること」は、毎回 AI に渡り、起動し直しても残る。
+#[gpui_kit::test]
+fn the_custom_context_reaches_the_ai(cx: &mut TestAppContext) {
+    let world = start(cx);
+    world.keys.set(Provider::Claude, "k").unwrap();
+    let (window, view) = open(cx, wide());
+    let pane = open_chat(cx, window, &view);
+    open_settings(cx, window, &pane);
+    ui(cx, window, |window, cx| {
+        window.click("ai-context", cx);
+        window.input("PR のタスクは優先度を高にする", cx);
+        window.click("ai-context-save", cx);
+    });
+    assert_eq!(
+        setting(cx, "ai.context").as_deref(),
+        Some("PR のタスクは優先度を高にする")
+    );
+    world.reply(text_reply("はい。"));
+    say(cx, window, &pane, "こんにちは");
+    wait(cx, "返事が来る", |s| !s.busy && s.items.len() >= 2);
+    let system = world.sent()[0].2["system"].as_str().unwrap().to_owned();
+    assert!(
+        system.ends_with("いつも従ってください。\nPR のタスクは優先度を高にする"),
+        "{system}"
+    );
+
+    // 長すぎるものは保存しない
+    let long = "あ".repeat(malakt_mahoz::ai::MAX_CONTEXT_CHARS + 1);
+    let session = session(cx);
+    cx.update(|cx| session.update(cx, |s, cx| s.set_context(&long, cx)));
+    assert!(read(cx, |s| s.error.clone()).unwrap().contains("文字まで"));
+    assert_eq!(
+        read(cx, |s| s.context.clone()),
+        "PR のタスクは優先度を高にする"
+    );
+}
+
 /// Enter で送り、Shift+Enter は改行になる。
 #[gpui_kit::test]
 fn enter_sends_and_shift_enter_breaks_the_line(cx: &mut TestAppContext) {
