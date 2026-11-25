@@ -13,7 +13,7 @@ use windows::UI::Notifications::{
     ScheduledToastNotification, ToastNotificationManager, ToastNotifier,
 };
 
-use crate::{digest, Item, List, Os, Seen};
+use crate::{toast_id, Item, List, Os, Seen};
 
 /// 1601 年から 1970 年までの秒数。
 const EPOCH_GAP: i64 = 11_644_473_600;
@@ -93,7 +93,7 @@ impl Toasts {
              </binding></visual>\
              <actions><action activationType=\"system\" arguments=\"dismiss\" content=\"\"/></actions>\
              </toast>",
-            digest(&[list]),
+            toast_id(list),
             escape(list),
             escape(&item.title),
             escape(due),
@@ -129,8 +129,7 @@ impl Os for Toasts {
         list_external: &str,
         item: &Item,
     ) -> Result<String, String> {
-        // 予約の id は 16 文字まで
-        let id = digest(&[&item.task_id]);
+        let id = toast_id(&item.task_id);
         self.unschedule(external.unwrap_or(&id)).map_err(os)?;
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)

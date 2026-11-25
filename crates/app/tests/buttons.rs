@@ -8,8 +8,8 @@ use std::collections::BTreeSet;
 
 use gpui_kit::test::{TestQueryExt, TestWindowExt};
 use gpui_kit::{
-    px, size, AnyWindowHandle, AppContext, Bounds, ElementId, Entity, Pixels, Point, Role, Size,
-    TestAppContext, WindowBounds, WindowOptions,
+    px, size, AnyWindowHandle, AppContext, Bounds, ElementId, Entity, Modifiers, MouseButton,
+    Pixels, Point, Role, Size, TestAppContext, VisualTestContext, WindowBounds, WindowOptions,
 };
 use malakt_core::panes::{Action, Dir};
 use malakt_core::view::Priority;
@@ -30,6 +30,9 @@ const NOT_BUTTONS: &[&str] = &[
     "sidebar-resize",
     "detail-panel",
     "dialog",
+    // ダイアログの外側の暗い所。真ん中にはダイアログがあるので、端を押して別に確かめる
+    "dialog-backdrop",
+    "dialog-under-backdrop",
     // メニューの入れ物。中の項目は 1 つずつ押す
     "popup-menu",
     "detail-description",
@@ -554,6 +557,27 @@ fn click(cx: &mut TestAppContext, world: &World, id: &ElementId) -> bool {
     found
 }
 
+/// ダイアログが出ていたら、外側の暗い所を押す。押して画面が変わったかを返す。
+/// ダイアログが出ていないとき、発行したチケットを見せているとき（閉じない決まり）は `None`。
+fn click_outside(cx: &mut TestAppContext, world: &World) -> Option<bool> {
+    let at = cx
+        .update_window(world.window, |_, window, cx| {
+            window.render_frame(cx);
+            if world.view.read(cx).issued_ticket.is_some() {
+                return None;
+            }
+            let dialog = window.try_find("dialog")?;
+            Some(dialog.bounds().origin - Point::new(px(4.), px(4.)))
+        })
+        .unwrap()?;
+    let before = fingerprint(cx, world);
+    let mut v = VisualTestContext::from_window(world.window, cx);
+    v.simulate_mouse_down(at, MouseButton::Left, Modifiers::default());
+    v.simulate_mouse_up(at, MouseButton::Left, Modifiers::default());
+    v.run_until_parked();
+    Some(before != fingerprint(cx, world))
+}
+
 fn with_view(
     cx: &mut TestAppContext,
     world: &World,
@@ -773,6 +797,8 @@ fn every_button_responds(cx: &mut TestAppContext) {
     let mut pressed: BTreeSet<String> = BTreeSet::new();
     let mut overlaps: Vec<String> = Vec::new();
     let mut small: Vec<String> = Vec::new();
+    let mut stuck: Vec<String> = Vec::new();
+    let mut outside = 0;
 
     for (screen, size, setup) in screens() {
         let world = fresh(cx, size);
@@ -830,6 +856,22 @@ fn every_button_responds(cx: &mut TestAppContext) {
                 if before == after && !quiet(screen, two) {
                     dead.push(format!("{screen} > {one:?} > {two:?}"));
                 }
+                // 中のボタンを押したあと（一覧を重ねたあとなど）も、外側を押すと閉じる
+                match click_outside(cx, &world) {
+                    Some(true) => outside += 1,
+                    Some(false) => stuck.push(format!("{screen} > {one:?} > {two:?}")),
+                    None => {}
+                }
+            }
+            // 開いたダイアログは、外側の暗い所を押すと閉じる
+            let world = fresh(cx, size);
+            setup(cx, &world);
+            frame(cx, &world);
+            click(cx, &world, one);
+            match click_outside(cx, &world) {
+                Some(true) => outside += 1,
+                Some(false) => stuck.push(format!("{screen} > {one:?}")),
+                None => {}
             }
         }
     }
@@ -844,7 +886,19 @@ fn every_button_responds(cx: &mut TestAppContext) {
         "押せる範囲が小さすぎるものがある:\n{}",
         small.join("\n")
     );
-    println!("押したもの {} 種類", pressed.len());
+    assert!(
+        stuck.is_empty(),
+        "外側を押しても閉じないダイアログがある:\n{}",
+        stuck.join("\n")
+    );
+    assert!(
+        outside >= 20,
+        "外側を押して確かめたダイアログが少ない: {outside}"
+    );
+    println!(
+        "押したもの {} 種類、外側を押したダイアログ {outside} 回",
+        pressed.len()
+    );
     let source = [
         include_str!("../src/render.rs"),
         include_str!("../src/ai_view.rs"),

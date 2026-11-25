@@ -228,6 +228,10 @@ pub struct MainView {
     /// 完了チケットをだれの分として発行するか（`None` は自分）と、発行したばかりのチケット。
     /// チケットの文字列は発行したときしか分からないので、ダイアログを閉じるまで持つ
     pub ticket_person: Option<Id>,
+    /// 外側を押して閉じた「状態を変更」の、書きかけのコメントを残してあるタスク。
+    pub status_draft: Option<Id>,
+    /// 外側を押し始めたとき、名前を書いている途中だった。
+    pub outside_busy: bool,
     pub issued_ticket: Option<IssuedTicket>,
     /// 通知（新しい順）と、未読の数
     pub notices: Vec<Notice>,
@@ -647,6 +651,8 @@ impl MainView {
             description_shown: String::new(),
             modal: Modal::None,
             ticket_person: None,
+            status_draft: None,
+            outside_busy: false,
             issued_ticket: None,
             notices: Vec::new(),
             unread_notices: 0,
@@ -1567,9 +1573,12 @@ impl MainView {
         } else {
             Status::NeedsAction
         };
-        self.inputs
-            .status_comment
-            .update(cx, |s, cx| s.set_value("", window, cx));
+        // 外側を押して閉じたときの書きかけは、同じタスクなら残す
+        if self.status_draft.take().as_deref() != Some(id) {
+            self.inputs
+                .status_comment
+                .update(cx, |s, cx| s.set_value("", window, cx));
+        }
         self.modal = Modal::Status(id.to_owned(), next);
         // すぐ書けるようにする。メニューから開いたときは、メニューが閉じたあとでフォーカスを移す
         let input = self.inputs.status_comment.clone();
@@ -3434,6 +3443,42 @@ impl MainView {
         if over {
             self.focus.focus(window, cx);
         }
+    }
+
+    /// 「閉じる」。いちばん上に出ているダイアログを 1 枚だけ閉じる。
+    pub fn close_top_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // 重ねたダイアログと、ペインのキーの一覧やプリセットは、いちばん上に出ている
+        if self.sub_modal.is_some() {
+            self.dismiss_in(window, cx);
+            return;
+        }
+        if self.pane_overlay.take().is_some() {
+            cx.notify();
+            return;
+        }
+        self.person_naming = None;
+        self.preset_naming = None;
+        self.modal = Modal::None;
+        self.issued_ticket = None;
+        cx.notify();
+    }
+
+    /// ダイアログの外側の暗い所を押した。いちばん上のダイアログを 1 枚だけ閉じる。
+    /// 発行したチケットの文字列は閉じると二度と出せないので、出ている間は閉じない。
+    /// 状態の変更に書きかけたコメントは取っておき、同じタスクで開き直すと戻る。
+    pub fn dismiss_outside(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if std::mem::take(&mut self.outside_busy) {
+            return;
+        }
+        if self.sub_modal.is_none() && self.pane_overlay.is_none() {
+            if self.issued_ticket.is_some() {
+                return;
+            }
+            if let Modal::Status(id, _) = &self.modal {
+                self.status_draft = Some(id.clone());
+            }
+        }
+        self.close_top_dialog(window, cx);
     }
 
     /// Esc。今開いているものを 1 つだけ閉じる。
