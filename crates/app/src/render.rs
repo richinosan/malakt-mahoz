@@ -81,6 +81,10 @@ fn glass(color: Hsla, cx: &App) -> Hsla {
     }
 }
 
+/// 「見た目」のダイアログと、テーマの見本の幅。見本は 1 行に 5 つ並ぶ。
+const APPEARANCE_WIDTH: Pixels = px(680.);
+const PRESET_WIDTH: Pixels = px(124.);
+
 /// 浮かせたパネルのすき間。
 const FLOAT_GAP: Pixels = px(8.);
 
@@ -116,7 +120,7 @@ fn backdrop_layer(cx: &App) -> Option<Img> {
 /// 同梱の画像の小さい絵。選ぶ画面に出す。
 fn scene_thumbnail(scene: &crate::theme::Scene, dark: bool) -> Option<Arc<Image>> {
     use std::sync::OnceLock;
-    static MADE: OnceLock<[Option<Arc<Image>>; 4]> = OnceLock::new();
+    static MADE: OnceLock<[Option<Arc<Image>>; 6]> = OnceLock::new();
     let made = MADE.get_or_init(|| {
         use crate::theme::Scene;
         [
@@ -124,6 +128,8 @@ fn scene_thumbnail(scene: &crate::theme::Scene, dark: bool) -> Option<Arc<Image>
             (Scene::Sky, true),
             (Scene::Forest, false),
             (Scene::Forest, true),
+            (Scene::Dusk, false),
+            (Scene::Dusk, true),
         ]
         .map(|(scene, dark)| {
             scene
@@ -134,6 +140,7 @@ fn scene_thumbnail(scene: &crate::theme::Scene, dark: bool) -> Option<Arc<Image>
     let at = match scene {
         crate::theme::Scene::Sky => 0,
         crate::theme::Scene::Forest => 2,
+        crate::theme::Scene::Dusk => 4,
         _ => return None,
     };
     made[at + usize::from(dark)].clone()
@@ -4133,6 +4140,30 @@ impl MainView {
                 .text_color(theme.muted_foreground)
                 .child(text)
         };
+        let presets = self.preset_tiles(cx);
+        let open = self.appearance_details;
+        let toggle = row()
+            .id("details-toggle")
+            .h_8()
+            .px_2()
+            .gap_2()
+            .rounded_md()
+            .cursor_pointer()
+            .text_sm()
+            .text_color(theme.muted_foreground)
+            .hover(|s| s.bg(theme.accent))
+            .active(|s| s.bg(theme.primary.opacity(0.4)))
+            .child(
+                app_icon(if open {
+                    "chevron-down"
+                } else {
+                    "chevron-right"
+                })
+                .small(),
+            )
+            .child("詳細")
+            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.toggle_appearance_details(cx)))
+            .test_support();
         let mut body = col().gap_2().child(
             row()
                 .gap_2()
@@ -4286,13 +4317,36 @@ impl MainView {
                     )
                     .child(reset("float-reset", false)),
             );
-        let body = body.when_some(self.error.clone(), |d, error| {
-            d.child(div().text_sm().text_color(theme.danger).child(error))
-        });
+        let details = if !open {
+            None
+        } else if self.motion {
+            Some(
+                body.with_animation("details-in", appear(160), |d, t| d.opacity(t))
+                    .into_any_element(),
+            )
+        } else {
+            Some(body.into_any_element())
+        };
+        // 画面に入りきらないときは、ダイアログの中でスクロールする
+        let body = col().min_h_0().child(
+            col()
+                .id("appearance-scroll")
+                .min_h_0()
+                .gap_2()
+                // 右の端はスクロールバーの場所
+                .pr_4()
+                .overflow_y_scrollbar()
+                .child(presets)
+                .child(toggle)
+                .children(details)
+                .when_some(self.error.clone(), |d, error| {
+                    d.child(div().text_sm().text_color(theme.danger).child(error))
+                }),
+        );
         let (title, width, over) = match self.sub_modal {
-            None => return self.dialog("見た目", body, cx),
+            None => return self.dialog_as("dialog", APPEARANCE_WIDTH, "見た目", body, cx),
             Some(SubModal::Font) => ("フォント", px(400.), self.font_picker(cx)),
-            Some(SubModal::Scene) => ("背景の画像", px(668.), self.scene_picker(cx)),
+            Some(SubModal::Scene) => ("背景の画像", px(680.), self.scene_picker(cx)),
         };
         let over = self.dialog_as("dialog", width, title, over, cx);
         let over = if self.motion {
@@ -4304,8 +4358,210 @@ impl MainView {
         div()
             .absolute()
             .inset_0()
-            .child(self.dialog_as("dialog-under", px(460.), "見た目", body, cx))
+            .child(self.dialog_as("dialog-under", APPEARANCE_WIDTH, "見た目", body, cx))
             .child(over)
+    }
+
+    /// テーマの見本。おすすめ、自分で保存したもの、今の見た目を保存するボタンの順に並べる。
+    fn preset_tiles(&self, cx: &mut Context<Self>) -> Div {
+        use crate::theme::{Preset, Scene};
+        let theme = cx.theme().clone();
+        let now = crate::theme::current("", cx);
+        let frame = |id: ElementId, selected: bool| {
+            col()
+                .id(id)
+                .w(PRESET_WIDTH)
+                .gap_1()
+                .p_1()
+                .rounded_lg()
+                .cursor_pointer()
+                .border_2()
+                .border_color(if selected {
+                    theme.primary
+                } else {
+                    theme.transparent
+                })
+                .hover(|s| s.bg(theme.accent))
+                .active(|s| s.bg(theme.primary.opacity(0.4)))
+        };
+        // 見本は、そのテーマの画像と色で、浮かせたパネルの形を小さく描く
+        let picture = |preset: &Preset| {
+            let dark = preset.dark(theme.is_dark());
+            let (accent, page) = preset.swatch(dark);
+            let (accent, page): (Hsla, Hsla) = (accent.into(), page.into());
+            let ink = if dark {
+                gpui_kit::white()
+            } else {
+                gpui_kit::black()
+            };
+            let image = scene_thumbnail(&preset.scene, dark);
+            let seen = image.is_some() || matches!(preset.scene, Scene::File(_));
+            let panel = if seen {
+                page.opacity(1. - f32::from(preset.clear) / 100.)
+            } else {
+                page.blend(ink.opacity(0.06))
+            };
+            let inset = if preset.floating { px(6.) } else { px(0.) };
+            let radius = if preset.floating { px(4.) } else { px(0.) };
+            let part = |fill: Hsla| div().rounded(radius).bg(fill);
+            div()
+                .relative()
+                .h(px(72.))
+                .rounded_md()
+                .overflow_hidden()
+                .border_1()
+                .border_color(theme.border)
+                .bg(page)
+                .children(image.map(|image| {
+                    img(image)
+                        .absolute()
+                        .inset_0()
+                        .size_full()
+                        .object_fit(ObjectFit::Cover)
+                }))
+                .when(matches!(preset.scene, Scene::File(_)), |d| {
+                    d.child(
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(app_icon("image").text_color(ink.opacity(0.5))),
+                    )
+                })
+                .child(
+                    row()
+                        .absolute()
+                        .inset(inset)
+                        .items_stretch()
+                        .gap(inset.min(px(3.)).max(px(1.)))
+                        .child(part(panel).w(px(22.)))
+                        .child(
+                            part(panel).flex_1().p(px(5.)).child(
+                                col()
+                                    .gap(px(4.))
+                                    .child(div().w(px(26.)).h(px(5.)).rounded_full().bg(accent))
+                                    .child(
+                                        div()
+                                            .w_full()
+                                            .h(px(3.))
+                                            .rounded_full()
+                                            .bg(ink.opacity(0.45)),
+                                    )
+                                    .child(
+                                        div()
+                                            .w(relative(0.6))
+                                            .h(px(3.))
+                                            .rounded_full()
+                                            .bg(ink.opacity(0.3)),
+                                    ),
+                            ),
+                        ),
+                )
+        };
+        let name = |text: SharedString| div().h_6().px_1().text_sm().truncate().child(text);
+        let mut tiles = row().flex_wrap().items_start().gap_1();
+        for (ix, preset) in Preset::recommended().into_iter().enumerate() {
+            let selected = preset.same_look(&now);
+            tiles = tiles.child(
+                frame(("preset", ix).into(), selected)
+                    .child(picture(&preset))
+                    .child(name(preset.name.clone().into()))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        this.apply_preset(&preset, window, cx)
+                    }))
+                    .test_support(),
+            );
+        }
+        for (ix, preset) in self.own_presets.iter().enumerate() {
+            let group = SharedString::from(format!("own-preset-{ix}"));
+            let label = if self.preset_naming == Some(ix) {
+                // その場で名前を書く。Enter かほかの場所を押すと保存、Esc で取り消し
+                div()
+                    .h_6()
+                    .on_mouse_down_out(
+                        cx.listener(|this, _, window, cx| this.save_preset_name(window, cx)),
+                    )
+                    // 名前を書いている間は、見本を押したことにしない
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .child(
+                        Input::new(&self.inputs.preset_name)
+                            .id("preset-input")
+                            .aria_label("テーマの名前")
+                            .text_sm()
+                            .h_6()
+                            .bg(theme.background)
+                            .border_color(theme.ring)
+                            .px_1(),
+                    )
+                    .into_any_element()
+            } else {
+                name(preset.name.clone().into())
+                    .id(("own-preset-name", ix))
+                    .rounded_sm()
+                    .hover(|s| s.bg(theme.muted))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        cx.stop_propagation();
+                        this.rename_preset(ix, window, cx)
+                    }))
+                    .test_support()
+                    .into_any_element()
+            };
+            let chosen = preset.clone();
+            tiles = tiles.child(
+                frame(("own-preset", ix).into(), preset.same_look(&now))
+                    .group(group.clone())
+                    .relative()
+                    .child(picture(preset))
+                    .child(label)
+                    .child(
+                        div()
+                            .absolute()
+                            .top(px(6.))
+                            .right(px(6.))
+                            .rounded_md()
+                            .bg(theme.background)
+                            .opacity(0.)
+                            .group_hover(group, |s| s.opacity(1.))
+                            .child(
+                                Button::new(("own-preset-delete", ix))
+                                    .icon(app_icon("trash"))
+                                    .ghost()
+                                    .xsmall()
+                                    .tooltip("削除")
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        cx.stop_propagation();
+                                        this.delete_preset(ix, cx)
+                                    })),
+                            ),
+                    )
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        this.apply_preset(&chosen, window, cx)
+                    }))
+                    .test_support(),
+            );
+        }
+        tiles.child(
+            frame("preset-save".into(), false)
+                .child(
+                    div()
+                        .h(px(72.))
+                        .rounded_md()
+                        .border_1()
+                        .border_dashed()
+                        .border_color(theme.input)
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(app_icon("plus").text_color(theme.muted_foreground)),
+                )
+                .child(name("今の見た目を保存".into()))
+                .on_click(
+                    cx.listener(|this, _: &ClickEvent, window, cx| this.save_preset(window, cx)),
+                )
+                .test_support(),
+        )
     }
 
     /// この PC に入っている書体の一覧。

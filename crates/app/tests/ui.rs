@@ -1750,6 +1750,7 @@ fn font_and_colors_are_chosen_in_settings(cx: &mut TestAppContext) {
     ui(cx, window, |window, cx| {
         view.update(cx, |v, cx| v.open_appearance(window, cx))
     });
+    ui(cx, window, |window, cx| window.click("details-toggle", cx));
     ui(cx, window, |window, cx| window.click("font-open", cx));
     cx.update(|cx| {
         view.update(cx, |v, cx| {
@@ -1784,6 +1785,7 @@ fn font_and_colors_are_chosen_in_settings(cx: &mut TestAppContext) {
     ui(cx, window, |window, cx| {
         view.update(cx, |v, cx| v.open_appearance(window, cx))
     });
+    ui(cx, window, |window, cx| window.click("details-toggle", cx));
     let pick = |cx: &mut TestAppContext, slot: usize, hex: &str| {
         let color = Color::parse(hex).unwrap();
         // 色の見本を押すと、色を選ぶところが開く
@@ -1883,6 +1885,7 @@ fn backdrop_and_cards_are_chosen_in_settings(cx: &mut TestAppContext) {
     ui(cx, window, |window, cx| {
         view.update(cx, |v, cx| v.open_appearance(window, cx))
     });
+    ui(cx, window, |window, cx| window.click("details-toggle", cx));
     ui(cx, window, |window, cx| {
         // 画像を出していないときは、透明度とぼかしは出ない
         assert!(window.try_find("clear-slider").is_none());
@@ -2006,6 +2009,137 @@ fn backdrop_and_cards_are_chosen_in_settings(cx: &mut TestAppContext) {
         theme::set(theme::Choice::Light, window, cx).unwrap()
     });
     assert_eq!(primary(cx), "#86600f");
+}
+
+/// 「見た目」のいちばん上でテーマを選ぶと、画像・色・カードがまとめて変わる。
+/// 今の見た目は自分のテーマとして保存でき、名前を変えられ、消せる。
+#[gpui_kit::test]
+fn themes_are_chosen_and_saved_in_settings(cx: &mut TestAppContext) {
+    use gpui_kit::component::ActiveTheme;
+    use malakt_mahoz::theme::{self, Choice, Color, Preset, Scene};
+    start(cx);
+    let (window, view) = open(cx, wide());
+    let saved = |cx: &mut TestAppContext, key: &str| store(cx, |s| s.setting(key).unwrap());
+    let hex = |color: gpui_kit::Hsla| Color::from(color).hex();
+    let stock: Vec<String> = Preset::recommended()
+        .iter()
+        .map(|p| p.name.clone())
+        .collect();
+    assert_eq!(stock[..3], ["標準", "ガラスと青い空", "ダークフォレスト"]);
+
+    ui(cx, window, |window, cx| {
+        view.update(cx, |v, cx| v.open_appearance(window, cx))
+    });
+    // 1 つずつ変える行は、「詳細」を押すまで出ない
+    ui(cx, window, |window, cx| {
+        assert!(window.try_find("font-open").is_none());
+        window.click("details-toggle", cx)
+    });
+    ui(cx, window, |window, cx| {
+        assert!(window.try_find("font-open").is_some());
+        window.click("details-toggle", cx)
+    });
+
+    // ダークフォレスト: 森の画像、ダーク、浮かせたパネル
+    ui(cx, window, |window, cx| {
+        window.click(("preset", 2usize), cx)
+    });
+    assert_eq!(saved(cx, "scene").as_deref(), Some("forest"));
+    assert_eq!(saved(cx, "theme").as_deref(), Some("dark"));
+    assert_eq!(saved(cx, "panels.float").as_deref(), Some("1"));
+    assert_eq!(saved(cx, "scene.clear").as_deref(), Some("45"));
+    assert!(cx.update(|cx| cx.theme().is_dark() && theme::backdrop(cx).is_some()));
+    assert!(cx.update(|cx| (theme::backdrop(cx).unwrap().alpha - 0.55).abs() < 0.001));
+    assert!(cx.update(|cx| Preset::recommended()[2].same_look(&theme::current("", cx))));
+
+    // 色だけのテーマ（さくら）は、画像を外して色を変える
+    let sakura = stock.iter().position(|n| n == "さくら").unwrap();
+    ui(cx, window, |window, cx| {
+        window.click(("preset", sakura), cx)
+    });
+    assert_eq!(saved(cx, "scene"), None);
+    assert_eq!(saved(cx, "theme").as_deref(), Some("light"));
+    assert_eq!(saved(cx, "panels.float"), None);
+    assert!(cx.update(|cx| theme::backdrop(cx).is_none()));
+    assert_eq!(hex(cx.update(|cx| cx.theme().background)), "#fdf1f5");
+    assert_eq!(hex(cx.update(|cx| cx.theme().primary)), "#c2477a");
+
+    // 少し変えてから保存すると、「マイテーマ 1」ができて、そのまま名前を書ける
+    ui(cx, window, |window, cx| {
+        view.update(cx, |v, cx| v.set_cards(true, cx));
+        window.click("preset-save", cx)
+    });
+    assert_eq!(
+        cx.update(|cx| view.read(cx).preset_naming),
+        Some(0),
+        "保存したテーマの名前を書いている"
+    );
+    ui(cx, window, |window, cx| window.input("桜とカード", cx));
+    ui(cx, window, |window, cx| window.press("enter", cx));
+    let own = cx.update(|cx| theme::own_presets(cx).unwrap());
+    assert_eq!(own.len(), 1);
+    assert_eq!(own[0].name, "桜とカード");
+    assert!(own[0].cards && own[0].mode == Some(Choice::Light));
+    assert_eq!(own[0].look.accent, Color::parse("#c2477a"));
+
+    // 標準に戻してから自分のテーマを選ぶと、保存したときの見た目に戻る
+    ui(cx, window, |window, cx| {
+        window.click(("preset", 0usize), cx)
+    });
+    assert_eq!(saved(cx, "color.accent"), None);
+    assert_eq!(saved(cx, "list.cards"), None);
+    assert_eq!(hex(cx.update(|cx| cx.theme().primary)), "#86600f");
+    ui(cx, window, |window, cx| {
+        window.click(("own-preset", 0usize), cx)
+    });
+    assert_eq!(saved(cx, "list.cards").as_deref(), Some("1"));
+    assert_eq!(hex(cx.update(|cx| cx.theme().background)), "#fdf1f5");
+
+    // 名前を押すと書き直せる。Esc は書きかけだけを捨てて、ダイアログは開いたまま
+    ui(cx, window, |window, cx| {
+        window.click(("own-preset-name", 0usize), cx)
+    });
+    ui(cx, window, |window, cx| window.input("x", cx));
+    ui(cx, window, |window, cx| window.press("escape", cx));
+    assert!(cx.update(|cx| {
+        let v = view.read(cx);
+        v.preset_naming.is_none() && v.modal == Modal::Appearance
+    }));
+    assert_eq!(
+        cx.update(|cx| theme::own_presets(cx).unwrap()[0].name.clone()),
+        "桜とカード"
+    );
+
+    // 開き直しても残る
+    ui(cx, window, |window, cx| window.press("escape", cx));
+    ui(cx, window, |window, cx| {
+        view.update(cx, |v, cx| v.open_appearance(window, cx))
+    });
+    assert_eq!(cx.update(|cx| view.read(cx).own_presets.len()), 1);
+
+    // 画像がなくなったテーマは使えない。前の見た目のまま、理由が出る
+    let gone = Preset {
+        name: "海".into(),
+        scene: Scene::File("/ない/海.png".into()),
+        ..own[0].clone()
+    };
+    ui(cx, window, |window, cx| {
+        view.update(cx, |v, cx| v.apply_preset(&gone, window, cx))
+    });
+    let error = cx.update(|cx| view.read(cx).error.clone()).unwrap();
+    assert!(
+        error.contains("海.png") && error.contains("テーマ「海」"),
+        "{error}"
+    );
+    assert_eq!(saved(cx, "scene"), None);
+
+    // 消しても、今の見た目は変わらない
+    ui(cx, window, |window, cx| {
+        window.click(("own-preset-delete", 0usize), cx)
+    });
+    assert_eq!(saved(cx, "presets"), None);
+    assert!(cx.update(|cx| view.read(cx).own_presets.is_empty()));
+    assert_eq!(hex(cx.update(|cx| cx.theme().background)), "#fdf1f5");
 }
 
 /// アイコンは検索して選べる。日本語でも探せ、見つからなければその旨が出る。
