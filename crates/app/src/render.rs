@@ -4321,6 +4321,10 @@ impl MainView {
                 .when_some(width, |d, width| {
                     d.w(width).border_l_1().border_color(theme.border)
                 })
+                // 一覧の上に重ねるときは、影で浮かせる
+                .when(!sheet && crate::theme::overlay(cx), |d| {
+                    d.elevate(Elevation::High, cx)
+                })
                 .bg(theme.background)
                 .occlude()
                 .flex()
@@ -4464,6 +4468,14 @@ impl MainView {
                 .child(text)
         };
         let presets = self.preset_tiles(cx);
+        let layouts = self.layout_tiles(cx);
+        let heading = |text: &'static str| {
+            div()
+                .px_1()
+                .text_sm()
+                .text_color(theme.muted_foreground)
+                .child(text)
+        };
         let open = self.appearance_details;
         let toggle = row()
             .id("details-toggle")
@@ -4651,21 +4663,35 @@ impl MainView {
             Some(body.into_any_element())
         };
         // 画面に入りきらないときは、ダイアログの中でスクロールする
-        let body = col().min_h_0().child(
-            col()
-                .id("appearance-scroll")
-                .min_h_0()
-                .gap_2()
-                // 右の端はスクロールバーの場所
-                .pr_4()
-                .overflow_y_scrollbar()
-                .child(presets)
-                .child(toggle)
-                .children(details)
-                .when_some(self.error.clone(), |d, error| {
-                    d.child(div().text_sm().text_color(theme.danger).child(error))
-                }),
-        );
+        let body = col()
+            .min_h_0()
+            .gap_2()
+            .child(
+                col()
+                    .relative()
+                    .min_h_0()
+                    .child(
+                        col()
+                            .id("appearance-scroll")
+                            .min_h_0()
+                            .gap_2()
+                            // 右の端はスクロールバーの場所
+                            .pr_4()
+                            .track_scroll(&self.appearance_scroll)
+                            .overflow_y_scroll()
+                            .child(heading("テーマ"))
+                            .child(presets)
+                            .child(heading("レイアウト"))
+                            .child(layouts)
+                            .child(toggle)
+                            .children(details),
+                    )
+                    .vertical_scrollbar(&self.appearance_scroll),
+            )
+            // 失敗の理由は、どこまでスクロールしていても見える所に出す
+            .when_some(self.error.clone(), |d, error| {
+                d.child(div().text_sm().text_color(theme.danger).child(error))
+            });
         let (title, width, over) = match self.sub_modal {
             None => return self.dialog_as("dialog", APPEARANCE_WIDTH, "見た目", body, cx),
             Some(SubModal::Font) => ("フォント", px(400.), self.font_picker(cx)),
@@ -4729,7 +4755,7 @@ impl MainView {
             let part = |fill: Hsla| div().rounded(radius).bg(fill);
             div()
                 .relative()
-                .h(px(72.))
+                .h(px(56.))
                 .rounded_md()
                 .overflow_hidden()
                 .border_1()
@@ -4869,7 +4895,7 @@ impl MainView {
             frame("preset-save".into(), false)
                 .child(
                     div()
-                        .h(px(72.))
+                        .h(px(56.))
                         .rounded_md()
                         .border_1()
                         .border_dashed()
@@ -4885,6 +4911,115 @@ impl MainView {
                 )
                 .test_support(),
         )
+    }
+
+    /// レイアウトの見本。一覧・詳細・AI チャットの並び方を、小さい図で出す。
+    fn layout_tiles(&self, cx: &mut Context<Self>) -> Div {
+        let theme = cx.theme().clone();
+        let chat = self.ai_docked(cx);
+        let line = |width: f32| {
+            div()
+                .w(relative(width))
+                .h(px(3.))
+                .rounded_full()
+                .bg(theme.muted_foreground.opacity(0.5))
+        };
+        let part = |round: bool| {
+            col()
+                .p(px(4.))
+                .gap(px(3.))
+                .bg(theme.background)
+                .border_1()
+                .border_color(theme.border)
+                .when(round, |d| d.rounded(px(4.)))
+        };
+        let picture = |layout: &crate::theme::Layout| {
+            let float = layout.floating;
+            let list = if layout.cards {
+                // 一覧の 1 行ずつがカード
+                col()
+                    .flex_1()
+                    .p(px(3.))
+                    .gap(px(3.))
+                    .children((0..3).map(|_| part(true).child(line(0.7))))
+            } else {
+                part(float)
+                    .flex_1()
+                    .child(line(0.8))
+                    .child(line(0.6))
+                    .child(line(0.7))
+                    .child(line(0.5))
+            };
+            let side = |accent: bool| {
+                part(float)
+                    .w(px(30.))
+                    .child(
+                        div()
+                            .w(relative(0.7))
+                            .h(px(4.))
+                            .rounded_full()
+                            .bg(if accent {
+                                theme.primary
+                            } else {
+                                theme.muted_foreground.opacity(0.5)
+                            }),
+                    )
+                    .child(line(1.))
+                    .child(line(0.8))
+            };
+            row()
+                .relative()
+                .h(px(56.))
+                .items_stretch()
+                .rounded_md()
+                .overflow_hidden()
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.muted)
+                .when(float, |d| d.p(px(5.)).gap(px(4.)))
+                .child(list)
+                .when(!layout.overlay, |d| d.child(side(true)))
+                .when(layout.chat == Some(true), |d| d.child(side(false)))
+                // 重ねる詳細は、一覧の上に影つきで乗る
+                .when(layout.overlay, |d| {
+                    d.child(
+                        side(true)
+                            .absolute()
+                            .top_0()
+                            .bottom_0()
+                            .right_0()
+                            .w(px(44.))
+                            .elevate(Elevation::High, cx),
+                    )
+                })
+        };
+        let mut tiles = row().flex_wrap().items_start().gap_1();
+        for (ix, layout) in crate::theme::Layout::PATTERNS.into_iter().enumerate() {
+            tiles = tiles.child(
+                col()
+                    .id(("layout", ix))
+                    .w(PRESET_WIDTH)
+                    .gap_1()
+                    .p_1()
+                    .rounded_lg()
+                    .cursor_pointer()
+                    .border_2()
+                    .border_color(if layout.shown(chat, cx) {
+                        theme.primary
+                    } else {
+                        theme.transparent
+                    })
+                    .hover(|s| s.bg(theme.accent))
+                    .active(|s| s.bg(theme.primary.opacity(0.4)))
+                    .child(picture(&layout))
+                    .child(div().h_6().px_1().text_sm().truncate().child(layout.name))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        this.apply_layout(&layout, window, cx)
+                    }))
+                    .test_support(),
+            );
+        }
+        tiles
     }
 
     /// この PC に入っている書体の一覧。
@@ -6054,7 +6189,7 @@ impl MainView {
                         col().gap_1().child(label("AI に伝えること")).child(
                             div()
                                 .id("ws-context")
-                                .child(Textarea::new(&self.inputs.ws_context).h(px(72.)))
+                                .child(Textarea::new(&self.inputs.ws_context).h(px(56.)))
                                 .test_support(),
                         ),
                     )
@@ -6246,7 +6381,7 @@ impl MainView {
         let width = bounds.size.width;
         let panel_width = self.panel_split(width);
         // 詳細を開いている間、一覧はその左の残りの幅に収まる
-        let beside = panel_width.filter(|_| self.detail.is_some());
+        let beside = panel_width.filter(|_| self.detail.is_some() && !crate::theme::overlay(cx));
         let list_width = width - beside.unwrap_or(px(0.));
         let table = list_width >= px(880.) && !crate::theme::cards(cx);
         self.list_width = f32::from(list_width) / crate::UI_SCALE;
@@ -6398,7 +6533,7 @@ impl Render for MainView {
             .map_or(main_width, |(_, rect)| main_width * rect.w);
         let panel_width = self.panel_split(own_width);
         // 詳細を開いている間、一覧はその左の残りの幅に収まる
-        let beside = panel_width.filter(|_| self.detail.is_some());
+        let beside = panel_width.filter(|_| self.detail.is_some() && !crate::theme::overlay(cx));
         let list_width = own_width - beside.unwrap_or(px(0.));
         // 表は、タイトルの列に読める幅が残るときだけ
         let table = list_width >= px(880.) && !crate::theme::cards(cx);

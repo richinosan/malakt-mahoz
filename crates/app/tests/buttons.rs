@@ -77,6 +77,7 @@ const NEVER: &[&str] = &[
 const MUST: &[&str] = &[
     "preset",
     "preset-save",
+    "layout",
     "own-preset",
     "own-preset-name",
     "own-preset-delete",
@@ -134,6 +135,7 @@ const QUIET: &[(&str, &str)] = &[
     ("見た目の詳細 > preset#0", "今選んでいるテーマ"),
     ("自分のテーマがある見た目 > preset#0", "今選んでいるテーマ"),
     ("own-preset#0", "今選んでいるテーマ"),
+    ("layout#0", "今選んでいるレイアウト"),
     ("scene-file", "OS のファイル選択を開く"),
     // 入力が空のときは送らない
     ("pane-keys#0", "今選んでいるキーの割り当て"),
@@ -513,6 +515,7 @@ fn fingerprint(cx: &mut TestAppContext, world: &World) -> String {
             "list.cards",
             "panels.float",
             "presets",
+            "panel.overlay",
         ] {
             data.push_str(&format!("{:?}", store.setting(key).unwrap()));
         }

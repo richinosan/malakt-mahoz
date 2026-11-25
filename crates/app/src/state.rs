@@ -303,6 +303,7 @@ pub struct MainView {
     pub sub_modal: Option<SubModal>,
     /// 「見た目」で、1 つずつ変える行（詳細）を開いている。
     pub appearance_details: bool,
+    pub appearance_scroll: gpui_kit::ScrollHandle,
     /// 自分で保存したテーマ。
     pub own_presets: Vec<crate::theme::Preset>,
     /// 名前を書いている自分のテーマ（`own_presets` の何番目か）。
@@ -688,6 +689,7 @@ impl MainView {
             pane_overlay: None,
             sub_modal: None,
             appearance_details: false,
+            appearance_scroll: gpui_kit::ScrollHandle::new(),
             own_presets: Vec::new(),
             preset_naming: None,
             fonts: Vec::new(),
@@ -2172,6 +2174,10 @@ impl MainView {
     /// 1 つずつ変える行（詳細）を開く・閉じる。
     pub fn toggle_appearance_details(&mut self, cx: &mut Context<Self>) {
         self.appearance_details = !self.appearance_details;
+        if self.appearance_details {
+            // 開いた行が見える所まで送る
+            self.appearance_scroll.scroll_to_bottom();
+        }
         cx.notify();
     }
 
@@ -2187,6 +2193,36 @@ impl MainView {
             Err(error) => self.error = Some(error.into()),
         }
         self.sync_color_pickers(window, cx);
+        cx.notify();
+    }
+
+    /// レイアウトを使う。AI チャットを並べるレイアウトでは、チャットも開く。
+    pub fn apply_layout(
+        &mut self,
+        layout: &crate::theme::Layout,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match crate::theme::apply_layout(layout, cx) {
+            Ok(()) => self.error = None,
+            Err(error) => {
+                self.error = Some(
+                    format!(
+                        "レイアウト「{}」を保存できませんでした。{error}",
+                        layout.name
+                    )
+                    .into(),
+                )
+            }
+        }
+        if layout
+            .chat
+            .is_some_and(|wanted| wanted != self.ai_docked(cx))
+        {
+            self.toggle_ai(window, cx);
+            // チャットの入力欄に移ったフォーカスを戻して、Esc でこのダイアログを閉じられるようにする
+            self.focus.focus(window, cx);
+        }
         cx.notify();
     }
 
