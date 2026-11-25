@@ -40,13 +40,14 @@ const fn px(value: f32) -> Pixels {
 const ICONS_SHOWN: usize = 400;
 /// 担当者の一覧の 1 行の高さ。名前を書く入力欄と同じ高さにする。
 const PERSON_ROW_HEIGHT: Pixels = gpui_kit::px(34. * crate::UI_SCALE);
-/// 見出しの枠（40px）の中のアイコンの大きさ。
-const TILE_ICON_SIZE: Pixels = px(24.);
+/// 上のバーの、画面の名前の左に出すアイコンの大きさ。
+const TILE_ICON_SIZE: Pixels = px(18.);
 /// ホームのカードの枠（56px）の中のアイコンの大きさ。
 const CARD_ICON_SIZE: Pixels = px(32.);
 /// アイコンを選ぶ画面のアイコンの大きさ。
 const PICKER_ICON_SIZE: Pixels = px(22.);
-const HEADER_HEIGHT: Pixels = px(84.);
+/// 上のバーの高さ。1 行だけにする。浮かせても変えない（中身の場所を変えないため）。
+const HEADER_HEIGHT: Pixels = px(46.);
 /// 詳細を右に並べても、一覧に残す幅。
 const LIST_MIN: f32 = 320.;
 /// 詳細を狭めてでも一覧に残したい幅。
@@ -111,6 +112,110 @@ impl Framed for Button {
         .border_color(theme.border)
         .elevate(Elevation::Low, cx)
     }
+}
+
+/// 最小化・最大化・閉じるのボタン。macOS は OS が描くので出さない。
+/// バーの高さいっぱいに右の端まで並べる。浮かせるときは、カードの中にほかのボタンと同じ高さで並べる。
+pub(crate) fn window_controls(
+    height: Pixels,
+    floating: bool,
+    window: &Window,
+    cx: &App,
+) -> Option<Div> {
+    if cfg!(target_os = "macos") {
+        return None;
+    }
+    // OS がタイトルバーを描いているときは、そちらのボタンを使う
+    #[cfg(target_os = "linux")]
+    if !matches!(window.window_decorations(), Decorations::Client { .. }) {
+        return None;
+    }
+    let theme = cx.theme().clone();
+    let supported = window.window_controls();
+    let max = if window.is_maximized() {
+        IconName::WindowRestore
+    } else {
+        IconName::WindowMaximize
+    };
+    let buttons = [
+        (
+            "window-minimize",
+            IconName::WindowMinimize,
+            WindowControlArea::Min,
+            supported.minimize,
+        ),
+        (
+            "window-maximize",
+            max,
+            WindowControlArea::Max,
+            supported.maximize,
+        ),
+        (
+            "window-close",
+            IconName::WindowClose,
+            WindowControlArea::Close,
+            true,
+        ),
+    ];
+    let mut controls = row().flex_none().ml_1();
+    for (id, icon, area, shown) in buttons {
+        if !shown {
+            continue;
+        }
+        let close = area == WindowControlArea::Close;
+        // 閉じるは、テーマの赤を淡く敷く
+        let (hover_bg, hover_fg, active_bg) = if close {
+            (
+                theme.danger.opacity(0.2),
+                theme.danger,
+                theme.danger.opacity(0.35),
+            )
+        } else {
+            (
+                theme.secondary_hover,
+                theme.foreground,
+                theme.secondary_active,
+            )
+        };
+        controls = controls.child(
+            div()
+                .id(id)
+                .w(rems(2.5))
+                .flex()
+                .flex_none()
+                .items_center()
+                .justify_center()
+                .map(|d| {
+                    if floating {
+                        d.h_6().rounded(feel::md())
+                    } else {
+                        d.h(height)
+                    }
+                })
+                .text_color(theme.foreground)
+                .hover(move |s| s.bg(hover_bg).text_color(hover_fg))
+                .active(move |s| s.bg(active_bg).text_color(hover_fg))
+                // Windows では、OS がこの場所をウィンドウのボタンとして扱う
+                .when(cfg!(target_os = "windows"), |d| d.window_control_area(area))
+                .when(!cfg!(target_os = "windows"), |d| {
+                    d.on_mouse_down(MouseButton::Left, |_, window, cx| {
+                        window.prevent_default();
+                        cx.stop_propagation();
+                    })
+                    .on_click(move |_, window, cx| {
+                        cx.stop_propagation();
+                        match area {
+                            WindowControlArea::Min => window.minimize_window(),
+                            WindowControlArea::Max => window.zoom_window(),
+                            _ => window.remove_window(),
+                        }
+                    })
+                })
+                .child(Icon::new(icon).small())
+                .test_support(),
+        );
+    }
+    Some(controls)
 }
 
 /// 背景の画像を出しているときは、面を透かして塗る。
@@ -777,7 +882,8 @@ impl MainView {
                 row()
                     .h(HEADER_HEIGHT)
                     .flex_none()
-                    .px_4()
+                    .pl_4()
+                    .pr_2()
                     .gap_2()
                     .border_b_1()
                     // 浮かせたカードの中では、端から端までの線を引かない
@@ -787,27 +893,18 @@ impl MainView {
                         theme.sidebar_border
                     })
                     .child(
-                        col()
+                        div()
                             .flex_1()
                             .min_w_0()
-                            .child(
-                                div()
-                                    .text_lg()
-                                    .font_weight(FontWeight::BOLD)
-                                    .truncate()
-                                    .child(crate::APP_NAME.to_uppercase()),
-                            )
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(theme.muted_foreground)
-                                    .child("タスク管理"),
-                            ),
+                            .font_weight(FontWeight::BOLD)
+                            .truncate()
+                            .child(crate::APP_NAME.to_uppercase()),
                     )
                     .child(feel::gloss(
                         Button::new("close-sidebar")
                             .icon(app_icon("x"))
-                            .framed(cx)
+                            .ghost()
+                            .small()
                             .tooltip("メニューを閉じる")
                             .on_click(
                                 cx.listener(move |this, _, _, cx| this.toggle_sidebar(wide, cx)),
@@ -943,17 +1040,16 @@ impl MainView {
 
     // ---- 上のバー ----
 
-    /// 今の画面の名前と、その下に出す一言、名前の左に出すアイコン。
-    fn header_title(&self, cx: &App) -> (SharedString, Option<&'static str>, Option<AnyElement>) {
+    /// 今の画面の名前と、名前の左に出すアイコン。
+    fn header_title(&self, cx: &App) -> (SharedString, Option<AnyElement>) {
         match &self.nav {
-            Nav::Home => ("ホーム".into(), None, None),
-            Nav::All => ("すべてのタスク".into(), Some("タスク一覧"), None),
-            Nav::Unfiled => ("未所属のタスク".into(), Some("タスク一覧"), None),
+            Nav::Home => ("ホーム".into(), None),
+            Nav::All => ("すべてのタスク".into(), None),
+            Nav::Unfiled => ("未所属のタスク".into(), None),
             Nav::Workspace(id) => {
                 let ws = self.workspaces.iter().find(|w| &w.id == id);
                 (
                     self.list_title(),
-                    Some("タスク一覧"),
                     ws.map(|w| {
                         workspace_icon(w.icon.as_deref(), w.color.as_deref(), TILE_ICON_SIZE, cx)
                     }),
@@ -966,16 +1062,8 @@ impl MainView {
         use crate::theme::Choice;
         let theme = cx.theme();
         let current = crate::theme::choice(cx);
-        // 隣の丸いボタンと同じ高さにそろえる
-        let mut toggle = row()
-            .flex_none()
-            .h_8()
-            .px_1()
-            .gap_0p5()
-            .rounded(feel::md())
-            .border_1()
-            .border_color(theme.border)
-            .bg(theme.muted);
+        // 枠は付けず、選んでいるものだけに面を敷く
+        let mut toggle = row().flex_none().gap_0p5();
         for (ix, (choice, icon)) in [
             (Choice::Light, "sun"),
             (Choice::Dark, "moon"),
@@ -988,9 +1076,7 @@ impl MainView {
             toggle = toggle.child(
                 div()
                     .rounded(feel::md())
-                    .when(active, |d| {
-                        d.bg(theme.background).elevate(Elevation::Mid, cx)
-                    })
+                    .when(active, |d| d.bg(theme.secondary_hover))
                     .child(feel::gloss(
                         Button::new(("theme", ix))
                             .icon(app_icon(icon))
@@ -1013,100 +1099,6 @@ impl MainView {
             );
         }
         toggle
-    }
-
-    /// 最小化・最大化・閉じるのボタン。macOS は OS が描くので出さない。
-    /// 上のバーのほかのボタンと同じ高さで並べ、乗せたときの色はボタンの中だけに付ける。
-    fn window_controls(&self, window: &Window, cx: &mut Context<Self>) -> Option<Div> {
-        if cfg!(target_os = "macos") {
-            return None;
-        }
-        // OS がタイトルバーを描いているときは、そちらのボタンを使う
-        #[cfg(target_os = "linux")]
-        if !matches!(window.window_decorations(), Decorations::Client { .. }) {
-            return None;
-        }
-        let theme = cx.theme().clone();
-        let supported = window.window_controls();
-        let max = if window.is_maximized() {
-            IconName::WindowRestore
-        } else {
-            IconName::WindowMaximize
-        };
-        let buttons = [
-            (
-                "window-minimize",
-                IconName::WindowMinimize,
-                WindowControlArea::Min,
-                supported.minimize,
-            ),
-            (
-                "window-maximize",
-                max,
-                WindowControlArea::Max,
-                supported.maximize,
-            ),
-            (
-                "window-close",
-                IconName::WindowClose,
-                WindowControlArea::Close,
-                true,
-            ),
-        ];
-        let mut controls = row().flex_none().ml_1();
-        for (id, icon, area, shown) in buttons {
-            if !shown {
-                continue;
-            }
-            let close = area == WindowControlArea::Close;
-            // 閉じるは Windows の標準と同じ赤
-            let (hover_bg, hover_fg, active_bg) = if close {
-                (
-                    gpui_kit::rgb(0xc42b1c).into(),
-                    gpui_kit::white(),
-                    gpui_kit::rgb(0x94141a).into(),
-                )
-            } else {
-                (
-                    theme.secondary_hover,
-                    theme.foreground,
-                    theme.secondary_active,
-                )
-            };
-            controls = controls.child(
-                div()
-                    .id(id)
-                    .h_8()
-                    .w(rems(2.75))
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .justify_center()
-                    .rounded(feel::md())
-                    .text_color(theme.foreground)
-                    .hover(move |s| s.bg(hover_bg).text_color(hover_fg))
-                    .active(move |s| s.bg(active_bg).text_color(hover_fg))
-                    // Windows では、OS がこの場所をウィンドウのボタンとして扱う
-                    .when(cfg!(target_os = "windows"), |d| d.window_control_area(area))
-                    .when(!cfg!(target_os = "windows"), |d| {
-                        d.on_mouse_down(MouseButton::Left, |_, window, cx| {
-                            window.prevent_default();
-                            cx.stop_propagation();
-                        })
-                        .on_click(move |_, window, cx| {
-                            cx.stop_propagation();
-                            match area {
-                                WindowControlArea::Min => window.minimize_window(),
-                                WindowControlArea::Max => window.zoom_window(),
-                                _ => window.remove_window(),
-                            }
-                        })
-                    })
-                    .child(Icon::new(icon).small())
-                    .test_support(),
-            );
-        }
-        Some(controls)
     }
 
     fn render_header(
@@ -1191,8 +1183,8 @@ impl MainView {
                 .child(
                     row()
                         .occlude()
-                        .pr_3()
-                        .children(self.window_controls(window, cx)),
+                        .when(floating, |d| d.pr_3())
+                        .children(window_controls(HEADER_HEIGHT, floating, window, cx)),
                 );
         }
         let sidebar_shown = if wide {
@@ -1201,7 +1193,7 @@ impl MainView {
             self.sidebar_open
         };
         // 分けているときは、今のペインの場所を出す
-        let (title, subtitle, icon) = match self.focused_child() {
+        let (title, icon) = match self.focused_child() {
             Some(child) => child.read(cx).header_title(cx),
             None => self.header_title(cx),
         };
@@ -1211,12 +1203,13 @@ impl MainView {
         let auto_update = crate::update::menu_label(cx);
         let update_ready = crate::update::ready_version(cx);
         let view = cx.entity().downgrade();
+        let controls = window_controls(HEADER_HEIGHT, floating, window, cx);
         bar.child(
             row()
                 .flex_1()
                 .min_w_0()
-                .gap_3()
-                .pl_4()
+                .gap_2()
+                .pl_3()
                 // macOS でメニューを閉じているときは、信号機ボタンの分を空ける
                 .when(cfg!(target_os = "macos") && !sidebar_shown, |d| {
                     d.pl(px(84.))
@@ -1226,52 +1219,30 @@ impl MainView {
                     div().occlude().child(feel::gloss(
                         Button::new("toggle-sidebar")
                             .icon(app_icon("menu"))
-                            .framed(cx)
+                            .ghost()
+                            .small()
                             .tooltip("メニュー")
                             .on_click(
                                 cx.listener(move |this, _, _, cx| this.toggle_sidebar(wide, cx)),
                             ),
                     )),
                 )
-                .when_some(icon, |d, icon| {
-                    d.child(
-                        div()
-                            .size_10()
-                            .flex_none()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(feel::md())
-                            .bg(theme.muted)
-                            .child(icon),
-                    )
-                })
+                .when_some(icon, |d, icon| d.child(div().flex_none().child(icon)))
                 .child(
-                    col()
+                    div()
                         .flex_1()
                         .min_w_0()
-                        .child(
-                            div()
-                                .text_xl()
-                                .font_weight(FontWeight::BOLD)
-                                .truncate()
-                                .child(title),
-                        )
-                        .when_some(subtitle, |d, subtitle| {
-                            d.child(
-                                div()
-                                    .text_sm()
-                                    .text_color(theme.muted_foreground)
-                                    .child(subtitle),
-                            )
-                        }),
+                        .font_weight(FontWeight::BOLD)
+                        .truncate()
+                        .child(title),
                 ),
         )
         .child(
             row()
                 .flex_none()
-                .gap_2()
-                .pr_3()
+                .gap_1()
+                // ウィンドウのボタンは、浮かせないときは右の端まで寄せる
+                .when(floating || controls.is_none(), |d| d.pr_3())
                 // 下のバーの判定に取られないよう、ボタンのある場所はマウスを受け止める。
                 // これがないと、Windows ではボタンを離したときのクリックがウィンドウの移動に取られる
                 .occlude()
@@ -1280,7 +1251,8 @@ impl MainView {
                     Button::new("pane-split")
                         .icon(app_icon("columns-2"))
                         .tooltip("右に分割（Ctrl+B → v）")
-                        .framed(cx)
+                        .ghost()
+                        .small()
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.pane_action(
                                 malakt_core::panes::Action::Split(malakt_core::panes::Dir::Right),
@@ -1295,18 +1267,18 @@ impl MainView {
                         .icon(app_icon("sparkles"))
                         // AI が動いている間は、回る印に変わる
                         .loading(self.ai_session.read(cx).busy)
-                        .outline()
-                        .rounded(px(999.))
+                        .ghost()
+                        .small()
                         .tooltip("AI チャット")
                         .on_click(cx.listener(|this, _, window, cx| this.toggle_ai(window, cx))),
                 ))
                 // 新しい版を取ってあるときだけ出る。閉じても同じ版に入れ替わる
                 .children(update_ready.map(|version| {
-                    feel::gloss_round(
+                    feel::gloss(
                         Button::new("update-now")
                             .icon(app_icon("refresh-cw"))
-                            .framed(cx)
-                            .rounded(px(999.))
+                            .ghost()
+                            .small()
                             .tooltip(format!("v{version} に更新して再起動"))
                             .on_click(cx.listener(|this, _, _, cx| this.update_now(cx))),
                     )
@@ -1314,11 +1286,11 @@ impl MainView {
                 .child(
                     div()
                         .relative()
-                        .child(feel::gloss_round(
+                        .child(feel::gloss(
                             Button::new("open-notices")
                                 .icon(app_icon("bell"))
-                                .framed(cx)
-                                .rounded(px(999.))
+                                .ghost()
+                                .small()
                                 .tooltip("通知")
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.modal = Modal::Notices;
@@ -1343,8 +1315,8 @@ impl MainView {
                 .child(
                     Button::new("open-menu")
                         .icon(app_icon("settings"))
-                        .framed(cx)
-                        .rounded(px(999.))
+                        .ghost()
+                        .small()
                         .tooltip("設定")
                         .dropdown_menu(move |menu, _, _| {
                             let item = |label: &'static str,
@@ -1412,7 +1384,7 @@ impl MainView {
                                 .label(concat!("v", env!("CARGO_PKG_VERSION")))
                         }),
                 )
-                .children(self.window_controls(window, cx)),
+                .children(controls),
         )
     }
 

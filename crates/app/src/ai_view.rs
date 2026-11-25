@@ -37,6 +37,8 @@ const fn px(value: f32) -> Pixels {
 }
 
 const SHELL_ROW: Pixels = px(20.);
+/// 別ウィンドウの上のバーの高さ。
+const TITLE_BAR_HEIGHT: Pixels = px(30.);
 const TERM_PAD: Pixels = px(12.);
 /// ターミナルの文字の大きさ。画面の文字の大きさ（テーマ）に対する比で決める。
 fn term_font(cx: &App) -> Pixels {
@@ -198,6 +200,8 @@ pub struct AiPane {
     term: Entity<TermPane>,
     /// シェルを、チャットの場所まで広げている。
     pub shell_wide: bool,
+    /// 別ウィンドウの上のバーを押している（動かすと、ウィンドウを動かし始める）。
+    bar_pressed: bool,
     input: Entity<TextareaState>,
     key_input: Entity<InputState>,
     model_input: Entity<InputState>,
@@ -444,6 +448,7 @@ impl AiPane {
             side: None,
             run_open: None,
             resize: None,
+            bar_pressed: false,
             open_tools: std::collections::HashSet::new(),
             chat_scroll: ScrollHandle::new(),
             shell_scroll: UniformListScrollHandle::new(),
@@ -2373,6 +2378,88 @@ impl AiPane {
 
     // ---- シェル ----
 
+    /// 別ウィンドウの上の細いバー。ウィンドウの名前と、最小化・最大化・閉じるのボタンを出す。
+    /// 空いているところを掴むと、ウィンドウを動かせる。右に置いているときは出さない。
+    fn render_title_bar(&self, window: &Window, cx: &mut Context<Self>) -> Option<Div> {
+        let title = match self.mode {
+            PaneMode::ShellWindow => "AI のシェル",
+            PaneMode::ChatWindow => "AI チャット",
+            PaneMode::Docked => return None,
+        };
+        // OS がタイトルバーを描いているときは、そちらに任せる
+        #[cfg(target_os = "linux")]
+        if !matches!(window.window_decorations(), Decorations::Client { .. }) {
+            return None;
+        }
+        let theme = cx.theme().clone();
+        let bar = row()
+            .flex_none()
+            .h(TITLE_BAR_HEIGHT)
+            .border_b_1()
+            .border_color(theme.border)
+            .bg(theme.background)
+            .when(cfg!(target_os = "windows"), |d| {
+                d.window_control_area(WindowControlArea::Drag)
+            })
+            .when(!cfg!(target_os = "windows"), |d| {
+                d.on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                        // ボタンが受けた押下では動かさない
+                        if window.default_prevented() {
+                            return;
+                        }
+                        if event.click_count == 2 {
+                            if cfg!(target_os = "macos") {
+                                window.titlebar_double_click();
+                            } else {
+                                window.zoom_window();
+                            }
+                            return;
+                        }
+                        this.bar_pressed = true;
+                        cx.notify();
+                    }),
+                )
+                .on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, _| this.bar_pressed = false),
+                )
+                .on_mouse_move(cx.listener(
+                    |this, event: &MouseMoveEvent, window, _| {
+                        if !this.bar_pressed {
+                            return;
+                        }
+                        this.bar_pressed = false;
+                        if event.pressed_button == Some(MouseButton::Left) {
+                            window.start_window_move();
+                        }
+                    },
+                ))
+            });
+        Some(
+            bar.child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .pl_3()
+                    // macOS は左に信号機ボタンが乗るので、その分を空ける
+                    .when(cfg!(target_os = "macos"), |d| d.pl(px(84.)))
+                    .text_sm()
+                    .text_color(theme.muted_foreground)
+                    .truncate()
+                    .child(title),
+            )
+            // バーの判定に取られないよう、ボタンのある場所はマウスを受け止める
+            .child(row().occlude().children(crate::render::window_controls(
+                TITLE_BAR_HEIGHT,
+                false,
+                window,
+                cx,
+            ))),
+        )
+    }
+
     fn render_shell(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let session = self.session.read(cx);
@@ -2838,15 +2925,23 @@ impl AiPane {
 impl Render for AiPane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
+        let title_bar = self.render_title_bar(window, cx);
         if !self.db.read(cx).unlocked {
             return div()
                 .size_full()
                 .flex()
-                .items_center()
-                .justify_center()
+                .flex_col()
                 .bg(theme.background)
                 .text_color(theme.muted_foreground)
-                .child("ロックされています。メインのウィンドウで解除してください。")
+                .children(title_bar)
+                .child(
+                    div()
+                        .flex_1()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child("ロックされています。メインのウィンドウで解除してください。"),
+                )
                 .into_any_element();
         }
         self.refresh_rows(cx);
@@ -2889,12 +2984,16 @@ impl Render for AiPane {
             PaneMode::ShellWindow => base
                 .size_full()
                 .flex_col()
+                .children(title_bar)
                 .child(self.render_shell(cx))
                 .into_any_element(),
             PaneMode::ChatWindow => {
                 // ウィンドウが狭ければ、シェルはチャットの下に置く
                 let side_by_side = width >= px(640.);
-                base.size_full()
+                let body = div()
+                    .flex()
+                    .flex_1()
+                    .min_h_0()
                     .when(side_by_side, |d| d.flex_row())
                     .when(!side_by_side, |d| d.flex_col())
                     .when(!wide, |d| d.child(self.render_chat(cx)))
@@ -2915,7 +3014,11 @@ impl Render for AiPane {
                                 })
                                 .child(self.render_shell(cx)),
                         )
-                    })
+                    });
+                base.size_full()
+                    .flex_col()
+                    .children(title_bar)
+                    .child(body)
                     .into_any_element()
             }
             PaneMode::Docked => {
