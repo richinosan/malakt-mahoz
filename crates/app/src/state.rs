@@ -192,6 +192,8 @@ pub struct MainView {
     pub homes: Vec<Option<usize>>,
     /// 行ごとの高さと、その合計。表のときと、カードのとき。
     pub row_sizes: [(Rc<Vec<Size<Pixels>>>, Pixels); 2],
+    /// `row_sizes` を作ったときの、行の詰め方。
+    pub row_density: crate::theme::Density,
     pub counts: (usize, usize),
     pub due: Rc<Vec<Todo>>,
     pub due_mine: bool,
@@ -623,6 +625,7 @@ impl MainView {
             rows: Rc::new(Vec::new()),
             homes: Vec::new(),
             row_sizes: Default::default(),
+            row_density: Default::default(),
             counts: (0, 0),
             due: Rc::new(Vec::new()),
             due_mine: false,
@@ -882,7 +885,10 @@ impl MainView {
         self.visible = Rc::new(outline.visible);
         self.rows = Rc::new(outline.rows);
         self.homes = outline.homes;
-        self.row_sizes = [true, false].map(|table| crate::render::row_sizes(&self.rows, table));
+        // 行の詰め方は、画面を描くときに今の設定と合わせ直す（`size_rows`）
+        let density = self.row_density;
+        self.row_sizes =
+            [true, false].map(|table| crate::render::row_sizes(&self.rows, table, density));
         // 見出しがなくなったら、キーで選んでいる行を外す
         if let Some(cursor) = &self.cursor {
             if self.workspaces.iter().any(|w| &w.id == cursor) && self.cursor_folder().is_none() {
@@ -2161,12 +2167,31 @@ impl MainView {
         // メニューから開くとフォーカスがなくなるので、Esc を受けられるように戻す
         self.focus.focus(window, cx);
         self.sub_modal = None;
+        // エディタ風のテーマが使う書体は、この PC に入っているものから決まる
+        self.fonts = crate::theme::fonts(cx);
         self.preset_naming = None;
         self.appearance_details = false;
         self.modal = Modal::Appearance;
         match crate::theme::own_presets(cx) {
             Ok(presets) => self.own_presets = presets,
             Err(error) => self.error = Some(error.into()),
+        }
+        cx.notify();
+    }
+
+    /// 一覧の行の高さを、今の行の詰め方で作り直す。
+    pub fn size_rows(&mut self, cx: &App) {
+        let density = crate::theme::density(cx);
+        self.row_density = density;
+        self.row_sizes =
+            [true, false].map(|table| crate::render::row_sizes(&self.rows, table, density));
+    }
+
+    /// 一覧の行の詰め方を変える。
+    pub fn set_density(&mut self, density: crate::theme::Density, cx: &mut Context<Self>) {
+        match crate::theme::set_density(density, cx) {
+            Ok(()) => self.error = None,
+            Err(error) => self.error = Some(format!("密度を保存できませんでした。{error}").into()),
         }
         cx.notify();
     }

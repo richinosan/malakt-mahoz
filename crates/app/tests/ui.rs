@@ -2276,6 +2276,93 @@ fn three_columns_fit_a_1920_wide_screen(cx: &mut TestAppContext) {
     assert!(cx.update(|cx| view.read(cx).list_width) >= 400.);
 }
 
+/// 密度を変えると一覧の行の高さが変わる。エディタ風のテーマは行を詰め、
+/// この PC に等幅の書体があればそれを使い、なければ標準の書体のままにする。
+#[gpui_kit::test]
+fn density_and_editor_themes(cx: &mut TestAppContext) {
+    use malakt_mahoz::theme::{self, Density, Preset};
+    start(cx);
+    cx.update(|cx| {
+        db::shared(cx).update(cx, |db, cx| {
+            db.store.add_task_in(None, "切符を買う").unwrap();
+            cx.notify();
+        })
+    });
+    let (window, view) = open(cx, wide());
+    let saved = |cx: &mut TestAppContext, key: &str| store(cx, |s| s.setting(key).unwrap());
+    cx.update(|cx| view.update(cx, |v, cx| v.go(Nav::All, cx)));
+    // 表の 1 行の高さ
+    let row = |cx: &mut TestAppContext| {
+        ui(cx, window, |_, _| ());
+        cx.update(|cx| view.read(cx).row_sizes[0].1)
+    };
+    let standard = row(cx);
+
+    ui(cx, window, |window, cx| {
+        view.update(cx, |v, cx| v.open_appearance(window, cx))
+    });
+    ui(cx, window, |window, cx| window.click("details-toggle", cx));
+    ui(cx, window, |window, cx| {
+        window.click(("density", 2usize), cx)
+    });
+    assert_eq!(saved(cx, "density").as_deref(), Some("compact"));
+    let compact = row(cx);
+    assert!(compact < standard, "{compact:?} {standard:?}");
+    ui(cx, window, |window, cx| {
+        window.click(("density", 0usize), cx)
+    });
+    assert_eq!(saved(cx, "density").as_deref(), Some("roomy"));
+    assert!(row(cx) > standard);
+    ui(cx, window, |window, cx| {
+        window.click(("density", 1usize), cx)
+    });
+    assert_eq!(saved(cx, "density"), None);
+    assert_eq!(row(cx), standard);
+    // 起動し直しても残る
+    cx.update(|cx| theme::set_density(Density::Compact, cx).unwrap());
+    assert_eq!(cx.update(|cx| theme::density(cx)), Density::Compact);
+    assert_eq!(row(cx), compact);
+    cx.update(|cx| theme::set_density(Density::Standard, cx).unwrap());
+
+    // エディタ風: 等幅の書体が入っていれば、それを使って行を詰める
+    let editor = Preset::recommended()
+        .iter()
+        .position(|p| p.name == "エディタ風")
+        .unwrap();
+    let pick = |cx: &mut TestAppContext, fonts: &[&str]| {
+        let fonts: Vec<String> = fonts.iter().map(|f| f.to_string()).collect();
+        ui(cx, window, |window, cx| {
+            view.update(cx, |v, cx| {
+                v.open_appearance(window, cx);
+                // この PC に入っている書体の代わり
+                v.fonts = fonts;
+                cx.notify();
+            })
+        });
+        ui(cx, window, |window, cx| {
+            window.click(("preset", editor), cx)
+        });
+    };
+    pick(cx, &["LINE Seed JP", "Menlo", "Consolas"]);
+    assert_eq!(saved(cx, "density").as_deref(), Some("compact"));
+    // 候補の並びで先にあるものを使う
+    assert_eq!(saved(cx, "font.family").as_deref(), Some("Consolas"));
+    assert_eq!(saved(cx, "theme").as_deref(), Some("dark"));
+    assert_eq!(row(cx), compact);
+
+    // 等幅の書体がなければ、標準の書体のまま
+    pick(cx, &["LINE Seed JP", "Noto Serif"]);
+    assert_eq!(saved(cx, "font.family"), None);
+    assert_eq!(saved(cx, "density").as_deref(), Some("compact"));
+
+    // 標準のテーマに戻すと、密度も書体も戻る
+    ui(cx, window, |window, cx| {
+        window.click(("preset", 0usize), cx)
+    });
+    assert_eq!(saved(cx, "density"), None);
+    assert_eq!(row(cx), standard);
+}
+
 /// アイコンは検索して選べる。日本語でも探せ、見つからなければその旨が出る。
 #[gpui_kit::test]
 fn workspace_icon_is_found_by_search(cx: &mut TestAppContext) {
