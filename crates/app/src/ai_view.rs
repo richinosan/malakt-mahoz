@@ -8,9 +8,10 @@ use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{
     Copy as CopyText, Input, InputEvent, InputState, MoveDown, MoveUp, Textarea, TextareaState,
 };
-use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
+use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::switch::Switch;
+use gpui_kit::component::text::TextView;
 use gpui_kit::component::{ActiveTheme, Disableable, Selectable, Sizable};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
@@ -106,6 +107,13 @@ fn avatar(cx: &App) -> Div {
 }
 
 /// アイコンだけのボタン。名前はホバーで出る。
+/// 何もないチャットに出す、押すとそのまま送る依頼。
+const SUGGESTIONS: [&str; 3] = [
+    "今日やることを教えて",
+    "期限が過ぎたタスクを教えて",
+    "今週の予定をまとめて",
+];
+
 fn icon_button(id: &'static str, icon: &str, tip: &'static str) -> Button {
     Button::new(id)
         .icon(app_icon(icon))
@@ -168,6 +176,7 @@ pub struct AiPane {
     model_input: Entity<InputState>,
     /// 定期チェックの指示。
     watch_input: Entity<TextareaState>,
+    context_input: Entity<TextareaState>,
     /// モデルの入力欄に出している値。
     /// 設定で、モデルの一覧を開いている。
     model_open: bool,
@@ -254,7 +263,11 @@ impl AiPane {
     ) -> Self {
         let session = ai::shared(cx);
         let db = db::shared(cx);
-        let input = cx.new(|cx| TextareaState::new(window, cx).placeholder("メッセージを入力"));
+        let input = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .submit_on_enter(true)
+                .placeholder("メッセージを入力")
+        });
         let key_input = cx.new(|cx| {
             InputState::new(window, cx)
                 .masked(true)
@@ -268,19 +281,21 @@ impl AiPane {
             state.set_value(instruction, window, cx);
             state
         });
+        let context = session.read(cx).context.clone();
+        let context_input = cx.new(|cx| {
+            let mut state =
+                TextareaState::new(window, cx).placeholder("例: PR のタスクは優先度を高にする");
+            state.set_value(context, window, cx);
+            state
+        });
         let shell_input = cx.new(|cx| InputState::new(window, cx));
 
         let subscriptions = vec![
             cx.observe(&session, |this, _, cx| this.sync(cx)),
             cx.observe(&db, |_, _, cx| cx.notify()),
             cx.subscribe_in(&input, window, |this, _, event: &InputEvent, window, cx| {
-                if matches!(
-                    event,
-                    InputEvent::PressEnter {
-                        secondary: true,
-                        ..
-                    }
-                ) {
+                // Enter で送り、Shift+Enter で改行する
+                if matches!(event, InputEvent::PressEnter { shift: false, .. }) {
                     this.submit(window, cx);
                 }
             }),
@@ -386,6 +401,7 @@ impl AiPane {
             key_input,
             model_input,
             watch_input,
+            context_input,
             model_open: false,
             settings_open: false,
             resize: None,
@@ -593,6 +609,13 @@ impl AiPane {
 
     pub fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let text = self.input.read(cx).value().to_string();
+        if self.send_text(&text, cx) {
+            self.input.update(cx, |s, cx| s.set_value("", window, cx));
+        }
+    }
+
+    /// 今見ている場所を添えて、AI に送る。
+    fn send_text(&mut self, text: &str, cx: &mut Context<Self>) -> bool {
         let place = self
             .main
             .as_ref()
@@ -600,10 +623,7 @@ impl AiPane {
             // 別ウィンドウのチャットでも、メインのウィンドウで見ている場所を伝える
             .or_else(|| Some(self.session.read(cx).place.clone()).filter(|p| !p.is_empty()))
             .unwrap_or_else(|| "ユーザーは、チャットだけのウィンドウを開いています。".to_owned());
-        let sent = self.session.update(cx, |s, cx| s.send(&text, place, cx));
-        if sent {
-            self.input.update(cx, |s, cx| s.set_value("", window, cx));
-        }
+        self.session.update(cx, |s, cx| s.send(text, place, cx))
     }
 
     /// 定期チェックの設定を、入力欄の指示と一緒に保存する。
@@ -987,6 +1007,27 @@ impl AiPane {
                 ),
             )
             .child(
+                section().child(label("いつも AI に伝えること")).child(
+                    row()
+                        .gap_1()
+                        .items_end()
+                        .child(
+                            div()
+                                .id("ai-context")
+                                .flex_1()
+                                .min_w_0()
+                                .child(Textarea::new(&self.context_input).h(px(72.)))
+                                .test_support(),
+                        )
+                        .child(
+                            icon_button("ai-context-save", "check", "保存").on_click(cx.listener(|this, _, _, cx| {
+                                let text = this.context_input.read(cx).value().to_string();
+                                this.session.update(cx, |s, cx| s.set_context(&text, cx));
+                            })),
+                        ),
+                ),
+            )
+            .child(
                 section().child(
                     Switch::new("ai-arrange")
                         .checked(arrange)
@@ -1106,8 +1147,23 @@ impl AiPane {
                         .bg(theme.muted)
                         .elevate(Elevation::Low, cx)
                         .text_sm()
-                        .child(text.clone())
-                        .test_support(),
+                        // ドラッグで選んでコピーできる
+                        .child(TextView::markdown(("ai-text", ix), text.clone()).selectable(true))
+                        .test_support()
+                        // 右クリックで、返答を丸ごとコピーする
+                        .context_menu({
+                            let text = text.clone();
+                            move |menu, _, _| {
+                                let text = text.clone();
+                                menu.item(PopupMenuItem::new("返答をコピー").on_click(
+                                    move |_, _, cx| {
+                                        cx.write_to_clipboard(ClipboardItem::new_string(
+                                            text.to_string(),
+                                        ));
+                                    },
+                                ))
+                            }
+                        }),
                 )
                 .into_any_element(),
             Item::Tool { summary, state } => {
@@ -1343,9 +1399,8 @@ impl AiPane {
         let pane = cx.entity().downgrade();
         let pill = |id: &'static str, label: SharedString, tip: &'static str| {
             Button::new(id)
-                .outline()
+                .ghost()
                 .small()
-                .rounded(px(999.))
                 .label(label)
                 .dropdown_caret(true)
                 .tooltip(tip)
@@ -1446,112 +1501,163 @@ impl AiPane {
         let session = self.session.read(cx);
         let busy = session.busy;
         let auto_run = session.auto_run;
-        let (shell_tip, shell_on) = match session.shell_place {
-            ShellPlace::Closed => ("シェルを開く", false),
-            ShellPlace::Docked => ("シェルを閉じる", true),
-            ShellPlace::Window(_) => ("シェルを表示", true),
+        let shell_label = match session.shell_place {
+            ShellPlace::Closed => "シェルを開く",
+            ShellPlace::Docked => "シェルを閉じる",
+            ShellPlace::Window(_) => "シェルを表示",
         };
-        let header = row()
-            .flex_none()
-            .h_10()
-            .pl_3()
-            .pr_2()
-            .gap_0p5()
-            .border_b_1()
-            .border_color(theme.border)
-            .child(app_icon("sparkles").size_4())
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .pl_1()
-                    .text_sm()
-                    .child("AI チャット"),
-            )
-            .when(auto_run, |d| {
-                d.child(
-                    row()
-                        .id("ai-auto-badge")
-                        .flex_none()
-                        .gap_1()
-                        .px_2()
-                        .mr_1()
-                        .h_6()
-                        .rounded_md()
-                        .bg(theme.warning)
-                        .text_color(theme.warning_foreground)
-                        .text_xs()
-                        .child(app_icon("zap").size_3())
-                        .child("オート実行")
-                        .test_support(),
-                )
-            })
-            .child(
-                icon_button("ai-new-chat", "message-square-plus", "新しいチャット").on_click(
-                    cx.listener(|this, _, _, cx| {
-                        this.session.update(cx, |s, cx| s.clear(cx));
-                    }),
-                ),
-            )
-            .child(
-                icon_button("ai-shell-toggle", "terminal", shell_tip)
-                    .selected(shell_on)
-                    .on_click(cx.listener(|this, _, _, cx| this.toggle_shell(cx))),
-            )
-            .child(
-                icon_button("ai-settings-toggle", "settings", "設定")
-                    .selected(self.settings_open)
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.settings_open = !this.settings_open;
+        let mode = self.mode;
+        let pane = cx.entity().downgrade();
+        let close = (mode == PaneMode::Docked).then(|| {
+            icon_button("ai-close", "x", "閉じる").on_click(cx.listener(|this, _, _, cx| {
+                if let Some(main) = &this.main {
+                    // メインの画面がもうなければ、閉じる先もない
+                    let _ = main.update(cx, |main, cx| {
+                        main.ai_open = false;
                         cx.notify();
-                    })),
-            )
-            .when(self.mode == PaneMode::Docked, |d| {
-                d.child(
-                    icon_button("ai-detach", "picture-in-picture-2", "別ウィンドウで開く")
-                        .on_click(
-                            cx.listener(|this, _, _, cx| this.detach(PaneMode::ChatWindow, cx)),
-                        ),
+                    });
+                    this.session.update(cx, |s, cx| s.set_open(false, cx));
+                }
+            }))
+        });
+        let bar = || {
+            row()
+                .flex_none()
+                .h_10()
+                .pl_3()
+                .pr_2()
+                .gap_0p5()
+                .border_b_1()
+                .border_color(theme.border)
+        };
+        let badge = auto_run.then(|| {
+            row()
+                .id("ai-auto-badge")
+                .flex_none()
+                .gap_1()
+                .px_2()
+                .mr_1()
+                .h_6()
+                .rounded_md()
+                .bg(theme.warning)
+                .text_color(theme.warning_foreground)
+                .text_xs()
+                .child(app_icon("zap").size_3())
+                .child("オート実行")
+                .test_support()
+        });
+        let header = if self.settings_open {
+            // 設定の間は、戻るボタンと「設定」だけにする
+            bar()
+                .pl_2()
+                .child(
+                    icon_button("ai-settings-toggle", "arrow-left", "チャットに戻る").on_click(
+                        cx.listener(|this, _, _, cx| {
+                            this.settings_open = false;
+                            cx.notify();
+                        }),
+                    ),
                 )
-                .child(icon_button("ai-close", "x", "閉じる").on_click(cx.listener(
-                    |this, _, _, cx| {
-                        if let Some(main) = &this.main {
-                            // メインの画面がもうなければ、閉じる先もない
-                            let _ = main.update(cx, |main, cx| {
-                                main.ai_open = false;
-                                cx.notify();
-                            });
-                            this.session.update(cx, |s, cx| s.set_open(false, cx));
-                        }
-                    },
-                )))
-            })
-            .when(self.mode == PaneMode::ChatWindow, |d| {
-                d.child(
-                    icon_button("ai-attach", "panel-right", "メインウィンドウに戻す")
-                        .on_click(|_, window, _| window.remove_window()),
+                .child(div().flex_1().min_w_0().pl_1().text_sm().child("AI の設定"))
+                .children(badge)
+                .children(close)
+        } else {
+            bar()
+                .child(app_icon("sparkles").size_4())
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .pl_1()
+                        .text_sm()
+                        .child("AI チャット"),
                 )
-            });
-
-        let mut list = col().gap_2().p_3();
-        if session.items.is_empty() && !matches!(session.key, KeyState::Present { .. }) {
-            list = list.child(
-                div()
-                    .id("ai-empty")
-                    .flex()
-                    .child(
-                        Button::new("ai-empty-key")
-                            .icon(app_icon("settings"))
-                            .label("API キーを設定")
-                            .outline()
-                            .small()
-                            .on_click(cx.listener(|this, _, _, cx| {
+                .children(badge)
+                .child(
+                    icon_button("ai-new-chat", "message-square-plus", "新しいチャット").on_click(
+                        cx.listener(|this, _, _, cx| {
+                            this.session.update(cx, |s, cx| s.clear(cx));
+                        }),
+                    ),
+                )
+                .child(
+                    // 残りの操作は、名前の付いたメニューにまとめる
+                    icon_button("ai-menu", "ellipsis", "メニュー").dropdown_menu_with_anchor(
+                        Anchor::TopRight,
+                        move |menu, _, _| {
+                            let item = |label: &'static str,
+                                        icon: &str,
+                                        run: fn(&mut AiPane, &mut Window, &mut Context<AiPane>)| {
+                                let pane = pane.clone();
+                                PopupMenuItem::new(label).icon(app_icon(icon)).on_click(
+                                    move |_, window, cx| {
+                                        // チャットを閉じたあとなら、反映する先がない
+                                        let _ = pane.update(cx, |this, cx| run(this, window, cx));
+                                    },
+                                )
+                            };
+                            menu.item(item("設定", "settings", |this, _, cx| {
                                 this.settings_open = true;
                                 cx.notify();
-                            })),
-                    )
-                    .test_support(),
+                            }))
+                            .item(item(shell_label, "terminal", |this, _, cx| {
+                                this.toggle_shell(cx)
+                            }))
+                            .item(if mode == PaneMode::ChatWindow {
+                                item(
+                                    "メインウィンドウに戻す",
+                                    "panel-right",
+                                    |_, window, _| window.remove_window(),
+                                )
+                            } else {
+                                item(
+                                    "別ウィンドウで開く",
+                                    "picture-in-picture-2",
+                                    |this, _, cx| this.detach(PaneMode::ChatWindow, cx),
+                                )
+                            })
+                        },
+                    ),
+                )
+                .children(close)
+        };
+
+        let mut list = col().gap_2().p_3();
+        if session.items.is_empty() {
+            let has_key = matches!(session.key, KeyState::Present { .. });
+            let mut start = col().id("ai-empty").items_center().gap_2().pt_10().child(
+                div()
+                    .text_color(theme.muted_foreground)
+                    .child(app_icon("sparkles").size_8()),
             );
+            if has_key {
+                // 押すと、そのまま送る
+                for (ix, text) in SUGGESTIONS.into_iter().enumerate() {
+                    start = start.child(
+                        Button::new(("ai-suggest", ix))
+                            .label(text)
+                            .outline()
+                            .small()
+                            .rounded(px(999.))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.send_text(text, cx);
+                            })),
+                    );
+                }
+            } else {
+                start = start.child(
+                    Button::new("ai-empty-key")
+                        .icon(app_icon("settings"))
+                        .label("API キーを設定")
+                        .outline()
+                        .small()
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.settings_open = true;
+                            cx.notify();
+                        })),
+                );
+            }
+            list = list.child(start.test_support());
         }
         let items = &session.items;
         let pane = cx.entity().downgrade();
@@ -1683,42 +1789,53 @@ impl AiPane {
             )
             .children(pending)
             .child(
-                col()
+                div()
                     .flex_none()
                     .when(self.settings_open, |d| d.hidden())
-                    .gap_2()
-                    .p_3()
-                    .border_t_1()
-                    .border_color(theme.border)
+                    .px_3()
+                    .pb_3()
+                    .pt_1()
                     .child(
-                        div()
-                            .id("ai-input")
-                            .w_full()
-                            .child(Textarea::new(&self.input).h(px(84.)))
-                            .test_support(),
-                    )
-                    .child(
-                        // 入力欄の下で、サービス・モデル・effort をその場で選ぶ
-                        row()
+                        // 入力欄と、サービス・モデル・effort・送信を 1 つの枠にまとめる
+                        col()
+                            .rounded_lg()
+                            .border_1()
+                            .border_color(theme.input)
+                            .bg(theme.background)
+                            .elevate(Elevation::Mid, cx)
+                            .p_1()
                             .gap_1()
-                            .items_center()
-                            .child(row().flex_1().min_w_0().gap_1().children(pills))
-                            .when(busy, |d| {
-                                d.child(
-                                    icon_button("ai-stop", "square", "停止（Ctrl+C）")
-                                        .danger()
-                                        .on_click(cx.listener(|this, _, _, cx| this.stop(cx))),
-                                )
-                            })
-                            .when(!busy, |d| {
-                                d.child(
-                                    icon_button("ai-send", "arrow-up", "送信（Ctrl / ⌘ + Enter）")
-                                        .primary()
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            this.submit(window, cx)
-                                        })),
-                                )
-                            }),
+                            .child(
+                                div()
+                                    .id("ai-input")
+                                    .w_full()
+                                    .child(Textarea::new(&self.input).appearance(false).h(px(72.)))
+                                    .test_support(),
+                            )
+                            .child(
+                                row()
+                                    .gap_1()
+                                    .items_center()
+                                    .child(row().flex_1().min_w_0().children(pills))
+                                    .when(busy, |d| {
+                                        d.child(
+                                            icon_button("ai-stop", "square", "停止（Ctrl+C）")
+                                                .danger()
+                                                .on_click(
+                                                    cx.listener(|this, _, _, cx| this.stop(cx)),
+                                                ),
+                                        )
+                                    })
+                                    .when(!busy, |d| {
+                                        d.child(
+                                            icon_button("ai-send", "arrow-up", "送信（Enter）")
+                                                .primary()
+                                                .on_click(cx.listener(|this, _, window, cx| {
+                                                    this.submit(window, cx)
+                                                })),
+                                        )
+                                    }),
+                            ),
                     ),
             )
             .test_support()
@@ -2058,7 +2175,8 @@ impl Render for AiPane {
                     .occlude()
                     .when_some(docked, |d, w| {
                         // タスクの画面の上に乗って見えるように、左に影を落とす
-                        d.w(w)
+                        d.relative()
+                            .w(w)
                             .border_l_1()
                             .border_color(theme.border)
                             .elevate(Elevation::High, cx)
@@ -2077,7 +2195,6 @@ impl Render for AiPane {
                     })
                     .when(side_by_side, |d| d.flex_row())
                     .when(!side_by_side, |d| d.flex_col())
-                    .relative()
                     // 左の境界をドラッグして幅を変える
                     .child(edge("ai-resize", Resize::Chat))
                     // ドラッグしている間は、ウィンドウのどこにマウスがあっても幅を追う

@@ -187,10 +187,19 @@ fn say(cx: &mut TestAppContext, window: AnyWindowHandle, pane: &Entity<AiPane>, 
 /// 設定を開く（開いていればそのまま）。
 fn open_settings(cx: &mut TestAppContext, window: AnyWindowHandle, pane: &Entity<AiPane>) {
     if !cx.update(|cx| pane.read(cx).settings_open) {
-        ui(cx, window, |window, cx| {
-            window.click("ai-settings-toggle", cx)
-        });
+        menu(cx, window, 0);
     }
+}
+
+/// チャットの「…」メニューの `n` 番目（0 から）を選ぶ。
+fn menu(cx: &mut TestAppContext, window: AnyWindowHandle, n: usize) {
+    ui(cx, window, |window, cx| window.click("ai-menu", cx));
+    ui(cx, window, |window, cx| {
+        for _ in 0..=n {
+            window.press("down", cx);
+        }
+        window.press("enter", cx);
+    });
 }
 
 fn text_reply(text: &str) -> Value {
@@ -247,9 +256,7 @@ fn the_key_is_saved_to_the_keychain_from_settings(cx: &mut TestAppContext) {
     let (window, view) = open(cx, wide());
     open_chat(cx, window, &view);
 
-    ui(cx, window, |window, cx| {
-        window.click("ai-settings-toggle", cx)
-    });
+    menu(cx, window, 0);
     ui(cx, window, |window, cx| {
         window.click("ai-key-input", cx);
         window.input("sk-ant-test-12345678", cx);
@@ -598,9 +605,7 @@ fn provider_model_and_effort_are_chosen_in_settings(cx: &mut TestAppContext) {
     world.keys.set(Provider::OpenCodeGo, "oc_sk_1").unwrap();
     let (window, view) = open(cx, wide());
     let pane = open_chat(cx, window, &view);
-    ui(cx, window, |window, cx| {
-        window.click("ai-settings-toggle", cx)
-    });
+    menu(cx, window, 0);
 
     // Claude のモデルと effort を変える
     // モデルは、開いた一覧から選ぶ。選ぶと一覧は閉じる
@@ -648,6 +653,9 @@ fn provider_model_and_effort_are_chosen_in_settings(cx: &mut TestAppContext) {
         KeyState::Present { .. }
     ));
     world.reply(json!({"choices": [{"finish_reason": "stop", "message": {"content": "やあ"}}]}));
+    ui(cx, window, |window, cx| {
+        window.click("ai-settings-toggle", cx)
+    });
     ui(cx, window, |window, cx| window.click("ai-new-chat", cx));
     say(cx, window, &pane, "こんにちは");
     let (url, headers, body) = world.sent()[1].clone();
@@ -734,7 +742,7 @@ fn chat_and_shell_detach_into_their_own_windows(cx: &mut TestAppContext) {
     assert_eq!(cx.update(|cx| cx.windows().len()), 1);
 
     // チャットを別ウィンドウへ。シェルはチャットの右に付いていく
-    ui(cx, window, |window, cx| window.click("ai-detach", cx));
+    menu(cx, window, 2);
     let chat_window = read(cx, |s| s.chat_window).expect("チャットが別ウィンドウに出る");
     cx.update(|cx| assert!(!view.read(cx).ai_docked(cx)));
     ui(cx, window, |window, _| {
@@ -759,7 +767,7 @@ fn chat_and_shell_detach_into_their_own_windows(cx: &mut TestAppContext) {
     );
 
     // 戻すと、メインのウィンドウの右に出る
-    ui(cx, chat_window, |window, cx| window.click("ai-attach", cx));
+    menu(cx, chat_window, 2);
     assert_eq!(read(cx, |s| s.chat_window), None);
     ui(cx, window, |window, _| {
         assert!(window.find("ai-chat").visible());
@@ -1027,9 +1035,7 @@ fn the_periodic_check_is_set_up_in_settings(cx: &mut TestAppContext) {
     world.keys.set(Provider::Claude, "k").unwrap();
     let (window, view) = open(cx, wide());
     open_chat(cx, window, &view);
-    ui(cx, window, |window, cx| {
-        window.click("ai-settings-toggle", cx)
-    });
+    menu(cx, window, 0);
     ui(cx, window, |window, cx| window.click("ai-watch", cx));
     ui(cx, window, |window, cx| {
         window.click(("ai-watch-minutes", 60usize), cx)
@@ -1106,9 +1112,7 @@ fn auto_run_skips_the_confirmations(cx: &mut TestAppContext) {
     world.reply(text_reply("実行しました。"));
     say(cx, window, &pane, "実行して");
     assert!(read(cx, |s| s.pending.is_some()));
-    ui(cx, window, |window, cx| {
-        window.click("ai-settings-toggle", cx)
-    });
+    menu(cx, window, 0);
     ui(cx, window, |window, cx| window.click("ai-auto", cx));
     wait(cx, "コマンドが終わる", |s| !s.busy);
     assert!(read(cx, |s| s.auto_run));
@@ -1379,6 +1383,182 @@ fn a_new_task_is_arranged_by_the_ai(cx: &mut TestAppContext) {
     let _ = view;
 }
 
+/// 設定に書いた「いつも AI に伝えること」は、毎回 AI に渡り、起動し直しても残る。
+#[gpui_kit::test]
+fn the_custom_context_reaches_the_ai(cx: &mut TestAppContext) {
+    let world = start(cx);
+    world.keys.set(Provider::Claude, "k").unwrap();
+    let (window, view) = open(cx, wide());
+    let pane = open_chat(cx, window, &view);
+    open_settings(cx, window, &pane);
+    ui(cx, window, |window, cx| {
+        window.click("ai-context", cx);
+        window.input("PR のタスクは優先度を高にする", cx);
+        window.click("ai-context-save", cx);
+    });
+    assert_eq!(
+        setting(cx, "ai.context").as_deref(),
+        Some("PR のタスクは優先度を高にする")
+    );
+    world.reply(text_reply("はい。"));
+    say(cx, window, &pane, "こんにちは");
+    wait(cx, "返事が来る", |s| !s.busy && s.items.len() >= 2);
+    let system = world.sent()[0].2["system"].as_str().unwrap().to_owned();
+    assert!(
+        system.ends_with("いつも従ってください。\nPR のタスクは優先度を高にする"),
+        "{system}"
+    );
+
+    // 長すぎるものは保存しない
+    let long = "あ".repeat(malakt_mahoz::ai::MAX_CONTEXT_CHARS + 1);
+    let session = session(cx);
+    cx.update(|cx| session.update(cx, |s, cx| s.set_context(&long, cx)));
+    assert!(read(cx, |s| s.error.clone()).unwrap().contains("文字まで"));
+    assert_eq!(
+        read(cx, |s| s.context.clone()),
+        "PR のタスクは優先度を高にする"
+    );
+}
+
+/// ワークスペースの設定に書いた「AI に伝えること」は、そのワークスペースを開いている間だけ AI に渡る。
+#[gpui_kit::test]
+fn the_workspace_context_reaches_the_ai(cx: &mut TestAppContext) {
+    let world = start(cx);
+    world.keys.set(Provider::Claude, "k").unwrap();
+    let workspace = cx.update(|cx| {
+        db::shared(cx).update(cx, |db, cx| {
+            let workspace = db.store.create_workspace(None, "仕事").unwrap();
+            cx.notify();
+            workspace.id
+        })
+    });
+    let (window, view) = open(cx, wide());
+    let session = session(cx);
+    cx.update(|cx| session.update(cx, |s, cx| s.set_context("敬語で答える", cx)));
+
+    // ワークスペースの設定で書いて保存する
+    ui(cx, window, |window, cx| {
+        view.update(cx, |v, cx| {
+            v.open_workspace_settings(&workspace, window, cx)
+        });
+    });
+    ui(cx, window, |window, cx| {
+        window.click("ws-context", cx);
+        window.input("PR のタスクは優先度を高にする", cx);
+        window.click("ws-settings-save", cx);
+    });
+    assert_eq!(
+        setting(cx, &malakt_mahoz::ai::workspace_context_key(&workspace)).as_deref(),
+        Some("PR のタスクは優先度を高にする")
+    );
+
+    // ほかの場所では、全体の分だけ
+    let pane = open_chat(cx, window, &view);
+    world.reply(text_reply("はい。"));
+    say(cx, window, &pane, "こんにちは");
+    wait(cx, "返事が来る", |s| !s.busy && s.items.len() >= 2);
+    let system = world.sent()[0].2["system"].as_str().unwrap().to_owned();
+    assert!(system.ends_with("敬語で答える"), "{system}");
+
+    // そのワークスペースを開くと、両方が渡る
+    ui(cx, window, |_, cx| {
+        view.update(cx, |v, cx| {
+            v.go(malakt_mahoz::state::Nav::Workspace(workspace.clone()), cx)
+        });
+    });
+    world.reply(text_reply("はい。"));
+    say(cx, window, &pane, "もう一度");
+    wait(cx, "返事が来る", |s| !s.busy && s.items.len() >= 4);
+    let system = world.sent()[1].2["system"].as_str().unwrap().to_owned();
+    assert!(
+        system.ends_with(
+            "敬語で答える\n\n今開いているワークスペース「仕事」についての前提と指示:\nPR のタスクは優先度を高にする"
+        ),
+        "{system}"
+    );
+
+    // 長すぎるものは保存しない
+    let long = "あ".repeat(malakt_mahoz::ai::MAX_WORKSPACE_CONTEXT_CHARS + 1);
+    assert!(malakt_mahoz::ai::workspace_context_error(&long).is_some());
+}
+
+/// Enter で送り、Shift+Enter は改行になる。
+#[gpui_kit::test]
+fn enter_sends_and_shift_enter_breaks_the_line(cx: &mut TestAppContext) {
+    let world = start(cx);
+    world.keys.set(Provider::Claude, "k").unwrap();
+    let (window, view) = open(cx, wide());
+    let pane = open_chat(cx, window, &view);
+    world.reply(text_reply("はい。"));
+    ui(cx, window, |window, cx| {
+        pane.update(cx, |pane, cx| pane.focus_input(window, cx));
+        window.input("1 行目", cx);
+        window.press("shift-enter", cx);
+        window.input("2 行目", cx);
+    });
+    assert!(world.sent().is_empty());
+    ui(cx, window, |window, cx| window.press("enter", cx));
+    wait(cx, "返事が来る", |s| !s.busy && s.items.len() >= 2);
+    let sent = world.sent();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(
+        sent[0].2["messages"][0]["content"].as_str().unwrap(),
+        "1 行目\n2 行目"
+    );
+}
+
+/// リンクを読めなかったタスクは AI に渡さず、元のまま残す。
+#[gpui_kit::test]
+fn a_task_whose_link_cannot_be_read_is_left_alone(cx: &mut TestAppContext) {
+    let world = start(cx);
+    world.keys.set(Provider::Claude, "k").unwrap();
+    *world.github.lock().unwrap() = if cfg!(windows) {
+        " & exit 1".into()
+    } else {
+        "; exit 1".into()
+    };
+    let task = new_task(cx, "https://github.com/o/r/pull/7");
+    wait(cx, "理由が出る", |s| {
+        !s.busy && !s.arrange_notes.is_empty()
+    });
+    assert!(world.sent().is_empty());
+    let note = read(cx, |s| s.arrange_notes[&task].clone());
+    assert!(note.contains("読み込めませんでした"), "{note}");
+    let tasks = all_tasks(cx);
+    assert_eq!(tasks[0].title, "https://github.com/o/r/pull/7");
+    assert_eq!(tasks[0].description, "");
+}
+
+/// AI が「取得できなかった」「未確認」と書いても、タスクには入れない。
+#[gpui_kit::test]
+fn fetch_notes_never_reach_the_task(cx: &mut TestAppContext) {
+    let world = start(cx);
+    world.keys.set(Provider::Claude, "k").unwrap();
+    let task = new_task(cx, "https://github.com/o/r/pull/7");
+    world.reply(tool_reply(
+        "t1",
+        "update_task",
+        json!({
+            "id": task,
+            "title": "PR 7（題名は未確認）",
+            "description": "PR: https://github.com/o/r/pull/7\n\n※リンク先の内容を取得できなかったため、概要と題名は未確認（タイトルはそのまま）。",
+        }),
+    ));
+    world.reply(text_reply("整えました。"));
+    wait(cx, "AI が整え終わる", |s| {
+        !s.busy && !s.items.is_empty()
+    });
+    assert_eq!(world.sent().len(), 2);
+    let message = world.sent()[0].2["messages"][0]["content"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(message.contains("注記を書かない"), "{message}");
+    let tasks = all_tasks(cx);
+    assert_eq!(tasks[0].title, "https://github.com/o/r/pull/7");
+    assert_eq!(tasks[0].description, "PR: https://github.com/o/r/pull/7");
+}
+
 /// API キーがなければ、どこにも通信しない。理由を出し、キーを入れると動く。
 #[gpui_kit::test]
 fn a_new_task_waits_for_the_key(cx: &mut TestAppContext) {
@@ -1502,7 +1682,7 @@ fn the_chat_comes_back_after_a_restart(cx: &mut TestAppContext) {
     let pane = open_chat(cx, window, &view);
     world.reply(text_reply("はい"));
     say(cx, window, &pane, "こんにちは");
-    ui(cx, window, |window, cx| window.click("ai-shell-toggle", cx));
+    menu(cx, window, 1);
     cx.run_until_parked();
     let ui_state: Value = serde_json::from_str(&setting(cx, "ai.ui").unwrap()).unwrap();
     assert_eq!(

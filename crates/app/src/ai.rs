@@ -130,6 +130,25 @@ fn saved_bounds(v: &Value) -> Option<[f32; 4]> {
 }
 
 /// 新しいタスクを AI が整えるとき、1 回で扱うタスクの数。
+/// いつも AI に伝える前提と指示の保存先と、長さの上限。
+const CONTEXT_SETTING: &str = "ai.context";
+pub const MAX_CONTEXT_CHARS: usize = 4000;
+/// ワークスペースごとの分の長さの上限。
+pub const MAX_WORKSPACE_CONTEXT_CHARS: usize = 2000;
+
+/// ワークスペースごとの「AI に伝えること」の保存先。
+pub fn workspace_context_key(workspace: &str) -> String {
+    format!("ai.context.ws.{workspace}")
+}
+
+/// 長すぎる「AI に伝えること」を断る文。
+pub fn workspace_context_error(text: &str) -> Option<String> {
+    let count = text.trim().chars().count();
+    (count > MAX_WORKSPACE_CONTEXT_CHARS).then(|| {
+        format!("AI に伝えることは {MAX_WORKSPACE_CONTEXT_CHARS} 文字までです（今は {count} 文字）")
+    })
+}
+
 const MAX_ARRANGE_TASKS: usize = 5;
 /// 新しいタスクを整えるとき、タスク 1 つで読みに行くリンクの数。
 const MAX_ARRANGE_LINKS: usize = 3;
@@ -324,6 +343,8 @@ pub struct Session {
     auto: bool,
     /// 新しいタスクを AI が整える。標準はオン（API キーがなければ動かない）。
     pub arrange: bool,
+    /// ユーザーが書いた、いつも AI に伝える前提と指示。
+    pub context: String,
     /// AI が今整えているタスクの ID。
     pub arranging: Vec<String>,
     /// タスクを整えられなかった理由。タスクの ID ごと。
@@ -348,6 +369,8 @@ pub struct Session {
     pub window_bounds: [Option<[f32; 4]>; 2],
     /// ユーザーが今見ている場所（ワークスペースや開いているタスク）。画面が書き込む。
     pub place: String,
+    /// ユーザーが今開いているワークスペース。画面が書き込む。
+    pub workspace: Option<String>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -378,6 +401,7 @@ impl Session {
         let ui: SavedUi;
         let chat: Option<Value>;
         let arrange;
+        let context;
         let (provider, effort, models) = {
             let store = &db.read(cx).store;
             let mut read = |key: &str| match store.setting(key) {
@@ -414,6 +438,7 @@ impl Session {
             chat = read(CHAT_SETTING).and_then(|v| serde_json::from_str::<Value>(&v).ok());
             auto_run = read("ai.auto_run").as_deref() == Some("1");
             arrange = read("ai.arrange").as_deref() != Some("0");
+            context = read(CONTEXT_SETTING).unwrap_or_default();
             let defaults = Watch::default();
             watch = Watch {
                 enabled: read("ai.watch.enabled").as_deref() == Some("1"),
@@ -465,6 +490,7 @@ impl Session {
             watch_timer: None,
             auto: false,
             arrange,
+            context,
             arranging: Vec::new(),
             arrange_notes: HashMap::new(),
             known: None,
@@ -485,6 +511,7 @@ impl Session {
             resizing: false,
             window_bounds: ui.bounds,
             place: String::new(),
+            workspace: None,
             _subscriptions: Vec::new(),
         };
         this._subscriptions = vec![
@@ -683,6 +710,51 @@ impl Session {
         }
     }
 
+    /// 全体の分と、今開いているワークスペースの分を合わせた、AI に伝える前提と指示。
+    fn whole_context(&self, cx: &App) -> String {
+        let store = &self.db.read(cx).store;
+        let mut context = self.context.clone();
+        let Some(id) = &self.workspace else {
+            return context;
+        };
+        // 読めなければ、全体の分だけを渡す（次の操作でデータベースのエラーとして出る）
+        let own = store
+            .setting(&workspace_context_key(id))
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        if !own.trim().is_empty() {
+            let name = store.workspace(id).map(|w| w.name).unwrap_or_default();
+            if !context.is_empty() {
+                context.push_str("\n\n");
+            }
+            context.push_str(&format!(
+                "今開いているワークスペース「{name}」についての前提と指示:\n{}",
+                own.trim()
+            ));
+        }
+        context
+    }
+
+    /// いつも AI に伝える前提と指示を保存する。
+    pub fn set_context(&mut self, text: &str, cx: &mut Context<Self>) {
+        let text = text.trim();
+        let count = text.chars().count();
+        if count > MAX_CONTEXT_CHARS {
+            self.error = Some(
+                format!("いつも伝えることは {MAX_CONTEXT_CHARS} 文字までです（今は {count} 文字）")
+                    .into(),
+            );
+            cx.notify();
+            return;
+        }
+        if text == self.context || !self.save_setting(CONTEXT_SETTING, text, cx) {
+            return;
+        }
+        self.context = text.to_owned();
+        cx.notify();
+    }
+
     // ---- 新しいタスクを整える ----
 
     pub fn set_arrange(&mut self, on: bool, cx: &mut Context<Self>) {
@@ -853,10 +925,12 @@ impl Session {
              - 説明には、リンクの URL と要点を書く。ユーザーが書いた文は消さない。\n\
              - 中身から分かる範囲で、優先度や期限を入れる。\n\
              - 直すところがなければ、何も変えない。\n\
-             - タスクを新しく作らない。消さない。\n",
+             - タスクを新しく作らない。消さない。\n\
+             - タイトルと説明には、タスクの中身だけを書く。読めなかったリンクや、確かめられなかったことについての注記を書かない。\n",
         );
+        let mut any = false;
         for task in &tasks {
-            message.push_str(&format!(
+            let mut section = format!(
                 "\n## タスク（id: {}）\nタイトル: {}\n説明: {}\n",
                 task.id,
                 task.title,
@@ -865,16 +939,19 @@ impl Session {
                 } else {
                     task.description.as_str()
                 }
-            ));
+            );
+            let mut read = 0;
             for link in task.links.iter().take(MAX_ARRANGE_LINKS) {
                 let url = link.url();
                 match Self::fetch_github(this, &config, link, cx).await {
-                    Ok(content) => message.push_str(&format!(
-                        "### {url} の中身\n{}\n",
-                        clip_tail(&content, MAX_WATCH_CHARS)
-                    )),
+                    Ok(content) => {
+                        read += 1;
+                        section.push_str(&format!(
+                            "### {url} の中身\n{}\n",
+                            clip_tail(&content, MAX_WATCH_CHARS)
+                        ));
+                    }
                     Err(error) => {
-                        message.push_str(&format!("### {url} は読み込めませんでした\n"));
                         let note: SharedString =
                             format!("{url} を読み込めませんでした: {error}").into();
                         this.update(cx, |s, cx| {
@@ -886,6 +963,14 @@ impl Session {
                     }
                 }
             }
+            // リンクを 1 つも読めなかったタスクは、AI に渡さず元のまま残す
+            if read > 0 || task.links.is_empty() {
+                message.push_str(&section);
+                any = true;
+            }
+        }
+        if !any {
+            return Ok(notes);
         }
         this.update(cx, |s, cx| {
             s.turns.push(Turn::User(message));
@@ -1569,7 +1654,10 @@ impl Session {
         })?
         .0;
 
-        let system = tools::system_prompt(&malakt_core::view::today(), place);
+        let context = this
+            .read_with(cx, |s, cx| s.whole_context(cx))
+            .map_err(gone)?;
+        let system = tools::system_prompt(&malakt_core::view::today(), place, &context);
         for _ in 0..MAX_ROUNDS {
             let (wire, reply) = Self::complete(
                 this,
@@ -1806,6 +1894,10 @@ impl Session {
                         let waiting: Vec<String> = task_links(&s.db.read(cx).store)
                             .map(|all| s.new_tasks(all).into_iter().map(|t| t.id).collect())
                             .unwrap_or_default();
+                        // 自動の整理では、読めなかったことの注記をタスクに書かせない
+                        let cleaned = (!s.arranging.is_empty())
+                            .then(|| without_fetch_notes(&s.db.read(cx).store, &call.args));
+                        let args = cleaned.as_ref().unwrap_or(&call.args);
                         let result = s.db.update(cx, |db, cx| {
                             // 自分が登録されていれば、コメントの書き手にする
                             let author = db
@@ -1815,7 +1907,7 @@ impl Session {
                                 .and_then(|p| p.into_iter().find(|p| p.is_self))
                                 .map(|p| p.id);
                             let result =
-                                tools::execute(&mut db.store, author.as_deref(), name, &call.args);
+                                tools::execute(&mut db.store, author.as_deref(), name, args);
                             cx.notify();
                             result
                         });
@@ -1836,7 +1928,10 @@ impl Session {
         cx: &mut AsyncApp,
     ) -> Result<String, String> {
         match Self::run_command(this, (config.gh)(link), cx).await {
-            Ok(output) if output.code == Some(0) => Ok(output.stdout),
+            Ok(output) if output.code == Some(0) && !output.stdout.trim().is_empty() => {
+                Ok(output.stdout)
+            }
+            Ok(output) if output.code == Some(0) => Err("gh の出力が空でした".into()),
             Ok(output) => Err(format!(
                 "gh が失敗しました（終了コード {}）: {}",
                 output.code.map_or("なし".to_owned(), |c| c.to_string()),
@@ -1998,6 +2093,55 @@ fn now_label() -> String {
         .chars()
         .skip(5)
         .collect()
+}
+
+/// 読めなかった・確かめられなかったことを書いた文の目印。
+const FETCH_NOTE_MARKS: &[&str] = &[
+    "取得でき",
+    "取得に失敗",
+    "取得失敗",
+    "読み込めな",
+    "読み込めません",
+    "読めな",
+    "読めません",
+    "アクセスでき",
+    "確認できな",
+    "確認できません",
+    "未確認",
+];
+
+fn is_fetch_note(text: &str) -> bool {
+    FETCH_NOTE_MARKS.iter().any(|mark| text.contains(mark))
+}
+
+/// AI がタスクに書こうとしたタイトルと説明から、読めなかったことの注記を除く。
+/// 元のタスクにあった文は残す。
+fn without_fetch_notes(store: &malakt_core::Store, args: &Value) -> Value {
+    let mut args = args.clone();
+    let before = args
+        .get("id")
+        .and_then(Value::as_str)
+        .and_then(|id| store.task(id).ok());
+    let (old_title, old_description) = before.map(|t| (t.title, t.description)).unwrap_or_default();
+    let Some(map) = args.as_object_mut() else {
+        return args;
+    };
+    if map
+        .get("title")
+        .and_then(Value::as_str)
+        .is_some_and(|title| is_fetch_note(title) && title != old_title)
+    {
+        map.remove("title");
+    }
+    if let Some(description) = map.get("description").and_then(Value::as_str) {
+        let kept: Vec<&str> = description
+            .lines()
+            .filter(|line| !is_fetch_note(line) || old_description.lines().any(|old| old == *line))
+            .collect();
+        let kept = kept.join("\n").trim_end().to_owned();
+        map.insert("description".into(), Value::String(kept));
+    }
+    args
 }
 
 fn gone<E>(_: E) -> String {

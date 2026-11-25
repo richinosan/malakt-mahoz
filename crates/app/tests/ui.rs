@@ -2594,3 +2594,304 @@ fn reminders_refused_by_the_os_turn_back_off(cx: &mut TestAppContext) {
         )
     });
 }
+
+/// 自動アップデートの外とのやり取りを差し替える。`check` は探した結果、`install` は入れ替えの結果。
+/// 戻り値は、探したときに渡された「見送っている版」と、入れ替えた版の記録。
+#[allow(clippy::type_complexity)]
+fn updater(
+    cx: &mut TestAppContext,
+    check: Result<Option<malakt_mahoz::update::Staged>, malakt_mahoz::update::Error>,
+    install: Result<(), &'static str>,
+) -> (
+    std::sync::Arc<std::sync::Mutex<Vec<Option<String>>>>,
+    std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+) {
+    use malakt_mahoz::update::Updater;
+    let checked = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let installed = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (check_log, install_log) = (checked.clone(), installed.clone());
+    cx.update(|cx| {
+        cx.set_global(Updater {
+            available: true,
+            check: std::sync::Arc::new(move |skipped| {
+                check_log.lock().unwrap().push(skipped);
+                check.clone()
+            }),
+            install: std::sync::Arc::new(move |staged| {
+                install_log.lock().unwrap().push(staged.version.clone());
+                install.map_err(str::to_owned)
+            }),
+        });
+        malakt_mahoz::update::check_now(cx);
+    });
+    cx.run_until_parked();
+    (checked, installed)
+}
+
+/// 取ってきて置いてある v0.2.0。
+fn staged_update(root: &std::path::Path) -> malakt_mahoz::update::Staged {
+    let dir = root.join("update");
+    std::fs::create_dir_all(dir.join("payload")).unwrap();
+    std::fs::write(dir.join("payload/malakt-mahoz"), b"new").unwrap();
+    malakt_mahoz::update::Staged {
+        version: "0.2.0".into(),
+        payload: dir.join("payload/malakt-mahoz"),
+        dir,
+    }
+}
+
+fn has(cx: &mut TestAppContext, window: AnyWindowHandle, id: &'static str) -> bool {
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        window.try_find(id).is_some()
+    })
+    .unwrap()
+}
+
+/// 新しい版を取ってくると上のバーに印が出て、アプリを閉じるときに 1 回だけ入れ替わる。
+#[gpui_kit::test]
+fn a_new_version_is_installed_when_the_app_closes(cx: &mut TestAppContext) {
+    start(cx);
+    let (window, view) = open(cx, wide());
+    // つないでいなければ（開発用のビルドなど）、印もメニューの項目も出ない
+    assert!(!has(cx, window, "update-now"));
+    cx.update(|cx| assert_eq!(malakt_mahoz::update::menu_label(cx), None));
+
+    let root = tempfile::tempdir().unwrap();
+    let (checked, installed) = updater(cx, Ok(Some(staged_update(root.path()))), Ok(()));
+    assert_eq!(*checked.lock().unwrap(), [None]);
+    assert!(has(cx, window, "update-now"));
+    // 取ってきただけでは入れ替えない
+    assert!(installed.lock().unwrap().is_empty());
+    // もう置いてあるので、探し直さない
+    cx.update(malakt_mahoz::update::check_now);
+    cx.run_until_parked();
+    assert_eq!(checked.lock().unwrap().len(), 1);
+
+    cx.update(malakt_mahoz::update::install_on_quit);
+    assert_eq!(*installed.lock().unwrap(), ["0.2.0"]);
+    // 終了の途中でもう一度呼ばれても、入れ替えは 1 回
+    cx.update(malakt_mahoz::update::install_on_quit);
+    assert_eq!(installed.lock().unwrap().len(), 1);
+    assert!(!has(cx, window, "update-now"));
+    cx.update(|cx| assert!(view.read(cx).error.is_none()));
+}
+
+/// 設定のメニューで無効にすると、取ってきた版を消し、閉じても入れ替えない。
+/// 有効に戻すと、もう一度探す。
+#[gpui_kit::test]
+fn auto_update_can_be_turned_off(cx: &mut TestAppContext) {
+    start(cx);
+    let (window, _) = open(cx, wide());
+    let root = tempfile::tempdir().unwrap();
+    let staged = staged_update(root.path());
+    let (checked, installed) = updater(cx, Ok(Some(staged.clone())), Ok(()));
+    assert!(has(cx, window, "update-now"));
+
+    choose_in_menu(cx, window, "自動アップデートを無効にする");
+    assert!(!has(cx, window, "update-now"));
+    assert!(!staged.dir.exists());
+    cx.update(malakt_mahoz::update::install_on_quit);
+    assert!(installed.lock().unwrap().is_empty());
+    // 無効の間は、探しに行かない
+    cx.update(malakt_mahoz::update::check_now);
+    cx.run_until_parked();
+    assert_eq!(checked.lock().unwrap().len(), 1);
+
+    choose_in_menu(cx, window, "自動アップデートを有効にする");
+    cx.run_until_parked();
+    assert_eq!(checked.lock().unwrap().len(), 2);
+    assert!(has(cx, window, "update-now"));
+}
+
+/// 閉じるときに入れ替えられなかったら、次に開いたウィンドウに理由が 1 回だけ出て、
+/// その版はもう取ってこない。
+#[gpui_kit::test]
+fn a_failed_install_is_shown_on_the_next_launch(cx: &mut TestAppContext) {
+    start(cx);
+    let root = tempfile::tempdir().unwrap();
+    let staged = staged_update(root.path());
+    let (checked, installed) = updater(
+        cx,
+        Ok(Some(staged.clone())),
+        Err("v0.2.0 に更新できませんでした。/Applications に書き込めません"),
+    );
+    cx.update(malakt_mahoz::update::install_on_quit);
+    assert_eq!(*installed.lock().unwrap(), ["0.2.0"]);
+    assert!(!staged.dir.exists());
+
+    let (_, view) = open(cx, wide());
+    cx.update(|cx| {
+        assert_eq!(
+            view.read(cx).error.as_deref(),
+            Some("v0.2.0 に更新できませんでした。/Applications に書き込めません")
+        )
+    });
+    let (_, second) = open(cx, wide());
+    cx.update(|cx| assert!(second.read(cx).error.is_none()));
+    // 次に探すときは、失敗した版を見送る
+    cx.update(malakt_mahoz::update::check_now);
+    cx.run_until_parked();
+    assert_eq!(*checked.lock().unwrap(), [None, Some("0.2.0".to_owned())]);
+}
+
+/// 取ってきたものが使えなかったら画面に出す。つながらないだけなら何も出さない。
+#[gpui_kit::test]
+fn a_bad_download_is_reported_but_being_offline_is_not(cx: &mut TestAppContext) {
+    use malakt_mahoz::update::Error;
+    start(cx);
+    let (window, view) = open(cx, wide());
+    updater(cx, Err(Error::Offline("つながりません".into())), Ok(()));
+    cx.update(|cx| assert!(view.read(cx).error.is_none()));
+    assert!(!has(cx, window, "update-now"));
+
+    updater(
+        cx,
+        Err(Error::Failed(
+            "v0.2.0 の a.zip が SHA256SUMS と合いません。".into(),
+        )),
+        Ok(()),
+    );
+    cx.update(|cx| {
+        assert_eq!(
+            view.read(cx).error.as_deref(),
+            Some("v0.2.0 の a.zip が SHA256SUMS と合いません。")
+        )
+    });
+    assert!(!has(cx, window, "update-now"));
+}
+
+/// どの幅でも、一覧の上のチェックボックスとボタンは重ならず、タイトルは読める幅で残る。
+/// AI チャットを開いても、列を広げても同じ。
+#[gpui_kit::test]
+fn narrow_widths_keep_the_title_and_never_overlap(cx: &mut TestAppContext) {
+    use malakt_mahoz::state::{Column, COLUMN_MAX, TITLE_MIN};
+    start(cx);
+    let ws = cx.update(|cx| {
+        db::shared(cx).update(cx, |db, _| {
+            let s = &mut db.store;
+            let ws = s.create_workspace(None, "文化祭").unwrap();
+            s.create_workspace(Some(&ws.id), "設営").unwrap();
+            s.set_workspace_date(&ws.id, Some(&malakt_core::view::today()))
+                .unwrap();
+            let d = malakt_core::TaskDraft {
+                title: "機材を借りる".into(),
+                due: Some(malakt_core::view::today()),
+                ..Default::default()
+            };
+            s.create_task(Some(&ws.id), &d).unwrap();
+            ws
+        })
+    });
+    let scale = malakt_mahoz::UI_SCALE;
+    let header = [
+        "ws-settings",
+        "ws-export",
+        "ws-import",
+        "ws-delete",
+        "new-task-open",
+    ];
+    let mut width = 380.;
+    while width <= 1600. {
+        for (ai, widened) in [(false, false), (true, false), (false, true), (true, true)] {
+            let (window, view) = open(cx, win(width, 800.));
+            cx.update_window(window, |_, window, cx| {
+                view.update(cx, |v, cx| {
+                    for c in &mut v.columns {
+                        c.width = if widened {
+                            COLUMN_MAX
+                        } else {
+                            c.column.default_width()
+                        };
+                    }
+                    v.go(Nav::Workspace(ws.id.clone()), cx);
+                    if ai {
+                        v.toggle_ai(window, cx);
+                    }
+                })
+            })
+            .unwrap();
+            let case = format!("幅 {width}、AI チャット {ai}、列を広げた {widened}");
+            ui(cx, window, |window, _| {
+                // チェックボックスと右のボタンは重ならない
+                let check = window.find("include-descendants").bounds();
+                for id in header {
+                    let button = window.find(id).bounds();
+                    assert!(
+                        !check.intersects(&button),
+                        "{case}: 「サブワークスペースも含める」と {id} が重なる"
+                    );
+                    assert!(button.left() >= px(0.), "{case}: {id} が左にはみ出す");
+                }
+                // AI チャットがウィンドウを覆う幅では、一覧は見えない
+                let chat = window.try_find("ai-resize").map(|e| e.bounds().left());
+                if chat.is_some_and(|left| left < px(200.)) {
+                    return;
+                }
+                // タイトルは、表でもカードでも読める幅がある。重ねた AI チャットにも隠れない
+                let title = window
+                    .try_find(("title", 0usize))
+                    .unwrap_or_else(|| panic!("{case}: タイトルが出ていない"))
+                    .bounds();
+                let shown = chat.map_or(title.right(), |left| left.min(title.right()));
+                assert!(
+                    shown - title.left() >= px(TITLE_MIN * scale * 0.6),
+                    "{case}: タイトルの幅が {:?}",
+                    shown - title.left()
+                );
+                // 表では、見出しと行の列がそろう
+                if let Some(head) = window.try_find(("col-head", Column::Priority as usize)) {
+                    let cell = window.find(("prio", 0usize)).bounds();
+                    assert_eq!(head.bounds().left(), cell.left(), "{case}");
+                }
+            });
+            cx.update_window(window, |_, window, _| window.remove_window())
+                .unwrap();
+        }
+        width += 20.;
+    }
+
+    // 列を広げて入らなくなったら、右の列から出さなくなる。追加のボタンは右の端に残る
+    let (window, view) = open(cx, win(1280., 800.));
+    cx.update(|cx| {
+        view.update(cx, |v, cx| {
+            for c in &mut v.columns {
+                c.width = COLUMN_MAX;
+            }
+            v.go(Nav::Workspace(ws.id.clone()), cx);
+        })
+    });
+    ui(cx, window, |window, _| {
+        assert!(window.try_find("col-title").is_some());
+        assert!(window
+            .try_find(("col-head", Column::Status as usize))
+            .is_some());
+        assert!(window
+            .try_find(("col-head", Column::Updated as usize))
+            .is_none());
+        assert!(window.try_find("quick-add-submit").is_some());
+        let title = window.find(("title", 0usize)).bounds();
+        assert!(title.size.width >= px(TITLE_MIN * scale));
+    });
+
+    // ホームの「期限が近いタスク」も、タイトルが残る
+    for width in [900., 1150., 1280.] {
+        let (window, view) = open(cx, win(width, 800.));
+        cx.update_window(window, |_, window, cx| {
+            view.update(cx, |v, cx| {
+                v.go(Nav::Home, cx);
+                v.toggle_ai(window, cx);
+            })
+        })
+        .unwrap();
+        ui(cx, window, |window, _| {
+            let row = window.find(("due", 0usize)).bounds();
+            let chat = window.find("ai-resize").bounds().left();
+            assert!(
+                chat.min(row.right()) - row.left() >= px(300.),
+                "幅 {width}: ホームの行が {:?}",
+                chat.min(row.right()) - row.left()
+            );
+        });
+    }
+}

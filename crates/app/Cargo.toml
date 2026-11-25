@@ -21,6 +21,7 @@ dirs = "5"
 malakt-ai.workspace = true
 malakt-passkey.workspace = true
 malakt-reminders.workspace = true
+malakt-update.workspace = true
 raw-window-handle = "0.6"
 async-channel = "2"
 image = { version = "0.25", default-features = false, features = ["png"] }

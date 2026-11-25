@@ -139,6 +139,7 @@ pub struct Inputs {
     pub def_time: Entity<InputState>,
     pub def_categories: Entity<InputState>,
     pub def_description: Entity<TextareaState>,
+    pub ws_context: Entity<TextareaState>,
     pub bulk_due: Entity<InputState>,
     pub bulk_categories: Entity<InputState>,
     pub nt_title: Entity<InputState>,
@@ -220,6 +221,8 @@ pub struct MainView {
     pub header_pressed: bool,
     /// 表の列。並び順どおり。幅と、隠しているかを持つ。
     pub columns: Vec<TableColumn>,
+    /// 一覧に使える幅（拡大率を掛ける前の値）。描くたびに、ウィンドウかペインの幅から決める
+    pub list_width: f32,
     /// 幅を変えている列と、押し始めた位置・そのときの幅。
     pub column_resize: Option<(Column, f32, f32)>,
     /// タスクの一覧と、期限が近いタスクの一覧のスクロール位置。
@@ -301,6 +304,11 @@ impl MainView {
             def_time: input(window, cx, "HH:MM（空なら日付だけ）"),
             def_categories: input(window, cx, "「、」で区切って入力"),
             def_description: area(window, cx, "説明の雛形"),
+            ws_context: area(
+                window,
+                cx,
+                "例: このワークスペースのタスクは優先度を高にする",
+            ),
             bulk_due: input(window, cx, "YYYY-MM-DD（時刻は続けて HH:MM）"),
             bulk_categories: input(window, cx, "「、」で区切って入力"),
             nt_title: input(window, cx, "タイトル"),
@@ -318,14 +326,31 @@ impl MainView {
             // 今見ている場所を、AI に伝えられるようにしておく
             cx.observe_self(|this, cx| {
                 let place = this.ai_place();
-                if this.ai_session.read(cx).place != place {
-                    this.ai_session.update(cx, |s, _| s.place = place);
+                let workspace = match &this.nav {
+                    Nav::Workspace(id) => Some(id.clone()),
+                    _ => None,
+                };
+                let session = this.ai_session.read(cx);
+                if session.place != place || session.workspace != workspace {
+                    this.ai_session.update(cx, |s, _| {
+                        s.place = place;
+                        s.workspace = workspace;
+                    });
                 }
             }),
             // リマインダーとの連携で失敗したことを出す
             cx.subscribe(
                 &crate::reminders::shared(cx),
                 |this, _, failed: &crate::reminders::Failed, cx| {
+                    this.error = Some(failed.0.clone());
+                    cx.notify();
+                },
+            ),
+            // 新しい版を取ってきたら、上のバーに印を出す
+            cx.observe(&crate::update::shared(cx), |_, _, cx| cx.notify()),
+            cx.subscribe(
+                &crate::update::shared(cx),
+                |this, _, failed: &crate::update::Failed, cx| {
                     this.error = Some(failed.0.clone());
                     cx.notify();
                 },
@@ -483,7 +508,7 @@ impl MainView {
             notices: Vec::new(),
             unread_notices: 0,
             defaults_draft: TaskDefaults::default(),
-            error: None,
+            error: crate::update::take_failure(cx),
             notice: None,
             sidebar_open: false,
             ai_open: false,
@@ -495,6 +520,7 @@ impl MainView {
             header_pressed: false,
             assignee_picker: false,
             columns: Column::ALL.map(TableColumn::new).to_vec(),
+            list_width: f32::INFINITY,
             column_resize: None,
             column_menu: None,
             list_scroll: UniformListScrollHandle::new(),
@@ -1857,9 +1883,13 @@ impl MainView {
         cx.notify();
     }
 
-    /// 今出している列。
+    /// 今出している列。タイトルに `TITLE_MIN` の幅が残らないときは、右の列から出さない。
     pub fn shown_columns(&self) -> impl Iterator<Item = &TableColumn> {
-        self.columns.iter().filter(|c| !c.hidden)
+        let mut room = self.list_width - TABLE_FIXED - TITLE_MIN;
+        self.columns.iter().filter(|c| !c.hidden).filter(move |c| {
+            room -= c.width + COLUMN_GAP;
+            room >= 0.
+        })
     }
 
     /// 列の左の境界を押して、幅を変え始める。`x` はウィンドウの中の位置。
@@ -2166,6 +2196,21 @@ impl MainView {
         cx.notify();
     }
 
+    // ---- 自動アップデート ----
+
+    /// 自動アップデートを有効にする・無効にする。
+    pub fn toggle_auto_update(&mut self, cx: &mut Context<Self>) {
+        let on = !crate::update::enabled(cx);
+        self.error = crate::update::set_enabled(on, cx).err().map(Into::into);
+        cx.notify();
+    }
+
+    /// 取ってきた新しい版に今すぐ入れ替えて、起動し直す。
+    pub fn update_now(&mut self, cx: &mut Context<Self>) {
+        self.error = crate::update::install_and_restart(cx).err().map(Into::into);
+        cx.notify();
+    }
+
     // ---- 通知 ----
 
     /// 期限が今日のタスクの通知を作り、まだ出していない通知を OS の通知に出す。
@@ -2246,7 +2291,11 @@ impl MainView {
         let loaded = store
             .workspace(id)
             .and_then(|w| Ok((w, store.task_defaults(id)?)));
-        let (workspace, defaults) = match loaded {
+        let loaded = loaded.and_then(|(w, d)| {
+            let context = store.setting(&crate::ai::workspace_context_key(id))?;
+            Ok((w, d, context.unwrap_or_default()))
+        });
+        let (workspace, defaults, context) = match loaded {
             Ok(loaded) => loaded,
             Err(error) => {
                 self.error = Some(error.to_string().into());
@@ -2290,6 +2339,9 @@ impl MainView {
         self.inputs
             .def_description
             .update(cx, |s, cx| s.set_value(description, window, cx));
+        self.inputs
+            .ws_context
+            .update(cx, |s, cx| s.set_value(context, window, cx));
         self.defaults_draft = defaults;
         self.modal = Modal::WorkspaceSettings(id.to_owned());
         self.error = None;
@@ -2357,11 +2409,23 @@ impl MainView {
         defaults.categories = split_list(&read(&self.inputs.def_categories));
         defaults.description = self.inputs.def_description.read(cx).value().to_string();
         let date = read(&self.inputs.ws_date);
+        let context = self.inputs.ws_context.read(cx).value().trim().to_owned();
+        if let Some(error) = crate::ai::workspace_context_error(&context) {
+            self.error = Some(error.into());
+            cx.notify();
+            return;
+        }
+        let context_key = crate::ai::workspace_context_key(&id);
         let saved = self.write(cx, |s| {
             // 先に両方を確かめて、片方だけ保存されることがないようにする
             malakt_core::defaults::clean(&defaults)?;
             s.set_workspace_date(&id, Some(&date))?;
-            s.set_task_defaults(&defaults)
+            s.set_task_defaults(&defaults)?;
+            // 空にしたら、保存してあるものを消す
+            s.set_setting(
+                &context_key,
+                (!context.is_empty()).then_some(context.as_str()),
+            )
         });
         if saved.is_some() {
             self.modal = Modal::None;
@@ -2778,6 +2842,13 @@ impl Column {
         }
     }
 }
+
+/// 表でタイトルに必ず残す幅。最初の列幅なら、表にするいちばん狭い幅でも全部の列が入る。
+pub const TITLE_MIN: f32 = 140.;
+/// 列と列の間。
+const COLUMN_GAP: f32 = 12.;
+/// 表の左右の余白と、選択のチェックボックスの幅。
+const TABLE_FIXED: f32 = 48. + 2. + 24. + 24.;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TableColumn {
