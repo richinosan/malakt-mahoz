@@ -51,6 +51,9 @@ const NOT_BUTTONS: &[&str] = &[
     "ws-settings-scroll",
     "home",
     "caret",
+    "row-cursor",
+    "keys-help",
+    "app-keys",
 ];
 
 /// 詳細のパネルの上の端に並ぶボタン。

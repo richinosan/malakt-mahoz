@@ -1065,6 +1065,7 @@ impl MainView {
                                 None => menu,
                             };
                             menu.separator()
+                                .item(item("キー操作", |this, _, cx| this.toggle_keys(cx)))
                                 .item(item("新しいウィンドウ", |_, window, cx| {
                                     window.dispatch_action(Box::new(NewWindow), cx)
                                 }))
@@ -2086,6 +2087,7 @@ impl MainView {
         let task = &self.tasks[self.visible[ix]];
         let id = task.id.clone();
         let active = self.panel.as_deref() == Some(id.as_str());
+        let cursor = self.cursor.as_deref() == Some(id.as_str());
         let closed = !task.status.is_open();
         let now = malakt_core::now_ms();
         let arranging = self.ai_session.read(cx).arranging.contains(&task.id);
@@ -2281,8 +2283,24 @@ impl MainView {
                     this.drag_task_over(DropTarget::Row(ix), event.position, cx)
                 }))
             })
-            .when(active, |d| d.bg(theme.accent.opacity(0.4)))
-            .when(!active, |d| d.hover(|s| s.bg(theme.muted.opacity(0.4))));
+            // キーで選んでいる行は、左の縁に線を出す
+            .when(cursor, |d| {
+                d.child(
+                    div()
+                        .id(("row-cursor", ix))
+                        .absolute()
+                        .left_0()
+                        .top_0()
+                        .bottom_0()
+                        .w(px(3.))
+                        .bg(theme.primary)
+                        .test_support(),
+                )
+            })
+            .when(active || cursor, |d| d.bg(theme.accent.opacity(0.4)))
+            .when(!active && !cursor, |d| {
+                d.hover(|s| s.bg(theme.muted.opacity(0.4)))
+            });
         let row_el = if table {
             base.h(ROW_HEIGHT)
                 .flex()
@@ -3743,7 +3761,7 @@ impl MainView {
     }
 
     /// 下に敷いたダイアログは `dialog-under`、いちばん上のものは `dialog` と名付ける。
-    fn dialog_as(
+    pub(crate) fn dialog_as(
         &self,
         id: &'static str,
         width: Pixels,
@@ -5330,6 +5348,7 @@ impl Render for MainView {
                     }
                 }))
             })
+            .map(|d| self.with_shortcuts(d, cx))
             .map(|d| self.with_drags(d, cx))
             .size_full()
             .relative()

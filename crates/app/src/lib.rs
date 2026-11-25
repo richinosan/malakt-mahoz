@@ -11,6 +11,7 @@ pub mod reminders;
 mod render;
 pub mod session;
 pub mod shadow;
+pub mod shortcuts;
 pub mod state;
 pub mod theme;
 pub mod update;
@@ -131,10 +132,8 @@ pub fn init_with(store: malakt_core::Store, ai: AiConfig, cx: &mut App) {
         // 入力欄の中では、Ctrl+C はコピーのまま
         KeyBinding::new("ctrl-c", StopAi, Some("AiChat")),
         KeyBinding::new("ctrl-c", StopAi, Some("AiShell")),
-        #[cfg(target_os = "macos")]
-        KeyBinding::new("cmd-n", NewWindow, None),
-        #[cfg(not(target_os = "macos"))]
-        KeyBinding::new("ctrl-n", NewWindow, None),
+        // Ctrl+N は新しいタスク（shortcuts.rs）
+        KeyBinding::new(secondary!("shift-n"), NewWindow, None),
         #[cfg(target_os = "macos")]
         KeyBinding::new("cmd-q", Quit, None),
         #[cfg(not(target_os = "macos"))]
@@ -150,6 +149,7 @@ pub fn init_with(store: malakt_core::Store, ai: AiConfig, cx: &mut App) {
         KeyBinding::new("escape", Dismiss, Some("MainView")),
         KeyBinding::new("ctrl-b", PanePrefix, Some("MainView")),
     ]);
+    shortcuts::bind(cx);
     cx.on_action(|_: &NewWindow, cx| {
         let _ = open_main_window(cx);
     });
@@ -162,8 +162,12 @@ pub fn init_with(store: malakt_core::Store, ai: AiConfig, cx: &mut App) {
     cx.set_menus([Menu {
         name: APP_NAME.into(),
         items: vec![
+            MenuItem::action("新しいタスク", shortcuts::NewTask),
             MenuItem::action("新しいウィンドウ", NewWindow),
+            MenuItem::action("検索", shortcuts::Find),
             MenuItem::action("AI チャット", ToggleAi),
+            MenuItem::action("全画面", shortcuts::ToggleFullscreen),
+            MenuItem::action("キー操作", shortcuts::ShowKeys),
             MenuItem::action("今すぐロック", LockNow),
             MenuItem::separator(),
             MenuItem::action("終了", Quit),

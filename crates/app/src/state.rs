@@ -169,6 +169,8 @@ pub struct MainView {
     pub query: ListQuery,
     pub filters_open: bool,
     pub selected: HashSet<Id>,
+    /// キー（↑↓）で選んでいる行。Enter・F2・Delete の相手になる
+    pub cursor: Option<Id>,
     /// Shift を押しながらの範囲選択の起点（最後に押した行）
     pub select_anchor: Option<Id>,
     /// まとめて変えるダイアログの入力（担当者の変え方、選んだ担当者、カテゴリを足すか外すか）
@@ -485,6 +487,7 @@ impl MainView {
             due_mine: false,
             query: ListQuery::default(),
             filters_open: false,
+            cursor: None,
             selected: HashSet::new(),
             select_anchor: None,
             bulk_mode: ListMode::Add,
@@ -550,6 +553,13 @@ impl MainView {
             inputs,
             _subscriptions: subs,
         };
+        // ダイアログを閉じて入力欄がなくなっても、続けてキーで操作できるようにする
+        this._subscriptions
+            .push(cx.on_focus_lost(window, |this, window, cx| {
+                if !this.embedded {
+                    this.focus.focus(window, cx);
+                }
+            }));
         this.load_sidebar_width(cx);
         this.load_columns(cx);
         this.load_pane_keys(cx);
@@ -771,6 +781,7 @@ impl MainView {
         if self.nav != nav {
             self.nav = nav;
             self.selected.clear();
+            self.cursor = None;
             self.panel = None;
             self.editing = None;
             self.notice = None;
@@ -879,6 +890,7 @@ impl MainView {
             self.expanded_threads.clear();
         }
         self.panel = Some(id.to_owned());
+        self.cursor = Some(id.to_owned());
         self.editing = None;
         self.assignee_picker = false;
         self.reload(cx);
@@ -1359,6 +1371,8 @@ impl MainView {
         let Some(task) = self.tasks.iter().find(|t| t.id == id) else {
             return;
         };
+        // 押した行が、キーの操作の相手になる
+        self.cursor = Some(task.id.clone());
         self.task_drag = Some(TaskDrag {
             id: task.id.clone(),
             title: task.title.clone().into(),
@@ -2760,6 +2774,8 @@ impl MainView {
             self.close_panel(cx);
         } else if !self.selected.is_empty() {
             self.selected.clear();
+        } else if self.cursor.take().is_some() {
+            // キーで選んでいた行を外す
         } else {
             return false;
         }

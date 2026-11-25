@@ -563,6 +563,33 @@ impl MainView {
             let mut body = div().flex().flex_col().gap_1();
             match overlay {
                 PaneOverlay::Help => {
+                    let line = |key: SharedString, about: SharedString| {
+                        div()
+                            .flex()
+                            .flex_row()
+                            .gap_3()
+                            .text_sm()
+                            .child(
+                                div()
+                                    .w(px(112.) * crate::UI_SCALE)
+                                    .flex_none()
+                                    .text_color(theme.primary)
+                                    .child(key),
+                            )
+                            .child(about)
+                    };
+                    let column = || {
+                        div()
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .min_w(px(280.) * crate::UI_SCALE)
+                            .gap_1()
+                    };
+                    let mut app = column().id("app-keys");
+                    for (key, about) in crate::shortcuts::help() {
+                        app = app.child(line(key.into(), about.into()));
+                    }
                     let mut keys = div().flex().flex_row().gap_1();
                     for scheme in Keys::ALL {
                         let on = self.pane_keys == scheme;
@@ -576,29 +603,29 @@ impl MainView {
                                 })),
                         );
                     }
-                    body = body.child(keys).child(
+                    let mut panes = column().child(keys).child(
                         div()
                             .text_xs()
                             .text_color(theme.muted_foreground)
-                            .child("Ctrl+B のあとに押すキー"),
+                            .child("ペイン: Ctrl+B のあとに押すキー"),
                     );
                     for (key, about) in self.pane_keys.help() {
-                        body = body.child(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .gap_3()
-                                .text_sm()
-                                .child(
-                                    div()
-                                        .w(px(96.) * crate::UI_SCALE)
-                                        .flex_none()
-                                        .text_color(theme.primary)
-                                        .child(key),
-                                )
-                                .child(about),
-                        );
+                        panes = panes.child(line(key.into(), about.into()));
                     }
+                    // 狭いウィンドウでは縦に並び、入りきらない分はスクロールする
+                    body = body.min_h_0().child(
+                        div()
+                            .id("keys-help")
+                            .flex()
+                            .flex_row()
+                            .flex_wrap()
+                            .gap_x_6()
+                            .gap_y_3()
+                            .min_h_0()
+                            .overflow_y_scroll()
+                            .child(app.test_support())
+                            .child(panes),
+                    );
                 }
                 PaneOverlay::Presets => {
                     for (n, (name, text)) in PRESETS.into_iter().enumerate() {
@@ -648,11 +675,14 @@ impl MainView {
                     );
                 }
             }
-            let title = match overlay {
-                PaneOverlay::Help => "ペインのキー操作",
-                PaneOverlay::Presets => "配置のプリセット",
+            let (title, width) = match overlay {
+                PaneOverlay::Help => ("キー操作", 720.),
+                PaneOverlay::Presets => ("配置のプリセット", 460.),
             };
-            return Some(self.dialog(title, body, cx).into_any_element());
+            return Some(
+                self.dialog_as("dialog", px(width) * crate::UI_SCALE, title, body, cx)
+                    .into_any_element(),
+            );
         }
         let label = if self.pane_prefix {
             "Ctrl+B"
