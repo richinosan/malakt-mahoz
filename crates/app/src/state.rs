@@ -235,6 +235,8 @@ pub struct MainView {
     pub sidebar_open: bool,
     /// このウィンドウの右に AI チャットを出しているか。
     pub ai_open: bool,
+    /// タスクの詳細で、AI の記録を開いている。
+    pub ai_log_open: bool,
     pub ai_pane: Option<Entity<AiPane>>,
     pub ai_session: Entity<Session>,
     /// 広いウィンドウで、左のメニューを閉じている
@@ -642,6 +644,7 @@ impl MainView {
             notice_undo: None,
             sidebar_open: false,
             ai_open: false,
+            ai_log_open: false,
             ai_pane: None,
             ai_session,
             sidebar_hidden: false,
@@ -3148,6 +3151,30 @@ impl MainView {
     // ---- AI チャット ----
 
     /// AI チャットを開く・閉じる。別ウィンドウに出しているときは、そのウィンドウを手前に出す。
+    /// あるタスクについての会話を、チャットに開く。
+    pub fn chat_about_task(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let title = match self.db.read(cx).store.task(id) {
+            Ok(task) => task.title,
+            Err(e) => {
+                self.error = Some(format!("タスクを読めませんでした: {e}").into());
+                cx.notify();
+                return;
+            }
+        };
+        self.ai_session
+            .update(cx, |s, cx| s.chat_about_task(id, title.into(), cx));
+        if !self.ai_open || self.ai_session.read(cx).chat_window.is_some() {
+            self.toggle_ai(window, cx);
+        } else if let Some(pane) = self.ai_pane.clone() {
+            pane.update(cx, |pane, cx| {
+                pane.side = None;
+                pane.settings_open = false;
+                pane.focus_input(window, cx)
+            });
+        }
+        cx.notify();
+    }
+
     pub fn toggle_ai(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(handle) = self.ai_session.read(cx).chat_window {
             if handle
@@ -3656,6 +3683,7 @@ bundled_icons! {
         "upload",
         "x",
         "message-square-plus",
+        "history",
         "picture-in-picture-2",
         "panel-right",
         "copy",
