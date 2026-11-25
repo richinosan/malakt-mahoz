@@ -1725,7 +1725,51 @@ fn due_takes_a_time_and_many_spellings(cx: &mut TestAppContext) {
 
     // 開始日も同じ書き方を読む
     type_in(cx, "start-input", "20270104 10時");
-    assert_eq!(all_tasks(cx)[0].start.as_deref(), Some("2027-01-04 10:00"));
+    let start = |cx: &mut TestAppContext| all_tasks(cx)[0].start.clone();
+    let start_shown = |cx: &mut TestAppContext| {
+        cx.update(|cx| {
+            let inputs = &view.read(cx).inputs;
+            (
+                inputs.start.read(cx).value().to_string(),
+                inputs.start_time.read(cx).value().to_string(),
+            )
+        })
+    };
+    assert_eq!(start(cx).as_deref(), Some("2027-01-04 10:00"));
+    assert_eq!(
+        start_shown(cx),
+        ("2027-01-04".to_owned(), "10:00".to_owned())
+    );
+
+    // 開始日も、時刻の欄とボタンで決められる
+    type_in(cx, "start-time-input", "17時");
+    assert_eq!(start(cx).as_deref(), Some("2027-01-04 17:00"));
+    ui(cx, window, |window, cx| {
+        window.click(("p-start", 1usize), cx)
+    });
+    assert_eq!(start(cx), Some(format!("{tomorrow} 17:00")));
+    assert_eq!(start_shown(cx), (tomorrow.clone(), "17:00".to_owned()));
+
+    // 開始と期限が同じ日なら、一覧では時間帯で出る
+    type_in(cx, "due-input", "明日 18時");
+    let day = malakt_core::view::format_date(&tomorrow, &today());
+    cx.update(|cx| {
+        let task = &view.read(cx).tasks[0];
+        assert_eq!(
+            malakt_core::view::format_span(
+                task.start.as_deref(),
+                task.due.as_deref().unwrap(),
+                &today()
+            ),
+            format!("{day} 17:00–18:00")
+        );
+    });
+
+    ui(cx, window, |window, cx| {
+        window.click(("p-start", 3usize), cx)
+    });
+    assert_eq!(start(cx), None);
+    assert_eq!(start_shown(cx), (String::new(), String::new()));
 }
 
 /// 上のバーの配色のボタンで、画面の色がその場で変わり、選択が保存される。

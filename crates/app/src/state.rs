@@ -97,6 +97,13 @@ pub enum SubModal {
     Scene,
 }
 
+/// 詳細で日付と時刻を入れる 2 つの項目。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum When {
+    Start,
+    Due,
+}
+
 /// 詳細パネルで編集中の項目。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Editing {
@@ -147,6 +154,7 @@ pub struct Inputs {
     pub title: Entity<InputState>,
     pub subtask: Entity<InputState>,
     pub start: Entity<InputState>,
+    pub start_time: Entity<InputState>,
     pub due: Entity<InputState>,
     pub due_time: Entity<InputState>,
     pub category: Entity<InputState>,
@@ -350,7 +358,8 @@ impl MainView {
             name: input(window, cx, "名前"),
             title: input(window, cx, "タイトル"),
             subtask: input(window, cx, "サブタスクを追加…"),
-            start: input(window, cx, "日付 時刻"),
+            start: input(window, cx, "日付"),
+            start_time: input(window, cx, "時刻"),
             due: input(window, cx, "日付"),
             due_time: input(window, cx, "時刻"),
             category: input(window, cx, "カテゴリを追加して Enter"),
@@ -478,35 +487,33 @@ impl MainView {
             },
         ));
         on_enter!(subtask, submit_subtask);
-        on_enter!(start, save_start);
-        on_enter!(due, save_due);
-        on_enter!(due_time, save_due_time);
-        // 期限は、書き換えてからほかの場所を押したときにも保存する
-        subs.push(cx.subscribe_in(
-            &inputs.due,
-            window,
-            |this, input, event: &InputEvent, window, cx| {
-                if matches!(event, InputEvent::Blur) {
-                    let due = this.current_due().unwrap_or_default();
-                    if input.read(cx).value().trim() != malakt_core::date_of(&due) {
-                        this.save_due(window, cx);
+        // 開始日と期限は、Enter と、書き換えてからほかの場所を押したときに保存する
+        for (which, time, input) in [
+            (When::Start, false, &inputs.start),
+            (When::Start, true, &inputs.start_time),
+            (When::Due, false, &inputs.due),
+            (When::Due, true, &inputs.due_time),
+        ] {
+            subs.push(cx.subscribe_in(
+                input,
+                window,
+                move |this, input, event: &InputEvent, window, cx| match event {
+                    InputEvent::PressEnter { .. } => this.save_when(which, time, window, cx),
+                    InputEvent::Blur => {
+                        let saved = this.current_when(which).unwrap_or_default();
+                        let saved = if time {
+                            malakt_core::time_of(&saved).unwrap_or_default()
+                        } else {
+                            malakt_core::date_of(&saved)
+                        };
+                        if input.read(cx).value().trim() != saved {
+                            this.save_when(which, time, window, cx);
+                        }
                     }
-                }
-            },
-        ));
-        subs.push(cx.subscribe_in(
-            &inputs.due_time,
-            window,
-            |this, input, event: &InputEvent, window, cx| {
-                if matches!(event, InputEvent::Blur) {
-                    let due = this.current_due().unwrap_or_default();
-                    let time = malakt_core::time_of(&due).unwrap_or_default();
-                    if input.read(cx).value().trim() != time {
-                        this.save_due_time(window, cx);
-                    }
-                }
-            },
-        ));
+                    _ => {}
+                },
+            ));
+        }
         on_enter!(category, submit_category);
         subs.push(cx.subscribe_in(
             &inputs.font_search,
@@ -1152,34 +1159,40 @@ impl MainView {
         self.fill_when_inputs(window, cx);
     }
 
-    /// 詳細の開始日と期限の入力欄に、保存されている値を入れる。期限は日付と時刻の欄に分ける。
-    fn fill_when_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(detail) = &self.detail else { return };
-        let start = detail.task.start.clone().unwrap_or_default();
-        let due = detail.task.due.clone().unwrap_or_default();
-        let date = malakt_core::date_of(&due).to_owned();
-        let time = malakt_core::time_of(&due).unwrap_or_default().to_owned();
-        for (input, value) in [
-            (&self.inputs.start, start),
-            (&self.inputs.due, date),
-            (&self.inputs.due_time, time),
+    /// 詳細の開始日と期限の、日付の欄と時刻の欄と、そこに入る保存されている値。
+    fn when_inputs(&self) -> Vec<(Entity<InputState>, String)> {
+        let Some(detail) = &self.detail else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for (value, date, time) in [
+            (
+                &detail.task.start,
+                &self.inputs.start,
+                &self.inputs.start_time,
+            ),
+            (&detail.task.due, &self.inputs.due, &self.inputs.due_time),
         ] {
+            let value = value.as_deref().unwrap_or_default();
+            out.push((date.clone(), malakt_core::date_of(value).to_owned()));
+            out.push((
+                time.clone(),
+                malakt_core::time_of(value).unwrap_or_default().to_owned(),
+            ));
+        }
+        out
+    }
+
+    /// 詳細の開始日と期限の入力欄に、保存されている値を入れる。
+    fn fill_when_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        for (input, value) in self.when_inputs() {
             input.update(cx, |s, cx| s.set_value(value, window, cx));
         }
     }
 
     /// 詳細の開始日と期限の入力欄を、タスクの今の値に合わせる。入力している途中の欄は変えない。
     fn sync_dates(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(detail) = &self.detail else { return };
-        let start = detail.task.start.clone().unwrap_or_default();
-        let due = detail.task.due.clone().unwrap_or_default();
-        let date = malakt_core::date_of(&due).to_owned();
-        let time = malakt_core::time_of(&due).unwrap_or_default().to_owned();
-        for (input, value) in [
-            (self.inputs.start.clone(), start),
-            (self.inputs.due.clone(), date),
-            (self.inputs.due_time.clone(), time),
-        ] {
+        for (input, value) in self.when_inputs() {
             input.update(cx, |s, cx| {
                 if s.value().as_ref() != value && !s.focus_handle(cx).is_focused(window) {
                     s.set_value(value, window, cx);
@@ -1188,9 +1201,13 @@ impl MainView {
         }
     }
 
-    /// 詳細のタスクの、いまの期限。
-    fn current_due(&self) -> Option<String> {
-        self.detail.as_ref()?.task.due.clone()
+    /// 詳細のタスクの、いまの開始日か期限。
+    fn current_when(&self, which: When) -> Option<String> {
+        let task = &self.detail.as_ref()?.task;
+        match which {
+            When::Start => task.start.clone(),
+            When::Due => task.due.clone(),
+        }
     }
 
     pub fn close_panel(&mut self, cx: &mut Context<Self>) {
@@ -1278,67 +1295,76 @@ impl MainView {
         }
     }
 
-    pub fn save_start(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let text = self.inputs.start.read(cx).value().to_string();
-        let base = self.detail.as_ref().and_then(|d| d.task.start.clone());
-        let value = when::resolve(&text, &view::now(), base.as_deref());
-        self.edit_task(cx, |d| d.start = Some(value));
-        self.after_when_edit(window, cx);
-    }
-
-    /// 期限の日付の欄を保存する。「11/27」「明日」「来週金曜 14時」のような書き方も読む。
-    /// 日付だけを書いたときは、時刻の欄の時刻を残す。
-    pub fn save_due(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let text = self.inputs.due.read(cx).value().to_string();
-        let current = self.current_due();
-        let mut value = when::resolve(&text, &view::now(), None);
-        if let Some(time) = current.as_deref().and_then(malakt_core::time_of) {
-            if malakt_core::is_valid_date(&value) {
-                value = format!("{value} {time}");
-            }
-        }
-        self.edit_task(cx, |d| d.due = Some(value));
-        self.after_when_edit(window, cx);
-    }
-
-    /// 期限の時刻の欄を保存する。空にすると日付だけの期限に戻る。期限がなければ今日の時刻にする。
-    pub fn save_due_time(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let text = self.inputs.due_time.read(cx).value().trim().to_owned();
-        let current = self.current_due();
-        let value = if text.is_empty() {
-            current
-                .as_deref()
-                .map(|due| malakt_core::date_of(due).to_owned())
-        } else {
-            Some(when::resolve(&text, &view::now(), current.as_deref()))
+    /// 開始日か期限の、日付の欄（`time` なら時刻の欄）を保存する。
+    /// 「11/27」「明日」「来週金曜 14時」「14時」のような書き方も読む。
+    ///
+    /// - 日付の欄に日付だけを書いたときは、時刻の欄の時刻を残す
+    /// - 時刻の欄を空にすると、日付だけに戻る。日付がまだなければ今日の時刻にする
+    pub fn save_when(
+        &mut self,
+        which: When,
+        time: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (date_input, time_input) = match which {
+            When::Start => (&self.inputs.start, &self.inputs.start_time),
+            When::Due => (&self.inputs.due, &self.inputs.due_time),
         };
-        self.edit_task(cx, |d| d.due = value);
-        self.after_when_edit(window, cx);
+        let current = self.current_when(which);
+        let now = view::now();
+        let value = if time {
+            let text = time_input.read(cx).value().trim().to_owned();
+            if text.is_empty() {
+                current
+                    .as_deref()
+                    .map(|v| malakt_core::date_of(v).to_owned())
+            } else {
+                Some(when::resolve(&text, &now, current.as_deref()))
+            }
+        } else {
+            let text = date_input.read(cx).value().to_string();
+            let value = when::resolve(&text, &now, None);
+            Some(if malakt_core::is_valid_date(&value) {
+                view::with_time_of(&value, current.as_deref())
+            } else {
+                value
+            })
+        };
+        self.set_when(which, value, window, cx);
     }
 
-    /// 保存できたら、入力欄を保存した形（`2026-11-27` と `14:00`）に直す。
+    /// 開始日か期限を今日から `days` 日後にする。時刻は残す。`None` ならなくす。
+    pub fn set_when_in(
+        &mut self,
+        which: When,
+        days: Option<i64>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let current = self.current_when(which);
+        let value =
+            days.map(|d| view::with_time_of(&view::add_days(&self.today, d), current.as_deref()));
+        self.set_when(which, value, window, cx);
+    }
+
+    /// 開始日か期限を保存する。保存できたら、入力欄を保存した形（`2026-11-27` と `14:00`）に直す。
     /// 保存できなかったときは、書いたものを残す。
-    fn after_when_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn set_when(
+        &mut self,
+        which: When,
+        value: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.edit_task(cx, |d| match which {
+            When::Start => d.start = value,
+            When::Due => d.due = value,
+        });
         if self.error.is_none() {
             self.reload(cx);
             self.fill_when_inputs(window, cx);
         }
-    }
-
-    /// 期限を今日から `days` 日後にする。時刻は残す。`None` なら期限をなくす。
-    pub fn set_due_in(&mut self, days: Option<i64>, window: &mut Window, cx: &mut Context<Self>) {
-        let current = self.current_due();
-        let value =
-            days.map(|d| view::with_time_of(&view::add_days(&self.today, d), current.as_deref()));
-        self.edit_task(cx, |d| d.due = value);
-        self.after_when_edit(window, cx);
-    }
-
-    pub fn clear_start(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.inputs
-            .start
-            .update(cx, |s, cx| s.set_value("", window, cx));
-        self.edit_task(cx, |d| d.start = None);
     }
 
     pub fn toggle_assignee(&mut self, person_id: &str, cx: &mut Context<Self>) {

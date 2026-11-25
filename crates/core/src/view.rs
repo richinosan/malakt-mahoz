@@ -436,6 +436,21 @@ pub fn format_date(when: &str, today: &str) -> String {
     }
 }
 
+/// 一覧での期限の表示。開始と期限が同じ日で、どちらにも時刻があれば
+/// 「12/2 17:00–18:00」のように時間帯で出す。それ以外は期限だけ。
+pub fn format_span(start: Option<&str>, due: &str, today: &str) -> String {
+    let text = format_date(due, today);
+    match start.map(|s| (crate::date_of(s), crate::time_of(s))) {
+        Some((day, Some(from)))
+            if day == crate::date_of(due) && crate::time_of(due).is_some_and(|to| from < to) =>
+        {
+            let (day, to) = text.split_once(' ').unwrap_or((&text, ""));
+            format!("{day} {from}–{to}")
+        }
+        _ => text,
+    }
+}
+
 /// 「3 分前」のような相対表示。7 日以上前は日付にする。
 pub fn format_relative(at_ms: i64, now_ms: i64) -> String {
     let secs = (now_ms - at_ms).max(0) / 1000;
@@ -865,6 +880,32 @@ mod tests {
         assert_eq!(ids(&tasks, &reversed, None), ["e", "a", "b", "c", "d"]);
         assert_eq!(Sort::ALL.map(Sort::label).len(), 7);
         assert_eq!(Sort::Due.label(), "期限が近い順");
+    }
+
+    #[test]
+    fn same_day_start_and_due_show_as_a_span() {
+        let today = "2026-11-25";
+        let span = |start: Option<&str>, due: &str| format_span(start, due, today);
+        assert_eq!(
+            span(Some("2026-12-02 17:00"), "2026-12-02 18:00"),
+            "12/2 17:00–18:00"
+        );
+        assert_eq!(
+            span(Some("2027-01-05 09:00"), "2027-01-05 10:30"),
+            "2027/1/5 09:00–10:30"
+        );
+        // 日が違う、時刻がない、開始が期限より後のときは期限だけ
+        assert_eq!(
+            span(Some("2026-12-01 17:00"), "2026-12-02 18:00"),
+            "12/2 18:00"
+        );
+        assert_eq!(span(Some("2026-12-02"), "2026-12-02 18:00"), "12/2 18:00");
+        assert_eq!(span(Some("2026-12-02 17:00"), "2026-12-02"), "12/2");
+        assert_eq!(
+            span(Some("2026-12-02 19:00"), "2026-12-02 18:00"),
+            "12/2 18:00"
+        );
+        assert_eq!(span(None, "2026-12-02 18:00"), "12/2 18:00");
     }
 
     #[test]
