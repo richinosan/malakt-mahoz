@@ -3967,7 +3967,34 @@ fn sub_workspaces_fold_inside_the_task_list(cx: &mut TestAppContext) {
             "0:予算を決める"
         ]
     );
-    // 見出しを選んでいる間、Delete はタスクを消さない
+    // 見出しから Shift+↓ を押すと、すぐ下のタスクまでを選ぶ。いちばん上のタスクへは飛ばない
+    key(cx, "shift-down");
+    cx.update(|cx| {
+        let v = view.read(cx);
+        let picked: Vec<_> = v
+            .tasks
+            .iter()
+            .filter(|t| v.selected.contains(&t.id))
+            .map(|t| t.title.clone())
+            .collect();
+        assert_eq!(picked, ["下見に行く"]);
+    });
+    // 見出しへ戻って Shift+↑ を押しても、上にタスクがないので何も変わらない
+    key(cx, "up");
+    cx.update(|cx| assert_eq!(view.read(cx).cursor.as_deref(), Some(setup.id.as_str())));
+    key(cx, "shift-up");
+    cx.update(|cx| {
+        let v = view.read(cx);
+        assert_eq!(v.cursor.as_deref(), Some(setup.id.as_str()));
+        assert_eq!(v.selected.len(), 1);
+    });
+    key(cx, "escape");
+    cx.update(|cx| {
+        view.update(cx, |v, cx| {
+            v.selected.clear();
+            cx.notify();
+        })
+    });
     key(cx, "delete");
     cx.update(|cx| assert_eq!(view.read(cx).modal, Modal::None));
     // 上の見出しを閉じると、中の見出しを選んでいたのは外れる
