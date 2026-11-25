@@ -13,7 +13,7 @@ use gpui_kit::*;
 use malakt_core::bulk::{self, BulkOp, ListMode};
 use malakt_core::notice::Notice;
 use malakt_core::ticket::IssuedTicket;
-use malakt_core::view::{self, ListQuery};
+use malakt_core::view::{self, ListQuery, ListRow};
 use malakt_core::when;
 use malakt_core::{
     archive, lock, mention, Anchor, Attachment, Change, Comment, DueRule, Id, NewComment, Person,
@@ -165,7 +165,8 @@ pub struct MainView {
     pub focus: FocusHandle,
     pub nav: Nav,
     pub collapsed: HashSet<Id>,
-    pub include_descendants: bool,
+    /// タスクの一覧で開いているサブワークスペース。
+    pub list_open: HashSet<Id>,
     /// 追加したばかりで、詳細で最初のタイトルを書いているタスク。
     pub naming_task: Option<Id>,
     /// 担当者の一覧で名前を書いている担当者。
@@ -182,6 +183,11 @@ pub struct MainView {
     pub categories: Vec<String>,
     pub tasks: Rc<Vec<Todo>>,
     pub visible: Rc<Vec<usize>>,
+    /// 一覧の行（タスクと、サブワークスペースの見出し）と、`visible` の各タスクを出しているワークスペース。
+    pub rows: Rc<Vec<ListRow>>,
+    pub homes: Vec<Option<usize>>,
+    /// 行ごとの高さと、その合計。表のときと、カードのとき。
+    pub row_sizes: [(Rc<Vec<Size<Pixels>>>, Pixels); 2],
     pub counts: (usize, usize),
     pub due: Rc<Vec<Todo>>,
     pub due_mine: bool,
@@ -246,7 +252,7 @@ pub struct MainView {
     /// 幅を変えている列と、押し始めた位置・そのときの幅。
     pub column_resize: Option<(Column, f32, f32)>,
     /// タスクの一覧と、期限が近いタスクの一覧のスクロール位置。
-    pub list_scroll: UniformListScrollHandle,
+    pub list_scroll: gpui_kit::base::VirtualListScrollHandle,
     pub due_scroll: UniformListScrollHandle,
     /// 低いペインで、一覧を画面ごとスクロールする位置
     pub page_scroll: gpui_kit::ScrollHandle,
@@ -571,7 +577,7 @@ impl MainView {
             focus: cx.focus_handle(),
             nav: Nav::Home,
             collapsed: HashSet::new(),
-            include_descendants: true,
+            list_open: HashSet::new(),
             icon_category: None,
             workspace_naming: None,
             person_naming: None,
@@ -584,6 +590,9 @@ impl MainView {
             categories: Vec::new(),
             tasks: Rc::new(Vec::new()),
             visible: Rc::new(Vec::new()),
+            rows: Rc::new(Vec::new()),
+            homes: Vec::new(),
+            row_sizes: Default::default(),
             counts: (0, 0),
             due: Rc::new(Vec::new()),
             due_mine: false,
@@ -629,7 +638,7 @@ impl MainView {
             list_width: f32::INFINITY,
             column_resize: None,
             column_menu: None,
-            list_scroll: UniformListScrollHandle::new(),
+            list_scroll: gpui_kit::base::VirtualListScrollHandle::new(),
             due_scroll: UniformListScrollHandle::new(),
             page_scroll: gpui_kit::ScrollHandle::new(),
             column_drag: None,
@@ -761,7 +770,8 @@ impl MainView {
         self.notices = store.notices(NOTICES_SHOWN)?;
         self.unread_notices = store.unread_notice_count()?;
         let filter = TaskFilter {
-            include_descendants: self.include_descendants,
+            // サブワークスペースのタスクは、一覧で見出しを開くと出る
+            include_descendants: true,
             ..Default::default()
         };
         self.tasks = Rc::new(match &self.nav {
@@ -817,11 +827,29 @@ impl MainView {
     /// 絞り込みと並べ替えだけをやり直す（データベースは読まない）。
     pub fn refilter(&mut self) {
         self.counts = view::counts(&self.tasks);
-        self.visible = Rc::new(view::apply(
-            &self.tasks,
-            &self.query,
-            self.self_id.as_deref(),
-        ));
+        let hits = view::apply(&self.tasks, &self.query, self.self_id.as_deref());
+        let outline = match &self.nav {
+            // 絞り込んでいる間は、条件に合うタスクがないサブワークスペースを出さない
+            Nav::Workspace(id) => view::outline(
+                &self.tasks,
+                &hits,
+                &self.workspaces,
+                id,
+                &self.list_open,
+                self.query.active_count() > 0,
+            ),
+            _ => view::Outline::flat(hits),
+        };
+        self.visible = Rc::new(outline.visible);
+        self.rows = Rc::new(outline.rows);
+        self.homes = outline.homes;
+        self.row_sizes = [true, false].map(|table| crate::render::row_sizes(&self.rows, table));
+        // 見出しがなくなったら、キーで選んでいる行を外す
+        if let Some(cursor) = &self.cursor {
+            if self.workspaces.iter().any(|w| &w.id == cursor) && self.cursor_folder().is_none() {
+                self.cursor = None;
+            }
+        }
         // 見えなくなったタスクは、選択から外す（見えていないものをまとめて変えないように）
         let shown: HashSet<&str> = self
             .visible
@@ -895,6 +923,29 @@ impl MainView {
             self.notice = None;
         }
         self.reload(cx);
+    }
+
+    /// タスクの一覧で、サブワークスペースの見出しを開く・閉じる。
+    pub fn toggle_list_folder(&mut self, id: &str, cx: &mut Context<Self>) {
+        if !self.list_open.remove(id) {
+            self.list_open.insert(id.to_owned());
+        }
+        self.refilter();
+        cx.notify();
+    }
+
+    /// キーで選んでいる行がサブワークスペースの見出しなら、その行の位置とワークスペース。
+    pub fn cursor_folder(&self) -> Option<(usize, &Workspace)> {
+        let cursor = self.cursor.as_ref()?;
+        self.rows
+            .iter()
+            .enumerate()
+            .find_map(|(at, row)| match *row {
+                ListRow::Folder { workspace, .. } if &self.workspaces[workspace].id == cursor => {
+                    Some((at, &self.workspaces[workspace]))
+                }
+                _ => None,
+            })
     }
 
     pub fn toggle_collapsed(&mut self, id: &str, cx: &mut Context<Self>) {
@@ -1646,8 +1697,17 @@ impl MainView {
                 }
                 let moved = order.remove(from);
                 order.insert(to, moved);
+                // ほかのサブワークスペースの行へ落としたら、そのワークスペースへ移す
+                let home = |ix: usize| self.homes[ix].map(|w| self.workspaces[w].id.clone());
+                let target = home(to).filter(|_| home(from) != home(to));
+                let done = self.write(cx, |s| {
+                    if let Some(workspace) = &target {
+                        s.move_task(&drag.id, Some(workspace))?;
+                    }
+                    s.set_task_order(&order)
+                });
                 // 並べ替えた結果が見えるように、手動の順で出す
-                if self.write(cx, |s| s.set_task_order(&order)).is_some() {
+                if done.is_some() {
                     self.query.sort = view::Sort::Manual;
                     self.query.descending = false;
                     self.reload(cx);
