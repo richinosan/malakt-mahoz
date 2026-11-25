@@ -18,7 +18,7 @@ use gpui_kit::component::{ActiveTheme, Icon, IconName, Sizable};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use malakt_core::bulk::{BulkOp, ListMode};
-use malakt_core::view::{self, AssigneeFilter, DueState, Priority as Prio, Sort, Tab};
+use malakt_core::view::{self, AssigneeFilter, DueState, ListRow, Priority as Prio, Sort, Tab};
 use malakt_core::{Comment, DueRule, Role as Raci, Roles, Status, Task as Todo, WORKSPACE_COLORS};
 
 use crate::ai::ShellPlace;
@@ -50,6 +50,28 @@ const HEADER_HEIGHT: Pixels = px(84.);
 const LIST_MIN: f32 = 320.;
 const ROW_HEIGHT: Pixels = px(60.);
 const CARD_HEIGHT: Pixels = px(96.);
+/// 一覧で、サブワークスペースの中の行を 1 段下げる幅。
+const LIST_INDENT: Pixels = px(24.);
+/// 一覧の、サブワークスペースの見出しの行の高さ。
+const FOLDER_HEIGHT: Pixels = px(44.);
+
+/// 一覧の行ごとの高さと、その合計。
+pub(crate) fn row_sizes(rows: &[ListRow], table: bool) -> (std::rc::Rc<Vec<Size<Pixels>>>, Pixels) {
+    let task = if table { ROW_HEIGHT } else { CARD_HEIGHT };
+    let mut total = px(0.);
+    let sizes = rows
+        .iter()
+        .map(|row| {
+            let height = match row {
+                ListRow::Task { .. } => task,
+                ListRow::Folder { .. } => FOLDER_HEIGHT,
+            };
+            total += height;
+            size(px(0.), height)
+        })
+        .collect();
+    (std::rc::Rc::new(sizes), total)
+}
 
 /// 枠つきのボタン。乗せると淡い金、押している間ははっきり濃くなる。
 trait Framed {
@@ -1793,7 +1815,6 @@ impl MainView {
     fn render_list(&self, table: bool, cx: &mut Context<Self>) -> Div {
         let theme = cx.theme().clone();
         let active = self.query.active_count();
-        let visible = self.visible.len();
         let tab = |id: &'static str,
                    icon: &'static str,
                    label: &'static str,
@@ -1832,12 +1853,8 @@ impl MainView {
                 }))
                 .test_support()
         };
+        let visible = self.rows.len();
         let workspace_id = self.current_workspace().map(str::to_owned);
-        let has_children = workspace_id.as_ref().is_some_and(|id| {
-            self.workspaces
-                .iter()
-                .any(|w| w.parent_id.as_ref() == Some(id))
-        });
 
         let mut header = row().flex_none().gap_2().flex_wrap();
         let date = workspace_id.as_ref().and_then(|id| {
@@ -1847,7 +1864,7 @@ impl MainView {
                 .and_then(|w| w.date.clone())
         });
         header = header.child(
-            // 基準日とチェックボックスが入らない幅では、右のボタンを次の行へ送る
+            // 基準日が入らない幅では、右のボタンを次の行へ送る
             row()
                 .flex_1()
                 .flex_shrink_0()
@@ -1857,20 +1874,6 @@ impl MainView {
                 .when_some(date, |d, date| {
                     d.child(div().text_color(theme.muted_foreground).child("基準日"))
                         .child(view::format_date(&date, &self.today))
-                })
-                .when(has_children, |d| {
-                    d.child(
-                        Checkbox::new("include-descendants")
-                            // 見た目はそのままで、押せる範囲を上下に広げる
-                            .py(px(4.))
-                            .my(px(-4.))
-                            .label("サブワークスペースも含める")
-                            .checked(self.include_descendants)
-                            .on_click(cx.listener(|this, checked: &bool, _, cx| {
-                                this.include_descendants = *checked;
-                                this.reload(cx);
-                            })),
-                    )
                 }),
         );
         if let Some(id) = workspace_id.clone() {
@@ -1953,21 +1956,34 @@ impl MainView {
                     )
                 })
         } else {
+            let (sizes, height) = self.row_sizes[usize::from(!table)].clone();
             // 件数が少ないときは、表を中身の高さで終える
             col()
                 .relative()
-                .h(if table { ROW_HEIGHT } else { CARD_HEIGHT } * visible as f32)
+                .h(height)
                 // 低いペインでも、1 行は見えるようにする。入りきらない分は画面ごとスクロールする
-                .min_h(if table { ROW_HEIGHT } else { CARD_HEIGHT })
+                .min_h(height.min(if table { ROW_HEIGHT } else { CARD_HEIGHT }))
                 .child(
-                    uniform_list(
+                    gpui_kit::base::v_virtual_list(
+                        cx.entity(),
                         "task-list",
-                        visible,
-                        cx.processor(move |this, range: Range<usize>, _, cx| {
+                        sizes,
+                        move |this, range: Range<usize>, _, cx| {
                             range
-                                .map(|ix| this.render_task_row(ix, table, cx))
+                                .map(|at| match this.rows[at] {
+                                    ListRow::Task { index, depth } => {
+                                        this.render_task_row(index, depth, table, cx)
+                                    }
+                                    ListRow::Folder {
+                                        workspace,
+                                        depth,
+                                        count,
+                                        open,
+                                    } => this
+                                        .render_folder_row(at, workspace, depth, count, open, cx),
+                                })
                                 .collect::<Vec<_>>()
-                        }),
+                        },
                     )
                     .track_scroll(&self.list_scroll)
                     .flex_1(),
@@ -2356,7 +2372,141 @@ impl MainView {
         options
     }
 
-    fn render_task_row(&self, ix: usize, table: bool, cx: &mut Context<Self>) -> AnyElement {
+    /// サブワークスペースの見出しの行。左の矢印で開く・閉じる。行を押すと、そのワークスペースへ移る。
+    fn render_folder_row(
+        &self,
+        at: usize,
+        workspace: usize,
+        depth: usize,
+        count: usize,
+        open: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = cx.theme().clone();
+        let ws = &self.workspaces[workspace];
+        let cursor = self.cursor.as_deref() == Some(ws.id.as_str());
+        let (toggle_id, go_id, menu_id) = (ws.id.clone(), ws.id.clone(), ws.id.clone());
+        let view = cx.entity().downgrade();
+        let el = row()
+            .id(("folder", at))
+            .w_full()
+            .h(FOLDER_HEIGHT)
+            .relative()
+            .px_3()
+            .gap_3()
+            .border_b_1()
+            .border_color(theme.border)
+            .cursor_pointer()
+            .when(cursor, |d| {
+                d.bg(theme.accent.opacity(0.4)).child(
+                    div()
+                        .id(("folder-cursor", at))
+                        .absolute()
+                        .left_0()
+                        .top_0()
+                        .bottom_0()
+                        .w(px(3.))
+                        .bg(theme.primary)
+                        .test_support(),
+                )
+            })
+            .when(!cursor, |d| d.hover(|s| s.bg(theme.muted.opacity(0.4))))
+            .active(|s| s.bg(theme.accent.opacity(0.6)))
+            // 矢印は、タスクの行のチェックボックスの列に置く
+            .child(
+                row()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_2()
+                    .pl(LIST_INDENT * depth as f32)
+                    .child(
+                        div()
+                            .id(("folder-toggle", at))
+                            .flex_none()
+                            .size_6()
+                            .mr_1()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_md()
+                            .text_color(theme.muted_foreground)
+                            .hover(|s| s.bg(theme.accent).text_color(theme.foreground))
+                            .active(|s| s.bg(theme.primary.opacity(0.4)))
+                            .child(
+                                app_icon(if open {
+                                    "chevron-down"
+                                } else {
+                                    "chevron-right"
+                                })
+                                .small(),
+                            )
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                cx.stop_propagation();
+                                this.toggle_list_folder(&toggle_id, cx);
+                            }))
+                            .test_support(),
+                    )
+                    .child(div().flex_none().child(workspace_icon(
+                        ws.icon.as_deref(),
+                        ws.color.as_deref(),
+                        NAV_ICON_SIZE,
+                        cx,
+                    )))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_sm()
+                            .font_weight(FontWeight::BOLD)
+                            .child(ws.name.clone()),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_sm()
+                            .text_color(theme.muted_foreground)
+                            .child(count.to_string()),
+                    ),
+            )
+            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                // ドラッグの終わりは、クリックにしない
+                if this.task_drag.as_ref().is_some_and(|d| d.moved) {
+                    return;
+                }
+                this.go_here(Nav::Workspace(go_id.clone()), cx);
+            }));
+        // ドラッグ中のタスクを落とすと、このワークスペースへ移す
+        self.drop_zone(el, DropTarget::Workspace(Some(ws.id.clone())), cx)
+            .rounded_none()
+            .test_support()
+            .context_menu(move |menu, _, _| {
+                let item =
+                    |label: &'static str, run: fn(&mut MainView, Id, &mut Context<MainView>)| {
+                        let view = view.clone();
+                        let id = menu_id.clone();
+                        PopupMenuItem::new(label).on_click(move |_, _, cx| {
+                            // ウィンドウを閉じたあとなら、反映する先がない
+                            let _ = view.update(cx, |this, cx| run(this, id.clone(), cx));
+                        })
+                    };
+                menu.item(item("開く", |this, id, cx| {
+                    this.go_here(Nav::Workspace(id), cx)
+                }))
+                .item(item(
+                    if open { "折りたたむ" } else { "展開" },
+                    |this, id, cx| this.toggle_list_folder(&id, cx),
+                ))
+            })
+            .into_any_element()
+    }
+
+    fn render_task_row(
+        &self,
+        ix: usize,
+        depth: usize,
+        table: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let theme = cx.theme().clone();
         let task = &self.tasks[self.visible[ix]];
         let id = task.id.clone();
@@ -2435,7 +2585,8 @@ impl MainView {
                 .flex_1()
                 .min_w_0()
                 .gap_1()
-                .when(task.parent_id.is_some(), |d| d.pl_4())
+                .pl(LIST_INDENT * depth as f32
+                    + px(if task.parent_id.is_some() { 16. } else { 0. }))
                 .child(
                     div()
                         .id(("title", ix))

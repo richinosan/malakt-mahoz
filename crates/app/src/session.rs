@@ -25,7 +25,8 @@ pub struct WindowState {
     pub category: Option<String>,
     pub sort: String,
     pub descending: bool,
-    pub include_descendants: bool,
+    /// タスクの一覧で開いているサブワークスペース。
+    pub list_open: Vec<String>,
     pub due_mine: bool,
     pub panel: Option<String>,
     pub collapsed: Vec<String>,
@@ -188,7 +189,11 @@ impl MainView {
             category: q.category.clone(),
             sort: name(q.sort),
             descending: q.descending,
-            include_descendants: self.include_descendants,
+            list_open: {
+                let mut ids: Vec<String> = self.list_open.iter().cloned().collect();
+                ids.sort();
+                ids
+            },
             due_mine: self.due_mine,
             panel: self.panel.clone(),
             collapsed: {
@@ -234,7 +239,7 @@ impl MainView {
         q.category = state.category.clone();
         q.sort = named(&Sort::ALL, &state.sort).unwrap_or_default();
         q.descending = state.descending;
-        self.include_descendants = state.include_descendants;
+        self.list_open = state.list_open.iter().cloned().collect();
         self.due_mine = state.due_mine;
         self.sidebar_hidden = state.sidebar_hidden;
         self.collapsed = state.collapsed.iter().cloned().collect();

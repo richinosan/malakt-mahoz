@@ -219,8 +219,17 @@ fn nested_workspaces_and_filing_later(cx: &mut TestAppContext) {
     assert_eq!(inside.len(), 1);
     assert_eq!(inside[0].title, "下見に行く");
 
-    // 親を開くと、子のタスクも見える
+    // 親を開くと、子は見出しの行で出る。見出しを開くと、子のタスクも見える
     cx.update(|cx| view.update(cx, |v, cx| v.go(Nav::Workspace(parent.id.clone()), cx)));
+    cx.update(|cx| {
+        assert_eq!(
+            (view.read(cx).rows.len(), view.read(cx).visible.len()),
+            (1, 0)
+        )
+    });
+    ui(cx, window, |window, cx| {
+        window.click(("folder-toggle", 0usize), cx)
+    });
     cx.update(|cx| assert_eq!(view.read(cx).visible.len(), 1));
 
     // 未所属のタスクを、あとから子のワークスペースに入れる
@@ -3380,7 +3389,7 @@ fn a_bad_download_is_reported_but_being_offline_is_not(cx: &mut TestAppContext) 
     assert!(!has(cx, window, "update-now"));
 }
 
-/// どの幅でも、一覧の上のチェックボックスとボタンは重ならず、タイトルは読める幅で残る。
+/// どの幅でも、一覧の上のボタンは重ならず、タイトルは読める幅で残る。サブワークスペースの見出しも出る。
 /// AI チャットを開いても、列を広げても同じ。
 #[gpui_kit::test]
 fn narrow_widths_keep_the_title_and_never_overlap(cx: &mut TestAppContext) {
@@ -3432,26 +3441,38 @@ fn narrow_widths_keep_the_title_and_never_overlap(cx: &mut TestAppContext) {
             .unwrap();
             let case = format!("幅 {width}、AI チャット {ai}、列を広げた {widened}");
             ui(cx, window, |window, _| {
-                // チェックボックスと右のボタンは重ならない
-                let check = window.find("include-descendants").bounds();
+                // 右のボタンは、たがいに重ならない
+                let mut right = px(0.);
                 for id in header {
                     let button = window.find(id).bounds();
-                    assert!(
-                        !check.intersects(&button),
-                        "{case}: 「サブワークスペースも含める」と {id} が重なる"
-                    );
                     assert!(button.left() >= px(0.), "{case}: {id} が左にはみ出す");
+                    if button.left() >= right {
+                        right = button.right();
+                    } else {
+                        // 次の行へ送ったボタンは、左から並び直す
+                        assert!(
+                            button.left() < px(200.) || button.left() >= right,
+                            "{case}: {id} が重なる"
+                        );
+                        right = button.right();
+                    }
                 }
                 // AI チャットがウィンドウを覆う幅では、一覧は見えない
                 let chat = window.try_find("ai-resize").map(|e| e.bounds().left());
                 if chat.is_some_and(|left| left < px(200.)) {
                     return;
                 }
+                // サブワークスペースの見出しは、表でもカードでもタスクの上に出る
+                let folder = window
+                    .try_find(("folder", 0usize))
+                    .unwrap_or_else(|| panic!("{case}: サブワークスペースの見出しが出ていない"))
+                    .bounds();
                 // タイトルは、表でもカードでも読める幅がある。重ねた AI チャットにも隠れない
                 let title = window
                     .try_find(("title", 0usize))
                     .unwrap_or_else(|| panic!("{case}: タイトルが出ていない"))
                     .bounds();
+                assert!(folder.bottom() <= title.top(), "{case}");
                 let shown = chat.map_or(title.right(), |left| left.min(title.right()));
                 assert!(
                     shown - title.left() >= px(TITLE_MIN * scale * 0.6),
@@ -3911,6 +3932,274 @@ fn undo_redo_and_paste_work_with_keys(cx: &mut TestAppContext) {
     ui(cx, window, |window, cx| window.input("一", cx));
     key(cx, "secondary-z");
     assert_eq!(all_tasks(cx).len(), 3);
+}
+
+/// ワークスペースの一覧に、サブワークスペースが見出しの行として入る。見出しは開く・閉じるができ、
+/// 開くと中のタスクと、さらに下のサブワークスペースが出る。
+#[gpui_kit::test]
+fn sub_workspaces_fold_inside_the_task_list(cx: &mut TestAppContext) {
+    use gpui_kit::{Modifiers, MouseButton, VisualTestContext};
+    use malakt_core::view::ListRow;
+    start(cx);
+    let (ws, hall, setup, press) = cx.update(|cx| {
+        db::shared(cx).update(cx, |db, _| {
+            let s = &mut db.store;
+            let ws = s.create_workspace(None, "文化祭").unwrap();
+            let hall = s.create_workspace(Some(&ws.id), "会場").unwrap();
+            let setup = s.create_workspace(Some(&hall.id), "設営").unwrap();
+            let press = s.create_workspace(Some(&ws.id), "広報").unwrap();
+            s.add_task_in(Some(&ws.id), "予算を決める").unwrap();
+            s.add_task_in(Some(&hall.id), "下見に行く").unwrap();
+            s.add_task_in(Some(&setup.id), "机を並べる").unwrap();
+            (ws, hall, setup, press)
+        })
+    });
+    let (window, view) = open(cx, win(1600., 1000.));
+    cx.update(|cx| {
+        window
+            .update(cx, |_, window, cx| {
+                view.update(cx, |v, cx| {
+                    v.track_session(window, cx);
+                    v.go(Nav::Workspace(ws.id.clone()), cx)
+                })
+            })
+            .unwrap()
+    });
+    cx.run_until_parked();
+    // 行を「名前 数」（見出し）と「タイトル」（タスク）で書き出す。見出しは、開いていれば v、閉じていれば > を付ける
+    let rows = |cx: &mut TestAppContext| {
+        cx.update(|cx| {
+            let v = view.read(cx);
+            v.rows
+                .iter()
+                .map(|row| match *row {
+                    ListRow::Task { index, depth } => {
+                        format!("{depth}:{}", v.tasks[v.visible[index]].title)
+                    }
+                    ListRow::Folder {
+                        workspace,
+                        depth,
+                        count,
+                        open,
+                    } => format!(
+                        "{depth}:{}{} {count}",
+                        if open { 'v' } else { '>' },
+                        v.workspaces[workspace].name
+                    ),
+                })
+                .collect::<Vec<_>>()
+        })
+    };
+    let click = |cx: &mut TestAppContext, id: gpui_kit::ElementId| {
+        ui(cx, window, |window, cx| window.click(id, cx))
+    };
+    let left = |cx: &mut TestAppContext, id: gpui_kit::ElementId| {
+        let mut at = px(0.);
+        ui(cx, window, |window, _| at = window.find(id).bounds().left());
+        at
+    };
+
+    // 最初は、見出しだけが閉じて並ぶ。数は、さらに下のサブワークスペースの分も含む
+    assert_eq!(rows(cx), ["0:>会場 2", "0:>広報 0", "0:予算を決める"]);
+    assert!(!has(cx, window, "include-descendants"));
+    cx.update(|cx| assert_eq!(view.read(cx).counts, (3, 0)));
+
+    // 矢印を押すと開き、サブのサブも同じように開ける。中の行は 1 段ずつ下がる
+    click(cx, ("folder-toggle", 0usize).into());
+    assert_eq!(
+        rows(cx),
+        [
+            "0:v会場 2",
+            "1:>設営 1",
+            "1:下見に行く",
+            "0:>広報 0",
+            "0:予算を決める"
+        ]
+    );
+    click(cx, ("folder-toggle", 1usize).into());
+    assert_eq!(
+        rows(cx),
+        [
+            "0:v会場 2",
+            "1:v設営 1",
+            "2:机を並べる",
+            "1:下見に行く",
+            "0:>広報 0",
+            "0:予算を決める"
+        ]
+    );
+    let (deep, mid, top) = (
+        left(cx, ("title", 0usize).into()),
+        left(cx, ("title", 1usize).into()),
+        left(cx, ("title", 2usize).into()),
+    );
+    assert!(deep > mid && mid > top, "{deep:?} {mid:?} {top:?}");
+    assert!(
+        left(cx, ("folder-toggle", 1usize).into()) > left(cx, ("folder-toggle", 0usize).into())
+    );
+
+    // 開いた見出しは設定に残る
+    let saved = cx.update(|cx| view.read(cx).session_state(cx));
+    let mut open_ids = vec![hall.id.clone(), setup.id.clone()];
+    open_ids.sort();
+    assert_eq!(saved.list_open, open_ids);
+
+    // 絞り込むと、条件に合うタスクがないサブワークスペースは出ない
+    cx.update(|cx| {
+        view.update(cx, |v, cx| {
+            v.query.q = "机".into();
+            v.refilter();
+            cx.notify();
+        })
+    });
+    assert_eq!(rows(cx), ["0:v会場 1", "1:v設営 1", "2:机を並べる"]);
+    cx.update(|cx| {
+        view.update(cx, |v, cx| {
+            v.query.clear_filters();
+            v.refilter();
+            cx.notify();
+        })
+    });
+
+    // 完了のタブでも、見出しは残る
+    click(cx, "tab-closed".into());
+    assert_eq!(rows(cx), ["0:v会場 0", "1:v設営 0", "0:>広報 0"]);
+    click(cx, "tab-open".into());
+
+    // ↑↓ は見出しにも止まり、Space で開く・閉じる
+    cx.update_window(window, |_, window, cx| {
+        view.read(cx).focus.clone().focus(window, cx)
+    })
+    .unwrap();
+    let key =
+        |cx: &mut TestAppContext, key: &str| ui(cx, window, |window, cx| window.press(key, cx));
+    key(cx, "down");
+    cx.update(|cx| assert_eq!(view.read(cx).cursor.as_deref(), Some(hall.id.as_str())));
+    assert!(has_id(cx, window, ("folder-cursor", 0usize)));
+    key(cx, "down");
+    cx.update(|cx| assert_eq!(view.read(cx).cursor.as_deref(), Some(setup.id.as_str())));
+    key(cx, "space");
+    assert_eq!(
+        rows(cx),
+        [
+            "0:v会場 2",
+            "1:>設営 1",
+            "1:下見に行く",
+            "0:>広報 0",
+            "0:予算を決める"
+        ]
+    );
+    // 見出しを選んでいる間、Delete はタスクを消さない
+    key(cx, "delete");
+    cx.update(|cx| assert_eq!(view.read(cx).modal, Modal::None));
+    // 上の見出しを閉じると、中の見出しを選んでいたのは外れる
+    click(cx, ("folder-toggle", 0usize).into());
+    assert_eq!(rows(cx), ["0:>会場 2", "0:>広報 0", "0:予算を決める"]);
+    cx.update(|cx| assert_eq!(view.read(cx).cursor, None));
+    // Enter は、選んでいる見出しのワークスペースへ移る
+    key(cx, "down");
+    key(cx, "down");
+    key(cx, "enter");
+    cx.update(|cx| assert_eq!(view.read(cx).nav, Nav::Workspace(press.id.clone())));
+    cx.update(|cx| view.update(cx, |v, cx| v.go(Nav::Workspace(ws.id.clone()), cx)));
+
+    // タスクを見出しへドラッグすると、そのサブワークスペースへ移る
+    let center = |cx: &mut TestAppContext, id: gpui_kit::ElementId| {
+        let mut at = Point::default();
+        ui(cx, window, |window, _| {
+            at = window.find(id).bounds().center()
+        });
+        at
+    };
+    let drag = |cx: &mut TestAppContext, from: Point<Pixels>, to: Point<Pixels>| {
+        let mut v = VisualTestContext::from_window(window, cx);
+        v.simulate_mouse_down(from, MouseButton::Left, Modifiers::default());
+        for step in 1..=4 {
+            let t = step as f32 / 4.;
+            let at = Point::new(from.x + (to.x - from.x) * t, from.y + (to.y - from.y) * t);
+            v.simulate_mouse_move(at, MouseButton::Left, Modifiers::default());
+            v.update(|window, cx| window.render_frame(cx));
+        }
+        v.simulate_mouse_up(to, MouseButton::Left, Modifiers::default());
+        v.run_until_parked();
+    };
+    let (from, to) = (
+        center(cx, ("title", 0usize).into()),
+        center(cx, ("folder", 1usize).into()),
+    );
+    drag(cx, from, to);
+    assert_eq!(rows(cx), ["0:>会場 2", "0:>広報 1"]);
+    cx.update(|cx| assert_eq!(view.read(cx).nav, Nav::Workspace(ws.id.clone())));
+
+    // 開いたサブワークスペースのタスクの行へ落とすと、そのサブワークスペースのその位置に入る
+    click(cx, ("folder-toggle", 0usize).into());
+    click(cx, ("folder-toggle", 3usize).into());
+    assert_eq!(
+        rows(cx),
+        [
+            "0:v会場 2",
+            "1:>設営 1",
+            "1:下見に行く",
+            "0:v広報 1",
+            "1:予算を決める"
+        ]
+    );
+    let (from, to) = (
+        center(cx, ("title", 0usize).into()),
+        center(cx, ("title", 1usize).into()),
+    );
+    drag(cx, from, to);
+    assert_eq!(
+        rows(cx),
+        [
+            "0:v会場 1",
+            "1:>設営 1",
+            "0:v広報 2",
+            "1:予算を決める",
+            "1:下見に行く"
+        ]
+    );
+    let moved = all_tasks(cx)
+        .into_iter()
+        .find(|t| t.title == "下見に行く")
+        .unwrap();
+    assert_eq!(moved.workspace_id.as_deref(), Some(press.id.as_str()));
+
+    // 見出しの行を押すと、そのワークスペースへ移る
+    click(cx, ("folder", 0usize).into());
+    cx.update(|cx| assert_eq!(view.read(cx).nav, Nav::Workspace(hall.id.clone())));
+    assert_eq!(rows(cx), ["0:>設営 1"]);
+
+    // 狭い幅のカード表示でも、同じ行が出て同じように開ける
+    let (narrow, small) = open(cx, win(420., 800.));
+    cx.update(|cx| small.update(cx, |v, cx| v.go(Nav::Workspace(hall.id.clone()), cx)));
+    ui(cx, narrow, |window, cx| {
+        window.click(("folder-toggle", 0usize), cx)
+    });
+    ui(cx, narrow, |window, _| {
+        let folder = window.find(("folder", 0usize)).bounds();
+        let title = window.find(("title", 0usize)).bounds();
+        assert!(folder.bottom() <= title.top());
+        assert!(folder.right() <= window.viewport_size().width);
+    });
+    cx.update(|cx| {
+        let v = small.read(cx);
+        assert_eq!(v.visible.len(), 1);
+        assert_eq!(v.tasks[v.visible[0]].title, "机を並べる");
+    });
+}
+
+fn has_id(
+    cx: &mut TestAppContext,
+    window: AnyWindowHandle,
+    id: impl Into<gpui_kit::ElementId>,
+) -> bool {
+    let mut found = false;
+    let id = id.into();
+    ui(cx, window, |window, _| {
+        found = window.try_find(id).is_some()
+    });
+    found
 }
 
 /// 自分の画像を足すと、小さくして保存され、ワークスペースのアイコンになる。足した画像はあとからも選べる。
