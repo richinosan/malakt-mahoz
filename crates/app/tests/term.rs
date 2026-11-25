@@ -184,8 +184,9 @@ fn keys_go_to_the_program_not_to_the_app(cx: &mut TestAppContext) {
     wait_text(cx, "after-2");
     assert!(!has_line(cx, "not-reached"));
     // Esc も、↑ も、プログラムに届く。チャットは閉じず、一覧のカーソルも動かない
-    run(cx, window, "echo first");
-    wait_text(cx, "first\n");
+    // シェルの行の編集（macOS の sh は Esc を自分で使う）に左右されないよう、`cat -v` に届いたバイトを出させる
+    run(cx, window, "echo first; cat -v");
+    wait_text(cx, "cat -v\nfirst");
     ui(cx, window, |window, cx| {
         window.press("escape", cx);
         window.press("up", cx);
@@ -196,9 +197,15 @@ fn keys_go_to_the_program_not_to_the_app(cx: &mut TestAppContext) {
     ui(cx, window, |window, _| {
         assert!(window.find("term-screen").visible());
     });
-    // Esc（^[）と ↑（^[[A）が、そのままシェルに届いている
-    wait_text(cx, "^[^[[A");
-    wait_text(cx, "not found");
+    // Esc（^[）と ↑（^[[A）が、そのままプログラムに届いている
+    wait(cx, "cat が ^[^[[A を出す", |t| {
+        t.active_tab().is_some_and(|tab| {
+            let text = tab.terminal.snapshot().text();
+            text.matches("^[^[[A").count() >= 2
+        })
+    });
+    // Ctrl+D で cat が終わり、シェルに戻る
+    ui(cx, window, |window, cx| window.press("ctrl-d", cx));
     // Ctrl+D でシェルが終わり、タブが閉じて AI のシェルに戻る
     run(cx, window, "echo ok-$((5+5))");
     wait_text(cx, "ok-10");
