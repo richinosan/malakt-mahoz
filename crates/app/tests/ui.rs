@@ -672,9 +672,10 @@ fn assignee_roles_and_per_person_completion(cx: &mut TestAppContext) {
     let id = all_tasks(cx).remove(0).id;
     let load = |cx: &mut TestAppContext| store(cx, |s| s.task(&id).unwrap());
 
-    // 担当を押すと選ぶところが開く。2 人を担当にすると、どちらも R から始まる
+    // 追加行から足したタスクの担当は自分。担当を押すと選ぶところが開く。
+    // もう 1 人を足して 2 人を担当にすると、どちらも R から始まる
+    assert_eq!(load(cx).assignee_ids, std::slice::from_ref(&me));
     ui(cx, window, |window, cx| window.click("p-assignees", cx));
-    ui(cx, window, |window, cx| window.click(("p-as", 0usize), cx));
     ui(cx, window, |window, cx| window.click(("p-as", 1usize), cx));
     let t = load(cx);
     assert_eq!(t.assignee_ids.len(), 2);
@@ -1087,7 +1088,7 @@ fn workspace_defaults_fill_new_tasks(cx: &mut TestAppContext) {
         );
     });
 
-    // ワークスペースの外で足すタスクには、何も入らない
+    // ワークスペースの外で足すタスクには、既定値は入らない。担当は自分
     ui(cx, window, |window, cx| window.click("modal-cancel", cx));
     ui(cx, window, |window, cx| window.click("nav-all", cx));
     set(cx, |v| &v.inputs.quick_add, "メモ");
@@ -1098,7 +1099,13 @@ fn workspace_defaults_fill_new_tasks(cx: &mut TestAppContext) {
         .into_iter()
         .find(|t| t.title == "メモ")
         .unwrap();
-    assert!(memo.due.is_none() && memo.assignee_ids.is_empty());
+    let me = store(cx, |s| s.people().unwrap())
+        .into_iter()
+        .find(|p| p.is_self)
+        .unwrap()
+        .id;
+    assert!(memo.due.is_none());
+    assert_eq!(memo.assignee_ids, [me]);
 }
 
 /// 1 つのタスクをほかのワークスペースにも表示し、片方から外せる。
@@ -1595,11 +1602,64 @@ fn quick_add_row_takes_status_and_priority(cx: &mut TestAppContext) {
     assert_eq!(task.title, "見積もりを取る");
     assert_eq!(task.priority, 1);
     assert_eq!(task.status, Status::InProcess);
-    // 足したあとは、次の 1 件のために最初の値へ戻る
+    // 足したあとも、選んだ値のまま次の 1 件を足せる
     cx.update(|cx| {
         let view = view.read(cx);
-        assert_eq!(view.quick.priority, 0);
-        assert_eq!(view.quick.status, Status::NeedsAction);
+        assert_eq!(view.quick.priority, 1);
+        assert_eq!(view.quick.status, Status::InProcess);
+    });
+}
+
+/// 追加行の担当は、最初は自分。選び直した値は、足したあとも、ウィンドウを開き直しても残る。
+#[gpui_kit::test]
+fn quick_add_row_starts_with_me_and_remembers(cx: &mut TestAppContext) {
+    start(cx);
+    let (window, view) = open(cx, win(1280., 800.));
+    ui(cx, window, |window, cx| window.click("nav-all", cx));
+    let me = cx.update(|cx| {
+        let people = db::shared(cx).read(cx).store.people().unwrap();
+        people.into_iter().find(|p| p.is_self).unwrap().id
+    });
+    cx.update(|cx| assert_eq!(view.read(cx).quick.assignee_ids, vec![me.clone()]));
+
+    ui(cx, window, |window, cx| {
+        window.click("quick-add", cx);
+        window.input("会場を予約する", cx);
+        window.press("enter", cx);
+    });
+    assert_eq!(all_tasks(cx)[0].assignee_ids, vec![me.clone()]);
+
+    // 担当のメニューの 1 つ目は自分。押すと外れる
+    ui(cx, window, |window, cx| window.click("quick-assignee", cx));
+    ui(cx, window, |window, cx| {
+        window.press("down", cx);
+        window.press("enter", cx);
+    });
+    ui(cx, window, |window, cx| window.click("quick-status", cx));
+    ui(cx, window, |window, cx| {
+        window.press("down", cx);
+        window.press("down", cx);
+        window.press("enter", cx);
+    });
+    ui(cx, window, |window, cx| {
+        window.click("quick-add", cx);
+        window.input("見積もりを取る", cx);
+        window.press("enter", cx);
+    });
+    let task = all_tasks(cx)
+        .into_iter()
+        .find(|t| t.title == "見積もりを取る")
+        .unwrap();
+    assert!(task.assignee_ids.is_empty());
+    assert_eq!(task.status, Status::InProcess);
+
+    // 開き直したウィンドウでも、選んだ値で始まる
+    let (again, view) = open(cx, win(1280., 800.));
+    ui(cx, again, |window, cx| window.click("nav-all", cx));
+    cx.update(|cx| {
+        let view = view.read(cx);
+        assert!(view.quick.assignee_ids.is_empty());
+        assert_eq!(view.quick.status, Status::InProcess);
     });
 }
 

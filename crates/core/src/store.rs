@@ -217,6 +217,15 @@ impl Store {
                                  AND pw.workspace_id NOT IN (SELECT id FROM sub))",
             params![id],
         )?;
+        // 追加行で選んだ値も、消すワークスペースの分は残さない
+        tx.execute(
+            "WITH RECURSIVE sub(id) AS ( \
+                 SELECT id FROM workspaces WHERE id = ?1 \
+                 UNION ALL \
+                 SELECT w.id FROM workspaces w JOIN sub ON w.parent_id = sub.id) \
+             DELETE FROM settings WHERE key IN (SELECT 'quick_choice:' || id FROM sub)",
+            params![id],
+        )?;
         let n = tx.execute("DELETE FROM workspaces WHERE id = ?1", params![id])?;
         found(n, "ワークスペース", id)?;
         tx.commit()?;
