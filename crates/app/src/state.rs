@@ -315,11 +315,17 @@ pub struct MainView {
     pub border_drag: Option<crate::panes::BorderDrag>,
     /// ドラッグして動かしているタスク。
     pub task_drag: Option<TaskDrag>,
+    /// ほかのペインやウィンドウからドラッグされてきているタスク。
+    pub task_drop: Option<TaskDrop>,
+    /// タスクを落とした直後。マウスを離したことを、クリックとして扱わない。
+    pub dropped: bool,
+    /// この画面が描いた、タスクを落とせる場所。
+    pub drops: Rc<crate::drops::Surface>,
     /// 詳細で、担当者と役を選ぶところを開いている。
     pub assignee_picker: bool,
     /// ダイアログの上に重ねて出しているダイアログ。
     pub sub_modal: Option<SubModal>,
-    /// 「テーマ」で、1 つずつ変える行（詳細）を開いている。
+    /// 「カスタマイズ」で、1 つずつ変える行（詳細）を開いている。
     pub appearance_details: bool,
     pub appearance_scroll: gpui_kit::ScrollHandle,
     /// 自分で保存したテーマ。
@@ -344,6 +350,13 @@ pub struct MainView {
 impl MainView {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let db = db::shared(cx);
+        let drops = Rc::new(crate::drops::Surface::default());
+        crate::drops::register(
+            &drops,
+            window.window_handle(),
+            Some(cx.entity().downgrade()),
+            cx,
+        );
         let input = |window: &mut Window, cx: &mut Context<Self>, placeholder: &'static str| {
             cx.new(|cx| InputState::new(window, cx).placeholder(placeholder))
         };
@@ -699,6 +712,9 @@ impl MainView {
             page_scroll: gpui_kit::ScrollHandle::new(),
             column_drag: None,
             task_drag: None,
+            task_drop: None,
+            dropped: false,
+            drops,
             layout: Default::default(),
             primary: 0,
             children: HashMap::new(),
@@ -1819,8 +1835,95 @@ impl MainView {
             at,
             moved: false,
             over: None,
+            over_view: None,
+            shown: Vec::new(),
         });
         cx.notify();
+    }
+
+    /// タスクをドラッグしている、または落とした直後。この間のクリックは、ドラッグの終わりとして扱う。
+    pub fn dragging_task(&self) -> bool {
+        self.dropped || self.task_drag.as_ref().is_some_and(|d| d.moved)
+    }
+
+    /// この画面の中で、今の落とし先になっている場所。
+    pub fn drop_over(&self) -> Option<&DropTarget> {
+        match &self.task_drag {
+            Some(drag) if drag.moved && drag.over_view.is_none() => {
+                drag.over.as_ref().map(|(target, _)| target)
+            }
+            _ => self.task_drop.as_ref().and_then(|d| d.over.as_ref()),
+        }
+    }
+
+    /// この画面の上をドラッグされているタスク。
+    pub fn dragged_task(&self) -> Option<&Id> {
+        match &self.task_drag {
+            Some(drag) if drag.moved => Some(&drag.id),
+            _ => self.task_drop.as_ref().map(|d| &d.id),
+        }
+    }
+
+    /// ドラッグ中のマウスの位置から、落とし先を探す。詳細の上でも、ほかのペインやウィンドウの上でも探せる。
+    pub fn drag_task_at(&mut self, at: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        self.drag_task(at, cx);
+        if !self.task_drag.as_ref().is_some_and(|d| d.moved) {
+            return;
+        }
+        let me = cx.entity().downgrade();
+        let hit = crate::drops::hit(&me, at, window, cx);
+        let Some(drag) = self.task_drag.as_mut() else {
+            return;
+        };
+        let (id, title) = (drag.id.clone(), drag.title.clone());
+        let show = |at, over| TaskDrop {
+            id: id.clone(),
+            title: title.clone(),
+            at,
+            over,
+        };
+        // ドラッグを見せるほかの画面
+        let mut shows: Vec<(WeakEntity<MainView>, TaskDrop)> = Vec::new();
+        drag.over = None;
+        drag.over_view = None;
+        if let Some(hit) = hit {
+            if let Some((owner, target)) = hit.zone {
+                drag.over = Some((target.clone(), at));
+                if owner != me {
+                    drag.over_view = Some(owner.clone());
+                    shows.push((owner, show(None, Some(target))));
+                }
+            }
+            // マウスに付いて動くタイトルは、マウスの下のウィンドウが出す
+            if let Some(root) = hit.root.filter(|root| *root != me) {
+                match shows.iter_mut().find(|(view, _)| *view == root) {
+                    Some((_, drop)) => drop.at = Some(hit.at),
+                    None => shows.push((root, show(Some(hit.at), None))),
+                }
+            }
+        }
+        let old = std::mem::replace(
+            &mut drag.shown,
+            shows.iter().map(|(view, _)| view.clone()).collect(),
+        );
+        for view in old {
+            if !shows.iter().any(|(shown, _)| *shown == view) {
+                Self::show_drop(&view, None, cx);
+            }
+        }
+        for (view, drop) in shows {
+            Self::show_drop(&view, Some(drop), cx);
+        }
+    }
+
+    fn show_drop(view: &WeakEntity<MainView>, drop: Option<TaskDrop>, cx: &mut Context<Self>) {
+        // 閉じた画面には、見せる先がない
+        let _ = view.update(cx, |view, cx| {
+            if view.task_drop != drop {
+                view.task_drop = drop;
+                cx.notify();
+            }
+        });
     }
 
     /// ドラッグ中のマウスの位置。行やワークスペースの上にいるときは、先に `drag_task_over` が呼ばれている。
@@ -1865,24 +1968,63 @@ impl MainView {
             return;
         };
         cx.notify();
-        let Some((target, _)) = drag.over.filter(|_| drag.moved) else {
+        for view in &drag.shown {
+            Self::show_drop(view, None, cx);
+        }
+        if !drag.moved {
             return;
+        }
+        // マウスを離したことが、下にある行やボタンのクリックにならないようにする
+        self.dropped = true;
+        let me = cx.entity().downgrade();
+        cx.defer(move |cx| {
+            // 閉じた画面なら、戻す先がない
+            let _ = me.update(cx, |this, _| this.dropped = false);
+        });
+        let Some((target, _)) = drag.over else {
+            return;
+        };
+        match drag.over_view {
+            Some(view) => {
+                // 落とす前に閉じた画面には、落とせない
+                let _ = view.update(cx, |view, cx| {
+                    view.drop_task(&drag.id, drag.title.clone(), target, cx)
+                });
+            }
+            None => self.drop_task(&drag.id, drag.title, target, cx),
+        }
+    }
+
+    /// タスクを、この画面の落とし先に落とす。ほかのペインやウィンドウから来たタスクも受ける。
+    pub fn drop_task(
+        &mut self,
+        id: &str,
+        title: SharedString,
+        target: DropTarget,
+        cx: &mut Context<Self>,
+    ) {
+        let old = match self.db.read(cx).store.task(id) {
+            Ok(task) => task,
+            Err(error) => {
+                self.error = Some(format!("「{title}」を移せませんでした。{error}").into());
+                cx.notify();
+                return;
+            }
         };
         match target {
             DropTarget::Chat => {
                 self.ai_session
-                    .update(cx, |s, cx| s.attach_task(&drag.id, drag.title.clone(), cx));
+                    .update(cx, |s, cx| s.attach_task(id, title, cx));
             }
             DropTarget::Workspace(workspace) => {
-                let old = self.tasks.iter().find(|t| t.id == drag.id);
-                if old.is_none_or(|t| t.workspace_id == workspace) {
+                if old.workspace_id == workspace {
                     return;
                 }
-                let done = self.write(cx, |s| s.move_task(&drag.id, workspace.as_deref()));
+                let done = self.write(cx, |s| s.move_task(id, workspace.as_deref()));
                 if done.is_some() {
                     let name = self.workspace_name(workspace.as_deref());
-                    self.notice =
-                        Some(format!("「{}」を「{name}」に移しました。", drag.title).into());
+                    self.show_notice(format!("「{title}」を「{name}」に移しました。").into());
+                    cx.notify();
                 }
             }
             DropTarget::Row(to) => {
@@ -1891,25 +2033,41 @@ impl MainView {
                     .iter()
                     .map(|&i| self.tasks[i].id.clone())
                     .collect();
-                let Some(from) = order.iter().position(|id| *id == drag.id) else {
-                    return;
-                };
-                if from == to || to >= order.len() {
+                if to >= order.len() {
                     return;
                 }
-                let moved = order.remove(from);
-                order.insert(to, moved);
-                // ほかのサブワークスペースの行へ落としたら、そのワークスペースへ移す
-                let home = |ix: usize| self.homes[ix].map(|w| self.workspaces[w].id.clone());
-                let target = home(to).filter(|_| home(from) != home(to));
+                let from = order.iter().position(|other| other == id);
+                let target = match from {
+                    Some(from) => {
+                        if from == to {
+                            return;
+                        }
+                        let moved = order.remove(from);
+                        order.insert(to, moved);
+                        // ほかのサブワークスペースの行へ落としたら、そのワークスペースへ移す
+                        let home =
+                            |ix: usize| self.homes[ix].map(|w| self.workspaces[w].id.clone());
+                        home(to).filter(|_| home(from) != home(to)).map(Some)
+                    }
+                    None => {
+                        // ほかの画面から来たタスクは、落とした行の上に入り、その行のワークスペースへ移る
+                        let workspace = self.tasks[self.visible[to]].workspace_id.clone();
+                        order.insert(to, old.id.clone());
+                        (workspace != old.workspace_id).then_some(workspace)
+                    }
+                };
                 let done = self.write(cx, |s| {
                     if let Some(workspace) = &target {
-                        s.move_task(&drag.id, Some(workspace))?;
+                        s.move_task(id, workspace.as_deref())?;
                     }
                     s.set_task_order(&order)
                 });
                 // 並べ替えた結果が見えるように、手動の順で出す
                 if done.is_some() {
+                    if let Some(workspace) = target.filter(|_| from.is_none()) {
+                        let name = self.workspace_name(workspace.as_deref());
+                        self.show_notice(format!("「{title}」を「{name}」に移しました。").into());
+                    }
                     self.query.sort = view::Sort::Manual;
                     self.query.descending = false;
                     self.reload(cx);
@@ -4054,6 +4212,21 @@ pub struct TaskDrag {
     pub moved: bool,
     /// 今の落とし先と、それを見たときのマウスの位置。
     pub over: Option<(DropTarget, Point<Pixels>)>,
+    /// 落とし先がほかのペインやウィンドウにあるときの、その画面。
+    pub over_view: Option<WeakEntity<MainView>>,
+    /// このドラッグを見せている、ほかの画面。
+    pub shown: Vec<WeakEntity<MainView>>,
+}
+
+/// ほかのペインやウィンドウからドラッグされてきているタスク。
+#[derive(Debug, Clone, PartialEq)]
+pub struct TaskDrop {
+    pub id: Id,
+    pub title: SharedString,
+    /// マウスに付けてタイトルを出す位置（ウィンドウの中）。
+    pub at: Option<Point<Pixels>>,
+    /// この画面の中の落とし先。
+    pub over: Option<DropTarget>,
 }
 
 /// ドラッグしたタスクを落とせる場所。

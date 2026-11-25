@@ -226,7 +226,7 @@ fn glass(color: Hsla, cx: &App) -> Hsla {
     }
 }
 
-/// 「テーマ」のダイアログと、テーマの見本の幅。見本は 1 行に 5 つ並ぶ。
+/// 「カスタマイズ」のダイアログと、テーマの見本の幅。見本は 1 行に 5 つ並ぶ。
 const APPEARANCE_WIDTH: Pixels = px(680.);
 const PRESET_WIDTH: Pixels = px(124.);
 
@@ -736,16 +736,86 @@ impl MainView {
         target: DropTarget,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
-        let Some(drag) = self.task_drag.as_ref().filter(|d| d.moved) else {
-            return el;
-        };
         let theme = cx.theme();
-        let over = drag.over.as_ref().is_some_and(|(t, _)| *t == target);
-        el.rounded(feel::md())
-            .when(over, |d| d.bg(theme.primary.opacity(0.25)))
-            .on_mouse_move(cx.listener(move |this, event: &MouseMoveEvent, _, cx| {
-                this.drag_task_over(target.clone(), event.position, cx)
-            }))
+        let over = self.drop_over() == Some(&target);
+        el.relative()
+            .when(self.dragged_task().is_some(), |d| {
+                d.rounded(feel::md())
+                    .when(over, |d| d.bg(theme.primary.opacity(0.25)))
+            })
+            .child(
+                self.drops
+                    .mark(cx.entity().downgrade(), Some(target), false),
+            )
+    }
+
+    /// タスクをドラッグしている間、ウィンドウに届くマウスの動きをすべて受ける。
+    /// 詳細の上でも、ウィンドウの外（ほかのウィンドウの上）でも追える。
+    fn task_drag_listener(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        self.task_drag.as_ref()?;
+        let view = cx.entity().downgrade();
+        Some(
+            canvas(
+                |_, _, _| {},
+                move |_, _, window, _| {
+                    let moved = view.clone();
+                    window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
+                        if phase != DispatchPhase::Capture {
+                            return;
+                        }
+                        // 閉じた画面のドラッグは、もう続かない
+                        let _ = moved.update(cx, |this, cx| {
+                            if event.pressed_button == Some(MouseButton::Left) {
+                                this.drag_task_at(event.position, window, cx);
+                            } else {
+                                this.finish_task_drag(cx);
+                            }
+                        });
+                    });
+                    let released = view.clone();
+                    window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
+                        if phase != DispatchPhase::Capture || event.button != MouseButton::Left {
+                            return;
+                        }
+                        // 閉じた画面のドラッグは、もう続かない
+                        let _ = released.update(cx, |this, cx| this.finish_task_drag(cx));
+                    });
+                },
+            )
+            .absolute()
+            .size_0(),
+        )
+    }
+
+    /// マウスに付いて動く、ドラッグ中のタスクのタイトル。
+    fn task_drag_ghost(&self, cx: &mut Context<Self>) -> Option<Div> {
+        let own = self
+            .task_drag
+            .as_ref()
+            .filter(|d| d.moved && !self.embedded)
+            .map(|d| (d.title.clone(), d.at));
+        let (title, at) = own.or_else(|| {
+            let drop = self.task_drop.as_ref()?;
+            Some((drop.title.clone(), drop.at?))
+        })?;
+        let theme = cx.theme();
+        Some(
+            div()
+                .absolute()
+                .left(at.x + px(10.))
+                .top(at.y + px(10.))
+                .max_w(px(320.))
+                .px_3()
+                .py_2()
+                .rounded(feel::md())
+                .border_1()
+                .border_color(theme.primary)
+                .bg(theme.popover)
+                .elevate(Elevation::High, cx)
+                .text_sm()
+                .truncate()
+                .child(title),
+        )
     }
 
     /// 左のメニューを開く・閉じる。狭いウィンドウでは中身と入れ替えで出す。
@@ -936,45 +1006,11 @@ impl MainView {
             .when(floating, |d| {
                 d.child(floating_card(
                     glass(theme.sidebar, cx),
-                    [FLOAT_GAP, half, FLOAT_GAP, FLOAT_GAP],
+                    // 上は、上のバーとの間のすき間の半分
+                    [half, half, FLOAT_GAP, FLOAT_GAP],
                     cx,
                 ))
             })
-            // macOS は左上に信号機ボタンが乗るので、その分を空ける
-            .when(cfg!(target_os = "macos"), |d| d.pt_6())
-            .child(
-                row()
-                    .h(HEADER_HEIGHT)
-                    .flex_none()
-                    .pl_4()
-                    .pr_2()
-                    .gap_2()
-                    .border_b_1()
-                    // 浮かせたカードの中では、端から端までの線を引かない
-                    .border_color(if floating {
-                        theme.transparent
-                    } else {
-                        theme.sidebar_border
-                    })
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .font_weight(FontWeight::BOLD)
-                            .truncate()
-                            .child(crate::APP_NAME.to_uppercase()),
-                    )
-                    .child(feel::gloss(
-                        Button::new("close-sidebar")
-                            .icon(app_icon("x"))
-                            .ghost()
-                            .small()
-                            .tooltip("メニューを閉じる")
-                            .on_click(
-                                cx.listener(move |this, _, _, cx| this.toggle_sidebar(wide, cx)),
-                            ),
-                    )),
-            )
             .child(
                 col()
                     .id("sidebar-nav")
@@ -1177,20 +1213,21 @@ impl MainView {
         // Windows は OS に任せ、ほかは押したまま動かしたときに自分で動かし始める
         let floating = crate::theme::floating(cx);
         let half = FLOAT_GAP / 2.;
+        // 中身はどれも、この行の中で縦の中央にそろう（flex）。
+        // 浮かせるときは、カードの内側に収まるように、まわりのすき間の分だけ内側に寄せる
         let bar = row()
             .flex_none()
             .h(HEADER_HEIGHT)
             .relative()
-            // 浮かせるときも枠の幅は取っておき、中身の場所を変えない
             .border_b_1()
             .border_color(theme.transparent)
             .when(!floating, |d| {
                 d.border_color(theme.border).bg(glass(theme.background, cx))
             })
             .when(floating, |d| {
-                d.child(floating_card(
+                d.pt(FLOAT_GAP).pb(half).px(FLOAT_GAP).child(floating_card(
                     glass(theme.popover, cx),
-                    [FLOAT_GAP, FLOAT_GAP, half, half],
+                    [FLOAT_GAP, FLOAT_GAP, half, FLOAT_GAP],
                     cx,
                 ))
             })
@@ -1239,23 +1276,19 @@ impl MainView {
                     div()
                         .flex_1()
                         .px_4()
-                        .text_sm()
-                        .text_color(theme.muted_foreground)
-                        .child(crate::APP_NAME),
+                        // macOS は左上に信号機ボタンが乗るので、その分を空ける
+                        .when(cfg!(target_os = "macos"), |d| d.pl(px(84.)))
+                        .font_weight(FontWeight::BOLD)
+                        .child(crate::APP_NAME.to_uppercase()),
                 )
                 // 下のバーの判定に取られないよう、ボタンのある場所はマウスを受け止める
                 .child(
                     row()
                         .occlude()
-                        .when(floating, |d| d.pr_3())
+                        .when(floating, |d| d.pr_2())
                         .children(window_controls(HEADER_HEIGHT, floating, window, cx)),
                 );
         }
-        let sidebar_shown = if wide {
-            !self.sidebar_hidden
-        } else {
-            self.sidebar_open
-        };
         // 分けているときは、今のペインの場所を出す
         let (title, icon) = match self.focused_child() {
             Some(child) => child.read(cx).header_title(cx),
@@ -1273,11 +1306,9 @@ impl MainView {
                 .flex_1()
                 .min_w_0()
                 .gap_2()
-                .pl_3()
-                // macOS でメニューを閉じているときは、信号機ボタンの分を空ける
-                .when(cfg!(target_os = "macos") && !sidebar_shown, |d| {
-                    d.pl(px(84.))
-                })
+                .pl_2()
+                // macOS は左上に信号機ボタンが乗るので、その分を空ける
+                .when(cfg!(target_os = "macos"), |d| d.pl(px(84.)))
                 .child(
                     // ボタンのある場所はマウスを受け止める（右のボタンと同じ理由）
                     div().occlude().child(feel::gloss(
@@ -1291,6 +1322,16 @@ impl MainView {
                             ),
                     )),
                 )
+                // 狭いウィンドウでは、アプリの名前を出さず、今の画面の名前に場所を譲る
+                .when(wide, |d| {
+                    d.child(
+                        div()
+                            .flex_none()
+                            .font_weight(FontWeight::BOLD)
+                            .child(crate::APP_NAME.to_uppercase()),
+                    )
+                    .child(div().flex_none().w(gpui_kit::px(1.)).h_4().bg(theme.border))
+                })
                 .when_some(icon, |d, icon| d.child(div().flex_none().child(icon)))
                 .child(
                     div()
@@ -1306,7 +1347,7 @@ impl MainView {
                 .flex_none()
                 .gap_1()
                 // ウィンドウのボタンは、浮かせないときは右の端まで寄せる
-                .when(floating || controls.is_none(), |d| d.pr_3())
+                .when(floating || controls.is_none(), |d| d.pr_2())
                 // 下のバーの判定に取られないよう、ボタンのある場所はマウスを受け止める。
                 // これがないと、Windows ではボタンを離したときのクリックがウィンドウの移動に取られる
                 .occlude()
@@ -1398,7 +1439,7 @@ impl MainView {
                                 .item(item("担当者", |this, window, cx| {
                                     this.open_people(window, cx)
                                 }))
-                                .item(item("テーマ", |this, window, cx| {
+                                .item(item("カスタマイズ", |this, window, cx| {
                                     this.open_appearance(window, cx)
                                 }))
                                 .separator()
@@ -1970,6 +2011,11 @@ impl MainView {
         };
         let visible = self.rows.len();
         let workspace_id = self.current_workspace().map(str::to_owned);
+        let list_target = match &self.nav {
+            Nav::Workspace(id) => Some(DropTarget::Workspace(Some(id.clone()))),
+            Nav::Unfiled => Some(DropTarget::Workspace(None)),
+            _ => None,
+        };
 
         let mut header = row().flex_none().gap_2().flex_wrap();
         let date = workspace_id.as_ref().and_then(|id| {
@@ -2114,6 +2160,12 @@ impl MainView {
             .bg(glass(theme.popover, cx))
             .elevate(Elevation::Low, cx)
             .overflow_hidden()
+            .when(
+                list_target.is_some()
+                    && self.task_drop.as_ref().and_then(|d| d.over.as_ref())
+                        == list_target.as_ref(),
+                |d| d.border_color(theme.primary),
+            )
             .child(
                 row()
                     .flex_none()
@@ -2149,9 +2201,14 @@ impl MainView {
             .child(rows)
             .child(self.render_quick_add_row(table, cx));
 
+        let view = cx.entity().downgrade();
         div()
             .size_full()
             .relative()
+            // ほかのペインやウィンドウから来たタスクは、一覧のどこに落としても、ここのワークスペースへ移る
+            .when_some(list_target, |d, target| {
+                d.child(self.drops.mark(view.clone(), Some(target), true))
+            })
             // 下は、右下の「＋」が表に重ならないだけ空ける
             .child(
                 div()
@@ -2169,7 +2226,9 @@ impl MainView {
                             .gap_3()
                             .child(header)
                             .child(card),
-                    ),
+                    )
+                    // 何もないところの右クリックで、コピーしたタスクを貼り付けられる
+                    .context_menu(move |menu, _, cx| menu.item(paste_item(&view, cx))),
             )
             .vertical_scrollbar(&self.page_scroll)
             // 右下の「＋」。どこまでスクロールしていても、新しいタスクを始められる
@@ -2595,7 +2654,7 @@ impl MainView {
             )
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                 // ドラッグの終わりは、クリックにしない
-                if this.task_drag.as_ref().is_some_and(|d| d.moved) {
+                if this.dragging_task() {
                     return;
                 }
                 this.go_here(Nav::Workspace(go_id.clone()), cx);
@@ -2740,7 +2799,7 @@ impl MainView {
                         .child(task.title.clone())
                         .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                             // ドラッグの終わりは、クリックにしない
-                            if this.task_drag.as_ref().is_some_and(|d| d.moved) {
+                            if this.dragging_task() {
                                 return;
                             }
                             this.open_panel(&id, window, cx)
@@ -2797,20 +2856,22 @@ impl MainView {
         let view = cx.entity().downgrade();
         let menu_id = id.clone();
         let menu_status = task.status;
-        let drag = self.task_drag.as_ref().filter(|d| d.moved);
-        let dragged = drag.is_some_and(|d| d.id == id);
-        // 落とすと入る側の縁に線を出す
-        let drop_edge = drag.and_then(|d| {
-            let from = self
-                .visible
-                .iter()
-                .position(|&i| self.tasks[i].id == d.id)?;
-            let over = d
-                .over
-                .as_ref()
-                .is_some_and(|(t, _)| *t == DropTarget::Row(ix));
-            (over && from != ix).then_some(from > ix)
-        });
+        let dragged = self
+            .task_drag
+            .as_ref()
+            .is_some_and(|d| d.moved && d.id == id);
+        // 落とすと入る側の縁に線を出す。ほかの画面から来たタスクは、行の上に入る
+        let drop_edge = (self.drop_over() == Some(&DropTarget::Row(ix)))
+            .then(|| {
+                let from = self
+                    .dragged_task()
+                    .and_then(|d| self.visible.iter().position(|&i| self.tasks[i].id == *d));
+                match from {
+                    Some(from) => (from != ix).then_some(from > ix),
+                    None => Some(true),
+                }
+            })
+            .flatten();
         let drag_id = id.clone();
         let base = div()
             .id(("row", ix))
@@ -2837,11 +2898,10 @@ impl MainView {
                     this.start_task_drag(&drag_id, event.position, cx)
                 }),
             )
-            .when(drag.is_some(), |d| {
-                d.on_mouse_move(cx.listener(move |this, event: &MouseMoveEvent, _, cx| {
-                    this.drag_task_over(DropTarget::Row(ix), event.position, cx)
-                }))
-            })
+            .child(
+                self.drops
+                    .mark(view.clone(), Some(DropTarget::Row(ix)), false),
+            )
             // キーで選んでいる行は、左の縁に線を出す
             .when(cursor, |d| {
                 d.child(
@@ -2914,6 +2974,9 @@ impl MainView {
                     let (view, id) = (view.clone(), menu_id.clone());
                     move |menu, _, _| status_items(menu, &view, &id, menu_status)
                 })
+                .separator()
+                .item(item("コピー", |this, id, _, cx| this.copy_task(&id, cx)))
+                .item(paste_item(&view, cx))
                 .separator()
                 .item(item("削除", |this, id, _, cx| {
                     this.modal = Modal::DeleteTasks(vec![id]);
@@ -4500,6 +4563,8 @@ impl MainView {
                     _ => theme.background,
                 })
                 .occlude()
+                // 詳細の下にある行は、ドラッグの落とし先にしない
+                .child(self.drops.mark(cx.entity().downgrade(), None, false))
                 .flex()
                 .flex_col()
                 .child(bar)
@@ -4583,6 +4648,7 @@ impl MainView {
             .justify_center()
             .bg(theme.overlay)
             .occlude()
+            .child(self.drops.mark(cx.entity().downgrade(), None, false))
             // 名前を書いている途中で外を押したら、その 1 回は名前を確定するだけにする
             .capture_any_mouse_down(cx.listener(|this, _, _, _| {
                 this.outside_busy = this.person_naming.is_some() || this.preset_naming.is_some();
@@ -4911,7 +4977,7 @@ impl MainView {
                             .pr_4()
                             .track_scroll(&self.appearance_scroll)
                             .overflow_y_scroll()
-                            .child(heading("プリセット"))
+                            .child(heading("テーマ"))
                             .child(presets)
                             .child(heading("レイアウト"))
                             .child(layouts)
@@ -4925,7 +4991,7 @@ impl MainView {
                 d.child(div().text_sm().text_color(theme.danger).child(error))
             });
         let (title, width, over) = match self.sub_modal {
-            None => return self.dialog_as("dialog", APPEARANCE_WIDTH, "テーマ", body, cx),
+            None => return self.dialog_as("dialog", APPEARANCE_WIDTH, "カスタマイズ", body, cx),
             Some(SubModal::Font) => ("フォント", px(400.), self.font_picker(cx)),
             Some(SubModal::Scene) => ("背景の画像", px(680.), self.scene_picker(cx)),
         };
@@ -4939,7 +5005,7 @@ impl MainView {
         div()
             .absolute()
             .inset_0()
-            .child(self.dialog_as("dialog-under", APPEARANCE_WIDTH, "テーマ", body, cx))
+            .child(self.dialog_as("dialog-under", APPEARANCE_WIDTH, "カスタマイズ", body, cx))
             .child(over)
     }
 
@@ -6645,20 +6711,6 @@ impl MainView {
                 cx.listener(|this, _, _, cx| this.finish_column_resize(cx)),
             )
         })
-        // タスクをドラッグしている間も同じ
-        .when(self.task_drag.is_some(), |d| {
-            d.on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
-                if event.pressed_button == Some(MouseButton::Left) {
-                    this.drag_task(event.position, cx);
-                } else {
-                    this.finish_task_drag(cx);
-                }
-            }))
-            .on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|this, _, _, cx| this.finish_task_drag(cx)),
-            )
-        })
         .when(self.column_drag.is_some(), |d| {
             d.on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
                 if event.pressed_button != Some(MouseButton::Left) {
@@ -6677,7 +6729,6 @@ impl MainView {
         })
     }
 
-    /// ほかのウィンドウの中のペインとして出す。左のメニューと上のバーは出さない。
     /// 時間がたって消えていく知らせ。少し下へずれながら薄くなる。
     fn notice_fade(&self, notice: impl IntoElement) -> AnyElement {
         let clock = &self.notice_clock;
@@ -6694,8 +6745,10 @@ impl MainView {
             .into_any_element()
     }
 
+    /// ほかのウィンドウの中のペインとして出す。左のメニューと上のバーは出さない。
     fn render_embedded(&mut self, cx: &mut Context<Self>) -> AnyElement {
         self.arm_notice(cx);
+        self.drops.begin(crate::drops::PANE);
         let theme = cx.theme().clone();
         let bounds = self.pane_bounds.unwrap_or_default();
         let width = bounds.size.width;
@@ -6735,24 +6788,7 @@ impl MainView {
             )
             .children(self.render_panel(panel_width, cx))
             .children(self.panel_drag_layer(cx))
-            // ドラッグ中のタスクは、マウスに付いて動く
-            .children(self.task_drag.as_ref().filter(|d| d.moved).map(|drag| {
-                div()
-                    .absolute()
-                    .left(drag.at.x - bounds.origin.x + px(10.))
-                    .top(drag.at.y - bounds.origin.y + px(10.))
-                    .max_w(px(320.))
-                    .px_3()
-                    .py_2()
-                    .rounded(feel::md())
-                    .border_1()
-                    .border_color(theme.primary)
-                    .bg(theme.popover)
-                    .elevate(Elevation::High, cx)
-                    .text_sm()
-                    .truncate()
-                    .child(drag.title.clone())
-            }))
+            .children(self.task_drag_listener(cx))
             .children(self.render_modal(cx))
             .when_some(
                 self.error
@@ -6814,6 +6850,14 @@ impl Render for MainView {
             return self.render_embedded(cx);
         }
         self.arm_notice(cx);
+        // 落とせる場所を覚え直す。描かれなかったペインと AI チャットの場所は残さない
+        self.drops.begin(crate::drops::ROOT);
+        for child in self.children.values() {
+            child.read(cx).drops.clear();
+        }
+        if let Some(pane) = &self.ai_pane {
+            pane.read(cx).drops.clear();
+        }
         let theme = cx.theme().clone();
         let window_width = window.viewport_size().width;
         // 右に AI チャットを置いた分、タスクの画面は狭くなる
@@ -6939,7 +6983,7 @@ impl Render for MainView {
             .size_full()
             .relative()
             .flex()
-            .flex_row()
+            .flex_col()
             // パネルを浮かせるときは、すき間に少し暗い地が見える
             .bg(if crate::theme::floating(cx) {
                 theme.muted
@@ -6948,13 +6992,14 @@ impl Render for MainView {
             })
             .text_color(theme.foreground)
             .children(backdrop_layer(cx))
-            .when(wide && sidebar, |d| d.child(self.render_sidebar(wide, cx)))
+            // 上のバーは、ウィンドウの端から端まで 1 本
+            .child(self.render_header(true, wide, window, cx))
             .child(
-                col()
+                row()
                     .flex_1()
-                    .min_w_0()
-                    .h_full()
-                    .child(self.render_header(true, wide, window, cx))
+                    .min_h_0()
+                    .items_stretch()
+                    .when(wide && sidebar, |d| d.child(self.render_sidebar(wide, cx)))
                     .child(
                         // 上のバーの下に、タスクの画面と AI チャットを横に並べる
                         row()
@@ -7016,24 +7061,9 @@ impl Render for MainView {
                             .children(ai_over),
                     ),
             )
+            .children(self.task_drag_listener(cx))
             // ドラッグ中のタスクは、マウスに付いて動く
-            .children(self.task_drag.as_ref().filter(|d| d.moved).map(|drag| {
-                div()
-                    .absolute()
-                    .left(drag.at.x + px(10.))
-                    .top(drag.at.y + px(10.))
-                    .max_w(px(320.))
-                    .px_3()
-                    .py_2()
-                    .rounded(feel::md())
-                    .border_1()
-                    .border_color(theme.primary)
-                    .bg(theme.popover)
-                    .elevate(Elevation::High, cx)
-                    .text_sm()
-                    .truncate()
-                    .child(drag.title.clone())
-            }))
+            .children(self.task_drag_ghost(cx))
             .children(self.panel_drag_layer(cx))
             .children(self.render_pane_overlay(cx))
             .children(self.render_modal(cx).map(|modal| {
@@ -7101,4 +7131,19 @@ impl Render for MainView {
             .into_any_element();
         body
     }
+}
+
+/// 右クリックのメニューの「貼り付け」。クリップボードに文字がないときは押せない。
+fn paste_item(view: &WeakEntity<MainView>, cx: &App) -> PopupMenuItem {
+    let filled = cx
+        .read_from_clipboard()
+        .and_then(|item| item.text())
+        .is_some_and(|text| !text.trim().is_empty());
+    let view = view.clone();
+    PopupMenuItem::new("貼り付け")
+        .disabled(!filled)
+        .on_click(move |_, _, cx| {
+            // ウィンドウを閉じたあとなら、反映する先がない
+            let _ = view.update(cx, |this, cx| this.paste_here(cx));
+        })
 }

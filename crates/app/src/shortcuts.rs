@@ -489,6 +489,22 @@ impl MainView {
         true
     }
 
+    /// 右クリックのメニューの「コピー」。選んでいる行の上なら選んでいる全部を、ほかの行ならその 1 件をコピーする。
+    pub fn copy_task(&mut self, id: &str, cx: &mut Context<Self>) {
+        if self.selected.contains(id) {
+            self.copy_links(cx);
+            return;
+        }
+        cx.write_to_clipboard(ClipboardItem::new_string(malakt_core::tasklink::url(id)));
+        self.show_notice("リンクをコピーしました。".into());
+        cx.notify();
+    }
+
+    /// 右クリックのメニューの「貼り付け」。
+    pub fn paste_here(&mut self, cx: &mut Context<Self>) {
+        self.paste(cx);
+    }
+
     /// 同じ中身のタスクを、同じワークスペースにもう 1 つ作る。
     fn duplicate_targets(&mut self, cx: &mut Context<Self>) -> bool {
         let ids = self.targets();

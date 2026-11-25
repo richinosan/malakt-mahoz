@@ -194,6 +194,8 @@ pub struct AiPane {
     pub mode: PaneMode,
     /// 右に置いているときの、メインの画面。
     main: Option<WeakEntity<MainView>>,
+    /// ドラッグしたタスクを落とせる場所。
+    pub drops: std::rc::Rc<crate::drops::Surface>,
     focus: FocusHandle,
     shell_focus: FocusHandle,
     /// ターミナルの画面。
@@ -298,6 +300,8 @@ impl AiPane {
     ) -> Self {
         let session = ai::shared(cx);
         let db = db::shared(cx);
+        let drops = std::rc::Rc::new(crate::drops::Surface::default());
+        crate::drops::register(&drops, window.window_handle(), None, cx);
         let input = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .submit_on_enter(true)
@@ -440,6 +444,7 @@ impl AiPane {
             db,
             mode,
             main,
+            drops,
             focus: cx.focus_handle(),
             shell_focus: cx.focus_handle(),
             term: cx.new(TermPane::new),
@@ -854,6 +859,8 @@ impl AiPane {
 
         let mut efforts = row().gap_1().flex_wrap();
         for e in Effort::ALL {
+            // 今のモデルで選べない値は、薄くして押せなくする
+            let allowed = session.effort_allowed(e);
             efforts = efforts.child(
                 chip(
                     ("ai-effort", e as usize),
@@ -861,9 +868,12 @@ impl AiPane {
                     e == session.effort,
                     cx,
                 )
-                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                    this.session.update(cx, |s, cx| s.set_effort(e, cx));
-                }))
+                .when(!allowed, |d| d.opacity(0.4).cursor_default())
+                .when(allowed, |d| {
+                    d.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.session.update(cx, |s, cx| s.set_effort(e, cx));
+                    }))
+                })
                 .test_support(),
             );
         }
@@ -1973,19 +1983,31 @@ impl AiPane {
                 .into_any_element()
         });
         if provider.supports_effort() {
+            let allowed = Effort::ALL.map(|e| session.effort_allowed(e));
             pills.push(
                 pill("ai-pick-effort", effort.label().into(), "effort".into())
                     .dropdown_menu_with_anchor(Anchor::BottomLeft, move |mut menu, _, _| {
-                        for e in Effort::ALL {
+                        for (e, allowed) in Effort::ALL.into_iter().zip(allowed) {
                             let pane = pane.clone();
                             menu = menu.item(
-                                PopupMenuItem::new(e.label()).checked(e == effort).on_click(
-                                    move |_, _, cx| {
-                                        let _ = pane.update(cx, |this, cx| {
-                                            this.session.update(cx, |s, cx| s.set_effort(e, cx));
-                                        });
-                                    },
-                                ),
+                                // 選べない値は、文字を薄くして押せなくする
+                                (if allowed {
+                                    PopupMenuItem::new(e.label())
+                                } else {
+                                    PopupMenuItem::element(move |_, cx| {
+                                        div()
+                                            .text_color(cx.theme().muted_foreground.opacity(0.5))
+                                            .child(e.label())
+                                    })
+                                })
+                                .checked(e == effort)
+                                // 今のモデルで選べない値は押せない
+                                .disabled(!allowed)
+                                .on_click(move |_, _, cx| {
+                                    let _ = pane.update(cx, |this, cx| {
+                                        this.session.update(cx, |s, cx| s.set_effort(e, cx));
+                                    });
+                                }),
                             );
                         }
                         menu
@@ -2297,13 +2319,8 @@ impl AiPane {
         let pills = self.render_pills(cx);
         let attached = self.session.read(cx).attached.clone();
         let dropping = self.main.as_ref().is_some_and(|main| {
-            main.read_with(cx, |main, _| {
-                main.task_drag
-                    .as_ref()
-                    .and_then(|d| d.over.as_ref())
-                    .is_some_and(|(target, _)| *target == DropTarget::Chat)
-            })
-            .unwrap_or(false)
+            main.read_with(cx, |main, _| main.drop_over() == Some(&DropTarget::Chat))
+                .unwrap_or(false)
         });
 
         col()
@@ -3037,37 +3054,19 @@ impl Render for AiPane {
         let shell_docked = self.session.read(cx).shell_place == ShellPlace::Docked;
         // シェルを広げている間は、チャットを出さない
         let wide = self.shell_wide && shell_docked;
-        // タスクをドラッグしている間は、チャットが落とし先になる
-        let dragging = self.main.as_ref().is_some_and(|main| {
-            main.read_with(cx, |main, _| {
-                main.task_drag.as_ref().is_some_and(|d| d.moved)
-            })
-            .unwrap_or(false)
-        });
+        // ドラッグしたタスクは、チャットに落とせる
+        self.drops.begin(crate::drops::CHAT);
+        let chat_drop = self
+            .main
+            .clone()
+            .filter(|_| self.mode != PaneMode::ShellWindow)
+            .map(|main| self.drops.mark(main, Some(DropTarget::Chat), false));
         let base = div()
             .flex()
+            .relative()
             .bg(theme.background)
             .text_color(theme.foreground)
-            .when(dragging, |d| {
-                d.on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
-                    if let Some(main) = &this.main {
-                        // メインの画面がもうなければ、落とす先もない
-                        let _ = main.update(cx, |main, cx| {
-                            // チャットの上では、メインの画面にマウスの動きが届かない
-                            main.drag_task(event.position, cx);
-                            main.drag_task_over(DropTarget::Chat, event.position, cx)
-                        });
-                    }
-                }))
-                .on_mouse_up(
-                    MouseButton::Left,
-                    cx.listener(|this, _, _, cx| {
-                        if let Some(main) = &this.main {
-                            let _ = main.update(cx, |main, cx| main.finish_task_drag(cx));
-                        }
-                    }),
-                )
-            });
+            .children(chat_drop);
         match self.mode {
             PaneMode::ShellWindow => base
                 .size_full()

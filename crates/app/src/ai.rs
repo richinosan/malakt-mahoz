@@ -11,6 +11,7 @@ use malakt_ai::github::{self, Link};
 use malakt_ai::keys::{self, KeyStore, Source};
 use malakt_ai::provider::{self, CatalogModel, Endpoint};
 use malakt_ai::shell::{self, Spec};
+use malakt_ai::slack;
 use malakt_ai::wire::{self, Reply, ToolCall, Turn, Wire};
 use malakt_ai::{clip_tail, tools, Effort, Provider, MAX_TOOL_OUTPUT_CHARS};
 use serde_json::Value;
@@ -31,7 +32,7 @@ const MAX_WATCH_CHARS: usize = 4000;
 pub const WATCH_MINUTES: [u32; 4] = [15, 30, 60, 180];
 /// 定期チェックで変化を見つけたときに AI に渡す、最初の指示。
 pub const DEFAULT_WATCH_INSTRUCTION: &str = "GitHub の状態に合わせて、関連するタスクを更新してください。\
-クローズまたはマージされていたらタスクを完了にし、新しい動きがあればタスクにコメントで要点を書いてください。";
+クローズまたはマージされていたらタスクを完了にし、新しい動きがあれば、何が変わったかをタスクにコメントで書いてください。";
 
 /// GitHub の定期チェックの設定。標準はオフ。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -287,10 +288,35 @@ struct NewTask {
     id: String,
     title: String,
     description: String,
-    links: Vec<Link>,
+    links: Vec<Fetch>,
 }
 
-/// タスクごとの、書かれている GitHub のリンク。新しいタスクとリンクを見分ける元にする。
+/// AI が中身を取りに行くリンク。
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Fetch {
+    GitHub(Link),
+    Slack(slack::Link),
+}
+
+impl Fetch {
+    fn url(&self) -> String {
+        match self {
+            Self::GitHub(link) => link.url(),
+            Self::Slack(link) => link.url(),
+        }
+    }
+}
+
+/// 文章の中の、GitHub と Slack のリンク。
+fn find_sources(text: &str) -> Vec<Fetch> {
+    github::find_links(text)
+        .into_iter()
+        .map(Fetch::GitHub)
+        .chain(slack::find_links(text).into_iter().map(Fetch::Slack))
+        .collect()
+}
+
+/// タスクごとの、書かれている GitHub と Slack のリンク。新しいタスクとリンクを見分ける元にする。
 fn task_links(store: &malakt_core::Store) -> Result<Vec<(NewTask, bool)>, String> {
     let tasks = store
         .tasks(malakt_core::Scope::All, &malakt_core::TaskFilter::default())
@@ -298,7 +324,7 @@ fn task_links(store: &malakt_core::Store) -> Result<Vec<(NewTask, bool)>, String
     Ok(tasks
         .into_iter()
         .map(|task| {
-            let links = github::find_links(&format!("{}\n{}", task.title, task.description));
+            let links = find_sources(&format!("{}\n{}", task.title, task.description));
             let open = task.status.is_open();
             (
                 NewTask {
@@ -402,6 +428,9 @@ const ICON_PROMPT: &str = "ワークスペース（タスクをまとめるフ�
 - 具体的な物や生き物を表す、小文字の英語の名詞を 5 つまで、合う順にコンマで区切って書く（例: cat, plane, book, wrench, house）。\n\
 - 英単語のほかには何も書かない。";
 
+/// Slack のリンクから、取りに行くコマンドを作る。
+pub type SlackFn = dyn Fn(&slack::Link) -> Vec<Spec> + Send + Sync;
+
 /// 外とのやり取り。テストでは差し替える。
 #[derive(Clone)]
 pub struct AiConfig {
@@ -411,6 +440,8 @@ pub struct AiConfig {
     pub get: Arc<GetFn>,
     /// GitHub のリンクを取りに行くコマンド。
     pub gh: Arc<dyn Fn(&Link) -> Spec + Send + Sync>,
+    /// Slack のリンクを取りに行くコマンド。前のものが起動できなければ、次のものを試す。
+    pub slack: Arc<SlackFn>,
     /// `gh` にログインしているアカウントを調べるコマンド（引数は、GitHub に通信してよいか）。
     pub whoami: Arc<dyn Fn(bool) -> Vec<Spec> + Send + Sync>,
 }
@@ -423,6 +454,7 @@ impl Default for AiConfig {
             post: Arc::new(malakt_ai::http::post_json),
             get: Arc::new(malakt_ai::http::get_text),
             gh: Arc::new(Link::gh),
+            slack: Arc::new(slack::Link::commands),
             whoami: Arc::new(github::whoami),
         }
     }
@@ -1409,7 +1441,7 @@ impl Session {
         for (task, _) in all {
             // タイトルを書いている途中のタスクは、書き終わってから整える
             if !waiting.contains(&task.id) && !self.holding.contains(&task.id) {
-                known.insert(task.id, task.links.iter().map(Link::url).collect());
+                known.insert(task.id, task.links.iter().map(Fetch::url).collect());
             }
         }
     }
@@ -1430,7 +1462,7 @@ impl Session {
         let Some(known) = &mut self.known else {
             self.known = Some(
                 all.into_iter()
-                    .map(|(task, _)| (task.id, task.links.iter().map(Link::url).collect()))
+                    .map(|(task, _)| (task.id, task.links.iter().map(Fetch::url).collect()))
                     .collect(),
             );
             return;
@@ -1491,7 +1523,7 @@ impl Session {
         self.arranging = tasks.iter().map(|task| task.id.clone()).collect();
         if let Some(known) = &mut self.known {
             for task in &tasks {
-                known.insert(task.id.clone(), task.links.iter().map(Link::url).collect());
+                known.insert(task.id.clone(), task.links.iter().map(Fetch::url).collect());
             }
         }
         let ids = self.arranging.clone();
@@ -1568,7 +1600,7 @@ impl Session {
             let mut read = 0;
             for link in task.links.iter().take(MAX_ARRANGE_LINKS) {
                 let url = link.url();
-                match Self::fetch_github(this, &config, link, cx).await {
+                match Self::fetch(this, &config, link, cx).await {
                     Ok(content) => {
                         read += 1;
                         section.push_str(&format!(
@@ -2270,6 +2302,58 @@ impl Session {
         cx.notify();
     }
 
+    /// OpenCode のモデルの一覧を読んでおく。モデルごとに選べる effort を、選ぶ前に出すため。
+    /// API キーがなければ通信しない。
+    fn load_catalog(&mut self, cx: &mut Context<Self>) {
+        let provider = self.provider;
+        let Some(url) = provider.catalog_url() else {
+            return;
+        };
+        if !matches!(self.key, KeyState::Present { .. })
+            || self.catalog.as_ref().is_some_and(|(p, _)| *p == provider)
+        {
+            return;
+        }
+        let config = self.config.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { fetch_catalog(&config, url) })
+                .await;
+            // チャットがもうなければ、知らせる先もない
+            let _ = this.update(cx, |this, cx| {
+                match result {
+                    Ok(catalog) => this.catalog = Some((provider, Arc::new(catalog))),
+                    Err(e) => {
+                        this.error = Some(format!("モデルの一覧を取得できませんでした: {e}").into())
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// 今のモデルで、その effort を選べるか。モデルの一覧をまだ読んでいなければ、選べるものとして扱う。
+    pub fn effort_allowed(&self, effort: Effort) -> bool {
+        let Some(wire) = effort.wire() else {
+            return true;
+        };
+        if !self.provider.supports_effort() {
+            return false;
+        }
+        let Some((provider, catalog)) = &self.catalog else {
+            return true;
+        };
+        if *provider != self.provider {
+            return true;
+        }
+        match catalog.iter().find(|m| m.id == self.model()) {
+            Some(entry) => entry.efforts.iter().any(|e| e == wire),
+            None => true,
+        }
+    }
+
     pub fn set_effort(&mut self, effort: Effort, cx: &mut Context<Self>) {
         if self.effort == effort || !self.save_setting("ai.effort", effort.as_str(), cx) {
             return;
@@ -2309,6 +2393,7 @@ impl Session {
                 {
                     this.read_github(cx);
                 }
+                this.load_catalog(cx);
                 cx.notify();
             });
         })
@@ -2822,11 +2907,11 @@ impl Session {
     ) -> Result<(), String> {
         let config = this.read_with(cx, |s, _| s.config.clone()).map_err(gone)?;
 
-        // メッセージに GitHub のリンクがあれば、先に中身を取ってきて添える
+        // メッセージに GitHub や Slack のリンクがあれば、先に中身を取ってきて添える
         let mut message = text.clone();
         message.push_str(&extra);
-        for link in github::find_links(&text) {
-            match Self::fetch_github(this, &config, &link, cx).await {
+        for link in find_sources(&text) {
+            match Self::fetch(this, &config, &link, cx).await {
                 Ok(content) => message.push_str(&format!("\n\n[{} の中身]\n{content}", link.url())),
                 Err(error) => {
                     let note = format!("{} を取得できませんでした: {error}", link.url());
@@ -3156,6 +3241,22 @@ impl Session {
                     Err(e) => failed(e),
                 }
             }
+            tools::SLACK_FETCH => {
+                let url = call
+                    .args
+                    .get("url")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let Some(link) = slack::parse_link(url) else {
+                    return failed(format!(
+                        "Slack のメッセージへのリンクとして読めません: {url}"
+                    ));
+                };
+                match Self::fetch_slack(this, config, &link, cx).await {
+                    Ok(content) => Ok(Ok(content)),
+                    Err(e) => failed(e),
+                }
+            }
             _ => {
                 let result = this
                     .update(cx, |s, cx| {
@@ -3209,6 +3310,46 @@ impl Session {
                 Ok(result.map_err(ToolError::Failed))
             }
         }
+    }
+
+    async fn fetch(
+        this: &WeakEntity<Self>,
+        config: &AiConfig,
+        source: &Fetch,
+        cx: &mut AsyncApp,
+    ) -> Result<String, String> {
+        match source {
+            Fetch::GitHub(link) => Self::fetch_github(this, config, link, cx).await,
+            Fetch::Slack(link) => Self::fetch_slack(this, config, link, cx).await,
+        }
+    }
+
+    /// Slack のメッセージと、そのスレッドの返信を Slack CLI で取ってくる。
+    async fn fetch_slack(
+        this: &WeakEntity<Self>,
+        config: &AiConfig,
+        link: &slack::Link,
+        cx: &mut AsyncApp,
+    ) -> Result<String, String> {
+        for spec in (config.slack)(link) {
+            let output = match Self::run_command(this, spec, cx).await {
+                Ok(output) => output,
+                // このコマンドがなければ、次の呼び方を試す
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(format!("Slack CLI を起動できませんでした: {e}")),
+            };
+            if output.code != Some(0) {
+                return Err(format!(
+                    "Slack CLI が失敗しました（終了コード {}）: {}",
+                    output.code.map_or("なし".to_owned(), |c| c.to_string()),
+                    clip_tail(output.all.trim(), 1000)
+                ));
+            }
+            return link.format_response(&output.stdout, |secs| {
+                malakt_core::view::format_datetime(secs.saturating_mul(1000))
+            });
+        }
+        Err("Slack CLI（slack-cli）が見つかりませんでした".into())
     }
 
     /// GitHub のリンクの中身を取ってくる。`gh` がなければ、公開の API を読む。

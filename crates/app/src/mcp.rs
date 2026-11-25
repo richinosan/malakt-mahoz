@@ -30,11 +30,16 @@ const PROTOCOLS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
 pub const LOCKED: &str =
     "malakt-mahoz はロックされています。アプリを開いて、ロックを解除してください。";
 
-const INSTRUCTIONS: &str = "\
+const INSTRUCTIONS_HEAD: &str = "\
 タスク管理アプリ malakt-mahoz のタスク、ワークスペース、担当者、コメントを読み書きします。\
 ID は list_workspaces、list_people、list_tasks で調べてから使ってください。\
 日付は YYYY-MM-DD、時刻つきなら YYYY-MM-DD HH:MM で渡します。\
 変更は undo で 1 つずつ元に戻せます（このサーバーが動いている間）。";
+
+/// サーバーの説明。コメントの決まりは、アプリの中の AI と同じ文を渡す。
+fn instructions() -> String {
+    format!("{INSTRUCTIONS_HEAD}{}", tools::COMMENT_RULE)
+}
 
 const WRITES: &[&str] = &[
     "create_task",
@@ -58,7 +63,12 @@ pub fn tool_list() -> Vec<Value> {
     let mut list: Vec<Value> = tools::definitions()
         .into_iter()
         // GitHub とシェルは、呼ぶ側（Claude Code）が自分で持っている
-        .filter(|t| !matches!(t.name, tools::GITHUB_FETCH | tools::RUN_SHELL))
+        .filter(|t| {
+            !matches!(
+                t.name,
+                tools::GITHUB_FETCH | tools::SLACK_FETCH | tools::RUN_SHELL
+            )
+        })
         .map(|t| {
             let description = if t.name == "delete_task" {
                 "タスクを削除する。undo で元に戻せる。"
@@ -98,7 +108,9 @@ pub fn call_tool(store: &mut Store, now: i64, name: &str, args: &Value) -> Resul
             let done = store.redo().map_err(core)?;
             Ok(json!({"redone": done}).to_string())
         }
-        tools::GITHUB_FETCH | tools::RUN_SHELL => Err(format!("{name} というツールはありません")),
+        tools::GITHUB_FETCH | tools::SLACK_FETCH | tools::RUN_SHELL => {
+            Err(format!("{name} というツールはありません"))
+        }
         _ => {
             // 自分が登録されていれば、コメントの書き手にする（AI チャットと同じ）
             let author = store
@@ -344,7 +356,7 @@ impl<F: FnOnce() -> malakt_core::Result<Store>> Server<F> {
                     "protocolVersion": version,
                     "capabilities": {"tools": {}},
                     "serverInfo": {"name": NAME, "version": env!("CARGO_PKG_VERSION")},
-                    "instructions": INSTRUCTIONS,
+                    "instructions": instructions(),
                 }))
             }
             "ping" => Ok(json!({})),
@@ -488,11 +500,17 @@ mod tests {
         // シェルと GitHub は出さない
         assert!(!names.contains(&tools::RUN_SHELL));
         assert!(!names.contains(&tools::GITHUB_FETCH));
+        assert!(!names.contains(&tools::SLACK_FETCH));
         for t in tools {
             assert_eq!(t["inputSchema"]["type"], "object", "{t}");
             assert!(!t["description"].as_str().unwrap().is_empty());
             // 削除は undo で戻せるので、「元に戻せない」とは書かない
             assert!(!t["description"].as_str().unwrap().contains("元に戻せない"));
+            if t["name"] == "add_comment" {
+                // 外のエージェントにも、中身のないコメントを書かせない
+                assert!(t["description"].as_str().unwrap().contains("事実だけ"));
+                assert!(instructions().contains("していないこと"));
+            }
         }
         // 書き込みとして扱うツールは、どれも一覧にある
         for name in WRITES {
