@@ -2032,6 +2032,10 @@ fn comments_are_sent_once_after_a_pause(cx: &mut TestAppContext) {
             cx.notify();
         })
     });
+    // 手で変えたあとも、残りの分（期限）は元に戻せる
+    let now = all_tasks(cx).remove(0);
+    let left = read(cx, |s| s.tracked_for(&now));
+    assert_eq!(left.as_deref(), Some("期限 2026-12-20"));
     let session = session(cx);
     cx.update(|cx| session.update(cx, |s, cx| s.undo_track(&task, cx)));
     let now = all_tasks(cx).remove(0);
@@ -2112,7 +2116,8 @@ fn an_update_from_a_comment_touches_only_that_task(cx: &mut TestAppContext) {
     world.reply(tool_reply(
         "t1",
         "update_task",
-        json!({"id": task, "title": "記事（ほぼ完成）", "description": "メモ", "percent": 90}),
+        json!({"id": task, "title": "記事（ほぼ完成）", "description": "メモ", "percent": 90,
+               "categories": ["執筆"], "parent_id": other, "assignee_ids": []}),
     ));
     world.reply(tool_reply(
         "t2",
@@ -2134,6 +2139,7 @@ fn an_update_from_a_comment_touches_only_that_task(cx: &mut TestAppContext) {
         (now.title.as_str(), now.description.as_str(), now.percent),
         ("記事を書く", "", 90)
     );
+    assert!(now.categories.is_empty() && now.parent_id.is_none());
     assert_eq!(find(&other).percent, 0);
     let comments = cx.update(|cx| db::shared(cx).read(cx).store.comments(&task).unwrap());
     assert_eq!(comments.len(), 1);
@@ -2288,4 +2294,40 @@ fn a_task_being_named_waits_for_its_title(cx: &mut TestAppContext) {
     let body = sent[0].2.to_string();
     assert!(body.contains("会場を予約する"), "{body}");
     assert!(!body.contains("新規タスク"), "{body}");
+}
+
+/// AI が更新している間に手で変えた分は、AI の変更に数えない。元に戻しても残る。
+#[gpui_kit::test]
+fn edits_made_during_an_update_are_not_undone(cx: &mut TestAppContext) {
+    let (world, task) = start_with_task(cx, "記事を書く");
+    world.keys.set(Provider::Claude, "k").unwrap();
+    cx.run_until_parked();
+    add_comment(cx, &task, "半分書いた");
+    // AI に届かなかった間に、手で期限を入れる
+    world.fail("connection refused");
+    settle_comments(cx);
+    cx.update(|cx| {
+        db::shared(cx).update(cx, |db, cx| {
+            let mut draft = TaskDraft::from(&db.store.task(&task).unwrap());
+            draft.due = Some("2026-12-24".into());
+            db.store.update_task(&task, &draft).unwrap();
+            cx.notify();
+        })
+    });
+    assert!(read(cx, |s| s.tracked.is_empty()));
+
+    world.reply(tool_reply(
+        "t1",
+        "update_task",
+        json!({"id": task, "percent": 50}),
+    ));
+    world.reply(text_reply("更新しました。"));
+    let session = session(cx);
+    cx.update(|cx| session.update(cx, |s, cx| s.retry_track(&task, cx)));
+    wait(cx, "AI が更新し終わる", |s| !s.busy);
+    let label = read(cx, |s| s.tracked[&task].label.clone());
+    assert_eq!(label.as_ref(), "0% → 50%");
+    cx.update(|cx| session.update(cx, |s, cx| s.undo_track(&task, cx)));
+    let now = all_tasks(cx).remove(0);
+    assert_eq!((now.percent, now.due.as_deref()), (0, Some("2026-12-24")));
 }

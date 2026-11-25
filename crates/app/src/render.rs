@@ -3480,7 +3480,7 @@ impl MainView {
                     .icon(app_icon("undo-2"))
                     .ghost()
                     .xsmall()
-                    .tooltip(format!("AI の更新（{}）を元に戻す", tracked.label))
+                    .tooltip(format!("AI の更新（{tracked}）を元に戻す"))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.ai_session.update(cx, |s, cx| s.undo_track(&id, cx));
                     })),
