@@ -6359,6 +6359,8 @@ impl Render for MainView {
                             .child(
                                 row()
                                     .id("notice")
+                                    // 下に重なったボタンまで押さない
+                                    .occlude()
                                     .gap_3()
                                     .px_3()
                                     .py_2()

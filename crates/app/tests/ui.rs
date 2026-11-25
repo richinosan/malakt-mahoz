@@ -4078,6 +4078,8 @@ fn status_changes_from_a_menu_without_a_dialog(cx: &mut TestAppContext) {
     ui(cx, window, |window, _| {
         assert!(window.try_find("notice-undo").is_none());
     });
+    // 知らせは一覧の右下の「＋」に重なる。知らせを押しても、下のボタンは押されない
+    cx.update(|cx| assert_eq!(view.read(cx).detail.as_ref().unwrap().task.id, id));
     ui(cx, window, |window, cx| window.click("to-cancelled", cx));
 
     // 詳細の状態からも選べる。1 つ目は「未着手」
