@@ -367,6 +367,8 @@ pub struct Session {
     pub arrange_notes: HashMap<String, SharedString>,
     /// もう見たタスクと、そのリンク。ここにないタスクやリンクが新しいもの。
     known: Option<HashMap<String, Vec<String>>>,
+    /// ユーザーが最初のタイトルを書いている途中のタスク。書き終えるまで整えない。
+    holding: Vec<String>,
     /// 手が空いたら、新しいタスクを探し直す。
     arrange_retry: bool,
     /// チャットを出している（メインのウィンドウの右か、別ウィンドウ）。次の起動で戻す。
@@ -510,6 +512,7 @@ impl Session {
             arranging: Vec::new(),
             arrange_notes: HashMap::new(),
             known: None,
+            holding: Vec::new(),
             arrange_retry: false,
             open: ui.open,
             restore: (ui.open || ui.shell == "window")
@@ -792,6 +795,22 @@ impl Session {
         cx.notify();
     }
 
+    /// 追加したばかりのタスクを、ユーザーがタイトルを書き終えるまで整えずに待つ。
+    pub fn hold(&mut self, id: String) {
+        if !self.holding.contains(&id) {
+            self.holding.push(id);
+        }
+    }
+
+    /// タイトルを書き終えたタスクを、整える対象に戻す。
+    pub fn release(&mut self, id: &str, cx: &mut Context<Self>) {
+        let before = self.holding.len();
+        self.holding.retain(|held| held != id);
+        if before != self.holding.len() {
+            self.tasks_changed(cx);
+        }
+    }
+
     /// まだ見ていないタスクと、新しくリンクが書かれたタスク。
     fn new_tasks(&self, all: Vec<(NewTask, bool)>) -> Vec<NewTask> {
         let Some(known) = &self.known else {
@@ -800,6 +819,7 @@ impl Session {
         all.into_iter()
             .filter(|(task, open)| {
                 *open
+                    && !self.holding.contains(&task.id)
                     && known.get(&task.id).is_none_or(|seen| {
                         task.links.iter().any(|link| !seen.contains(&link.url()))
                     })
