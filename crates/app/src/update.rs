@@ -82,15 +82,7 @@ pub fn connect(source: Source, platform: &'static str, exe: PathBuf, dir: PathBu
     cx.set_global(Updater {
         available: true,
         check: Arc::new(move |skipped| {
-            if let Some(staged) = malakt_update::staged(&dir, current) {
-                return Ok(Some(staged));
-            }
-            match malakt_update::latest(&source, current, platform)? {
-                Some(release) if skipped.as_deref() != Some(release.version.as_str()) => {
-                    malakt_update::stage(&release, &dir).map(Some)
-                }
-                _ => Ok(None),
-            }
+            malakt_update::check(&source, current, platform, skipped.as_deref(), &dir)
         }),
         install: Arc::new(move |staged| malakt_update::install(staged, &exe)),
     });

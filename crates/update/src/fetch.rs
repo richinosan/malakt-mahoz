@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 
-use crate::{newer, write_ready, Error, Release, Source, Staged};
+use crate::{lock, newer, staged, write_ready, Error, Release, Source, Staged};
 
 const SUMS: &str = "SHA256SUMS";
 /// アーカイブの大きさの上限。これを超えるものは取り込まない。
@@ -106,6 +106,37 @@ pub fn latest(source: &Source, current: &str, platform: &str) -> Result<Option<R
         }),
         _ => None,
     })
+}
+
+/// 新しい版を探し、あれば取ってきて `dir` に置く。前に置いたものがあれば、それを返す。
+///
+/// `skipped` は、入れ替えに失敗して見送っている版。同じ版は取ってこない。
+/// ほかのプロセスが `dir` で取ってきている・入れ替えている最中なら、何も触らずに `Ok(None)`。
+pub fn check(
+    source: &Source,
+    current: &str,
+    platform: &str,
+    skipped: Option<&str>,
+    dir: &Path,
+) -> Result<Option<Staged>, Error> {
+    let lock = lock(dir).map_err(|e| {
+        Error::Failed(format!(
+            "新しい版を置く場所（{}）を使えませんでした: {e}",
+            dir.display()
+        ))
+    })?;
+    let Some(_lock) = lock else {
+        return Ok(None);
+    };
+    if let Some(found) = staged(dir, current) {
+        return Ok(Some(found));
+    }
+    match latest(source, current, platform)? {
+        Some(release) if skipped != Some(release.version.as_str()) => {
+            stage(&release, dir).map(Some)
+        }
+        _ => Ok(None),
+    }
 }
 
 /// `SHA256SUMS` から、`name` の行のハッシュを読む。
@@ -265,7 +296,6 @@ fn stage_into(release: &Release, dir: &Path) -> Result<Staged, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::staged;
     use std::collections::HashMap;
     use std::net::TcpListener;
 
@@ -425,6 +455,61 @@ mod tests {
         assert_eq!(std::fs::read_dir(dir.join("payload")).unwrap().count(), 1);
         // 次の起動でも、置いてあるものが見つかる
         assert_eq!(staged(&dir, "0.1.0"), Some(got));
+    }
+
+    #[test]
+    fn checking_stages_once_and_then_reuses_what_is_there() {
+        let source = release_server("0.2.0", LINUX, linux_archive(), None);
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("update");
+        let first = check(&source, "0.1.0", "linux-x86_64", None, &dir)
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.version, "0.2.0");
+        // 2 回目（もう 1 つのアプリ）は、置いてあるものをそのまま使う
+        let marker = std::fs::metadata(dir.join("ready.json"))
+            .unwrap()
+            .modified()
+            .unwrap();
+        let second = check(&source, "0.1.0", "linux-x86_64", None, &dir).unwrap();
+        assert_eq!(second, Some(first));
+        assert_eq!(
+            std::fs::metadata(dir.join("ready.json"))
+                .unwrap()
+                .modified()
+                .unwrap(),
+            marker
+        );
+        // 見送っている版は取ってこない
+        let other = root.path().join("other");
+        assert_eq!(
+            check(&source, "0.1.0", "linux-x86_64", Some("0.2.0"), &other),
+            Ok(None)
+        );
+        assert!(!other.exists());
+    }
+
+    #[test]
+    fn another_process_downloading_is_left_alone() {
+        let source = release_server("0.2.0", LINUX, linux_archive(), None);
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("update");
+        // もう 1 つのアプリが取ってきている途中（鍵を持っていて、目印はまだない）
+        let held = lock(&dir).unwrap().unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("archive"), b"half").unwrap();
+        assert_eq!(
+            check(&source, "0.1.0", "linux-x86_64", None, &dir),
+            Ok(None)
+        );
+        assert_eq!(std::fs::read(dir.join("archive")).unwrap(), b"half");
+        // 終わったら（落ちたら）、残りを片付けて取り直す
+        drop(held);
+        let got = check(&source, "0.1.0", "linux-x86_64", None, &dir)
+            .unwrap()
+            .unwrap();
+        assert_eq!(std::fs::read(&got.payload).unwrap(), b"new binary");
+        assert!(!dir.join("archive").exists());
     }
 
     #[test]

@@ -3,7 +3,7 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
-use crate::Staged;
+use crate::{lock, still_staged, Staged};
 
 /// `.app` の中の実行ファイルの場所。
 const BUNDLE_BINARY: &str = "Contents/MacOS/malakt-mahoz";
@@ -76,8 +76,24 @@ fn bring(from: &Path, to: &Path) -> std::io::Result<()> {
 /// 動いている実行ファイルは上書きできない OS があるので、今のものを隣に退けてから、新しい
 /// ものを同じ名前で置く。置けなかったら、退けたものを戻す。退けたものは消すが、Windows では
 /// 動いている間は消せないので、次の起動で消す（[`clear_leftovers`]）。
+///
+/// 同じ置き場を使うほかのプロセスが、もう入れ替えた・今入れ替えている・取り直しているなら、
+/// 何もせずに `Ok` を返す（入れ替えは 1 回で足りる）。
 pub fn install(staged: &Staged, exe: &Path) -> Result<(), String> {
     let (new, current) = pair(staged, exe);
+    let lock = lock(&staged.dir).map_err(|e| {
+        format!(
+            "v{} に更新できませんでした。新しい版を置いた場所（{}）を使えませんでした: {e}",
+            staged.version,
+            staged.dir.display()
+        )
+    })?;
+    let Some(_lock) = lock else {
+        return Ok(());
+    };
+    if !still_staged(staged) {
+        return Ok(());
+    }
     let fail = |what: &str, error: std::io::Error| {
         format!(
             "v{} に更新できませんでした。{}{what}: {error}",
@@ -128,6 +144,7 @@ mod tests {
     fn staged(root: &Path, payload: &str) -> Staged {
         let dir = root.join("update");
         std::fs::create_dir_all(dir.join("payload")).unwrap();
+        crate::write_ready(&dir, "0.2.0", payload).unwrap();
         Staged {
             version: "0.2.0".into(),
             payload: dir.join("payload").join(payload),
@@ -217,18 +234,53 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let exe = root.path().join("malakt-mahoz");
         std::fs::write(&exe, b"old").unwrap();
-        // 置いてあるはずのものがない
         let staged = staged(root.path(), "malakt-mahoz");
+        std::fs::write(&staged.payload, b"new").unwrap();
+        // 隣に、消せない形で前の版が残っている（中身のあるフォルダーは、ファイルとしては置き換えられない）
+        let moved = root.path().join("elsewhere");
+        std::fs::rename(&exe, &moved).unwrap();
         let error = install(&staged, &exe).unwrap_err();
         assert!(error.contains("v0.2.0") && error.contains("malakt-mahoz"));
-        assert_eq!(std::fs::read(&exe).unwrap(), b"old");
+        // 写しかけは残さない
+        assert!(!root.path().join(".malakt-mahoz.new").exists());
+        assert!(!exe.exists());
+        assert_eq!(std::fs::read(&moved).unwrap(), b"old");
+    }
+
+    #[test]
+    fn an_update_another_process_already_installed_is_not_installed_twice() {
+        let root = tempfile::tempdir().unwrap();
+        let exe = root.path().join("malakt-mahoz");
+        std::fs::write(&exe, b"new").unwrap();
+        let staged = staged(root.path(), "malakt-mahoz");
+        // もう 1 つのアプリが入れ替えて、置き場を消したあと
+        std::fs::remove_dir_all(&staged.dir).unwrap();
+        install(&staged, &exe).unwrap();
+        assert_eq!(std::fs::read(&exe).unwrap(), b"new");
         assert_eq!(
             std::fs::read_dir(root.path())
                 .unwrap()
-                .filter(|e| e.as_ref().unwrap().file_name() != "update")
+                .filter(|e| e.as_ref().unwrap().file_name() != "update.lock")
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn installing_waits_out_another_process_using_the_staging_dir() {
+        let root = tempfile::tempdir().unwrap();
+        let exe = root.path().join("malakt-mahoz");
+        std::fs::write(&exe, b"old").unwrap();
+        let staged = staged(root.path(), "malakt-mahoz");
+        std::fs::write(&staged.payload, b"new").unwrap();
+        // もう 1 つのアプリが置き場を使っている間は、触らない
+        let held = lock(&staged.dir).unwrap().unwrap();
+        install(&staged, &exe).unwrap();
+        assert_eq!(std::fs::read(&exe).unwrap(), b"old");
+        assert_eq!(std::fs::read(&staged.payload).unwrap(), b"new");
+        drop(held);
+        install(&staged, &exe).unwrap();
+        assert_eq!(std::fs::read(&exe).unwrap(), b"new");
     }
 
     #[test]
