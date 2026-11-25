@@ -16,6 +16,10 @@ pub enum Elevation {
 
 /// その高さの影。暗い画面では背景に埋もれないよう、濃くする。
 pub fn shadow(level: Elevation, cx: &App) -> Vec<BoxShadow> {
+    // 背景の画像の上の面は透けるので、下に敷いた影が面の中に見えてしまう
+    if level == Elevation::Low && crate::theme::backdrop(cx).is_some() {
+        return Vec::new();
+    }
     let dark = cx.theme().is_dark();
     let ink = |alpha: f32| hsla(0., 0., 0., if dark { alpha * 4.5 } else { alpha }.min(0.9));
     let layer = |y: f32, blur: f32, spread: f32, alpha: f32| {

@@ -75,10 +75,19 @@ const MUST: &[&str] = &[
     "light-reset",
     "dark-reset",
     "color-open",
+    "scene-open",
+    "scene",
+    "scene-reset",
+    "clear-slider",
+    "blur-slider",
+    "cards-switch",
 ];
 
 /// ロックを設定したときだけ出るもの。ロックは tests/ui.rs で確かめる。
 const LOCK: &[&str] = &["lock-disable", "lock-save", "unlock"];
+
+/// アイコンを選ぶ画面のカテゴリ。5 つとも tests/ui.rs で押して確かめる。
+const ICON_PICKER: &[&str] = &["icon-category"];
 
 /// 入力欄。名前が `-input` で終わるもののほかに、ここにあるもの。
 const INPUTS: &[&str] = &[
@@ -106,6 +115,7 @@ const QUIET: &[(&str, &str)] = &[
     ("タスクの詳細 > title#1", "今開いているタスク"),
     ("説明を編集中の詳細 > title#1", "今開いているタスク"),
     ("担当を選んでいる詳細 > title#1", "今開いているタスク"),
+    ("ホーム > p-due#0", "期限がもう今日のタスク"),
     ("nt-prio#0", "今選んでいる優先度"),
     ("def-prio#0", "今選んでいる優先度"),
     ("def-due-none", "今選んでいる期限の決め方"),
@@ -113,6 +123,8 @@ const QUIET: &[(&str, &str)] = &[
     ("bulk-cat-mode#0", "今選んでいる変え方"),
     ("ticket-who#0", "今選んでいる人"),
     ("font#0", "今選んでいるフォント"),
+    ("scene#0", "今選んでいる背景の画像"),
+    ("scene-file", "OS のファイル選択を開く"),
     // 入力が空のときは送らない
     ("pane-keys#0", "今選んでいるキーの割り当て"),
     ("quick-add-submit", "タイトルが空"),
@@ -468,6 +480,10 @@ fn fingerprint(cx: &mut TestAppContext, world: &World) -> String {
             "color.accent",
             "color.background.light",
             "color.background.dark",
+            "scene",
+            "scene.clear",
+            "scene.blur",
+            "list.cards",
         ] {
             data.push_str(&format!("{:?}", store.setting(key).unwrap()));
         }
@@ -577,27 +593,30 @@ fn screens() -> Vec<(&'static str, Size<Pixels>, Setup)> {
         ("担当者のダイアログ", wide, |cx, w| {
             with_view(cx, w, |v, window, cx| v.open_people(window, cx))
         }),
-        ("フォントとカラー", wide, |cx, w| {
+        ("見た目", wide, |cx, w| {
             with_view(cx, w, |v, window, cx| v.open_appearance(window, cx))
         }),
-        (
-            "フォントとカラーを変えたところ",
-            wide,
-            |cx, w| {
-                use malakt_mahoz::theme::{Color, Slot};
-                with_view(cx, w, |v, window, cx| {
-                    v.set_font(Some("Noto Sans"), cx);
-                    for (slot, hex) in [
-                        (Slot::Accent, "#1d4ed8"),
-                        (Slot::Light, "#fdf6e3"),
-                        (Slot::Dark, "#002b36"),
-                    ] {
-                        v.set_color(slot, Color::parse(hex), window, cx);
-                    }
-                    v.open_appearance(window, cx)
-                })
-            },
-        ),
+        ("見た目を変えたところ", wide, |cx, w| {
+            use malakt_mahoz::theme::{Color, Slot};
+            with_view(cx, w, |v, window, cx| {
+                v.set_font(Some("Noto Sans"), cx);
+                for (slot, hex) in [
+                    (Slot::Accent, "#1d4ed8"),
+                    (Slot::Light, "#fdf6e3"),
+                    (Slot::Dark, "#002b36"),
+                ] {
+                    v.set_color(slot, Color::parse(hex), window, cx);
+                }
+                v.set_scene(malakt_mahoz::theme::Scene::Sky, window, cx);
+                v.open_appearance(window, cx)
+            })
+        }),
+        ("背景の画像の一覧", wide, |cx, w| {
+            with_view(cx, w, |v, window, cx| {
+                v.open_appearance(window, cx);
+                v.open_scene_picker(cx);
+            })
+        }),
         ("フォントの一覧", wide, |cx, w| {
             with_view(cx, w, |v, window, cx| {
                 v.open_appearance(window, cx);
@@ -783,6 +802,7 @@ fn every_button_responds(cx: &mut TestAppContext) {
                 && !ai_inside(name)
                 && !NEVER.contains(&name)
                 && !LOCK.contains(&name)
+                && !ICON_PICKER.contains(&name)
                 && !missed.contains(&name)
             {
                 missed.push(name);

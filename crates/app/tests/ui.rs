@@ -177,13 +177,23 @@ fn nested_workspaces_and_filing_later(cx: &mut TestAppContext) {
 
     // ワークスペースを作ると、そこへ移動する
     ui(cx, window, |window, cx| window.click("add-workspace", cx));
+    // ダイアログは出ず、「新規ワークスペース」という名前で増えて、その行で名前を書ける
+    cx.update(|cx| {
+        let view = view.read(cx);
+        assert_eq!(view.modal, Modal::None);
+        assert!(view.workspace_naming.as_ref().is_some_and(|n| n.created));
+    });
+    let parent = store(cx, |s| s.workspaces().unwrap()).remove(0);
+    assert_eq!(parent.name, malakt_mahoz::state::NEW_WORKSPACE_NAME);
+    // 名前は全部選ばれているので、打つと置き換わる
     ui(cx, window, |window, cx| {
-        window.click("name-input", cx);
+        assert!(window.find("workspace-name-input").visible());
         window.input("冬のイベント", cx);
         window.press("enter", cx);
     });
     let parent = store(cx, |s| s.workspaces().unwrap()).remove(0);
     assert_eq!(parent.name, "冬のイベント");
+    cx.update(|cx| assert_eq!(view.read(cx).workspace_naming, None));
     cx.update(|cx| assert_eq!(view.read(cx).nav, Nav::Workspace(parent.id.clone())));
 
     // その中に子を作る
@@ -193,11 +203,10 @@ fn nested_workspaces_and_filing_later(cx: &mut TestAppContext) {
     for key in ["down", "down", "down", "enter"] {
         ui(cx, window, |window, cx| window.press(key, cx));
     }
-    ui(cx, window, |window, cx| {
-        window.click("name-input", cx);
-        window.input("会場", cx);
-        window.click("name-submit", cx);
-    });
+    // ほかの場所を押しても保存される
+    ui(cx, window, |window, cx| window.input("会場", cx));
+    ui(cx, window, |window, cx| window.click("quick-add", cx));
+    cx.update(|cx| assert_eq!(view.read(cx).workspace_naming, None));
     let all = store(cx, |s| s.workspaces().unwrap());
     let child = all
         .iter()
@@ -243,15 +252,64 @@ fn nested_workspaces_and_filing_later(cx: &mut TestAppContext) {
         assert_eq!(view.open_counts.get(&child.id), Some(&2));
     });
 
-    // 空の名前では作れず、ダイアログは開いたまま
+    // 何も打たずに Enter を押すと、「新規ワークスペース」のまま残る
     ui(cx, window, |window, cx| window.click("add-workspace", cx));
-    ui(cx, window, |window, cx| window.click("name-submit", cx));
+    ui(cx, window, |window, cx| window.press("enter", cx));
+    let all = store(cx, |s| s.workspaces().unwrap());
+    assert_eq!(all.len(), 3);
+    let added = all
+        .iter()
+        .find(|w| w.name == malakt_mahoz::state::NEW_WORKSPACE_NAME)
+        .expect("新規ワークスペース")
+        .id
+        .clone();
     cx.update(|cx| {
         let view = view.read(cx);
-        assert!(matches!(view.modal, Modal::WorkspaceName { .. }));
-        assert!(view.error.is_some());
+        assert_eq!(view.workspace_naming, None);
+        assert_eq!(view.nav, Nav::Workspace(added.clone()));
     });
-    assert_eq!(store(cx, |s| s.workspaces().unwrap()).len(), 2);
+
+    // 行のメニューの「名前を変更」も、その行で書く。空にして Enter を押すと、前の名前のまま
+    let rename = |cx: &mut TestAppContext| {
+        cx.update_window(window, |_, window, cx| {
+            view.update(cx, |v, cx| v.rename_workspace(added.clone(), window, cx))
+        })
+        .unwrap();
+        cx.run_until_parked();
+    };
+    rename(cx);
+    cx.update(|cx| {
+        let naming = view
+            .read(cx)
+            .workspace_naming
+            .clone()
+            .expect("名前を書いている");
+        assert!(!naming.created);
+    });
+    ui(cx, window, |window, cx| {
+        window.press("backspace", cx);
+        window.press("enter", cx);
+    });
+    assert_eq!(
+        store(cx, |s| s.workspace(&added).unwrap()).name,
+        malakt_mahoz::state::NEW_WORKSPACE_NAME
+    );
+    // Esc は書きかけを捨てる
+    rename(cx);
+    ui(cx, window, |window, cx| window.input("捨てる名前", cx));
+    ui(cx, window, |window, cx| window.press("escape", cx));
+    cx.update(|cx| assert_eq!(view.read(cx).workspace_naming, None));
+    assert_eq!(
+        store(cx, |s| s.workspace(&added).unwrap()).name,
+        malakt_mahoz::state::NEW_WORKSPACE_NAME
+    );
+    // 書いて Enter で変わる
+    rename(cx);
+    ui(cx, window, |window, cx| {
+        window.input("打ち上げ", cx);
+        window.press("enter", cx);
+    });
+    assert_eq!(store(cx, |s| s.workspace(&added).unwrap()).name, "打ち上げ");
 }
 
 /// ウィンドウを 2 枚開くと、片方の変更がもう片方にもすぐ出る。
@@ -511,10 +569,6 @@ fn every_screen_renders_at_any_size(cx: &mut TestAppContext) {
         .unwrap();
         ui(cx, window, |_, _| {});
         let modals = [
-            Modal::WorkspaceName {
-                parent: None,
-                rename: Some(ws.clone()),
-            },
             Modal::DeleteWorkspace(ws.clone()),
             Modal::DeleteTasks(vec![task.clone()]),
             Modal::MoveTasks(vec![task.clone()]),
@@ -1152,14 +1206,14 @@ fn bulk_changes_and_full_new_task_form(cx: &mut TestAppContext) {
 
     // 期限: 正しくない値は断り、ダイアログを開いたままにする
     ui(cx, window, |window, cx| window.click("bulk-due", cx));
-    set(cx, |v| &v.inputs.bulk_due, "来週");
+    set(cx, |v| &v.inputs.bulk_due, "そのうち");
     ui(cx, window, |window, cx| window.click("bulk-due-submit", cx));
     cx.update(|cx| {
         let view = view.read(cx);
         assert_eq!(view.modal, Modal::BulkDue);
         assert!(view.error.is_some());
     });
-    set(cx, |v| &v.inputs.bulk_due, "2026-12-24 18:00");
+    set(cx, |v| &v.inputs.bulk_due, "2026/12/24 午後6時");
     ui(cx, window, |window, cx| window.click("bulk-due-submit", cx));
     let due = |cx: &mut TestAppContext, id: &str| store(cx, |s| s.task(id).unwrap().due);
     assert_eq!(due(cx, &shown[1]).as_deref(), Some("2026-12-24 18:00"));
@@ -1221,8 +1275,8 @@ fn bulk_changes_and_full_new_task_form(cx: &mut TestAppContext) {
             "見積もりを取る"
         );
     });
-    set(cx, |v| &v.inputs.nt_due, "2026-12-01");
-    set(cx, |v| &v.inputs.nt_start, "2026-11-30 09:00");
+    set(cx, |v| &v.inputs.nt_due, "2026年12月1日");
+    set(cx, |v| &v.inputs.nt_start, "2026.11.30 9時");
     set(cx, |v| &v.inputs.nt_categories, "経理");
     ui(cx, window, |window, cx| {
         window.click(("nt-prio", 1usize), cx)
@@ -1540,6 +1594,99 @@ fn title_is_edited_in_place(cx: &mut TestAppContext) {
     assert!(cx.update(|cx| view.read(cx).editing.is_none()));
 }
 
+/// 詳細の期限は、日付の欄と時刻の欄で決める。「明日」「11/27 14時」のような書き方も読み、
+/// 保存すると欄は保存した形に直る。一覧のメニューで日付を変えても時刻は残る。
+#[gpui_kit::test]
+fn due_takes_a_time_and_many_spellings(cx: &mut TestAppContext) {
+    use malakt_core::view::{add_days, today};
+    start(cx);
+    let (window, view) = open(cx, wide());
+    ui(cx, window, |window, cx| {
+        window.click("nav-all", cx);
+        window.click("quick-add", cx);
+        window.input("資料を出す", cx);
+        window.press("enter", cx);
+    });
+    ui(cx, window, |window, cx| window.click(("title", 0usize), cx));
+    let due = |cx: &mut TestAppContext| all_tasks(cx)[0].due.clone();
+    let shown = |cx: &mut TestAppContext| {
+        cx.update(|cx| {
+            let inputs = &view.read(cx).inputs;
+            (
+                inputs.due.read(cx).value().to_string(),
+                inputs.due_time.read(cx).value().to_string(),
+            )
+        })
+    };
+    let type_in = |cx: &mut TestAppContext, id: &'static str, text: &'static str| {
+        ui(cx, window, |window, cx| {
+            window.click(id, cx);
+            window.press("secondary-a", cx);
+            window.press("backspace", cx);
+            if !text.is_empty() {
+                window.input(text, cx);
+            }
+            window.press("enter", cx);
+        });
+    };
+
+    // 時刻だけを入れると、今日のその時刻になる
+    type_in(cx, "due-time-input", "14時");
+    assert_eq!(due(cx), Some(format!("{} 14:00", today())));
+    assert_eq!(shown(cx), (today(), "14:00".to_owned()));
+
+    // 日付だけを書き換えても、時刻は残る
+    type_in(cx, "due-input", "明日");
+    let tomorrow = add_days(&today(), 1);
+    assert_eq!(due(cx), Some(format!("{tomorrow} 14:00")));
+    assert_eq!(shown(cx), (tomorrow.clone(), "14:00".to_owned()));
+
+    // 日付の欄に時刻まで書くと、両方が変わる
+    type_in(cx, "due-input", "2027/1/5 午後3時半");
+    assert_eq!(due(cx).as_deref(), Some("2027-01-05 15:30"));
+    assert_eq!(shown(cx), ("2027-01-05".to_owned(), "15:30".to_owned()));
+    type_in(cx, "due-time-input", "9:05");
+    assert_eq!(due(cx).as_deref(), Some("2027-01-05 09:05"));
+
+    // 読めない書き方は断り、書いたものと元の期限を残す
+    type_in(cx, "due-time-input", "25時");
+    assert!(cx.update(|cx| view.read(cx).error.is_some()));
+    assert_eq!(due(cx).as_deref(), Some("2027-01-05 09:05"));
+    assert_eq!(shown(cx).1, "25時");
+
+    // 時刻を空にすると、日付だけの期限に戻る
+    type_in(cx, "due-time-input", "");
+    assert_eq!(due(cx).as_deref(), Some("2027-01-05"));
+    assert!(cx.update(|cx| view.read(cx).error.is_none()));
+
+    // ボタンで日付を変えても時刻は残り、クリアで両方の欄が空になる
+    type_in(cx, "due-time-input", "2pm");
+    ui(cx, window, |window, cx| window.click(("p-due", 1usize), cx));
+    assert_eq!(due(cx), Some(format!("{tomorrow} 14:00")));
+    assert_eq!(shown(cx), (tomorrow.clone(), "14:00".to_owned()));
+
+    // 書き換えてからほかの場所を押しても保存する
+    cx.update_window(window, |_, window, _| window.activate_window())
+        .unwrap();
+    cx.run_until_parked();
+    ui(cx, window, |window, cx| {
+        window.click("due-time-input", cx);
+        window.press("secondary-a", cx);
+        window.press("backspace", cx);
+        window.input("18:00", cx);
+    });
+    ui(cx, window, |window, cx| window.click("due-input", cx));
+    assert_eq!(due(cx), Some(format!("{tomorrow} 18:00")));
+
+    ui(cx, window, |window, cx| window.click(("p-due", 3usize), cx));
+    assert_eq!(due(cx), None);
+    assert_eq!(shown(cx), (String::new(), String::new()));
+
+    // 開始日も同じ書き方を読む
+    type_in(cx, "start-input", "20270104 10時");
+    assert_eq!(all_tasks(cx)[0].start.as_deref(), Some("2027-01-04 10:00"));
+}
+
 /// 上のバーの配色のボタンで、画面の色がその場で変わり、選択が保存される。
 #[gpui_kit::test]
 fn theme_buttons_switch_the_colors(cx: &mut TestAppContext) {
@@ -1693,6 +1840,140 @@ fn font_and_colors_are_chosen_in_settings(cx: &mut TestAppContext) {
     );
 }
 
+/// 設定の「見た目」で、背景の画像・透明度・ぼかし・カード表示を変えられ、開き直しても残る。
+#[gpui_kit::test]
+fn backdrop_and_cards_are_chosen_in_settings(cx: &mut TestAppContext) {
+    use gpui_kit::component::ActiveTheme;
+    use malakt_mahoz::state::SubModal;
+    use malakt_mahoz::theme::{self, Color, Scene};
+    start(cx);
+    cx.update(|cx| {
+        db::shared(cx).update(cx, |db, cx| {
+            db.store.add_task_in(None, "切符を買う").unwrap();
+            cx.notify();
+        })
+    });
+    let (window, view) = open(cx, wide());
+    cx.update(|cx| view.update(cx, |v, cx| v.go(Nav::All, cx)));
+    let saved = |cx: &mut TestAppContext, key: &str| store(cx, |s| s.setting(key).unwrap());
+    let primary = |cx: &mut TestAppContext| cx.update(|cx| Color::from(cx.theme().primary).hex());
+    ui(cx, window, |window, cx| {
+        theme::set(theme::Choice::Light, window, cx).unwrap()
+    });
+    assert!(cx.update(|cx| theme::backdrop(cx).is_none()));
+
+    // 背景の画像の一覧は、設定の上に重なって開く。選ぶと、その画像に合う色になる
+    ui(cx, window, |window, cx| {
+        view.update(cx, |v, cx| v.open_appearance(window, cx))
+    });
+    ui(cx, window, |window, cx| {
+        // 画像を出していないときは、透明度とぼかしは出ない
+        assert!(window.try_find("clear-slider").is_none());
+        window.click("scene-open", cx)
+    });
+    assert_eq!(
+        cx.update(|cx| view.read(cx).sub_modal),
+        Some(SubModal::Scene)
+    );
+    ui(cx, window, |window, cx| window.click(("scene", 1usize), cx));
+    assert_eq!(saved(cx, "scene").as_deref(), Some("sky"));
+    assert!(cx.update(|cx| theme::backdrop(cx).is_some()));
+    assert_eq!(primary(cx), "#1f6fd0");
+    ui(cx, window, |window, cx| window.press("escape", cx));
+    assert!(cx.update(|cx| {
+        let v = view.read(cx);
+        v.sub_modal.is_none() && v.modal == Modal::Appearance
+    }));
+
+    // 透明度とぼかしは、押したところの値になる
+    let alpha = |cx: &mut TestAppContext| cx.update(|cx| theme::backdrop(cx).unwrap().alpha);
+    let before = alpha(cx);
+    ui(cx, window, |window, cx| {
+        let slider = window.find("clear-slider").bounds();
+        let right = gpui_kit::point(slider.size.width * 0.9, slider.size.height / 2.);
+        window.click_at("clear-slider", right, cx)
+    });
+    assert!(alpha(cx) < before, "透明度を上げると、面が薄くなる");
+    assert_eq!(
+        saved(cx, "scene.clear").and_then(|v| v.parse::<u8>().ok()),
+        Some(cx.update(|cx| theme::clear(cx)))
+    );
+    assert!(cx.update(|cx| theme::clear(cx)) > theme::DEFAULT_CLEAR);
+    ui(cx, window, |window, cx| window.click("blur-slider", cx));
+    assert_eq!(saved(cx, "scene.blur").as_deref(), Some("50"));
+
+    // 自分で選んだ色は、画像に合う色より優先する
+    ui(cx, window, |window, cx| {
+        view.update(cx, |v, cx| {
+            v.set_color(theme::Slot::Accent, Color::parse("#b3344f"), window, cx)
+        })
+    });
+    assert_eq!(primary(cx), "#b3344f");
+    ui(cx, window, |window, cx| window.click("accent-reset", cx));
+    assert_eq!(primary(cx), "#1f6fd0");
+
+    // カードで表示にすると、広い画面でも表の見出しがなくなる
+    ui(cx, window, |window, cx| {
+        assert!(window.try_find(("col-head", 0usize)).is_some());
+        window.click("cards-switch", cx)
+    });
+    assert_eq!(saved(cx, "list.cards").as_deref(), Some("1"));
+    ui(cx, window, |window, _| {
+        assert!(window.try_find(("col-head", 0usize)).is_none())
+    });
+
+    // 起動し直しても残る。ダークでは夜の絵に変わる
+    let day = cx.update(|cx| theme::backdrop(cx).unwrap().image.id);
+    cx.update(theme::init);
+    assert!(cx.update(|cx| theme::backdrop(cx).is_some()));
+    ui(cx, window, |window, cx| {
+        theme::set(theme::Choice::Dark, window, cx).unwrap()
+    });
+    assert_ne!(cx.update(|cx| theme::backdrop(cx).unwrap().image.id), day);
+
+    // 自分の画像。読めない画像は、前のままにして理由を出す
+    let dir = tempfile::tempdir().unwrap();
+    let missing = dir.path().join("ない.png");
+    let broken = dir.path().join("壊れた.png");
+    std::fs::write(&broken, b"png?").unwrap();
+    for bad in [missing, broken] {
+        ui(cx, window, |window, cx| {
+            view.update(cx, |v, cx| {
+                v.set_scene(Scene::File(bad.clone()), window, cx)
+            })
+        });
+        let error = cx.update(|cx| view.read(cx).error.clone()).unwrap();
+        assert!(error.contains(&bad.display().to_string()), "{error}");
+        assert_eq!(saved(cx, "scene").as_deref(), Some("sky"));
+    }
+    let own = dir.path().join("海.png");
+    image::RgbaImage::from_pixel(8, 8, image::Rgba([20, 80, 160, 255]))
+        .save(&own)
+        .unwrap();
+    ui(cx, window, |window, cx| {
+        view.update(cx, |v, cx| {
+            v.set_scene(Scene::File(own.clone()), window, cx)
+        })
+    });
+    assert!(cx.update(|cx| view.read(cx).error.is_none()));
+    assert_eq!(cx.update(|cx| theme::scene(cx)), Scene::File(own.clone()));
+    assert_eq!(cx.update(|cx| theme::scene(cx).label()), "海.png");
+    // 画像がなくなっていたら、次の起動では画像なしで始めて、理由を知らせる
+    std::fs::remove_file(&own).unwrap();
+    cx.update(theme::init);
+    assert!(cx.update(|cx| theme::backdrop(cx).is_none()));
+    assert!(cx.update(theme::take_failure).unwrap().contains("海.png"));
+
+    // 標準に戻すと、画像も、画像に合わせた色もなくなる
+    ui(cx, window, |window, cx| window.click("scene-reset", cx));
+    assert_eq!(saved(cx, "scene"), None);
+    assert!(cx.update(|cx| theme::backdrop(cx).is_none()));
+    ui(cx, window, |window, cx| {
+        theme::set(theme::Choice::Light, window, cx).unwrap()
+    });
+    assert_eq!(primary(cx), "#86600f");
+}
+
 /// アイコンは検索して選べる。日本語でも探せ、見つからなければその旨が出る。
 #[gpui_kit::test]
 fn workspace_icon_is_found_by_search(cx: &mut TestAppContext) {
@@ -1736,6 +2017,60 @@ fn workspace_icon_is_found_by_search(cx: &mut TestAppContext) {
     });
     let saved = store(cx, |s| s.workspace(&ws).unwrap());
     assert_eq!(saved.icon.as_deref(), Some("cat"));
+
+    // カテゴリで絞る。「動物・自然」の中で、ひらがなで探して絵文字のペンギンを選ぶ
+    ui(cx, window, |window, cx| {
+        window.click(("icon-category", 0usize), cx)
+    });
+    cx.update(|cx| {
+        assert_eq!(
+            view.read(cx).icon_category,
+            Some(malakt_mahoz::icons::Category::Nature)
+        )
+    });
+    ui(cx, window, |window, cx| {
+        window.click("icon-search", cx);
+        window.press("ctrl-a", cx);
+        window.input("ぺんぎん", cx);
+    });
+    ui(cx, window, |window, cx| {
+        window.click(("ws-icon", 0usize), cx)
+    });
+    let saved = store(cx, |s| s.workspace(&ws).unwrap());
+    assert_eq!(saved.icon.as_deref(), Some("emoji-penguin"));
+    // ほかのカテゴリに切り替える
+    ui(cx, window, |window, cx| {
+        window.click(("icon-category", 1usize), cx)
+    });
+    cx.update(|cx| {
+        assert_eq!(
+            view.read(cx).icon_category,
+            Some(malakt_mahoz::icons::Category::Food)
+        )
+    });
+    // もう一度押すとカテゴリが外れる
+    ui(cx, window, |window, cx| {
+        window.click(("icon-category", 1usize), cx)
+    });
+    cx.update(|cx| assert_eq!(view.read(cx).icon_category, None));
+    // どのカテゴリのボタンも押せて、その中の先頭のアイコンを選べる
+    ui(cx, window, |window, cx| {
+        window.click("icon-search", cx);
+        window.press("ctrl-a", cx);
+        window.press("backspace", cx);
+    });
+    for (ix, category) in malakt_mahoz::icons::Category::ALL.into_iter().enumerate() {
+        ui(cx, window, |window, cx| {
+            window.click(("icon-category", ix), cx)
+        });
+        cx.update(|cx| assert_eq!(view.read(cx).icon_category, Some(category)));
+        ui(cx, window, |window, cx| {
+            window.click(("ws-icon", 0usize), cx)
+        });
+        let saved = store(cx, |s| s.workspace(&ws).unwrap());
+        let first = malakt_mahoz::icons::search("", Some(category), &[], 1);
+        assert_eq!(saved.icon.as_deref(), first.first().copied());
+    }
 }
 
 /// 上のバーのメニューのボタンで左のメニューを閉じて開ける。境界で変えた幅は保存される。

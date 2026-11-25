@@ -2155,3 +2155,105 @@ fn updates_from_comments_are_turned_off_in_settings(cx: &mut TestAppContext) {
     settle_comments(cx);
     assert!(world.sent().is_empty());
 }
+
+fn first_workspace(cx: &mut TestAppContext) -> malakt_core::Workspace {
+    cx.update(|cx| db::shared(cx).read(cx).store.workspaces().unwrap())
+        .remove(0)
+}
+
+/// 追加したワークスペースに名前を付けると、AI がアイコンを選ぶ。チャットには何も出ない。
+#[gpui_kit::test]
+fn a_named_workspace_gets_an_icon(cx: &mut TestAppContext) {
+    let world = start(cx);
+    world.keys.set(Provider::Claude, "k").unwrap();
+    let (window, view) = open(cx, wide());
+    world.reply(text_reply("penguin, bird, zoo"));
+    ui(cx, window, |window, cx| window.click("add-workspace", cx));
+    ui(cx, window, |window, cx| {
+        window.input("ペンギンの世話", cx);
+        window.press("enter", cx);
+    });
+    for _ in 0..500 {
+        cx.run_until_parked();
+        if first_workspace(cx).icon.is_some() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let saved = first_workspace(cx);
+    assert_eq!(saved.name, "ペンギンの世話");
+    assert_eq!(saved.icon.as_deref(), Some("emoji-penguin"));
+    // 名前だけを送り、ツールは渡さない
+    let sent = world.sent();
+    assert_eq!(sent.len(), 1);
+    let body = sent[0].2.to_string();
+    assert!(body.contains("ペンギンの世話"), "{body}");
+    assert!(!body.contains("update_task"), "{body}");
+    assert!(read(cx, |s| s.items.is_empty() && !s.busy));
+    // 左のメニューにも出る
+    cx.update(|cx| {
+        let view = view.read(cx);
+        assert_eq!(view.workspaces[0].icon.as_deref(), Some("emoji-penguin"));
+    });
+
+    // 名前を変えただけでは、AI に聞かない
+    let id = saved.id.clone();
+    cx.update_window(window, |_, window, cx| {
+        view.update(cx, |v, cx| v.rename_workspace(id, window, cx))
+    })
+    .unwrap();
+    cx.run_until_parked();
+    ui(cx, window, |window, cx| {
+        window.input("シロクマの世話", cx);
+        window.press("enter", cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(first_workspace(cx).name, "シロクマの世話");
+    assert_eq!(world.sent().len(), 1);
+}
+
+/// API キーがなければ、名前を付けても通信しない。アイコンは最初のまま。
+#[gpui_kit::test]
+fn a_named_workspace_keeps_its_icon_without_a_key(cx: &mut TestAppContext) {
+    let world = start(cx);
+    let (window, _view) = open(cx, wide());
+    ui(cx, window, |window, cx| window.click("add-workspace", cx));
+    ui(cx, window, |window, cx| {
+        window.input("ペンギンの世話", cx);
+        window.press("enter", cx);
+    });
+    for _ in 0..20 {
+        cx.run_until_parked();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let saved = first_workspace(cx);
+    assert_eq!(saved.name, "ペンギンの世話");
+    assert_eq!(saved.icon, None);
+    assert!(world.sent().is_empty());
+    assert!(read(cx, |s| s.items.is_empty()));
+}
+
+/// AI の答えに合うアイコンがなければ、チャットに理由を出して、アイコンは最初のままにする。
+#[gpui_kit::test]
+fn an_icon_that_cannot_be_picked_is_reported(cx: &mut TestAppContext) {
+    let world = start(cx);
+    world.keys.set(Provider::Claude, "k").unwrap();
+    let (window, _view) = open(cx, wide());
+    world.reply(text_reply("zzzzqqq"));
+    ui(cx, window, |window, cx| window.click("add-workspace", cx));
+    ui(cx, window, |window, cx| {
+        window.input("なぞ", cx);
+        window.press("enter", cx);
+    });
+    wait(cx, "理由が出る", |s| !s.items.is_empty());
+    let shown = read(cx, |s| match &s.items[0] {
+        Item::Error(text) => text.to_string(),
+        other => panic!("{other:?}"),
+    });
+    assert!(
+        shown.contains("「なぞ」のアイコンを AI が選べませんでした"),
+        "{shown}"
+    );
+    let saved = first_workspace(cx);
+    assert_eq!(saved.icon, None);
+}
