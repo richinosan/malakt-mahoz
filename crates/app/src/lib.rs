@@ -4,6 +4,7 @@ pub mod ai;
 pub mod ai_view;
 pub mod cli;
 pub mod db;
+pub mod drops;
 mod feel;
 pub mod icons;
 pub mod mcp;
