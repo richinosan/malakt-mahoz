@@ -2043,7 +2043,7 @@ fn workspace_icon_is_found_by_search(cx: &mut TestAppContext) {
     // 日本語でも探せる
     ui(cx, window, |window, cx| {
         window.click("icon-search", cx);
-        window.press("ctrl-a", cx);
+        window.press("secondary-a", cx);
         window.input("猫", cx);
     });
     ui(cx, window, |window, cx| {
@@ -2064,7 +2064,7 @@ fn workspace_icon_is_found_by_search(cx: &mut TestAppContext) {
     });
     ui(cx, window, |window, cx| {
         window.click("icon-search", cx);
-        window.press("ctrl-a", cx);
+        window.press("secondary-a", cx);
         window.input("ぺんぎん", cx);
     });
     ui(cx, window, |window, cx| {
@@ -2090,7 +2090,7 @@ fn workspace_icon_is_found_by_search(cx: &mut TestAppContext) {
     // どのカテゴリのボタンも押せて、その中の先頭のアイコンを選べる
     ui(cx, window, |window, cx| {
         window.click("icon-search", cx);
-        window.press("ctrl-a", cx);
+        window.press("secondary-a", cx);
         window.press("backspace", cx);
     });
     for (ix, category) in malakt_mahoz::icons::Category::ALL.into_iter().enumerate() {
