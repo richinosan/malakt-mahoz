@@ -1,6 +1,6 @@
 //! コマンドの実行。出力を 1 行ずつ受け取り、途中で強制終了できる。
 
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -15,6 +15,8 @@ pub struct Spec {
     pub display: String,
     pub env: Vec<(String, String)>,
     pub cwd: Option<PathBuf>,
+    /// 標準入力に流す文字。なければ、標準入力は閉じておく。
+    pub stdin: Option<String>,
 }
 
 impl Spec {
@@ -201,7 +203,11 @@ pub fn spawn(
     command
         .args(&spec.args)
         .envs(spec.env.iter().map(|(k, v)| (k, v)))
-        .stdin(Stdio::null())
+        .stdin(if spec.stdin.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     if let Some(cwd) = &spec.cwd {
@@ -214,6 +220,13 @@ pub fn spawn(
         command.process_group(0);
     }
     let mut child = command.spawn()?;
+    if let (Some(text), Some(mut pipe)) = (spec.stdin.clone(), child.stdin.take()) {
+        // 出力を読むのと並べて書く。書き終わったら閉じて、読む側に終わりを知らせる
+        std::thread::spawn(move || {
+            // 読まずに終わったコマンドには、書けなくてよい
+            let _ = pipe.write_all(text.as_bytes());
+        });
+    }
     let handle = Handle {
         pid: child.id(),
         done: Arc::new(AtomicBool::new(false)),
@@ -351,6 +364,26 @@ mod tests {
         // 分からない文字コードでも、読めるところは出す
         assert_eq!(decode(&[b'o', b'k', 0xff], 437), "ok\u{fffd}");
         assert_eq!(decode(&[b'o', b'k', 0xff], 65001), "ok\u{fffd}");
+    }
+
+    #[test]
+    fn text_is_fed_to_standard_input() {
+        let mut spec = if cfg!(windows) {
+            Spec::direct("findstr", vec!["a".into()])
+        } else {
+            Spec::direct("sh", Vec::new())
+        };
+        spec.stdin = Some(if cfg!(windows) {
+            "abc\r\n".into()
+        } else {
+            "echo \"$MALAKT_TEST\" abc\n".into()
+        });
+        spec.env.push(("MALAKT_TEST".into(), "x y".into()));
+        let (_, rx) = collect(&spec);
+        let (events, code) = wait_exit(&rx);
+        assert_eq!(code, Some(0));
+        let line = if cfg!(windows) { "abc" } else { "x y abc" };
+        assert!(events.contains(&Event::Stdout(line.into())), "{events:?}");
     }
 
     #[test]

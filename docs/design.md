@@ -5,7 +5,7 @@
 | クレート | 役割 |
 | --- | --- |
 | `crates/core`（`malakt-core`） | データとロジック。SQLite への保存、zip の読み書き、ロック、絞り込みと並べ替え、添付、通知、完了チケット。画面に依存しません |
-| `crates/ai`（`malakt-ai`） | AI とのやり取り。各サービスへのリクエスト、キーの保存、AI に渡すタスク操作、GitHub の取得、コマンドの実行。画面に依存しません |
+| `crates/ai`（`malakt-ai`） | AI とのやり取り。各サービスへのリクエスト、キーの保存、AI に渡すタスク操作、GitHub と Slack の取得、コマンドの実行。画面に依存しません |
 | `crates/term`（`malakt-term`） | ターミナル。開けるシェルの一覧、PTY（Windows は ConPTY）、端末エミュレーション、キーとマウスの変換。画面に依存しません |
 | `crates/update`（`malakt-update`） | 自動アップデート。GitHub Releases の確認、ダウンロードと検証、実行ファイルの入れ替え。画面に依存しません |
 | `crates/app`（`malakt-mahoz`） | gpui の画面。状態は `state.rs`、描画は `render.rs`、コマンドは `cli.rs`、AI チャットは `ai.rs` と `ai_view.rs`、ターミナルは `term.rs` |

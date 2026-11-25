@@ -31,6 +31,8 @@ struct World {
     sent: Sent,
     /// gh が返す中身に付け足す文字。変えると「GitHub 側で変化があった」ことになる。
     github: Arc<Mutex<String>>,
+    /// Slack CLI の様子。"missing" は入っていない、"not_authed" は断られた。ほかは本文に付け足す文字。
+    slack: Arc<Mutex<String>>,
     /// gh にログインしているアカウント。`None` はログインしていない。
     account: Arc<Mutex<Option<String>>>,
     replies: Arc<Mutex<VecDeque<Result<Value, String>>>>,
@@ -62,6 +64,7 @@ fn start_with(cx: &mut TestAppContext, store: Store) -> World {
         keys: Arc::new(MemoryKeys::default()),
         sent: Sent::default(),
         github: Arc::default(),
+        slack: Arc::default(),
         account: Arc::default(),
         replies: Arc::default(),
         fetched: Arc::default(),
@@ -72,6 +75,7 @@ fn start_with(cx: &mut TestAppContext, store: Store) -> World {
         world.fetched.clone(),
     );
     let github = world.github.clone();
+    let slack = world.slack.clone();
     let account = world.account.clone();
     let config = AiConfig {
         keys: world.keys.clone(),
@@ -105,6 +109,35 @@ fn start_with(cx: &mut TestAppContext, store: Store) -> World {
         gh: Arc::new(move |link| {
             let state = github.lock().unwrap().clone();
             Spec::shell(&format!("echo fetched {}{state}", link.url()))
+        }),
+        slack: Arc::new(move |link| {
+            let state = slack.lock().unwrap().clone();
+            // cmd は引用符をそのまま出し、sh は引用符の中をそのまま出す
+            let echo = |json: String, exit: i32| {
+                Spec::shell(&if cfg!(windows) {
+                    format!("echo {json}& exit /b {exit}")
+                } else {
+                    format!("echo '{json}'; exit {exit}")
+                })
+            };
+            let missing = Spec::direct("malakt-mahoz-no-such-program", Vec::new());
+            match state.as_str() {
+                // Slack CLI が入っていない
+                "missing" => vec![missing],
+                // トークンがなく、Slack に断られた
+                "not_authed" => vec![echo(r#"{"ok":false,"error":"not_authed"}"#.into(), 1)],
+                // 最初の呼び方では起動できず、次の呼び方（WSL の中など）で読めた
+                _ => vec![
+                    missing,
+                    echo(
+                        format!(
+                            r#"{{"ok":true,"messages":[{{"user":"U01","ts":"{}","text":"slack body{state}"}}]}}"#,
+                            link.ts
+                        ),
+                        0,
+                    ),
+                ],
+            }
         }),
         whoami: Arc::new(move |_| match &*account.lock().unwrap() {
             Some(login) => vec![Spec::shell("exit 1"), Spec::shell(&format!("echo {login}"))],
@@ -648,6 +681,67 @@ fn github_links_are_fetched_before_sending(cx: &mut TestAppContext) {
         .unwrap()
         .to_owned();
     assert!(result.contains("fetched https://github.com/o/r/pull/4"));
+}
+
+/// メッセージに Slack のリンクがあると、Slack CLI で中身を取ってきて AI に渡す。
+#[gpui_kit::test]
+fn slack_links_are_fetched_before_sending(cx: &mut TestAppContext) {
+    const URL: &str = "https://acme.slack.com/archives/C0123ABCD/p1700000000123456";
+    let world = start(cx);
+    world.keys.set(Provider::Claude, "k").unwrap();
+    let (window, view) = open(cx, wide());
+    let pane = open_chat(cx, window, &view);
+
+    world.reply(text_reply("読みました。"));
+    say(cx, window, &pane, &format!("{URL} をタスクにして"));
+    wait(cx, "返事が出る", |s| !s.busy);
+    let sent = world.sent();
+    let message = sent[0].2["messages"][0]["content"].as_str().unwrap();
+    assert!(
+        message.contains(&format!("[{URL} の中身]\nU01 ")),
+        "{message}"
+    );
+    assert!(message.contains(":\nslack body"), "{message}");
+    assert!(
+        !message.contains("\"ok\""),
+        "JSON のままでは渡さない: {message}"
+    );
+    assert!(read(cx, |s| !s
+        .items
+        .iter()
+        .any(|i| matches!(i, Item::Error(_)))));
+
+    // AI が自分で取りに行くこともできる（確認は出ない）
+    world.reply(tool_reply(
+        "t1",
+        "slack_fetch",
+        json!({"url": "https://acme.slack.com/archives/C0123ABCD/p1700000111000200?thread_ts=1700000000.123456&cid=C0123ABCD"}),
+    ));
+    world.reply(text_reply("返信も読みました。"));
+    say(cx, window, &pane, "返信も見て");
+    wait(cx, "返事が出る", |s| !s.busy);
+    assert!(read(cx, |s| s.pending.is_none()));
+    let result = world.sent()[2].2["messages"]
+        .as_array()
+        .unwrap()
+        .last()
+        .unwrap()["content"][0]["content"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(result.contains("slack body"), "{result}");
+
+    // Slack のメッセージではないリンクは、取りに行かない
+    world.reply(tool_reply(
+        "t2",
+        "slack_fetch",
+        json!({"url": "https://evil.example/archives/C0123ABCD/p1700000000123456"}),
+    ));
+    world.reply(text_reply("読めませんでした。"));
+    let before = read(cx, |s| s.shell.len());
+    say(cx, window, &pane, "これも");
+    wait(cx, "返事が出る", |s| !s.busy);
+    assert_eq!(read(cx, |s| s.shell.len()), before);
 }
 
 /// サービス・モデル・effort は設定で選べ、保存されて、次のリクエストに使われる。
@@ -1723,6 +1817,57 @@ fn a_task_whose_link_cannot_be_read_is_left_alone(cx: &mut TestAppContext) {
         !s.busy && s.arrange_notes.is_empty()
     });
     assert_eq!(all_tasks(cx)[0].title, "ログインを直す");
+}
+
+/// Slack のリンクが書かれたタスクも、AI が中身を読んで整える。
+#[gpui_kit::test]
+fn a_task_with_a_slack_link_is_arranged_by_the_ai(cx: &mut TestAppContext) {
+    const URL: &str = "https://acme.slack.com/archives/C0123ABCD/p1700000000123456";
+    let world = start(cx);
+    world.keys.set(Provider::Claude, "k").unwrap();
+    let task = new_task(cx, URL);
+    wait(cx, "AI が動き始める", |s| !s.arranging.is_empty());
+    world.reply(tool_reply(
+        "t1",
+        "update_task",
+        json!({"id": task, "title": "起動で落ちる件の返事"}),
+    ));
+    world.reply(text_reply("タイトルを付け直しました。"));
+    wait(cx, "AI が整え終わる", |s| !s.busy);
+    let sent = world.sent();
+    let message = sent[0].2["messages"][0]["content"].as_str().unwrap();
+    assert!(
+        message.contains(&format!("### {URL} の中身\nU01 ")),
+        "{message}"
+    );
+    assert!(message.contains("slack body"), "{message}");
+    assert_eq!(all_tasks(cx)[0].title, "起動で落ちる件の返事");
+}
+
+/// Slack CLI がない、またはトークンがなくて断られたタスクは AI に渡さず、元のまま残す。
+#[gpui_kit::test]
+fn a_task_whose_slack_link_cannot_be_read_is_left_alone(cx: &mut TestAppContext) {
+    const URL: &str = "https://acme.slack.com/archives/C0123ABCD/p1700000000123456";
+    for state in ["missing", "not_authed"] {
+        let world = start(cx);
+        world.keys.set(Provider::Claude, "k").unwrap();
+        *world.slack.lock().unwrap() = state.into();
+        let task = new_task(cx, URL);
+        wait(cx, "理由が出る", |s| {
+            !s.busy && !s.arrange_notes.is_empty()
+        });
+        assert!(world.sent().is_empty(), "{state}");
+        let note = read(cx, |s| s.arrange_notes[&task].clone());
+        assert!(note.contains("読み込めませんでした"), "{note}");
+        assert_eq!(
+            malakt_mahoz::ai::arrange_note_label(&note),
+            "リンクを読み込めませんでした"
+        );
+        let tasks = all_tasks(cx);
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].title, URL);
+        assert_eq!(tasks[0].description, "");
+    }
 }
 
 /// AI が「取得できなかった」「未確認」と書いても、タスクには入れない。
