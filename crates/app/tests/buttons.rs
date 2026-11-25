@@ -71,6 +71,7 @@ const INPUTS: &[&str] = &[
     "nt-due",
     "nt-categories",
     "ws-date",
+    "ws-context",
     "def-categories",
 ];
 

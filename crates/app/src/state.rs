@@ -128,6 +128,7 @@ pub struct Inputs {
     pub def_time: Entity<InputState>,
     pub def_categories: Entity<InputState>,
     pub def_description: Entity<TextareaState>,
+    pub ws_context: Entity<TextareaState>,
     pub bulk_due: Entity<InputState>,
     pub bulk_categories: Entity<InputState>,
     pub nt_title: Entity<InputState>,
@@ -282,6 +283,11 @@ impl MainView {
             def_time: input(window, cx, "HH:MM（空なら日付だけ）"),
             def_categories: input(window, cx, "「、」で区切って入力"),
             def_description: area(window, cx, "説明の雛形"),
+            ws_context: area(
+                window,
+                cx,
+                "例: このワークスペースのタスクは優先度を高にする",
+            ),
             bulk_due: input(window, cx, "YYYY-MM-DD（時刻は続けて HH:MM）"),
             bulk_categories: input(window, cx, "「、」で区切って入力"),
             nt_title: input(window, cx, "タイトル"),
@@ -299,8 +305,16 @@ impl MainView {
             // 今見ている場所を、AI に伝えられるようにしておく
             cx.observe_self(|this, cx| {
                 let place = this.ai_place();
-                if this.ai_session.read(cx).place != place {
-                    this.ai_session.update(cx, |s, _| s.place = place);
+                let workspace = match &this.nav {
+                    Nav::Workspace(id) => Some(id.clone()),
+                    _ => None,
+                };
+                let session = this.ai_session.read(cx);
+                if session.place != place || session.workspace != workspace {
+                    this.ai_session.update(cx, |s, _| {
+                        s.place = place;
+                        s.workspace = workspace;
+                    });
                 }
             }),
             // リマインダーとの連携で失敗したことを出す
@@ -2119,7 +2133,11 @@ impl MainView {
         let loaded = store
             .workspace(id)
             .and_then(|w| Ok((w, store.task_defaults(id)?)));
-        let (workspace, defaults) = match loaded {
+        let loaded = loaded.and_then(|(w, d)| {
+            let context = store.setting(&crate::ai::workspace_context_key(id))?;
+            Ok((w, d, context.unwrap_or_default()))
+        });
+        let (workspace, defaults, context) = match loaded {
             Ok(loaded) => loaded,
             Err(error) => {
                 self.error = Some(error.to_string().into());
@@ -2163,6 +2181,9 @@ impl MainView {
         self.inputs
             .def_description
             .update(cx, |s, cx| s.set_value(description, window, cx));
+        self.inputs
+            .ws_context
+            .update(cx, |s, cx| s.set_value(context, window, cx));
         self.defaults_draft = defaults;
         self.modal = Modal::WorkspaceSettings(id.to_owned());
         self.error = None;
@@ -2230,11 +2251,23 @@ impl MainView {
         defaults.categories = split_list(&read(&self.inputs.def_categories));
         defaults.description = self.inputs.def_description.read(cx).value().to_string();
         let date = read(&self.inputs.ws_date);
+        let context = self.inputs.ws_context.read(cx).value().trim().to_owned();
+        if let Some(error) = crate::ai::workspace_context_error(&context) {
+            self.error = Some(error.into());
+            cx.notify();
+            return;
+        }
+        let context_key = crate::ai::workspace_context_key(&id);
         let saved = self.write(cx, |s| {
             // 先に両方を確かめて、片方だけ保存されることがないようにする
             malakt_core::defaults::clean(&defaults)?;
             s.set_workspace_date(&id, Some(&date))?;
-            s.set_task_defaults(&defaults)
+            s.set_task_defaults(&defaults)?;
+            // 空にしたら、保存してあるものを消す
+            s.set_setting(
+                &context_key,
+                (!context.is_empty()).then_some(context.as_str()),
+            )
         });
         if saved.is_some() {
             self.modal = Modal::None;

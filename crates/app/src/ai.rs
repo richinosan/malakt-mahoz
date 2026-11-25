@@ -133,6 +133,21 @@ fn saved_bounds(v: &Value) -> Option<[f32; 4]> {
 /// いつも AI に伝える前提と指示の保存先と、長さの上限。
 const CONTEXT_SETTING: &str = "ai.context";
 pub const MAX_CONTEXT_CHARS: usize = 4000;
+/// ワークスペースごとの分の長さの上限。
+pub const MAX_WORKSPACE_CONTEXT_CHARS: usize = 2000;
+
+/// ワークスペースごとの「AI に伝えること」の保存先。
+pub fn workspace_context_key(workspace: &str) -> String {
+    format!("ai.context.ws.{workspace}")
+}
+
+/// 長すぎる「AI に伝えること」を断る文。
+pub fn workspace_context_error(text: &str) -> Option<String> {
+    let count = text.trim().chars().count();
+    (count > MAX_WORKSPACE_CONTEXT_CHARS).then(|| {
+        format!("AI に伝えることは {MAX_WORKSPACE_CONTEXT_CHARS} 文字までです（今は {count} 文字）")
+    })
+}
 
 const MAX_ARRANGE_TASKS: usize = 5;
 /// 新しいタスクを整えるとき、タスク 1 つで読みに行くリンクの数。
@@ -354,6 +369,8 @@ pub struct Session {
     pub window_bounds: [Option<[f32; 4]>; 2],
     /// ユーザーが今見ている場所（ワークスペースや開いているタスク）。画面が書き込む。
     pub place: String,
+    /// ユーザーが今開いているワークスペース。画面が書き込む。
+    pub workspace: Option<String>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -494,6 +511,7 @@ impl Session {
             resizing: false,
             window_bounds: ui.bounds,
             place: String::new(),
+            workspace: None,
             _subscriptions: Vec::new(),
         };
         this._subscriptions = vec![
@@ -690,6 +708,32 @@ impl Session {
         if let Some(id) = chat["id"].as_str().filter(|id| !id.is_empty()) {
             self.conversation = id.to_owned();
         }
+    }
+
+    /// 全体の分と、今開いているワークスペースの分を合わせた、AI に伝える前提と指示。
+    fn whole_context(&self, cx: &App) -> String {
+        let store = &self.db.read(cx).store;
+        let mut context = self.context.clone();
+        let Some(id) = &self.workspace else {
+            return context;
+        };
+        // 読めなければ、全体の分だけを渡す（次の操作でデータベースのエラーとして出る）
+        let own = store
+            .setting(&workspace_context_key(id))
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        if !own.trim().is_empty() {
+            let name = store.workspace(id).map(|w| w.name).unwrap_or_default();
+            if !context.is_empty() {
+                context.push_str("\n\n");
+            }
+            context.push_str(&format!(
+                "今開いているワークスペース「{name}」についての前提と指示:\n{}",
+                own.trim()
+            ));
+        }
+        context
     }
 
     /// いつも AI に伝える前提と指示を保存する。
@@ -1610,7 +1654,9 @@ impl Session {
         })?
         .0;
 
-        let context = this.read_with(cx, |s, _| s.context.clone()).map_err(gone)?;
+        let context = this
+            .read_with(cx, |s, cx| s.whole_context(cx))
+            .map_err(gone)?;
         let system = tools::system_prompt(&malakt_core::view::today(), place, &context);
         for _ in 0..MAX_ROUNDS {
             let (wire, reply) = Self::complete(
