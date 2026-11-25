@@ -147,6 +147,9 @@ pub struct Snapshot {
     pub combining: Vec<(usize, String)>,
     /// カーソルの場所（桁、行）と形。さかのぼっている間や、隠されている間は `None`。
     pub cursor: Option<(usize, usize, Caret)>,
+    /// 入力の場所（桁、行）。カーソルを隠すプログラム（Claude Code など）でも分かる。
+    /// IME の変換中の文字と候補を出す場所に使う。さかのぼっている間は `None`。
+    pub input_at: Option<(usize, usize)>,
     /// さかのぼっている行数。
     pub offset: usize,
     /// さかのぼれる行数。
@@ -251,6 +254,11 @@ struct Shared {
 
 impl Shared {
     fn write(&self, bytes: Vec<u8>) {
+        // 空の書き込みを送ると、PTY への書き込みの列の先頭に残り続けて、あとの入力がすべて届かなくなる
+        // （IME は、変換を取り消したときなどに空の文字を確定してくる）
+        if bytes.is_empty() {
+            return;
+        }
         if let Some(sender) = self.sender.lock().unwrap().as_ref() {
             // シェルが終わったあとは送れない。終わったことは Exit で伝えてある
             let _ = sender.send(Msg::Input(bytes.into()));
@@ -632,10 +640,10 @@ impl Terminal {
                 combining.push((ix, extra.iter().collect()));
             }
         }
-        let cursor = (content.cursor.shape != CursorShape::Hidden)
-            .then(|| term::point_to_viewport(offset, content.cursor.point))
-            .flatten()
-            .filter(|at| at.line < rows && at.column.0 < cols)
+        let input_at = term::point_to_viewport(offset, content.cursor.point)
+            .filter(|at| at.line < rows && at.column.0 < cols);
+        let cursor = input_at
+            .filter(|_| content.cursor.shape != CursorShape::Hidden)
             .map(|at| {
                 let caret = match content.cursor.shape {
                     CursorShape::Underline => Caret::Underline,
@@ -650,6 +658,7 @@ impl Terminal {
             cells,
             combining,
             cursor,
+            input_at: input_at.map(|at| (at.column.0, at.line)),
             offset,
             history: term.grid().history_size(),
         }
