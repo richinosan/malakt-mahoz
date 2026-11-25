@@ -632,6 +632,11 @@ impl TermPane {
         }
     }
 
+    /// キーの入力先が、このターミナルか。
+    pub fn is_focused(&self, window: &Window) -> bool {
+        self.focus.is_focused(window)
+    }
+
     fn terminal(&self, cx: &App) -> Option<Arc<Terminal>> {
         self.terms
             .read(cx)
@@ -1219,6 +1224,10 @@ impl Render for TermPane {
             self.terms.update(cx, |terms, _| terms.focus_wanted = false);
             window.focus(&self.focus, cx);
         }
+        // 変換の途中でほかの場所へ移ったら、変換中の文字を残さない（残ると Enter などが届かなくなる）
+        if self.ime.is_some() && !self.focus.is_focused(window) {
+            self.ime = None;
+        }
         let danger = cx.theme().danger;
         let pane = cx.entity();
         let focus = self.focus.clone();
@@ -1233,7 +1242,6 @@ impl Render for TermPane {
             .min_h_0()
             .min_w_0()
             .bg(gpui_kit::rgb(malakt_term::BACKGROUND))
-            .cursor_text()
             .on_mouse_down(MouseButton::Left, cx.listener(Self::mouse_down))
             .on_mouse_down(MouseButton::Middle, cx.listener(Self::mouse_down))
             .on_mouse_down(MouseButton::Right, cx.listener(Self::mouse_down))

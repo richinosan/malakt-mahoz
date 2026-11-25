@@ -729,3 +729,86 @@ fn no_terminal_opens_while_locked(cx: &mut TestAppContext) {
     });
     assert!(terms(cx, |t| t.tabs.is_empty()));
 }
+
+/// ターミナルで作業している間は、知らせが出ても、タブやメニューを使っても、場所の大きさが変わっても、
+/// キーの入力先はターミナルのまま。
+#[gpui_kit::test]
+fn the_terminal_keeps_the_keys_while_the_screen_changes(cx: &mut TestAppContext) {
+    let (window, view) = start(cx);
+    open_terminal(cx, window);
+    let pane = cx.update(|cx| {
+        let pane = view.read(cx).ai_pane.clone().unwrap();
+        pane.read(cx).term_pane()
+    });
+    let focused = |cx: &mut TestAppContext, what: &str| {
+        cx.run_until_parked();
+        ui(cx, window, |_, _| {});
+        let on = cx
+            .update_window(window, |_, window, cx| pane.read(cx).is_focused(window))
+            .unwrap();
+        assert!(on, "キーの入力先がターミナルから外れた: {what}");
+    };
+    focused(cx, "start");
+    cx.update(|cx| {
+        term::shared(cx).update(cx, |t, cx| {
+            t.error = Some("x".into());
+            cx.notify();
+        })
+    });
+    focused(cx, "error bar");
+    cx.update(|cx| {
+        term::shared(cx).update(cx, |t, cx| {
+            t.error = None;
+            cx.notify();
+        })
+    });
+    focused(cx, "error bar gone");
+    // 別のタブを開いて終わらせる
+    ui(cx, window, |window, cx| window.click("term-new", cx));
+    focused(cx, "second tab");
+    run(cx, window, "exit");
+    wait(cx, "閉じる", |t| t.tabs.len() == 1);
+    focused(cx, "after exit of second");
+    // データベースの変更
+    cx.update(|cx| {
+        db::shared(cx).update(cx, |db, cx| {
+            let ws = db.store.create_workspace(None, "w").unwrap();
+            db.store
+                .create_task(
+                    Some(&ws.id),
+                    &TaskDraft {
+                        title: "t".into(),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            cx.notify();
+        })
+    });
+    focused(cx, "db change");
+    ui(cx, window, |window, cx| window.click("term-shells", cx));
+    ui(cx, window, |window, cx| window.press("escape", cx));
+    focused(cx, "menu dismissed");
+    ui(cx, window, |window, cx| window.click("term-mcp", cx));
+    ui(cx, window, |window, cx| {
+        window.press("down", cx);
+        window.press("enter", cx);
+    });
+    focused(cx, "mcp typed");
+    // 入った登録のコマンドは、実行せずに消す
+    ui(cx, window, |window, cx| window.press("ctrl-u", cx));
+    ui(cx, window, |window, cx| window.click("ai-shell-wide", cx));
+    focused(cx, "wide");
+    ui(cx, window, |window, cx| window.click("ai-shell-wide", cx));
+    focused(cx, "narrow");
+    cx.update_window(window, |_, window, _| {
+        window.resize(size(px(700.), px(600.)))
+    })
+    .unwrap();
+    focused(cx, "small window");
+    cx.update_window(window, |_, window, _| window.resize(wide()))
+        .unwrap();
+    focused(cx, "big window");
+    run(cx, window, "echo still-$((1+1))");
+    wait_text(cx, "still-2");
+}
