@@ -31,7 +31,7 @@ const MAX_WATCH_CHARS: usize = 4000;
 pub const WATCH_MINUTES: [u32; 4] = [15, 30, 60, 180];
 /// 定期チェックで変化を見つけたときに AI に渡す、最初の指示。
 pub const DEFAULT_WATCH_INSTRUCTION: &str = "GitHub の状態に合わせて、関連するタスクを更新してください。\
-クローズまたはマージされていたらタスクを完了にし、新しい動きがあればタスクにコメントで要点を書いてください。";
+クローズまたはマージされていたらタスクを完了にし、新しい動きがあれば、何が変わったかをタスクにコメントで書いてください。";
 
 /// GitHub の定期チェックの設定。標準はオフ。
 #[derive(Debug, Clone, PartialEq, Eq)]
