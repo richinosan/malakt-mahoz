@@ -58,7 +58,12 @@ pub fn tool_list() -> Vec<Value> {
     let mut list: Vec<Value> = tools::definitions()
         .into_iter()
         // GitHub とシェルは、呼ぶ側（Claude Code）が自分で持っている
-        .filter(|t| !matches!(t.name, tools::GITHUB_FETCH | tools::RUN_SHELL))
+        .filter(|t| {
+            !matches!(
+                t.name,
+                tools::GITHUB_FETCH | tools::SLACK_FETCH | tools::RUN_SHELL
+            )
+        })
         .map(|t| {
             let description = if t.name == "delete_task" {
                 "タスクを削除する。undo で元に戻せる。"
@@ -98,7 +103,9 @@ pub fn call_tool(store: &mut Store, now: i64, name: &str, args: &Value) -> Resul
             let done = store.redo().map_err(core)?;
             Ok(json!({"redone": done}).to_string())
         }
-        tools::GITHUB_FETCH | tools::RUN_SHELL => Err(format!("{name} というツールはありません")),
+        tools::GITHUB_FETCH | tools::SLACK_FETCH | tools::RUN_SHELL => {
+            Err(format!("{name} というツールはありません"))
+        }
         _ => {
             // 自分が登録されていれば、コメントの書き手にする（AI チャットと同じ）
             let author = store
@@ -389,6 +396,7 @@ mod tests {
         // シェルと GitHub は出さない
         assert!(!names.contains(&tools::RUN_SHELL));
         assert!(!names.contains(&tools::GITHUB_FETCH));
+        assert!(!names.contains(&tools::SLACK_FETCH));
         for t in tools {
             assert_eq!(t["inputSchema"]["type"], "object", "{t}");
             assert!(!t["description"].as_str().unwrap().is_empty());

@@ -6,6 +6,7 @@
 //! - `wire`: 各 API の形式への変換（リクエストの組み立てと、返事の読み取り）
 //! - `tools`: AI がタスクを読み書きするためのツール
 //! - `github`: GitHub のリンクの検出と、取得のためのコマンド
+//! - `slack`: Slack のリンクの検出と、取得のためのコマンド
 //! - `shell`: コマンドの実行と強制終了
 //! - `keys`: API キーの保存（OS のキーチェーン）
 //! - `http`: HTTPS の呼び出し
@@ -16,6 +17,7 @@ pub mod http;
 pub mod keys;
 pub mod provider;
 pub mod shell;
+pub mod slack;
 pub mod tools;
 pub mod wire;
 
