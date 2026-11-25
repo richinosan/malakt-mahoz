@@ -23,9 +23,5 @@ fn scenario_keys_mean_the_same_on_every_os() {
             }
         }
     }
-    assert!(
-        wrong.is_empty(),
-        "secondary- で書く:\n{}",
-        wrong.join("\n")
-    );
+    assert!(wrong.is_empty(), "secondary- で書く:\n{}", wrong.join("\n"));
 }
