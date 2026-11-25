@@ -90,22 +90,6 @@ fn appear() -> Animation {
     Animation::new(Duration::from_millis(160)).with_easing(ease_out_quint())
 }
 
-/// AI の発言の左に出す印。
-fn avatar(cx: &App) -> Div {
-    let theme = cx.theme();
-    div()
-        .flex_none()
-        .size_6()
-        .rounded_full()
-        .flex()
-        .items_center()
-        .justify_center()
-        .bg(theme.primary)
-        .text_color(theme.primary_foreground)
-        .elevate(Elevation::Low, cx)
-        .child(app_icon("sparkles").size_3())
-}
-
 /// アイコンだけのボタン。名前はホバーで出る。
 /// 何もないチャットに出す、押すとそのまま送る依頼。
 const SUGGESTIONS: [&str; 3] = [
@@ -1145,20 +1129,16 @@ impl AiPane {
                         .test_support(),
                 )
                 .into_any_element(),
+            // AI の返答は、枠も印も付けずにペインの幅いっぱいに出す
             Item::Assistant(text) => row()
                 .items_start()
-                .gap_2()
-                .child(avatar(cx))
                 .child(
                     div()
                         .id(("ai-assistant", ix))
                         .flex_1()
                         .min_w_0()
-                        .px_3()
-                        .py_2()
-                        .rounded_lg()
-                        .bg(theme.muted)
-                        .elevate(Elevation::Low, cx)
+                        .px_1()
+                        .py_1()
                         .text_sm()
                         // ドラッグで選んでコピーできる
                         .child(TextView::markdown(("ai-text", ix), text.clone()).selectable(true))
@@ -1703,7 +1683,7 @@ impl AiPane {
                     .items_center()
                     .text_xs()
                     .text_color(theme.muted_foreground)
-                    .child(avatar(cx))
+                    .px_1()
                     .child(Spinner::new().small())
                     .child(if session.command_running() {
                         "コマンドを実行中"
@@ -2200,7 +2180,8 @@ impl Render for AiPane {
                             .top_0()
                             .bottom_0()
                             .right_0()
-                            .w(px(widths.0))
+                            // 重ねるときは、タスクの画面が左に見える幅までにする
+                            .w(px(widths.0.min(ai::CHAT_MIN_WIDTH + 60.)))
                             .max_w_full()
                             .border_l_1()
                             .border_color(theme.border)
