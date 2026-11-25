@@ -291,7 +291,9 @@ impl AiPane {
         let input = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .submit_on_enter(true)
-                .placeholder("メッセージを入力")
+                // 1 行から始め、書いた分だけ伸びる
+                .auto_grow(1, 8)
+                .placeholder("メッセージを入力（Shift+Enter で改行）")
         });
         let key_input = cx.new(|cx| {
             InputState::new(window, cx)
@@ -2279,17 +2281,21 @@ impl AiPane {
                                 ))
                             })
                             .child(
-                                div()
-                                    .id("ai-input")
-                                    .w_full()
-                                    .child(Textarea::new(&self.input).appearance(false).h(px(72.)))
-                                    .test_support(),
-                            )
-                            .child(
+                                // 入力欄と送信を 1 行に置く
                                 row()
                                     .gap_1()
-                                    .items_center()
-                                    .child(row().flex_1().min_w_0().children(pills))
+                                    .items_end()
+                                    .pr_1()
+                                    .pb_1()
+                                    .child(
+                                        div()
+                                            .id("ai-input")
+                                            .mb(px(-4.))
+                                            .flex_1()
+                                            .min_w_0()
+                                            .child(Textarea::new(&self.input).appearance(false))
+                                            .test_support(),
+                                    )
                                     .when(busy, |d| {
                                         d.child(
                                             icon_button("ai-stop", "square", "停止（Ctrl+C）")
@@ -2309,7 +2315,9 @@ impl AiPane {
                                         )
                                     }),
                             ),
-                    ),
+                    )
+                    // サービス・モデル・effort は、入力欄の下の細い行に
+                    .child(row().pt_1().min_w_0().children(pills)),
             )
             .test_support()
             .track_focus(&self.focus)
