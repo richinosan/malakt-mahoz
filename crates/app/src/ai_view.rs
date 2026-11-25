@@ -2175,7 +2175,8 @@ impl Render for AiPane {
                     .occlude()
                     .when_some(docked, |d, w| {
                         // タスクの画面の上に乗って見えるように、左に影を落とす
-                        d.w(w)
+                        d.relative()
+                            .w(w)
                             .border_l_1()
                             .border_color(theme.border)
                             .elevate(Elevation::High, cx)
@@ -2194,7 +2195,6 @@ impl Render for AiPane {
                     })
                     .when(side_by_side, |d| d.flex_row())
                     .when(!side_by_side, |d| d.flex_col())
-                    .relative()
                     // 左の境界をドラッグして幅を変える
                     .child(edge("ai-resize", Resize::Chat))
                     // ドラッグしている間は、ウィンドウのどこにマウスがあっても幅を追う
