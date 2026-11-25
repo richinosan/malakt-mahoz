@@ -5049,3 +5049,29 @@ fn closing_main_window_closes_the_others(cx: &mut TestAppContext) {
     assert_eq!(saved[0].nav, "home");
     assert_eq!(saved[1].nav, "all");
 }
+
+/// メインと一緒に最小化するウィンドウを覚えて、メインを戻すときに、開いているものだけを返す。
+#[gpui_kit::test]
+fn windows_minimized_with_the_main_window_come_back_together(cx: &mut TestAppContext) {
+    use malakt_mahoz::session;
+    start(cx);
+    let (main, _) = cx.update(|cx| malakt_mahoz::open_main_window(cx).unwrap());
+    let (second, _) = cx.update(|cx| malakt_mahoz::open_main_window(cx).unwrap());
+    let (third, _) = cx.update(|cx| malakt_mahoz::open_main_window(cx).unwrap());
+    cx.run_until_parked();
+    assert_eq!(cx.update(session::main_window), Some(main));
+
+    // メインを最小化したときに開いていた 2 枚を覚える。もう 1 度呼んでも、覚えは変わらない
+    let tucked = cx.update(|cx| session::tuck(vec![second, third], cx));
+    assert_eq!(tucked, vec![second, third]);
+    assert!(cx.update(|cx| session::tuck(vec![second], cx)).is_empty());
+
+    // 最小化している間に閉じたウィンドウは、戻すものに入らない
+    cx.update_window(third, |_, window, _| window.remove_window())
+        .unwrap();
+    cx.run_until_parked();
+    assert_eq!(cx.update(session::untuck), vec![second]);
+
+    // 戻したあとは、覚えが空になる
+    assert!(cx.update(session::untuck).is_empty());
+}

@@ -76,6 +76,8 @@ struct Sessions {
     quitting: bool,
     /// メインのウィンドウ（最初に開いた 1 枚）。閉じるとアプリが終了する。
     main: Option<(EntityId, AnyWindowHandle)>,
+    /// メインと一緒に最小化したウィンドウ。メインを元に戻すときに、一緒に戻す。
+    tucked: Vec<AnyWindowHandle>,
 }
 
 impl Global for Sessions {}
@@ -95,11 +97,38 @@ pub fn quitting(cx: &mut App) {
     cx.default_global::<Sessions>().quitting = true;
 }
 
-/// 最初に開いたウィンドウをメインにする。もう決まっていれば変えない。
-pub(crate) fn set_main(view: EntityId, window: AnyWindowHandle, cx: &mut App) {
+/// 最初に開いたウィンドウをメインにする。もう決まっていれば変えずに `false` を返す。
+pub(crate) fn set_main(view: EntityId, window: AnyWindowHandle, cx: &mut App) -> bool {
+    let sessions = cx.default_global::<Sessions>();
+    if sessions.main.is_some() {
+        return false;
+    }
+    sessions.main = Some((view, window));
+    true
+}
+
+/// メインのウィンドウ。まだ開いていなければ `None`。
+pub fn main_window(cx: &mut App) -> Option<AnyWindowHandle> {
     cx.default_global::<Sessions>()
         .main
-        .get_or_insert((view, window));
+        .map(|(_, window)| window)
+}
+
+/// メインと一緒に最小化するウィンドウを覚える。もう覚えているときは、変えずに空を返す。
+pub fn tuck(windows: Vec<AnyWindowHandle>, cx: &mut App) -> Vec<AnyWindowHandle> {
+    let sessions = cx.default_global::<Sessions>();
+    if !sessions.tucked.is_empty() {
+        return Vec::new();
+    }
+    sessions.tucked = windows;
+    sessions.tucked.clone()
+}
+
+/// メインと一緒に最小化したウィンドウのうち、まだ開いているものを返して、覚えを消す。
+pub fn untuck(cx: &mut App) -> Vec<AnyWindowHandle> {
+    let open = cx.windows();
+    let tucked = std::mem::take(&mut cx.default_global::<Sessions>().tucked);
+    tucked.into_iter().filter(|w| open.contains(w)).collect()
 }
 
 /// メインのウィンドウを閉じたか。メインを開いていないうちは `false`。
