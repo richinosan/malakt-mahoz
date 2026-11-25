@@ -838,9 +838,12 @@ impl MainView {
         f: impl FnOnce(&mut Store) -> malakt_core::Result<R>,
     ) -> Option<R> {
         let result = self.db.update(cx, |db, cx| {
-            let result = f(&mut db.store);
+            // この操作を、元に戻すときの 1 つの段にする。前の区切りからの変更（AI が変えた分など）は、
+            // その前の段になる
+            let result = db.store.undo_mark().and_then(|()| f(&mut db.store));
+            let marked = db.store.undo_mark();
             cx.notify();
-            result
+            result.and_then(|value| marked.map(|()| value))
         });
         match result {
             Ok(value) => {

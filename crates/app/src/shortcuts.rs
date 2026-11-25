@@ -29,6 +29,9 @@ actions!(
         SelectAll,
         CopyLink,
         Duplicate,
+        Paste,
+        Undo,
+        Redo,
         OpenSettings,
         ShowKeys,
         ToggleFullscreen,
@@ -37,6 +40,9 @@ actions!(
 );
 
 const MAC: bool = cfg!(target_os = "macos");
+
+/// 1 回の貼り付けで作るタスクの数の上限。
+const PASTE_MAX: usize = 200;
 
 /// PageUp / PageDown で動く行の数。
 const PAGE: isize = 10;
@@ -74,6 +80,9 @@ pub fn bind(cx: &mut App) {
         KeyBinding::new(secondary!("a"), SelectAll, at),
         KeyBinding::new(secondary!("c"), CopyLink, at),
         KeyBinding::new(secondary!("d"), Duplicate, at),
+        KeyBinding::new(secondary!("v"), Paste, at),
+        KeyBinding::new(secondary!("z"), Undo, at),
+        KeyBinding::new(secondary!("shift-z"), Redo, at),
         KeyBinding::new(secondary!(","), OpenSettings, at),
         KeyBinding::new("f1", ShowKeys, at),
         KeyBinding::new(secondary!("/"), ShowKeys, at),
@@ -85,6 +94,7 @@ pub fn bind(cx: &mut App) {
         keys.push(KeyBinding::new("ctrl-cmd-f", ToggleFullscreen, None));
     } else {
         keys.push(KeyBinding::new("f11", ToggleFullscreen, None));
+        keys.push(KeyBinding::new("ctrl-y", Redo, at));
     }
     cx.bind_keys(keys);
     // 全画面は、AI チャットのウィンドウでも同じキーで切り替える
@@ -113,6 +123,9 @@ pub fn help() -> Vec<(&'static str, &'static str)> {
         (pick("Ctrl+A", "⌘A"), "すべてにチェックを付ける"),
         (pick("Ctrl+C", "⌘C"), "リンクをコピー"),
         (pick("Ctrl+D", "⌘D"), "複製"),
+        (pick("Ctrl+V", "⌘V"), "貼り付けてタスクを追加"),
+        (pick("Ctrl+Z", "⌘Z"), "元に戻す"),
+        (pick("Ctrl+Y / Ctrl+Shift+Z", "⇧⌘Z"), "やり直す"),
         ("Esc", "閉じる"),
         (pick("Ctrl+J", "⌘J"), "AI チャット"),
         (pick("Ctrl+,", "⌘,"), "フォントとカラー"),
@@ -187,6 +200,19 @@ impl MainView {
         let d = list::<SelectAll>(d, cx, |v, _, cx| v.select_all(cx));
         let d = list::<CopyLink>(d, cx, |v, _, cx| v.copy_links(cx));
         let d = list::<Duplicate>(d, cx, |v, _, cx| v.duplicate_targets(cx));
+        let d = list::<Paste>(d, cx, |v, _, cx| v.paste(cx));
+        // 元に戻す・やり直しは、どのペインで押しても、データ全体のいちばん新しい操作に働く
+        let d = d
+            .on_action(cx.listener(|this, _: &Undo, window, cx| {
+                if !this.list_keys(window) || !this.undo(false, cx) {
+                    cx.propagate();
+                }
+            }))
+            .on_action(cx.listener(|this, _: &Redo, window, cx| {
+                if !this.list_keys(window) || !this.undo(true, cx) {
+                    cx.propagate();
+                }
+            }));
         d.on_action(cx.listener(|this, _: &OpenSettings, window, cx| {
             if this.covered() {
                 cx.propagate();
@@ -241,6 +267,14 @@ impl MainView {
         self.visible
             .iter()
             .position(|&i| &self.tasks[i].id == cursor)
+    }
+
+    /// 作ったばかりのタスクを読み込んで、キーで選んでいる行が見えるところまで一覧を動かす。
+    fn reveal_cursor(&mut self, cx: &mut Context<Self>) {
+        self.reload(cx);
+        if let Some(ix) = self.cursor_index() {
+            self.list_scroll.scroll_to_item(ix, ScrollStrategy::Top);
+        }
     }
 
     /// キーの操作の相手。チェックを付けたタスク、なければキーで選んでいる行、なければ開いているタスク。
@@ -399,7 +433,106 @@ impl MainView {
             self.notice = Some(format!("{} 件のタスクを複製しました。", ids.len()).into());
             // 続けて名前を変えたり開いたりできるよう、できたタスクを選ぶ
             self.cursor = last;
+            self.reveal_cursor(cx);
+        }
+        true
+    }
+
+    /// いちばん新しい操作を元に戻す。`redo` なら、戻した操作をやり直す。相手がなければ `false`。
+    pub fn undo(&mut self, redo: bool, cx: &mut Context<Self>) -> bool {
+        let result = self.db.update(cx, |db, cx| {
+            let result = if redo {
+                db.store.redo()
+            } else {
+                db.store.undo()
+            };
             cx.notify();
+            result
+        });
+        match result {
+            Ok(false) => return false,
+            Ok(true) => {
+                self.error = None;
+                self.notice = Some(
+                    if redo {
+                        "やり直しました。"
+                    } else {
+                        "元に戻しました。"
+                    }
+                    .into(),
+                );
+            }
+            Err(error) => {
+                let what = if redo {
+                    "やり直せませんでした"
+                } else {
+                    "元に戻せませんでした"
+                };
+                self.error = Some(format!("{what}: {error}").into());
+            }
+        }
+        cx.notify();
+        true
+    }
+
+    /// クリップボードの中身からタスクを作る。タスクのリンクなら、そのタスクの写しを今の場所に作り、
+    /// ほかの文字なら、1 行を 1 つのタスクにする。
+    fn paste(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.nav == Nav::Home {
+            return false;
+        }
+        let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
+            return false;
+        };
+        let lines: Vec<&str> = text
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect();
+        if lines.is_empty() {
+            return false;
+        }
+        if lines.len() > PASTE_MAX {
+            self.error = Some(
+                format!(
+                    "貼り付けられるのは {PASTE_MAX} 行までです（クリップボードは {} 行）。",
+                    lines.len()
+                )
+                .into(),
+            );
+            cx.notify();
+            return true;
+        }
+        let workspace = self.current_workspace().map(str::to_owned);
+        let made = self.write(cx, |store| {
+            // 先に全部の下書きを作り、1 つでも作れなければ何も足さない
+            let mut drafts = Vec::new();
+            for line in &lines {
+                let linked = match line.strip_prefix(malakt_core::tasklink::PREFIX) {
+                    Some(id) => store.task(id).ok(),
+                    None => None,
+                };
+                drafts.push(match linked {
+                    Some(task) => {
+                        let mut draft = TaskDraft::from(&task);
+                        // 親のタスクは元の場所にあるので、写しは親なしで作る
+                        draft.parent_id = None;
+                        draft
+                    }
+                    None => store.draft_for(workspace.as_deref(), line)?,
+                });
+            }
+            let mut last = None;
+            for draft in &drafts {
+                last = Some(store.create_task_shown(workspace.as_deref(), draft)?.id);
+            }
+            Ok((drafts.len(), last))
+        });
+        if let Some((count, last)) = made {
+            self.notice = Some(format!("{count} 件のタスクを追加しました。").into());
+            self.query.tab = malakt_core::view::Tab::Open;
+            self.cursor = last;
+            self.reveal_cursor(cx);
         }
         true
     }

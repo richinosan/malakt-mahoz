@@ -9,6 +9,7 @@
 //! - `notice`: 通知（期限が今日、ほかの人からの変更）
 //! - `remind`: OS のリマインダーとの連携（何を作り・直し・消すかの判断）
 //! - `ticket`: 完了チケット（画面で発行し、コマンドで完了報告する）
+//! - `undo`: 元に戻す・やり直し（上限つきの記録）
 //! - `lock`: アプリロック
 //! - `mention`: コメントの `@名前`
 //! - `view`: 一覧の絞り込みや並べ替え
@@ -33,6 +34,7 @@ pub mod store;
 pub mod tasklink;
 pub mod text;
 pub mod ticket;
+pub mod undo;
 pub mod view;
 pub mod when;
 
