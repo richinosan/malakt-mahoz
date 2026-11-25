@@ -1006,45 +1006,11 @@ impl MainView {
             .when(floating, |d| {
                 d.child(floating_card(
                     glass(theme.sidebar, cx),
-                    [FLOAT_GAP, half, FLOAT_GAP, FLOAT_GAP],
+                    // 上は、上のバーとの間のすき間の半分
+                    [half, half, FLOAT_GAP, FLOAT_GAP],
                     cx,
                 ))
             })
-            // macOS は左上に信号機ボタンが乗るので、その分を空ける
-            .when(cfg!(target_os = "macos"), |d| d.pt_6())
-            .child(
-                row()
-                    .h(HEADER_HEIGHT)
-                    .flex_none()
-                    .pl_4()
-                    .pr_2()
-                    .gap_2()
-                    .border_b_1()
-                    // 浮かせたカードの中では、端から端までの線を引かない
-                    .border_color(if floating {
-                        theme.transparent
-                    } else {
-                        theme.sidebar_border
-                    })
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .font_weight(FontWeight::BOLD)
-                            .truncate()
-                            .child(crate::APP_NAME.to_uppercase()),
-                    )
-                    .child(feel::gloss(
-                        Button::new("close-sidebar")
-                            .icon(app_icon("x"))
-                            .ghost()
-                            .small()
-                            .tooltip("メニューを閉じる")
-                            .on_click(
-                                cx.listener(move |this, _, _, cx| this.toggle_sidebar(wide, cx)),
-                            ),
-                    )),
-            )
             .child(
                 col()
                     .id("sidebar-nav")
@@ -1247,20 +1213,21 @@ impl MainView {
         // Windows は OS に任せ、ほかは押したまま動かしたときに自分で動かし始める
         let floating = crate::theme::floating(cx);
         let half = FLOAT_GAP / 2.;
+        // 中身はどれも、この行の中で縦の中央にそろう（flex）。
+        // 浮かせるときは、カードの内側に収まるように、まわりのすき間の分だけ内側に寄せる
         let bar = row()
             .flex_none()
             .h(HEADER_HEIGHT)
             .relative()
-            // 浮かせるときも枠の幅は取っておき、中身の場所を変えない
             .border_b_1()
             .border_color(theme.transparent)
             .when(!floating, |d| {
                 d.border_color(theme.border).bg(glass(theme.background, cx))
             })
             .when(floating, |d| {
-                d.child(floating_card(
+                d.pt(FLOAT_GAP).pb(half).px(FLOAT_GAP).child(floating_card(
                     glass(theme.popover, cx),
-                    [FLOAT_GAP, FLOAT_GAP, half, half],
+                    [FLOAT_GAP, FLOAT_GAP, half, FLOAT_GAP],
                     cx,
                 ))
             })
@@ -1309,23 +1276,19 @@ impl MainView {
                     div()
                         .flex_1()
                         .px_4()
-                        .text_sm()
-                        .text_color(theme.muted_foreground)
-                        .child(crate::APP_NAME),
+                        // macOS は左上に信号機ボタンが乗るので、その分を空ける
+                        .when(cfg!(target_os = "macos"), |d| d.pl(px(84.)))
+                        .font_weight(FontWeight::BOLD)
+                        .child(crate::APP_NAME.to_uppercase()),
                 )
                 // 下のバーの判定に取られないよう、ボタンのある場所はマウスを受け止める
                 .child(
                     row()
                         .occlude()
-                        .when(floating, |d| d.pr_3())
+                        .when(floating, |d| d.pr_2())
                         .children(window_controls(HEADER_HEIGHT, floating, window, cx)),
                 );
         }
-        let sidebar_shown = if wide {
-            !self.sidebar_hidden
-        } else {
-            self.sidebar_open
-        };
         // 分けているときは、今のペインの場所を出す
         let (title, icon) = match self.focused_child() {
             Some(child) => child.read(cx).header_title(cx),
@@ -1343,11 +1306,9 @@ impl MainView {
                 .flex_1()
                 .min_w_0()
                 .gap_2()
-                .pl_3()
-                // macOS でメニューを閉じているときは、信号機ボタンの分を空ける
-                .when(cfg!(target_os = "macos") && !sidebar_shown, |d| {
-                    d.pl(px(84.))
-                })
+                .pl_2()
+                // macOS は左上に信号機ボタンが乗るので、その分を空ける
+                .when(cfg!(target_os = "macos"), |d| d.pl(px(84.)))
                 .child(
                     // ボタンのある場所はマウスを受け止める（右のボタンと同じ理由）
                     div().occlude().child(feel::gloss(
@@ -1361,6 +1322,16 @@ impl MainView {
                             ),
                     )),
                 )
+                // 狭いウィンドウでは、アプリの名前を出さず、今の画面の名前に場所を譲る
+                .when(wide, |d| {
+                    d.child(
+                        div()
+                            .flex_none()
+                            .font_weight(FontWeight::BOLD)
+                            .child(crate::APP_NAME.to_uppercase()),
+                    )
+                    .child(div().flex_none().w(gpui_kit::px(1.)).h_4().bg(theme.border))
+                })
                 .when_some(icon, |d, icon| d.child(div().flex_none().child(icon)))
                 .child(
                     div()
@@ -1376,7 +1347,7 @@ impl MainView {
                 .flex_none()
                 .gap_1()
                 // ウィンドウのボタンは、浮かせないときは右の端まで寄せる
-                .when(floating || controls.is_none(), |d| d.pr_3())
+                .when(floating || controls.is_none(), |d| d.pr_2())
                 // 下のバーの判定に取られないよう、ボタンのある場所はマウスを受け止める。
                 // これがないと、Windows ではボタンを離したときのクリックがウィンドウの移動に取られる
                 .occlude()
@@ -6989,7 +6960,7 @@ impl Render for MainView {
             .size_full()
             .relative()
             .flex()
-            .flex_row()
+            .flex_col()
             // パネルを浮かせるときは、すき間に少し暗い地が見える
             .bg(if crate::theme::floating(cx) {
                 theme.muted
@@ -6998,13 +6969,14 @@ impl Render for MainView {
             })
             .text_color(theme.foreground)
             .children(backdrop_layer(cx))
-            .when(wide && sidebar, |d| d.child(self.render_sidebar(wide, cx)))
+            // 上のバーは、ウィンドウの端から端まで 1 本
+            .child(self.render_header(true, wide, window, cx))
             .child(
-                col()
+                row()
                     .flex_1()
-                    .min_w_0()
-                    .h_full()
-                    .child(self.render_header(true, wide, window, cx))
+                    .min_h_0()
+                    .items_stretch()
+                    .when(wide && sidebar, |d| d.child(self.render_sidebar(wide, cx)))
                     .child(
                         // 上のバーの下に、タスクの画面と AI チャットを横に並べる
                         row()
