@@ -79,6 +79,9 @@ pub struct WorkspaceNaming {
 /// 追加したばかりのタスクのタイトル。
 pub const NEW_TASK_TITLE: &str = "新規タスク";
 
+/// 追加したばかりの担当者の名前。
+pub const NEW_PERSON_NAME: &str = "新規担当者";
+
 /// 追加したばかりのワークスペースの名前。
 pub const NEW_WORKSPACE_NAME: &str = "新規ワークスペース";
 
@@ -165,6 +168,8 @@ pub struct MainView {
     pub include_descendants: bool,
     /// 追加したばかりで、詳細で最初のタイトルを書いているタスク。
     pub naming_task: Option<Id>,
+    /// 担当者の一覧で名前を書いている担当者。
+    pub person_naming: Option<Id>,
     /// 左のメニューで名前を書いているワークスペース。
     pub workspace_naming: Option<WorkspaceNaming>,
     /// アイコンを選ぶ画面で選んでいるカテゴリ。
@@ -394,7 +399,17 @@ impl MainView {
             };
         }
         on_enter!(quick_add, submit_quick_add);
-        on_enter!(name, submit_name);
+        on_enter!(name, save_person_name);
+        // 担当者の名前も、ほかの場所を押したときに保存する
+        subs.push(cx.subscribe_in(
+            &inputs.name,
+            window,
+            |this, _, event: &InputEvent, window, cx| {
+                if matches!(event, InputEvent::Blur) && this.person_naming.is_some() {
+                    this.save_person_name(window, cx);
+                }
+            },
+        ));
         on_enter!(title, save_title);
         // タイトルは、ほかの場所を押したときにも保存する
         subs.push(cx.subscribe_in(
@@ -559,6 +574,7 @@ impl MainView {
             include_descendants: true,
             icon_category: None,
             workspace_naming: None,
+            person_naming: None,
             naming_task: None,
             workspaces: Vec::new(),
             tree: Vec::new(),
@@ -1910,15 +1926,54 @@ impl MainView {
         cx.notify();
     }
 
-    /// 名前の入力欄で Enter。担当者を追加する。
-    pub fn submit_name(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let name = self.inputs.name.read(cx).value().to_string();
-        match self.modal.clone() {
-            Modal::People if self.write(cx, |s| s.create_person(&name, false)).is_some() => {
-                Self::take(&self.inputs.name.clone(), window, cx);
-            }
-            _ => {}
+    /// 「新規担当者」という名前で追加して、一覧のその行でそのまま名前を書けるようにする。
+    pub fn add_person(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(person) = self.write(cx, |s| s.create_person(NEW_PERSON_NAME, false)) {
+            // 一覧を読み直して、増えた行を出す
+            self.reload(cx);
+            self.rename_person(person.id, window, cx);
         }
+    }
+
+    /// 担当者の一覧の行で、名前を書き直す。
+    pub fn rename_person(&mut self, id: Id, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(name) = self
+            .people
+            .iter()
+            .find(|p| p.id == id)
+            .map(|p| p.name.clone())
+        else {
+            return;
+        };
+        self.inputs.name.update(cx, |s, cx| {
+            s.set_value(name, window, cx);
+            s.focus(window, cx);
+            // すぐ打ち替えられるように、名前を全部選んでおく
+            s.select_all(window, cx);
+        });
+        self.person_naming = Some(id);
+        cx.notify();
+    }
+
+    /// 書いた担当者の名前を保存する。Enter か、ほかの場所を押したとき。
+    pub fn save_person_name(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = self.person_naming.clone() else {
+            return;
+        };
+        let name = self.inputs.name.read(cx).value().trim().to_owned();
+        let current = self.people.iter().find(|p| p.id == id).cloned();
+        // 空にしたときと変えていないときは、今の名前のままにする
+        if let Some(person) = current.filter(|p| !name.is_empty() && p.name != name) {
+            if self
+                .write(cx, |s| s.update_person(&id, &name, &person.note))
+                .is_none()
+            {
+                return;
+            }
+        }
+        self.person_naming = None;
+        self.leave_input(&self.inputs.name.clone(), window, cx);
+        cx.notify();
     }
 
     pub fn confirm_delete_workspace(&mut self, cx: &mut Context<Self>) {
@@ -2091,10 +2146,9 @@ impl MainView {
     }
 
     pub fn open_people(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.inputs.name.update(cx, |s, cx| {
-            s.set_value("", window, cx);
-            s.focus(window, cx);
-        });
+        // メニューから開くとフォーカスがなくなるので、Esc を受けられるように戻す
+        self.focus.focus(window, cx);
+        self.person_naming = None;
         self.modal = Modal::People;
         cx.notify();
     }
@@ -3006,6 +3060,8 @@ impl MainView {
         } else if self.pane_prefix || self.pane_resize {
             self.pane_prefix = false;
             self.pane_resize = false;
+        } else if self.person_naming.take().is_some() {
+            // 書きかけの名前を捨てる。担当者のダイアログは開いたまま
         } else if self.modal != Modal::None {
             self.modal = Modal::None;
             self.issued_ticket = None;
@@ -3027,7 +3083,7 @@ impl MainView {
     pub fn dismiss_own(&mut self, cx: &mut Context<Self>) -> bool {
         self.error = None;
         cx.notify();
-        if self.sub_modal.take().is_some() {
+        if self.sub_modal.take().is_some() || self.person_naming.take().is_some() {
         } else if self.modal != Modal::None {
             self.modal = Modal::None;
             self.issued_ticket = None;
