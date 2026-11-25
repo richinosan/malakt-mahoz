@@ -57,16 +57,29 @@ const LIST_INDENT: Pixels = px(24.);
 /// 一覧の、サブワークスペースの見出しの行の高さ。
 const FOLDER_HEIGHT: Pixels = px(44.);
 
+/// タスクの 1 行の高さ。表の行か、2 段のカードか。
+fn task_height(table: bool, density: crate::theme::Density) -> Pixels {
+    if table {
+        ROW_HEIGHT * density.rows()
+    } else {
+        CARD_HEIGHT * density.cards()
+    }
+}
+
 /// 一覧の行ごとの高さと、その合計。
-pub(crate) fn row_sizes(rows: &[ListRow], table: bool) -> (std::rc::Rc<Vec<Size<Pixels>>>, Pixels) {
-    let task = if table { ROW_HEIGHT } else { CARD_HEIGHT };
+pub(crate) fn row_sizes(
+    rows: &[ListRow],
+    table: bool,
+    density: crate::theme::Density,
+) -> (std::rc::Rc<Vec<Size<Pixels>>>, Pixels) {
+    let task = task_height(table, density);
     let mut total = px(0.);
     let sizes = rows
         .iter()
         .map(|row| {
             let height = match row {
                 ListRow::Task { .. } => task,
-                ListRow::Folder { .. } => FOLDER_HEIGHT,
+                ListRow::Folder { .. } => FOLDER_HEIGHT * density.rows(),
             };
             total += height;
             size(px(0.), height)
@@ -1398,7 +1411,7 @@ impl MainView {
                     })
             } else {
                 col()
-                    .h(ROW_HEIGHT * count.min(8) as f32 + px(2.))
+                    .h(task_height(true, crate::theme::density(cx)) * count.min(8) as f32 + px(2.))
                     .flex_none()
                     .border_1()
                     .border_color(theme.border)
@@ -1499,7 +1512,7 @@ impl MainView {
         row()
             .id(("due", ix))
             .w_full()
-            .h(ROW_HEIGHT)
+            .h(task_height(true, crate::theme::density(cx)))
             .px_3()
             .gap_3()
             .border_b_1()
@@ -1964,7 +1977,7 @@ impl MainView {
                 .relative()
                 .h(height)
                 // 低いペインでも、1 行は見えるようにする。入りきらない分は画面ごとスクロールする
-                .min_h(height.min(if table { ROW_HEIGHT } else { CARD_HEIGHT }))
+                .min_h(height.min(task_height(table, self.row_density)))
                 .child(
                     gpui_kit::base::v_virtual_list(
                         cx.entity(),
@@ -2392,7 +2405,7 @@ impl MainView {
         let el = row()
             .id(("folder", at))
             .w_full()
-            .h(FOLDER_HEIGHT)
+            .h(FOLDER_HEIGHT * self.row_density.rows())
             .relative()
             .px_3()
             .gap_3()
@@ -2738,7 +2751,7 @@ impl MainView {
                 d.hover(|s| s.bg(theme.muted.opacity(0.4)))
             });
         let row_el = if table {
-            base.h(ROW_HEIGHT)
+            base.h(task_height(true, self.row_density))
                 .flex()
                 .flex_row()
                 .items_center()
@@ -2755,7 +2768,7 @@ impl MainView {
                 ]))
         } else {
             // 狭い画面では 1 件を 2 段のカードにする
-            base.h(CARD_HEIGHT)
+            base.h(task_height(false, self.row_density))
                 .flex()
                 .flex_col()
                 .justify_center()
@@ -4626,6 +4639,30 @@ impl MainView {
             .child(
                 row()
                     .gap_2()
+                    .child(label("密度"))
+                    .child(
+                        row().flex_1().gap_1().children(
+                            crate::theme::Density::ALL.into_iter().enumerate().map(
+                                |(ix, density)| {
+                                    chip(
+                                        ("density", ix),
+                                        density.label(),
+                                        crate::theme::density(cx) == density,
+                                        cx,
+                                    )
+                                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                        this.set_density(density, cx)
+                                    }))
+                                    .test_support()
+                                },
+                            ),
+                        ),
+                    )
+                    .child(reset("density-reset", false)),
+            )
+            .child(
+                row()
+                    .gap_2()
                     .child(label("タスクの一覧"))
                     .child(
                         div().flex_1().flex().child(
@@ -4816,7 +4853,10 @@ impl MainView {
         };
         let name = |text: SharedString| div().h_6().px_1().text_sm().truncate().child(text);
         let mut tiles = row().flex_wrap().items_start().gap_1();
-        for (ix, preset) in Preset::recommended().into_iter().enumerate() {
+        for (ix, preset) in Preset::recommended_with(&self.fonts)
+            .into_iter()
+            .enumerate()
+        {
             let selected = preset.same_look(&now);
             tiles = tiles.child(
                 frame(("preset", ix).into(), selected)
@@ -6397,6 +6437,10 @@ impl MainView {
         let list_width = width - beside.unwrap_or(px(0.));
         let table = list_width >= px(880.) && !crate::theme::cards(cx);
         self.list_width = f32::from(list_width) / crate::UI_SCALE;
+        // 行の詰め方が変わっていたら、行の高さを作り直す
+        if self.row_density != crate::theme::density(cx) {
+            self.size_rows(cx);
+        }
         let main = match self.nav {
             Nav::Home => self.render_home(table, cx).into_any_element(),
             _ => self.render_list(table, cx).into_any_element(),
@@ -6550,6 +6594,10 @@ impl Render for MainView {
         // 表は、タイトルの列に読める幅が残るときだけ
         let table = list_width >= px(880.) && !crate::theme::cards(cx);
         self.list_width = f32::from(list_width) / crate::UI_SCALE;
+        // 行の詰め方が変わっていたら、行の高さを作り直す
+        if self.row_density != crate::theme::density(cx) {
+            self.size_rows(cx);
+        }
 
         let main = if !wide && sidebar {
             // 狭い画面でメニューを開いているあいだは、メニューだけを見せる

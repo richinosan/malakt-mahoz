@@ -99,6 +99,7 @@ const MUST: &[&str] = &[
     "blur-slider",
     "cards-switch",
     "float-switch",
+    "density",
 ];
 
 /// ロックを設定したときだけ出るもの。ロックは tests/ui.rs で確かめる。
@@ -139,6 +140,7 @@ const QUIET: &[(&str, &str)] = &[
     ("自分のテーマがある見た目 > preset#0", "今選んでいるテーマ"),
     ("own-preset#0", "今選んでいるテーマ"),
     ("layout#0", "今選んでいるレイアウト"),
+    ("density#1", "今選んでいる密度"),
     ("scene-file", "OS のファイル選択を開く"),
     // 入力が空のときは送らない
     ("pane-keys#0", "今選んでいるキーの割り当て"),
@@ -519,6 +521,7 @@ fn fingerprint(cx: &mut TestAppContext, world: &World) -> String {
             "panels.float",
             "presets",
             "panel.overlay",
+            "density",
         ] {
             data.push_str(&format!("{:?}", store.setting(key).unwrap()));
         }

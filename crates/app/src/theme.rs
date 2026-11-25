@@ -24,6 +24,7 @@ const CARDS: &str = "list.cards";
 const FLOAT: &str = "panels.float";
 const PRESETS: &str = "presets";
 const OVERLAY: &str = "panel.overlay";
+const DENSITY: &str = "density";
 /// 背景の画像を出したときの、面の透明度とぼかしの最初の値（0〜100）。
 pub const DEFAULT_CLEAR: u8 = 40;
 pub const DEFAULT_BLUR: u8 = 30;
@@ -174,6 +175,88 @@ impl Look {
     }
 }
 
+/// 一覧の行の詰め方。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Density {
+    Roomy,
+    #[default]
+    Standard,
+    Compact,
+}
+
+impl Density {
+    pub const ALL: [Density; 3] = [Density::Roomy, Density::Standard, Density::Compact];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Density::Roomy => "ゆったり",
+            Density::Standard => "標準",
+            Density::Compact => "詰める",
+        }
+    }
+
+    fn key(self) -> Option<&'static str> {
+        match self {
+            Density::Roomy => Some("roomy"),
+            Density::Standard => None,
+            Density::Compact => Some("compact"),
+        }
+    }
+
+    fn from_key(key: Option<&str>) -> Self {
+        match key {
+            Some("roomy") => Density::Roomy,
+            Some("compact") => Density::Compact,
+            _ => Density::Standard,
+        }
+    }
+
+    /// 1 行の表の行と見出しの行の高さに掛ける倍率。
+    pub fn rows(self) -> f32 {
+        match self {
+            Density::Roomy => 1.2,
+            Density::Standard => 1.,
+            Density::Compact => 0.75,
+        }
+    }
+
+    /// 2 段のカードの行の高さに掛ける倍率（詰めても 2 段が入る高さを残す）。
+    pub fn cards(self) -> f32 {
+        match self {
+            Density::Roomy => 1.15,
+            Density::Standard => 1.,
+            Density::Compact => 0.85,
+        }
+    }
+}
+
+/// 保存してある、一覧の行の詰め方。
+pub fn density(cx: &App) -> Density {
+    let store = &db::shared(cx).read(cx).store;
+    Density::from_key(store.setting(DENSITY).ok().flatten().as_deref())
+}
+
+/// 一覧の行の詰め方を変える。
+pub fn set_density(density: Density, cx: &mut App) -> malakt_core::Result<()> {
+    db::shared(cx).update(cx, |db, _| db.store.set_setting(DENSITY, density.key()))?;
+    cx.refresh_windows();
+    Ok(())
+}
+
+/// 等幅の書体の候補。この PC に入っている最初のものを、エディタ風のテーマが使う。
+const MONO_FONTS: [&str; 10] = [
+    "JetBrains Mono",
+    "Cascadia Code",
+    "Cascadia Mono",
+    "Consolas",
+    "SF Mono",
+    "Menlo",
+    "Source Han Code JP",
+    "Noto Sans Mono CJK JP",
+    "Noto Sans Mono",
+    "DejaVu Sans Mono",
+];
+
 /// 見た目のまとまり（テーマ）。背景の画像・色・透明度・ぼかし・カード・書体を 1 回で切り替える。
 #[derive(Debug, Clone, PartialEq)]
 pub struct Preset {
@@ -186,6 +269,7 @@ pub struct Preset {
     pub blur: u8,
     pub cards: bool,
     pub floating: bool,
+    pub density: Density,
 }
 
 impl Preset {
@@ -199,6 +283,7 @@ impl Preset {
             blur: DEFAULT_BLUR,
             cards: false,
             floating: false,
+            density: Density::Standard,
         }
     }
 
@@ -232,7 +317,22 @@ impl Preset {
 
     /// おすすめのテーマ。先頭は、何も変えていないときの見た目。
     pub fn recommended() -> Vec<Preset> {
+        Preset::recommended_with(&[])
+    }
+
+    /// おすすめのテーマ。エディタ風は、`installed`（この PC の書体）に等幅の書体があればそれを使い、
+    /// なければ標準の書体のままにする。
+    pub fn recommended_with(installed: &[String]) -> Vec<Preset> {
         use Choice::{Dark, Light};
+        let mono = MONO_FONTS
+            .iter()
+            .find(|name| installed.iter().any(|have| have == *name))
+            .map(|name| (*name).to_owned());
+        let dense = |mut preset: Preset, font: Option<String>| {
+            preset.density = Density::Compact;
+            preset.look.font = font;
+            preset
+        };
         vec![
             Preset::plain("標準"),
             Preset::glass("ガラスと青い空", Scene::Sky, Light, 50, 30),
@@ -245,9 +345,16 @@ impl Preset {
             Preset::tinted("紙とインク", Light, "#7a4a1e", "#f6f0e2"),
             Preset::tinted("ミッドナイト", Dark, "#6aa7ff", "#0d1424"),
             // ノートアプリやコードエディタでよく見る、灰色の地に 1 色だけを置く配色
-            Preset::tinted("ノート風", Dark, "#8f7bf0", "#1e1e1e"),
-            Preset::tinted("エディタ風", Dark, "#2f8fe0", "#1f1f1f"),
-            Preset::tinted("明るいエディタ風", Light, "#005fb8", "#f8f8f8"),
+            // 行を詰める。エディタ風は等幅の書体も使う
+            dense(Preset::tinted("ノート風", Dark, "#8f7bf0", "#1e1e1e"), None),
+            dense(
+                Preset::tinted("エディタ風", Dark, "#2f8fe0", "#1f1f1f"),
+                mono.clone(),
+            ),
+            dense(
+                Preset::tinted("明るいエディタ風", Light, "#005fb8", "#f8f8f8"),
+                mono,
+            ),
         ]
     }
 
@@ -262,6 +369,7 @@ impl Preset {
             && self.look == other.look
             && self.cards == other.cards
             && self.floating == other.floating
+            && self.density == other.density
     }
 
     /// このテーマで画面がダークになるか。決めていないテーマは `fallback`。
@@ -299,6 +407,7 @@ impl Preset {
             "blur": self.blur,
             "cards": self.cards,
             "floating": self.floating,
+            "density": self.density.key(),
         })
     }
 
@@ -320,6 +429,7 @@ impl Preset {
             blur: number("blur", 100)?,
             cards: value["cards"].as_bool()?,
             floating: value["floating"].as_bool()?,
+            density: Density::from_key(text("density")),
         })
     }
 }
@@ -770,6 +880,7 @@ pub fn current(name: &str, cx: &App) -> Preset {
         blur: blur(cx),
         cards: cards(cx),
         floating: floating(cx),
+        density: density(cx),
     }
 }
 
@@ -819,6 +930,7 @@ pub fn apply_preset(preset: &Preset, window: &mut Window, cx: &mut App) -> Resul
         (SCENE_BLUR, Some(preset.blur.min(100).to_string())),
         (CARDS, flag(preset.cards)),
         (FLOAT, flag(preset.floating)),
+        (DENSITY, preset.density.key().map(str::to_owned)),
     ];
     let saved = db::shared(cx).update(cx, |db, _| {
         values
