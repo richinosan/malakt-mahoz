@@ -79,6 +79,26 @@ fn glass(color: Hsla, cx: &App) -> Hsla {
     }
 }
 
+/// 浮かせたパネルのすき間。
+const FLOAT_GAP: Pixels = px(8.);
+
+/// 浮かせたパネルの地（角丸のカード）。パネルの最初の子にして、中身の後ろに敷く。
+/// `edges` は上・右・下・左のすき間。隣のパネルと接する辺は半分にして、すき間をそろえる。
+fn floating_card(fill: Hsla, edges: [Pixels; 4], cx: &App) -> Div {
+    let [top, right, bottom, left] = edges;
+    div()
+        .absolute()
+        .top(top)
+        .right(right)
+        .bottom(bottom)
+        .left(left)
+        .rounded(px(16.))
+        .border_1()
+        .border_color(cx.theme().border)
+        .bg(fill)
+        .elevate(Elevation::Low, cx)
+}
+
 /// 画面の後ろに敷く画像。
 fn backdrop_layer(cx: &App) -> Option<Img> {
     let backdrop = crate::theme::backdrop(cx)?;
@@ -539,13 +559,27 @@ impl MainView {
 
         let unread = self.unread_notices;
         let view = cx.entity().downgrade();
+        let floating = crate::theme::floating(cx);
+        let half = FLOAT_GAP / 2.;
         let inner = col()
             .id("sidebar")
             .size_full()
-            .bg(glass(theme.sidebar, cx))
+            .relative()
             .text_color(theme.sidebar_foreground)
+            // 浮かせるときも枠の幅は取っておき、中身の場所を変えない
             .border_r_1()
-            .border_color(theme.sidebar_border)
+            .border_color(theme.transparent)
+            .when(!floating, |d| {
+                d.bg(glass(theme.sidebar, cx))
+                    .border_color(theme.sidebar_border)
+            })
+            .when(floating, |d| {
+                d.child(floating_card(
+                    glass(theme.sidebar, cx),
+                    [FLOAT_GAP, half, FLOAT_GAP, FLOAT_GAP],
+                    cx,
+                ))
+            })
             // macOS は左上に信号機ボタンが乗るので、その分を空ける
             .when(cfg!(target_os = "macos"), |d| d.pt_6())
             .child(
@@ -555,7 +589,12 @@ impl MainView {
                     .px_4()
                     .gap_2()
                     .border_b_1()
-                    .border_color(theme.sidebar_border)
+                    // 浮かせたカードの中では、端から端までの線を引かない
+                    .border_color(if floating {
+                        theme.transparent
+                    } else {
+                        theme.sidebar_border
+                    })
                     .child(
                         col()
                             .flex_1()
@@ -889,12 +928,25 @@ impl MainView {
         let theme = cx.theme().clone();
         // バーの空いているところを掴むと、ウィンドウを動かせる。
         // Windows は OS に任せ、ほかは押したまま動かしたときに自分で動かし始める
+        let floating = crate::theme::floating(cx);
+        let half = FLOAT_GAP / 2.;
         let bar = row()
             .flex_none()
             .h(HEADER_HEIGHT)
+            .relative()
+            // 浮かせるときも枠の幅は取っておき、中身の場所を変えない
             .border_b_1()
-            .border_color(theme.border)
-            .bg(glass(theme.background, cx))
+            .border_color(theme.transparent)
+            .when(!floating, |d| {
+                d.border_color(theme.border).bg(glass(theme.background, cx))
+            })
+            .when(floating, |d| {
+                d.child(floating_card(
+                    glass(theme.popover, cx),
+                    [FLOAT_GAP, FLOAT_GAP, half, half],
+                    cx,
+                ))
+            })
             .when(cfg!(target_os = "windows"), |d| {
                 d.window_control_area(WindowControlArea::Drag)
             })
@@ -4066,6 +4118,24 @@ impl MainView {
                         ),
                     )
                     .child(reset("cards-reset", false)),
+            )
+            .child(
+                row()
+                    .gap_2()
+                    .child(label("パネル"))
+                    .child(
+                        div().flex_1().flex().child(
+                            Switch::new("float-switch")
+                                .label("カードにして浮かせる")
+                                .checked(crate::theme::floating(cx))
+                                .on_click(
+                                    cx.listener(|this, on: &bool, _, cx| {
+                                        this.set_floating(*on, cx)
+                                    }),
+                                ),
+                        ),
+                    )
+                    .child(reset("float-reset", false)),
             );
         let body = body.when_some(self.error.clone(), |d, error| {
             d.child(div().text_sm().text_color(theme.danger).child(error))
@@ -5625,7 +5695,12 @@ impl Render for MainView {
             .relative()
             .flex()
             .flex_row()
-            .bg(theme.background)
+            // パネルを浮かせるときは、すき間に少し暗い地が見える
+            .bg(if crate::theme::floating(cx) {
+                theme.muted
+            } else {
+                theme.background
+            })
             .text_color(theme.foreground)
             .children(backdrop_layer(cx))
             .when(wide && sidebar, |d| d.child(self.render_sidebar(wide, cx)))
@@ -5642,8 +5717,25 @@ impl Render for MainView {
                             .min_h_0()
                             .relative()
                             // 背景の画像の上では、中身の後ろも薄く塗って文字を読めるようにする
-                            .when_some(crate::theme::backdrop(cx), |d, backdrop| {
-                                d.bg(theme.background.opacity(backdrop.alpha * 0.45))
+                            .map(|d| {
+                                let fill = match crate::theme::backdrop(cx) {
+                                    Some(backdrop) => {
+                                        theme.background.opacity(backdrop.alpha * 0.45)
+                                    }
+                                    None => theme.background,
+                                };
+                                if crate::theme::floating(cx) {
+                                    let half = FLOAT_GAP / 2.;
+                                    d.child(floating_card(
+                                        fill,
+                                        [half, FLOAT_GAP, FLOAT_GAP, half],
+                                        cx,
+                                    ))
+                                } else if crate::theme::backdrop(cx).is_some() {
+                                    d.bg(fill)
+                                } else {
+                                    d
+                                }
                             })
                             .items_stretch()
                             .child(

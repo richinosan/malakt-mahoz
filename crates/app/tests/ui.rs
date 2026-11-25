@@ -1922,6 +1922,23 @@ fn backdrop_and_cards_are_chosen_in_settings(cx: &mut TestAppContext) {
         assert!(window.try_find(("col-head", 0usize)).is_none())
     });
 
+    // パネルを浮かせても、ボタンや一覧の場所は変わらない（カードは中身の後ろに敷くだけ）
+    let place = |cx: &mut TestAppContext| {
+        cx.update_window(window, |_, window, _| {
+            ["cards-switch", "float-switch", "open-menu", "nav-home"]
+                .map(|id| window.find(id).bounds())
+        })
+        .unwrap()
+    };
+    let flat = place(cx);
+    ui(cx, window, |window, cx| window.click("float-switch", cx));
+    assert_eq!(saved(cx, "panels.float").as_deref(), Some("1"));
+    assert!(cx.update(|cx| theme::floating(cx)));
+    assert_eq!(place(cx), flat);
+    ui(cx, window, |window, cx| window.click("float-switch", cx));
+    assert_eq!(saved(cx, "panels.float"), None);
+    ui(cx, window, |window, cx| window.click("float-switch", cx));
+
     // 起動し直しても残る。ダークでは夜の絵に変わる
     let day = cx.update(|cx| theme::backdrop(cx).unwrap().image.id);
     cx.update(theme::init);

@@ -1990,6 +1990,17 @@ impl MainView {
         .detach();
     }
 
+    /// 左のメニュー・上のバー・中身を、角丸のカードとして浮かせる。
+    pub fn set_floating(&mut self, on: bool, cx: &mut Context<Self>) {
+        match crate::theme::set_floating(on, cx) {
+            Ok(()) => self.error = None,
+            Err(error) => {
+                self.error = Some(format!("パネルの出し方を保存できませんでした。{error}").into())
+            }
+        }
+        cx.notify();
+    }
+
     /// タスクの一覧を、広い画面でもカードで出す。
     pub fn set_cards(&mut self, on: bool, cx: &mut Context<Self>) {
         match crate::theme::set_cards(on, cx) {
