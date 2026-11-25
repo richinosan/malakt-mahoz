@@ -949,7 +949,8 @@ impl Session {
             return;
         };
         for (task, _) in all {
-            if !waiting.contains(&task.id) {
+            // タイトルを書いている途中のタスクは、書き終わってから整える
+            if !waiting.contains(&task.id) && !self.holding.contains(&task.id) {
                 known.insert(task.id, task.links.iter().map(Link::url).collect());
             }
         }

@@ -2310,6 +2310,53 @@ fn a_task_being_named_waits_for_its_title(cx: &mut TestAppContext) {
     assert!(!body.contains("新規タスク"), "{body}");
 }
 
+/// タイトルを書いている間に AI がほかの仕事でツールを使っても、書き終えたタスクは整えられる。
+#[gpui_kit::test]
+fn a_task_being_named_is_arranged_after_the_ai_used_a_tool(cx: &mut TestAppContext) {
+    let world = start(cx);
+    world.keys.set(Provider::Claude, "k").unwrap();
+    let (window, view) = open(cx, wide());
+    ui(cx, window, |window, cx| window.click("nav-all", cx));
+    cx.run_until_parked();
+    ui(cx, window, |window, cx| window.click("new-task-open", cx));
+    for _ in 0..20 {
+        cx.run_until_parked();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    cx.update(|cx| assert!(view.read(cx).naming_task.is_some()));
+
+    world.reply(tool_reply(
+        "t1",
+        "create_task",
+        json!({"title": "牛乳を買う"}),
+    ));
+    world.reply(text_reply("作りました。"));
+    let session = session(cx);
+    cx.update(|cx| {
+        session.update(cx, |s, cx| {
+            s.send("牛乳のタスクを作って", String::new(), cx)
+        })
+    });
+    wait(cx, "AI が作り終わる", |s| {
+        !s.busy && !s.items.is_empty()
+    });
+    let before = world.sent().len();
+
+    world.reply(text_reply("そのままにしました。"));
+    ui(cx, window, |window, cx| {
+        window.input("会場を予約する", cx);
+        window.press("enter", cx);
+    });
+    for _ in 0..50 {
+        cx.run_until_parked();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    wait(cx, "AI が整え終わる", |s| !s.busy);
+    let sent = world.sent();
+    assert_eq!(sent.len(), before + 1, "書き終えたタスクを整える");
+    assert!(sent[before].2.to_string().contains("会場を予約する"));
+}
+
 /// AI が更新している間に手で変えた分は、AI の変更に数えない。元に戻しても残る。
 #[gpui_kit::test]
 fn edits_made_during_an_update_are_not_undone(cx: &mut TestAppContext) {
