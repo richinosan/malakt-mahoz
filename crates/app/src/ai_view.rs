@@ -377,8 +377,12 @@ impl AiPane {
                     }
                 },
             ),
-            // ウィンドウを閉じたら、メインのウィンドウの右に戻す
+            // ウィンドウを閉じたら、メインのウィンドウの右に戻す。
+            // 終了で閉じるウィンドウは、次の起動で同じ場所に開くので、別ウィンドウのまま覚えておく
             cx.on_release(move |this, cx| {
+                if crate::session::is_quitting(cx) {
+                    return;
+                }
                 let (session, mode) = (this.session.clone(), this.mode);
                 cx.defer(move |cx| {
                     session.update(cx, |s, cx| {
