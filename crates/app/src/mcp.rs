@@ -30,11 +30,16 @@ const PROTOCOLS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
 pub const LOCKED: &str =
     "malakt-mahoz はロックされています。アプリを開いて、ロックを解除してください。";
 
-const INSTRUCTIONS: &str = "\
+const INSTRUCTIONS_HEAD: &str = "\
 タスク管理アプリ malakt-mahoz のタスク、ワークスペース、担当者、コメントを読み書きします。\
 ID は list_workspaces、list_people、list_tasks で調べてから使ってください。\
 日付は YYYY-MM-DD、時刻つきなら YYYY-MM-DD HH:MM で渡します。\
 変更は undo で 1 つずつ元に戻せます（このサーバーが動いている間）。";
+
+/// サーバーの説明。コメントの決まりは、アプリの中の AI と同じ文を渡す。
+fn instructions() -> String {
+    format!("{INSTRUCTIONS_HEAD}{}", tools::COMMENT_RULE)
+}
 
 const WRITES: &[&str] = &[
     "create_task",
@@ -344,7 +349,7 @@ impl<F: FnOnce() -> malakt_core::Result<Store>> Server<F> {
                     "protocolVersion": version,
                     "capabilities": {"tools": {}},
                     "serverInfo": {"name": NAME, "version": env!("CARGO_PKG_VERSION")},
-                    "instructions": INSTRUCTIONS,
+                    "instructions": instructions(),
                 }))
             }
             "ping" => Ok(json!({})),
@@ -493,6 +498,11 @@ mod tests {
             assert!(!t["description"].as_str().unwrap().is_empty());
             // 削除は undo で戻せるので、「元に戻せない」とは書かない
             assert!(!t["description"].as_str().unwrap().contains("元に戻せない"));
+            if t["name"] == "add_comment" {
+                // 外のエージェントにも、中身のないコメントを書かせない
+                assert!(t["description"].as_str().unwrap().contains("事実だけ"));
+                assert!(instructions().contains("していないこと"));
+            }
         }
         // 書き込みとして扱うツールは、どれも一覧にある
         for name in WRITES {

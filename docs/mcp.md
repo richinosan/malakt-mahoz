@@ -66,7 +66,7 @@ Windows のアプリは、起動のときに黒い窓を出さないように作
 | `list_tasks` | タスクの一覧（ワークスペース、文字で絞り込み。完了・中止は `include_done`） |
 | `get_task` | タスク 1 件と、コメント、サブタスク |
 | `create_task` / `update_task` / `move_task` / `delete_task` | タスクを作る、書き換える、移す、削除する |
-| `add_comment` | コメントを書く（書き手は自分） |
+| `add_comment` | コメントを書く（書き手は自分）。書くのは、あとでタスクを読む人に要る事実だけ。作業をしたことだけを伝える文と、していないことは書かない |
 | `create_workspace` / `create_person` | ワークスペース、担当者を作る |
 | `undo` / `redo` | このサーバーからの変更を 1 つ元に戻す、やり直す |
 

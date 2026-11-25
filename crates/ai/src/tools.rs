@@ -103,7 +103,7 @@ pub fn definitions() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "add_comment",
-            description: "タスクにコメントを書く。",
+            description: COMMENT_TOOL,
             schema: object(
                 json!({"task_id": {"type": "string"}, "body": {"type": "string"}}),
                 &["task_id", "body"],
@@ -429,6 +429,11 @@ pub fn shell_name() -> &'static str {
 /// AI への最初の指示。`context` は、ユーザーが設定に書いた、いつも伝える前提と指示。
 /// 会話の途中で変わると、それまでの考えのブロックを送り返せなくなるので、
 /// 日付や今の画面のように変わるものは入れない（[`turn_note`] でメッセージに添える）。
+/// コメントに書いてよいこと。アプリの中の AI にも、MCP でつなぐ外のエージェントにも同じ文を渡す。
+pub const COMMENT_RULE: &str = "コメントは、あとでタスクを読む人に要る事実だけを書いてください（決まったこと、分かったこと、変わった状態、次にすること）。「確認しました」「レビューしました」「対応しました」のように、作業をしたことだけを伝える文は書かないでください。「まだ〜していません」「〜は未確認です」のように、していないことも書かないでください。書く事実がなければ、コメントを書かないでください。";
+
+const COMMENT_TOOL: &str = "タスクにコメントを書く。書くのは、あとでタスクを読む人に要る事実だけ（決まったこと、分かったこと、変わった状態、次にすること）。「確認しました」「レビューしました」のように作業をしたことだけを伝える文と、「まだ〜していません」のようにしていないことは書かない。書く事実がなければ呼ばない。";
+
 pub fn system_prompt(context: &str) -> String {
     let shell = shell_name();
     let context = if context.trim().is_empty() {
@@ -450,6 +455,7 @@ pub fn system_prompt(context: &str) -> String {
          - {RUN_SHELL} のコマンドは {shell} で動きます。そのシェルの書き方で書いてください。\n\
          - タスクの追加、書き換え、整理のように元に戻せる操作は、「〜しましょうか」と聞き返さずに実行し、結果だけを伝えてください。聞き返すのは、頼まれたことが 2 通り以上に読めて、どちらかで結果が大きく変わるときだけです。\n\
          - ツールが失敗したら、やり方を変えてやり直してください。返事には最後の結果だけを書き、途中の失敗、その原因、ツールやシェルの事情は書かないでください。どうしてもできなかったときだけ、できなかったことと、ユーザーにしてほしいことを 1 文で書いてください。\n\
+         - {COMMENT_RULE}ユーザーが文面を決めてコメントを頼んだときは、その文面のまま書いてください。\n\
          - 返事は短く、ユーザーの言葉（ふつうは日本語）で書いてください。記法は使わず、ふつうの文章で書いてください。"
     );
     prompt + &context
@@ -461,6 +467,19 @@ mod tests {
 
     fn run(store: &mut Store, name: &str, args: Value) -> Value {
         serde_json::from_str(&execute(store, None, name, &args).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn comments_without_facts_are_forbidden_everywhere_the_tool_is_offered() {
+        let tool = definitions()
+            .into_iter()
+            .find(|t| t.name == "add_comment")
+            .unwrap();
+        for text in [tool.description, &system_prompt(""), COMMENT_RULE] {
+            assert!(text.contains("事実だけ"), "{text}");
+            assert!(text.contains("していないこと"), "{text}");
+            assert!(text.contains("書く事実がなければ"), "{text}");
+        }
     }
 
     #[test]
