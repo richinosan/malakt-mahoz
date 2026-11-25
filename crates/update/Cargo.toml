@@ -1,0 +1,18 @@
+[package]
+name = "malakt-update"
+description = "malakt-mahoz の自動アップデート（UI 非依存）。GitHub Releases の確認、ダウンロードと検証、入れ替え"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+flate2 = "1"
+serde_json.workspace = true
+sha2 = "0.10"
+tar = { version = "0.4", default-features = false }
+ureq = { version = "3", features = ["platform-verifier"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+[dev-dependencies]
+tempfile = "3"

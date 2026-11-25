@@ -33,11 +33,13 @@ fn main() {
             malakt_mahoz::db::clear_stale_opened();
             malakt_mahoz::init(store, cx);
             malakt_mahoz::reminders::connect_system(cx);
+            malakt_mahoz::update::connect_system(cx);
             malakt_mahoz::db::watch(cx);
-            // 最後のウィンドウを閉じたら終了する
+            // 最後のウィンドウを閉じたら終了する。新しい版を取ってあれば、ここで入れ替える
             cx.on_window_closed(|cx, _| {
                 if cx.windows().is_empty() {
                     malakt_mahoz::session::quitting(cx);
+                    malakt_mahoz::update::install_on_quit(cx);
                     cx.quit();
                 }
             })
