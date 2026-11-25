@@ -60,6 +60,8 @@ impl Framed for Button {
                 .hover(theme.accent)
                 .active(theme.primary.opacity(0.4)),
         )
+        // 部品は地を透かして塗るので、下の影が透けて暗く見える。地の色で塗りつぶす
+        .bg(theme.background)
         .border_1()
         .border_color(theme.border)
         .elevate(Elevation::Low, cx)
