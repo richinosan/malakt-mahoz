@@ -6,6 +6,7 @@ pub mod cli;
 pub mod db;
 pub mod icons;
 pub mod mcp;
+pub mod mcp_register;
 pub mod panes;
 pub mod passkey;
 pub mod reminders;

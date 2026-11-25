@@ -31,6 +31,10 @@ claude mcp add --scope user malakt-mahoz -- "/mnt/c/<malakt-mahoz.exe を置い�
 
 WSL の中から SQLite のファイル（`/mnt/c/...`）を直接開く方法は使いません。
 
+### アプリのターミナルから
+
+アプリの中でターミナルを開くと、そのシェル（WSL の中を含む）の Claude Code に、上の登録が自動で入ります。手で登録する必要はありません（[docs/terminal.md](terminal.md)）。
+
 ### アプリのシェルから
 
 アプリのシェルで起動したコマンドには、次の環境変数が渡ります。
