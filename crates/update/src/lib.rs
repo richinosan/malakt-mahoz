@@ -6,15 +6,18 @@
 //! （macOS は `.app`）と入れ替える（[`install`]）。次に起動すると新しい版になる。
 //!
 //! ディスクに置くのは、取り出した新しい版 1 つだけ。入れ替えたら消す。
-//! どの関数も答えが出るまで戻らないので、画面のスレッドからは [`install`] と [`staged`]、
-//! [`discard`]、[`clear_leftovers`]（どれも手元のファイルだけを触る）のほかは呼ばない。
+//! [`check`] は答えが出るまで戻らないので、画面のスレッドからは呼ばない。
+//!
+//! 同じデータベースでアプリを 2 つ動かしていると、置き場も同じになる。取ってくる間と
+//! 入れ替える間は、置き場の隣のファイル（`update.lock`）に鍵を掛けて、もう片方が取りかけの
+//! ものを消したり、同じものを 2 回入れ替えたりしないようにする。
 
 mod fetch;
 mod place;
 
 use std::path::{Path, PathBuf};
 
-pub use fetch::{latest, stage};
+pub use fetch::{check, latest, stage};
 pub use place::{clear_leftovers, install};
 
 /// 新しい版を探す場所。
@@ -111,6 +114,32 @@ pub fn newer(candidate: &str, current: &str) -> bool {
 }
 
 const READY: &str = "ready.json";
+
+/// 置き場に掛けた鍵。捨てると外れる。プロセスが落ちても、OS が外す。
+pub(crate) struct Lock(#[allow(dead_code)] std::fs::File);
+
+/// 置き場 `dir` に鍵を掛ける。ほかのプロセス（やスレッド）が掛けていれば `Ok(None)`。
+pub(crate) fn lock(dir: &Path) -> std::io::Result<Option<Lock>> {
+    let path = dir.with_extension("lock");
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path)?;
+    match file.try_lock() {
+        Ok(()) => Ok(Some(Lock(file))),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+        Err(std::fs::TryLockError::Error(error)) => Err(error),
+    }
+}
+
+/// `staged` が、今も置き場にそのまま置いてあるか。ほかのプロセスが入れ替えたあとなら `false`。
+pub(crate) fn still_staged(staged: &Staged) -> bool {
+    read_ready(&staged.dir).as_ref() == Some(staged) && staged.payload.exists()
+}
 
 /// 前に取り出して置いたままの新しい版。今の版より新しくなければ（入れ替えが済んでいる、
 /// 取ってくる途中で終わった）、置いてあるものを消して `None`。
@@ -216,6 +245,20 @@ mod tests {
         write_ready(&dir, "0.2.0", "../../elsewhere").unwrap();
         assert_eq!(staged(&dir, "0.1.0"), None);
         assert!(root.path().join("elsewhere").exists());
+    }
+
+    #[test]
+    fn the_lock_is_held_by_one_holder_at_a_time() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("data/update");
+        let first = lock(&dir).unwrap();
+        assert!(first.is_some());
+        assert!(lock(&dir).unwrap().is_none());
+        // 鍵のファイルは置き場の外にある（置き場を消しても鍵は残る）
+        assert!(root.path().join("data/update.lock").exists());
+        assert!(!dir.exists());
+        drop(first);
+        assert!(lock(&dir).unwrap().is_some());
     }
 
     #[test]
