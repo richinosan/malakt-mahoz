@@ -244,6 +244,10 @@ impl Preset {
             Preset::tinted("さくら", Light, "#c2477a", "#fdf1f5"),
             Preset::tinted("紙とインク", Light, "#7a4a1e", "#f6f0e2"),
             Preset::tinted("ミッドナイト", Dark, "#6aa7ff", "#0d1424"),
+            // ノートアプリやコードエディタでよく見る、灰色の地に 1 色だけを置く配色
+            Preset::tinted("ノート風", Dark, "#8f7bf0", "#1e1e1e"),
+            Preset::tinted("エディタ風", Dark, "#2f8fe0", "#1f1f1f"),
+            Preset::tinted("明るいエディタ風", Light, "#005fb8", "#f8f8f8"),
         ]
     }
 
