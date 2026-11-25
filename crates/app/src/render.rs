@@ -243,6 +243,47 @@ fn status_badge(status: Status, cx: &App) -> Div {
         .child(status.label())
 }
 
+/// 知らせの中に出す「元に戻す」ボタン。
+fn notice_undo(cx: &mut Context<MainView>) -> impl IntoElement {
+    let theme = cx.theme();
+    Button::new("notice-undo")
+        .icon(app_icon("undo-2").text_color(theme.primary_foreground))
+        .ghost()
+        .xsmall()
+        .tooltip("元に戻す")
+        .on_click(cx.listener(|this, _, _, cx| {
+            this.undo(false, cx);
+        }))
+}
+
+/// 状態を選ぶメニューの中身。選ぶとすぐ変わり、コメントを付けるときだけダイアログを開く。
+fn status_items(
+    mut menu: PopupMenu,
+    view: &WeakEntity<MainView>,
+    task: &Id,
+    current: Status,
+) -> PopupMenu {
+    for status in Status::ALL {
+        let (view, task) = (view.clone(), task.clone());
+        menu = menu.item(
+            PopupMenuItem::new(status.label())
+                .checked(status == current)
+                .on_click(move |_, _, cx| {
+                    // ウィンドウを閉じたあとなら、反映する先がない
+                    let _ = view.update(cx, |this, cx| this.set_status(&task, status, cx));
+                }),
+        );
+    }
+    let (view, task) = (view.clone(), task.clone());
+    menu.separator()
+        .item(
+            PopupMenuItem::new("コメントを付けて変更…").on_click(move |_, window, cx| {
+                // ウィンドウを閉じたあとなら、反映する先がない
+                let _ = view.update(cx, |this, cx| this.ask_status(&task, window, cx));
+            }),
+        )
+}
+
 /// 優先度。棒の本数と色で見分ける。
 fn priority_label(priority: Prio, cx: &App) -> Div {
     let theme = cx.theme();
@@ -2244,6 +2285,24 @@ impl MainView {
             })
     }
 
+    /// 状態を押して選ぶメニュー。選ぶとすぐ変わる。
+    fn status_menu(
+        &self,
+        id: impl Into<ElementId>,
+        task: &Id,
+        current: Status,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let view = cx.entity().downgrade();
+        let task = task.clone();
+        Button::new(id)
+            .ghost()
+            .small()
+            .justify_start()
+            .child(status_badge(current, cx))
+            .dropdown_menu(move |menu, _, _| status_items(menu, &view, &task, current))
+    }
+
     fn priority_options(current: Prio) -> Vec<(SharedString, bool, u8)> {
         [Prio::High, Prio::Mid, Prio::Low, Prio::None]
             .into_iter()
@@ -2391,19 +2450,7 @@ impl MainView {
                 )
                 .when(has_chips, |d| d.child(chips))
         };
-        let status = {
-            let id = id.clone();
-            div().flex().child(
-                status_badge(task.status, cx)
-                    .id(("status", ix))
-                    .cursor_pointer()
-                    .hover(|s| s.border_color(theme.primary))
-                    .active(|s| s.bg(theme.accent))
-                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                        this.ask_status(&id, window, cx)
-                    })),
-            )
-        };
+        let status = self.status_menu(("status", ix), &id, task.status, cx);
         let current = Prio::of(task.priority);
         let priority = {
             let id = id.clone();
@@ -2450,6 +2497,7 @@ impl MainView {
 
         let view = cx.entity().downgrade();
         let menu_id = id.clone();
+        let menu_status = task.status;
         let drag = self.task_drag.as_ref().filter(|d| d.moved);
         let dragged = drag.is_some_and(|d| d.id == id);
         // 落とすと入る側の縁に線を出す
@@ -2550,7 +2598,7 @@ impl MainView {
         };
         // 右クリックで、その行の操作を出す
         row_el
-            .context_menu(move |menu, _, _| {
+            .context_menu(move |menu, window, cx| {
                 let item = |label: &'static str,
                             run: fn(&mut MainView, Id, &mut Window, &mut Context<MainView>)| {
                     let view = view.clone();
@@ -2563,9 +2611,10 @@ impl MainView {
                 menu.item(item("開く", |this, id, window, cx| {
                     this.open_panel(&id, window, cx)
                 }))
-                .item(item("状態を変更", |this, id, window, cx| {
-                    this.ask_status(&id, window, cx)
-                }))
+                .submenu("状態を変更", window, cx, {
+                    let (view, id) = (view.clone(), menu_id.clone());
+                    move |menu, _, _| status_items(menu, &view, &id, menu_status)
+                })
                 .separator()
                 .item(item("削除", |this, id, _, cx| {
                     this.modal = Modal::DeleteTasks(vec![id]);
@@ -3291,10 +3340,7 @@ impl MainView {
                 } else {
                     button.framed(cx)
                 };
-                button.on_click(cx.listener(move |this, _, window, cx| {
-                    this.ask_status(&id, window, cx);
-                    this.modal = Modal::Status(id.clone(), status);
-                }))
+                button.on_click(cx.listener(move |this, _, _, cx| this.set_status(&id, status, cx)))
             };
             if open {
                 actions = actions
@@ -3303,7 +3349,16 @@ impl MainView {
             } else {
                 actions = actions.child(set("再開する", "to-reopen", Status::NeedsAction, true));
             }
-            actions
+            let id = task.id.clone();
+            actions.child(
+                Button::new("status-with-comment")
+                    .icon(app_icon("message-square-plus"))
+                    .framed(cx)
+                    .tooltip("コメントを付けて状態を変更")
+                    .on_click(
+                        cx.listener(move |this, _, window, cx| this.ask_status(&id, window, cx)),
+                    ),
+            )
         };
 
         let pinned: Vec<_> = detail.comments.iter().filter(|c| c.pinned).collect();
@@ -3408,21 +3463,13 @@ impl MainView {
         }
 
         // プロパティ
-        let status_chips = {
-            let id = task.id.clone();
-            self.property("状態", cx).child(
-                div().flex().child(
-                    status_badge(task.status, cx)
-                        .id("p-status")
-                        .cursor_pointer()
-                        .hover(|s| s.border_color(theme.primary))
-                        .active(|s| s.bg(theme.accent))
-                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                            this.ask_status(&id, window, cx)
-                        })),
-                ),
-            )
-        };
+        let status_chips = self
+            .property("状態", cx)
+            .child(
+                div()
+                    .flex()
+                    .child(self.status_menu("p-status", &task.id, task.status, cx)),
+            );
         let current_priority = Prio::of(task.priority);
         let prio_chips = self.value_menu(
             "p-prio",
@@ -5954,6 +6001,12 @@ impl MainView {
                                         d.bg(theme.primary).text_color(theme.primary_foreground)
                                     })
                                     .child(text)
+                                    .when(
+                                        !is_error
+                                            && self.notice.is_some()
+                                            && self.notice == self.notice_undo,
+                                        |d| d.child(notice_undo(cx)),
+                                    )
                                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                                         this.error = None;
                                         this.notice = None;
@@ -6215,6 +6268,12 @@ impl Render for MainView {
                                         d.bg(theme.primary).text_color(theme.primary_foreground)
                                     })
                                     .child(text)
+                                    .when(
+                                        !is_error
+                                            && self.notice.is_some()
+                                            && self.notice == self.notice_undo,
+                                        |d| d.child(notice_undo(cx)),
+                                    )
                                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                                         this.error = None;
                                         this.notice = None;

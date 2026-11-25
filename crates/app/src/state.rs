@@ -230,6 +230,8 @@ pub struct MainView {
     pub defaults_draft: TaskDefaults,
     pub error: Option<SharedString>,
     pub notice: Option<SharedString>,
+    /// 「元に戻す」ボタンを付けて出す知らせ。`notice` と同じ間だけボタンが出る
+    pub notice_undo: Option<SharedString>,
     pub sidebar_open: bool,
     /// このウィンドウの右に AI チャットを出しているか。
     pub ai_open: bool,
@@ -637,6 +639,7 @@ impl MainView {
             error: crate::update::take_failure(cx)
                 .or_else(|| crate::theme::take_failure(cx).map(Into::into)),
             notice: None,
+            notice_undo: None,
             sidebar_open: false,
             ai_open: false,
             ai_pane: None,
@@ -1505,7 +1508,23 @@ impl MainView {
             .status_comment
             .update(cx, |s, cx| s.set_value("", window, cx));
         self.modal = Modal::Status(id.to_owned(), next);
+        // すぐ書けるようにする。メニューから開いたときは、メニューが閉じたあとでフォーカスを移す
+        let input = self.inputs.status_comment.clone();
+        cx.defer_in(window, move |this, window, cx| {
+            if matches!(this.modal, Modal::Status(..)) {
+                input.update(cx, |s, cx| s.focus(window, cx));
+            }
+        });
         cx.notify();
+    }
+
+    /// 状態をすぐ変える。コメントは付けない。
+    pub fn set_status(&mut self, id: &str, status: Status, cx: &mut Context<Self>) {
+        if self.write(cx, |s| s.set_task_status(id, status)).is_some() {
+            self.notice = Some(format!("状態を「{}」にしました。", status.label()).into());
+            // この知らせが出ている間は、その場で元に戻せる
+            self.notice_undo = self.notice.clone();
+        }
     }
 
     pub fn submit_status(&mut self, window: &mut Window, cx: &mut Context<Self>) {

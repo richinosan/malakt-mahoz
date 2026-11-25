@@ -127,15 +127,9 @@ fn works_right_after_first_launch(cx: &mut TestAppContext) {
         .update(|cx| view.read(cx).panel.clone())
         .expect("詳細が開く");
 
-    // 完了にする（コメントは書かない）
+    // 完了にする。ダイアログは出ず、すぐ変わる
     ui(cx, window, |window, cx| window.click("to-completed", cx));
-    cx.update(|cx| {
-        assert_eq!(
-            view.read(cx).modal,
-            Modal::Status(opened.clone(), Status::Completed)
-        );
-    });
-    ui(cx, window, |window, cx| window.click("status-submit", cx));
+    cx.update(|cx| assert_eq!(view.read(cx).modal, Modal::None));
     let task = store(cx, |s| s.task(&opened).unwrap());
     assert_eq!(task.status, Status::Completed);
     assert_eq!(task.percent, 100);
@@ -3886,5 +3880,100 @@ fn an_image_becomes_a_workspace_icon(cx: &mut TestAppContext) {
     });
     ui(cx, window, |window, _| {
         assert!(window.try_find(("ws-custom-icon", 0usize)).is_none());
+    });
+}
+
+/// 状態は押して選ぶとすぐ変わる。コメントを付けるときだけダイアログが開く。
+#[gpui_kit::test]
+fn status_changes_from_a_menu_without_a_dialog(cx: &mut TestAppContext) {
+    start(cx);
+    let (window, view) = open(cx, wide());
+    let id = cx.update(|cx| {
+        db::shared(cx).update(cx, |db, cx| {
+            cx.notify();
+            let draft = malakt_core::TaskDraft {
+                title: "Lorem ipsum".into(),
+                ..Default::default()
+            };
+            db.store.create_task(None, &draft).unwrap().id
+        })
+    });
+    ui(cx, window, |window, cx| window.click("nav-all", cx));
+    cx.run_until_parked();
+    let status = |cx: &mut TestAppContext| store(cx, |s| s.task(&id).unwrap()).status;
+
+    // 一覧の状態を押すとメニューが開く。2 つ目は「進行中」
+    ui(cx, window, |window, cx| {
+        window.click(("status", 0usize), cx)
+    });
+    cx.update(|cx| assert_eq!(view.read(cx).modal, Modal::None));
+    ui(cx, window, |window, cx| {
+        window.press("down", cx);
+        window.press("down", cx);
+        window.press("enter", cx);
+    });
+    assert_eq!(status(cx), Status::InProcess);
+    cx.update(|cx| assert_eq!(view.read(cx).modal, Modal::None));
+
+    // 最後の項目は「コメントを付けて変更…」。ここからだけダイアログが開く
+    ui(cx, window, |window, cx| {
+        window.click(("status", 0usize), cx)
+    });
+    ui(cx, window, |window, cx| {
+        window.press("up", cx);
+        window.press("enter", cx);
+    });
+    cx.update(|cx| {
+        assert_eq!(
+            view.read(cx).modal,
+            Modal::Status(id.clone(), Status::Completed)
+        );
+    });
+    ui(cx, window, |window, cx| {
+        window.input("dolor sit amet", cx);
+        window.click("status-submit", cx);
+    });
+    assert_eq!(status(cx), Status::Completed);
+    let comments = store(cx, |s| s.comments(&id).unwrap());
+    assert!(comments.iter().any(|c| c.is_completion_report()));
+
+    // 詳細のボタンも、押すとすぐ変わる
+    ui(cx, window, |window, cx| window.click("tab-closed", cx));
+    cx.update_window(window, |_, window, cx| {
+        view.update(cx, |v, cx| v.open_panel(&id, window, cx))
+    })
+    .unwrap();
+    cx.run_until_parked();
+    ui(cx, window, |window, cx| window.click("to-reopen", cx));
+    assert_eq!(status(cx), Status::NeedsAction);
+    cx.update(|cx| assert_eq!(view.read(cx).modal, Modal::None));
+    ui(cx, window, |window, cx| window.click("to-cancelled", cx));
+    assert_eq!(status(cx), Status::Cancelled);
+
+    // 知らせの「元に戻す」で、すぐ戻せる
+    ui(cx, window, |window, cx| window.click("notice-undo", cx));
+    assert_eq!(status(cx), Status::NeedsAction);
+    ui(cx, window, |window, _| {
+        assert!(window.try_find("notice-undo").is_none());
+    });
+    ui(cx, window, |window, cx| window.click("to-cancelled", cx));
+
+    // 詳細の状態からも選べる。1 つ目は「未着手」
+    ui(cx, window, |window, cx| window.click("p-status", cx));
+    ui(cx, window, |window, cx| {
+        window.press("down", cx);
+        window.press("enter", cx);
+    });
+    assert_eq!(status(cx), Status::NeedsAction);
+
+    // コメントを付けるボタンでダイアログが開く
+    ui(cx, window, |window, cx| {
+        window.click("status-with-comment", cx)
+    });
+    cx.update(|cx| {
+        assert_eq!(
+            view.read(cx).modal,
+            Modal::Status(id.clone(), Status::Completed)
+        );
     });
 }
