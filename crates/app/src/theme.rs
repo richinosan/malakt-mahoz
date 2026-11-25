@@ -22,6 +22,7 @@ const SCENE_CLEAR: &str = "scene.clear";
 const SCENE_BLUR: &str = "scene.blur";
 const CARDS: &str = "list.cards";
 const FLOAT: &str = "panels.float";
+const PRESETS: &str = "presets";
 /// 背景の画像を出したときの、面の透明度とぼかしの最初の値（0〜100）。
 pub const DEFAULT_CLEAR: u8 = 40;
 pub const DEFAULT_BLUR: u8 = 30;
@@ -37,18 +38,21 @@ pub enum Scene {
     Sky,
     /// 森（ダークでは夜の森）
     Forest,
+    /// 夕暮れ（ダークでは宵の空）
+    Dusk,
     /// 自分で選んだ画像
     File(PathBuf),
 }
 
 impl Scene {
-    pub const BUNDLED: [Scene; 3] = [Scene::None, Scene::Sky, Scene::Forest];
+    pub const BUNDLED: [Scene; 4] = [Scene::None, Scene::Sky, Scene::Forest, Scene::Dusk];
 
     pub fn label(&self) -> String {
         match self {
             Scene::None => "なし".into(),
-            Scene::Sky => "ガラスと青い空".into(),
-            Scene::Forest => "ダークフォレスト".into(),
+            Scene::Sky => "青い空".into(),
+            Scene::Forest => "森".into(),
+            Scene::Dusk => "夕暮れ".into(),
             Scene::File(path) => path.file_name().map_or_else(
                 || path.display().to_string(),
                 |n| n.to_string_lossy().into(),
@@ -61,6 +65,7 @@ impl Scene {
             Scene::None => None,
             Scene::Sky => Some("sky".into()),
             Scene::Forest => Some("forest".into()),
+            Scene::Dusk => Some("dusk".into()),
             Scene::File(path) => Some(format!("file:{}", path.display())),
         }
     }
@@ -69,6 +74,7 @@ impl Scene {
         match key {
             "sky" => Scene::Sky,
             "forest" => Scene::Forest,
+            "dusk" => Scene::Dusk,
             _ => key
                 .strip_prefix("file:")
                 .map_or(Scene::None, |path| Scene::File(path.into())),
@@ -82,15 +88,18 @@ impl Scene {
             (Scene::Sky, true) => include_bytes!("../assets/scenes/sky-dark.jpg"),
             (Scene::Forest, false) => include_bytes!("../assets/scenes/forest-light.jpg"),
             (Scene::Forest, true) => include_bytes!("../assets/scenes/forest-dark.jpg"),
+            (Scene::Dusk, false) => include_bytes!("../assets/scenes/dusk-light.jpg"),
+            (Scene::Dusk, true) => include_bytes!("../assets/scenes/dusk-dark.jpg"),
             _ => return None,
         })
     }
 
     /// この画像に合う色（アクセント、ライトの地、ダークの地）。自分で選んだ色があれば、そちらを使う。
-    fn colors(&self) -> Option<[Color; 3]> {
+    pub fn colors(&self) -> Option<[Color; 3]> {
         let hex = match self {
             Scene::Sky => ["#1f6fd0", "#eaf3fc", "#0c1830"],
             Scene::Forest => ["#4f8a3c", "#edf4ea", "#0b1712"],
+            Scene::Dusk => ["#c0507a", "#fbf0ec", "#160f26"],
             _ => return None,
         };
         Some(hex.map(|hex| Color::parse(hex).expect("正しい色")))
@@ -161,6 +170,152 @@ impl Look {
             Slot::Light => self.light,
             Slot::Dark => self.dark,
         }
+    }
+}
+
+/// 見た目のまとまり（テーマ）。背景の画像・色・透明度・ぼかし・カード・書体を 1 回で切り替える。
+#[derive(Debug, Clone, PartialEq)]
+pub struct Preset {
+    pub name: String,
+    /// ライトかダークか。`None` は今のまま。
+    pub mode: Option<Choice>,
+    pub scene: Scene,
+    pub look: Look,
+    pub clear: u8,
+    pub blur: u8,
+    pub cards: bool,
+    pub floating: bool,
+}
+
+impl Preset {
+    fn plain(name: &str) -> Self {
+        Preset {
+            name: name.into(),
+            mode: None,
+            scene: Scene::None,
+            look: Look::default(),
+            clear: DEFAULT_CLEAR,
+            blur: DEFAULT_BLUR,
+            cards: false,
+            floating: false,
+        }
+    }
+
+    /// 背景の画像の上に、透かしたカードを浮かせるテーマ。
+    fn glass(name: &str, scene: Scene, mode: Choice, clear: u8, blur: u8) -> Self {
+        Preset {
+            mode: Some(mode),
+            scene,
+            clear,
+            blur,
+            floating: true,
+            ..Preset::plain(name)
+        }
+    }
+
+    /// 画像を使わず、色だけのテーマ。
+    fn tinted(name: &str, mode: Choice, accent: &str, page: &str) -> Self {
+        let (accent, page) = (Color::parse(accent), Color::parse(page));
+        let dark = mode == Choice::Dark;
+        Preset {
+            mode: Some(mode),
+            look: Look {
+                font: None,
+                accent,
+                light: page.filter(|_| !dark),
+                dark: page.filter(|_| dark),
+            },
+            ..Preset::plain(name)
+        }
+    }
+
+    /// おすすめのテーマ。先頭は、何も変えていないときの見た目。
+    pub fn recommended() -> Vec<Preset> {
+        use Choice::{Dark, Light};
+        vec![
+            Preset::plain("標準"),
+            Preset::glass("ガラスと青い空", Scene::Sky, Light, 50, 30),
+            Preset::glass("ダークフォレスト", Scene::Forest, Dark, 45, 25),
+            Preset::glass("夕暮れ", Scene::Dusk, Light, 45, 30),
+            Preset::glass("星空", Scene::Sky, Dark, 50, 10),
+            Preset::glass("朝の森", Scene::Forest, Light, 40, 30),
+            Preset::glass("宵の空", Scene::Dusk, Dark, 50, 20),
+            Preset::tinted("さくら", Light, "#c2477a", "#fdf1f5"),
+            Preset::tinted("紙とインク", Light, "#7a4a1e", "#f6f0e2"),
+            Preset::tinted("ミッドナイト", Dark, "#6aa7ff", "#0d1424"),
+        ]
+    }
+
+    /// 名前のほかが同じ見た目か。ライトとダークを決めていないテーマは、どちらでも同じとみなす。
+    pub fn same_look(&self, other: &Preset) -> bool {
+        let mode = self.mode.is_none() || other.mode.is_none() || self.mode == other.mode;
+        // 画像を出していないときは、透明度とぼかしは見た目に出ない
+        let glass =
+            self.scene == Scene::None || (self.clear, self.blur) == (other.clear, other.blur);
+        mode && glass
+            && self.scene == other.scene
+            && self.look == other.look
+            && self.cards == other.cards
+            && self.floating == other.floating
+    }
+
+    /// このテーマで画面がダークになるか。決めていないテーマは `fallback`。
+    pub fn dark(&self, fallback: bool) -> bool {
+        match self.mode {
+            Some(Choice::Dark) => true,
+            Some(Choice::Light) => false,
+            _ => fallback,
+        }
+    }
+
+    /// 小さい見本に使う色（アクセント、地）。
+    pub fn swatch(&self, dark: bool) -> (Color, Color) {
+        let look = with_scene(self.look.clone(), &self.scene);
+        let accent = look
+            .accent
+            .unwrap_or_else(|| stock_color(dark, "primary.background"));
+        let page = if dark { look.dark } else { look.light };
+        (
+            accent,
+            page.unwrap_or_else(|| stock_color(dark, "background")),
+        )
+    }
+
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "name": self.name,
+            "mode": self.mode.map(Choice::key),
+            "scene": self.scene.key(),
+            "font": self.look.font,
+            "accent": self.look.accent.map(Color::hex),
+            "light": self.look.light.map(Color::hex),
+            "dark": self.look.dark.map(Color::hex),
+            "clear": self.clear,
+            "blur": self.blur,
+            "cards": self.cards,
+            "floating": self.floating,
+        })
+    }
+
+    fn from_json(value: &serde_json::Value) -> Option<Self> {
+        let text = |key: &str| value[key].as_str();
+        let color = |key: &str| text(key).and_then(Color::parse);
+        let number = |key: &str, max: u8| value[key].as_u64().map(|n| n.min(u64::from(max)) as u8);
+        Some(Preset {
+            name: text("name")?.to_owned(),
+            mode: text("mode").map(Choice::from_key),
+            scene: text("scene").map_or(Scene::None, Scene::from_key),
+            look: Look {
+                font: text("font").map(str::to_owned),
+                accent: color("accent"),
+                light: color("light"),
+                dark: color("dark"),
+            },
+            clear: number("clear", MAX_CLEAR)?,
+            blur: number("blur", 100)?,
+            cards: value["cards"].as_bool()?,
+            floating: value["floating"].as_bool()?,
+        })
     }
 }
 
@@ -529,6 +684,87 @@ pub fn set_floating(on: bool, cx: &mut App) -> malakt_core::Result<()> {
     db::shared(cx).update(cx, |db, _| db.store.set_setting(FLOAT, on.then_some("1")))?;
     cx.refresh_windows();
     Ok(())
+}
+
+/// 今の見た目を、テーマとしてまとめたもの。
+pub fn current(name: &str, cx: &App) -> Preset {
+    Preset {
+        name: name.into(),
+        mode: Some(choice(cx)),
+        scene: scene(cx),
+        look: look(cx),
+        clear: clear(cx),
+        blur: blur(cx),
+        cards: cards(cx),
+        floating: floating(cx),
+    }
+}
+
+/// 自分で保存したテーマ。
+pub fn own_presets(cx: &App) -> Result<Vec<Preset>, String> {
+    let store = &db::shared(cx).read(cx).store;
+    let saved = store
+        .setting(PRESETS)
+        .map_err(|error| format!("保存したテーマを読めませんでした。{error}"))?;
+    let Some(saved) = saved else {
+        return Ok(Vec::new());
+    };
+    let broken = || "保存したテーマを読めませんでした（中身が壊れています）。".to_owned();
+    let list: Vec<serde_json::Value> = serde_json::from_str(&saved).map_err(|_| broken())?;
+    list.iter()
+        .map(|value| Preset::from_json(value).ok_or_else(broken))
+        .collect()
+}
+
+/// 自分のテーマの一覧を保存する。
+pub fn set_own_presets(presets: &[Preset], cx: &mut App) -> Result<(), String> {
+    let list: Vec<_> = presets.iter().map(Preset::to_json).collect();
+    let text = (!list.is_empty()).then(|| serde_json::Value::from(list).to_string());
+    db::shared(cx)
+        .update(cx, |db, _| db.store.set_setting(PRESETS, text.as_deref()))
+        .map_err(|error| format!("テーマを保存できませんでした。{error}"))
+}
+
+/// テーマを使う。背景の画像を読めないときは、何も変えずに理由を返す。
+pub fn apply_preset(preset: &Preset, window: &mut Window, cx: &mut App) -> Result<(), String> {
+    let mode = preset.mode.unwrap_or_else(|| choice(cx));
+    // 先に読んで確かめる。読めなければ保存もしない
+    render(&preset.scene, false, 0)
+        .map_err(|error| format!("テーマ「{}」を使えませんでした。{error}", preset.name))?;
+    let hex = |color: Option<Color>| color.map(Color::hex);
+    let flag = |on: bool| on.then(|| "1".to_owned());
+    let look = &preset.look;
+    let font = look.font.clone().filter(|name| name != DEFAULT_FONT);
+    let values = [
+        (SETTING, Some(mode.key().to_owned())),
+        (SCENE, preset.scene.key()),
+        (FONT, font),
+        (Slot::Accent.key(), hex(look.accent)),
+        (Slot::Light.key(), hex(look.light)),
+        (Slot::Dark.key(), hex(look.dark)),
+        (SCENE_CLEAR, Some(preset.clear.min(MAX_CLEAR).to_string())),
+        (SCENE_BLUR, Some(preset.blur.min(100).to_string())),
+        (CARDS, flag(preset.cards)),
+        (FLOAT, flag(preset.floating)),
+    ];
+    let saved = db::shared(cx).update(cx, |db, _| {
+        values
+            .iter()
+            .try_for_each(|(key, value)| db.store.set_setting(key, value.as_deref()))
+    });
+    // 途中まで保存されたときも、画面は保存されている中身に合わせる
+    install(&with_scene(self::look(cx), &scene(cx)), cx);
+    apply(choice(cx), Some(window), cx);
+    let alpha = 1. - f32::from(clear(cx)) / 100.;
+    if let Some(backdrop) = cx.global_mut::<Shown>().backdrop.as_mut() {
+        backdrop.alpha = alpha;
+    }
+    cx.refresh_windows();
+    saved.map_err(|error| format!("テーマ「{}」を保存できませんでした。{error}", preset.name))?;
+    match take_failure(cx) {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
 }
 
 /// 今、画面の後ろに敷いている画像。
@@ -1002,6 +1238,35 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn presets_round_trip_and_stay_readable() {
+        use super::{Preset, Scene};
+        let mut names = std::collections::HashSet::new();
+        for mut preset in Preset::recommended() {
+            assert!(
+                names.insert(preset.name.clone()),
+                "{} が 2 つある",
+                preset.name
+            );
+            // 配色として読めて、保存した形から同じものが戻る
+            themes(&super::with_scene(preset.look.clone(), &preset.scene));
+            preset.look.font = Some("Noto Serif".into());
+            assert_eq!(Preset::from_json(&preset.to_json()), Some(preset.clone()));
+            // 同梱の画像は、ライトとダークの両方がある
+            if preset.scene != Scene::None {
+                assert!(
+                    preset.scene.bundled(false).is_some() && preset.scene.bundled(true).is_some()
+                );
+            }
+        }
+        let own = Preset {
+            scene: Scene::File("/絵/海.png".into()),
+            ..Preset::recommended().remove(1)
+        };
+        assert_eq!(Preset::from_json(&own.to_json()), Some(own));
+        assert_eq!(Preset::from_json(&serde_json::json!({ "name": "x" })), None);
     }
 
     #[test]

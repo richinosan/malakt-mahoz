@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""背景の画像（青い空、森）を作る。写真は使わず、ノイズと稜線で描く。
+"""背景の画像（青い空、森、夕暮れ）を作る。写真は使わず、ノイズと稜線で描く。
 
 使い方: python3 scripts/scenes.py crates/app/assets/scenes
 """
@@ -83,6 +83,32 @@ def forest(night):
     return img
 
 
+def dusk(night):
+    if night:
+        img = gradient((16, 12, 40), (96, 52, 104), 1.5)
+        glow, cloud_tone, amount = (214, 120, 132), (52, 34, 78), 0.6
+        hills = [(40, 26, 62), (22, 14, 38)]
+    else:
+        img = gradient((96, 98, 170), (250, 190, 130), 1.1)
+        glow, cloud_tone, amount = (255, 226, 170), (236, 132, 120), 0.7
+        hills = [(120, 80, 110), (66, 44, 76)]
+    ys = np.arange(H)[:, None]
+    # 地平線の近くが明るい
+    low = np.clip(1 - np.abs(ys - H * 0.74) / (H * 0.3), 0, 1) ** 2 * 0.7 + np.zeros((H, W))
+    img = blend(img, glow, low)
+    # 横に長い雲
+    rng = np.random.default_rng(11)
+    grid = rng.random((40, 9)).astype(np.float32)
+    streak = np.asarray(Image.fromarray((grid * 255).astype(np.uint8)).resize((W, H), Image.BICUBIC)) / 255.0
+    alpha = np.clip((streak * 0.6 + noise(5) * 0.4 - 0.5) * 4.5, 0, 1) * np.linspace(1.0, 0.2, H)[:, None] * amount
+    img = blend(img, cloud_tone, alpha)
+    for i, color in enumerate(hills):
+        ridge = noise(60 + i, octaves=4, base=2)[0] * 170
+        top = H * (0.72 + i * 0.1) + ridge - 60
+        img = blend(img, color, (ys >= top[None, :]).astype(np.float32))
+    return img
+
+
 def save(img, path):
     Image.fromarray(np.clip(img, 0, 255).astype(np.uint8)).save(path, quality=74, optimize=True, progressive=False)
 
@@ -92,3 +118,5 @@ save(sky(False), f"{out}/sky-light.jpg")
 save(sky(True), f"{out}/sky-dark.jpg")
 save(forest(False), f"{out}/forest-light.jpg")
 save(forest(True), f"{out}/forest-dark.jpg")
+save(dusk(False), f"{out}/dusk-light.jpg")
+save(dusk(True), f"{out}/dusk-dark.jpg")

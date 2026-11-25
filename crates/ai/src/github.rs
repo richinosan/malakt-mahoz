@@ -114,6 +114,12 @@ pub fn find_links(text: &str) -> Vec<Link> {
     links
 }
 
+/// `gh issue view --json` で受け取る項目。
+const ISSUE_FIELDS: &str =
+    "number,title,state,author,body,labels,assignees,milestone,closedAt,url,comments";
+/// `gh pr view --json` で受け取る項目。
+const PULL_FIELDS: &str = "number,title,state,isDraft,author,body,labels,assignees,baseRefName,headRefName,reviewDecision,mergedAt,closedAt,additions,deletions,changedFiles,url,comments,reviews";
+
 impl Link {
     fn slug(&self) -> String {
         format!("{}/{}", self.owner, self.repo)
@@ -155,13 +161,16 @@ impl Link {
         let slug = self.slug();
         let args: Vec<String> = match &self.kind {
             Kind::Repo => vec!["repo".into(), "view".into(), slug],
+            // `--comments` は、端末でないときはコメントだけを出す（コメントがなければ空になる）。
+            // 題、本文、状態、コメントを必ず取れるように、項目を決めて JSON で受け取る
             Kind::Issue(n) => vec![
                 "issue".into(),
                 "view".into(),
                 n.to_string(),
                 "-R".into(),
                 slug,
-                "--comments".into(),
+                "--json".into(),
+                ISSUE_FIELDS.into(),
             ],
             Kind::Pull(n) => vec![
                 "pr".into(),
@@ -169,7 +178,8 @@ impl Link {
                 n.to_string(),
                 "-R".into(),
                 slug,
-                "--comments".into(),
+                "--json".into(),
+                PULL_FIELDS.into(),
             ],
             Kind::File { .. } | Kind::Commit(_) => {
                 let (path, accept) = self.api();
@@ -324,15 +334,17 @@ mod tests {
         assert_eq!(issue.program, "gh");
         assert_eq!(
             issue.args,
-            ["issue", "view", "3", "-R", "o/r", "--comments"]
+            ["issue", "view", "3", "-R", "o/r", "--json", ISSUE_FIELDS]
         );
-        assert_eq!(issue.display, "gh issue view 3 -R o/r --comments");
+        // コメントがなくても、題と本文は必ず出る形で取る
+        assert!(ISSUE_FIELDS.contains("title") && ISSUE_FIELDS.contains("body"));
+        assert!(PULL_FIELDS.contains("title") && PULL_FIELDS.contains("body"));
         assert!(issue
             .env
             .contains(&("GH_PROMPT_DISABLED".into(), "1".into())));
         assert_eq!(
             link("o", "r", Kind::Pull(4)).gh().args,
-            ["pr", "view", "4", "-R", "o/r", "--comments"]
+            ["pr", "view", "4", "-R", "o/r", "--json", PULL_FIELDS]
         );
         assert_eq!(
             link("o", "r", Kind::Repo).gh().args,

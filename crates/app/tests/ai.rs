@@ -1543,6 +1543,67 @@ fn a_rejected_thinking_block_is_dropped_and_retried(cx: &mut TestAppContext) {
     );
 }
 
+/// タスクをチャットにドラッグして落とすと入力欄に添えられ、送ると中身が AI に渡る。
+#[gpui_kit::test]
+fn a_task_dropped_on_the_chat_is_attached(cx: &mut TestAppContext) {
+    let world = start(cx);
+    world.keys.set(Provider::Claude, "k").unwrap();
+    let session = session(cx);
+    cx.update(|cx| session.update(cx, |s, cx| s.set_arrange(false, cx)));
+    let task = new_task(cx, "発表資料を作る");
+    let (window, view) = open(cx, wide());
+    let pane = open_chat(cx, window, &view);
+    ui(cx, window, |window, cx| window.click("nav-all", cx));
+    cx.run_until_parked();
+
+    // 行を押して動かし、チャットの上で離す
+    let drop = |cx: &mut TestAppContext| {
+        ui(cx, window, |window, cx| {
+            let at = window.find("ai-input").bounds().center();
+            view.update(cx, |v, cx| {
+                v.start_task_drag(&task, gpui_kit::point(px(500.), px(400.)), cx);
+                v.drag_task(at, cx);
+                v.drag_task_over(malakt_mahoz::state::DropTarget::Chat, at, cx);
+            });
+        });
+        ui(cx, window, |_, cx| {
+            view.update(cx, |v, cx| v.finish_task_drag(cx));
+        });
+    };
+    drop(cx);
+    assert_eq!(
+        read(cx, |s| s.attached.clone()),
+        vec![(task.clone(), "発表資料を作る".into())]
+    );
+    // 同じタスクは 1 つだけ。× で外せる
+    drop(cx);
+    assert_eq!(read(cx, |s| s.attached.len()), 1);
+    ui(cx, window, |window, cx| {
+        assert!(window.find(("ai-attached", 0usize)).visible());
+        window.click(("ai-attached-remove", 0usize), cx);
+    });
+    assert!(read(cx, |s| s.attached.is_empty()));
+
+    drop(cx);
+    world.reply(text_reply("見ました。"));
+    say(cx, window, &pane, "これを見て");
+    wait(cx, "返事が来る", |s| !s.busy && s.items.len() >= 2);
+    let message = world.sent()[0].2["messages"][0]["content"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        message.starts_with("これを見て\n\n[添えたタスク「発表資料を作る」]\n"),
+        "{message}"
+    );
+    assert!(message.contains(&task), "{message}");
+    assert!(read(cx, |s| s.attached.is_empty()));
+    assert_eq!(
+        read(cx, |s| s.items[0].clone()),
+        Item::User("「発表資料を作る」\nこれを見て".into())
+    );
+}
+
 /// Enter で送り、Shift+Enter は改行になる。
 #[gpui_kit::test]
 fn enter_sends_and_shift_enter_breaks_the_line(cx: &mut TestAppContext) {

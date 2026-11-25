@@ -85,6 +85,9 @@ pub const NEW_PERSON_NAME: &str = "新規担当者";
 /// 追加したばかりのワークスペースの名前。
 pub const NEW_WORKSPACE_NAME: &str = "新規ワークスペース";
 
+/// 保存したばかりのテーマの名前。同じ名前があれば、後ろの番号を増やす。
+pub const NEW_PRESET_NAME: &str = "マイテーマ";
+
 /// ダイアログの上に、もう 1 枚重ねて出すダイアログ。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SubModal {
@@ -139,6 +142,7 @@ pub struct Inputs {
     pub icon_search: Entity<InputState>,
     pub workspace_name: Entity<InputState>,
     pub font_search: Entity<InputState>,
+    pub preset_name: Entity<InputState>,
     pub name: Entity<InputState>,
     pub title: Entity<InputState>,
     pub subtask: Entity<InputState>,
@@ -232,6 +236,8 @@ pub struct MainView {
     pub defaults_draft: TaskDefaults,
     pub error: Option<SharedString>,
     pub notice: Option<SharedString>,
+    /// 「元に戻す」ボタンを付けて出す知らせ。`notice` と同じ間だけボタンが出る
+    pub notice_undo: Option<SharedString>,
     pub sidebar_open: bool,
     /// このウィンドウの右に AI チャットを出しているか。
     pub ai_open: bool,
@@ -289,6 +295,12 @@ pub struct MainView {
     pub assignee_picker: bool,
     /// ダイアログの上に重ねて出しているダイアログ。
     pub sub_modal: Option<SubModal>,
+    /// 「見た目」で、1 つずつ変える行（詳細）を開いている。
+    pub appearance_details: bool,
+    /// 自分で保存したテーマ。
+    pub own_presets: Vec<crate::theme::Preset>,
+    /// 名前を書いている自分のテーマ（`own_presets` の何番目か）。
+    pub preset_naming: Option<usize>,
     /// 書体を選ぶ一覧に出す名前（この PC に入っている書体）。
     pub fonts: Vec<String>,
     pub font_scroll: UniformListScrollHandle,
@@ -319,6 +331,7 @@ impl MainView {
             icon_search: input(window, cx, "アイコンを検索"),
             workspace_name: input(window, cx, "ワークスペース名"),
             font_search: input(window, cx, "フォントを検索"),
+            preset_name: input(window, cx, "テーマの名前"),
             name: input(window, cx, "名前"),
             title: input(window, cx, "タイトル"),
             subtask: input(window, cx, "サブタスクを追加…"),
@@ -406,6 +419,16 @@ impl MainView {
         }
         on_enter!(quick_add, submit_quick_add);
         on_enter!(name, save_person_name);
+        on_enter!(preset_name, save_preset_name);
+        subs.push(cx.subscribe_in(
+            &inputs.preset_name,
+            window,
+            |this, _, event: &InputEvent, window, cx| {
+                if matches!(event, InputEvent::Blur) && this.preset_naming.is_some() {
+                    this.save_preset_name(window, cx);
+                }
+            },
+        ));
         // 担当者の名前も、ほかの場所を押したときに保存する
         subs.push(cx.subscribe_in(
             &inputs.name,
@@ -625,6 +648,7 @@ impl MainView {
             error: crate::update::take_failure(cx)
                 .or_else(|| crate::theme::take_failure(cx).map(Into::into)),
             notice: None,
+            notice_undo: None,
             sidebar_open: false,
             ai_open: false,
             ai_pane: None,
@@ -654,6 +678,9 @@ impl MainView {
             pane_keys: Default::default(),
             pane_overlay: None,
             sub_modal: None,
+            appearance_details: false,
+            own_presets: Vec::new(),
+            preset_naming: None,
             fonts: Vec::new(),
             font_scroll: UniformListScrollHandle::new(),
             color_pickers,
@@ -895,6 +922,48 @@ impl MainView {
         cx: &mut Context<Self>,
     ) {
         self.write(cx, |s| s.set_workspace_icon(id, icon, color));
+    }
+
+    /// 画像ファイルを選んで、ワークスペースのアイコンにする。
+    pub fn add_icon_image(&mut self, id: Id, window: &mut Window, cx: &mut Context<Self>) {
+        let chosen = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("アイコンにする".into()),
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(paths))) = chosen.await else {
+                return;
+            };
+            let Some(path) = paths.first() else {
+                return;
+            };
+            // ウィンドウを閉じたあとなら、何もしない
+            let _ = this.update(cx, |this, cx| this.add_icon_file(&id, path, cx));
+        })
+        .detach();
+    }
+
+    /// 画像を小さくして保存し、ワークスペースのアイコンにする。色はそのまま。
+    pub fn add_icon_file(&mut self, id: &str, path: &std::path::Path, cx: &mut Context<Self>) {
+        let png = match crate::icons::shrink_file(path) {
+            Ok(png) => png,
+            Err(error) => {
+                self.error = Some(error.into());
+                cx.notify();
+                return;
+            }
+        };
+        let color = self
+            .workspaces
+            .iter()
+            .find(|w| w.id == id)
+            .and_then(|w| w.color.clone());
+        self.write(cx, |s| {
+            let icon = s.add_custom_icon(&png)?;
+            s.set_workspace_icon(id, Some(&icon), color.as_deref())
+        });
     }
 
     // ---- 移動 ----
@@ -1490,7 +1559,23 @@ impl MainView {
             .status_comment
             .update(cx, |s, cx| s.set_value("", window, cx));
         self.modal = Modal::Status(id.to_owned(), next);
+        // すぐ書けるようにする。メニューから開いたときは、メニューが閉じたあとでフォーカスを移す
+        let input = self.inputs.status_comment.clone();
+        cx.defer_in(window, move |this, window, cx| {
+            if matches!(this.modal, Modal::Status(..)) {
+                input.update(cx, |s, cx| s.focus(window, cx));
+            }
+        });
         cx.notify();
+    }
+
+    /// 状態をすぐ変える。コメントは付けない。
+    pub fn set_status(&mut self, id: &str, status: Status, cx: &mut Context<Self>) {
+        if self.write(cx, |s| s.set_task_status(id, status)).is_some() {
+            self.notice = Some(format!("状態を「{}」にしました。", status.label()).into());
+            // この知らせが出ている間は、その場で元に戻せる
+            self.notice_undo = self.notice.clone();
+        }
     }
 
     pub fn submit_status(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1671,6 +1756,10 @@ impl MainView {
             return;
         };
         match target {
+            DropTarget::Chat => {
+                self.ai_session
+                    .update(cx, |s, cx| s.attach_task(&drag.id, drag.title.clone(), cx));
+            }
             DropTarget::Workspace(workspace) => {
                 let old = self.tasks.iter().find(|t| t.id == drag.id);
                 if old.is_none_or(|t| t.workspace_id == workspace) {
@@ -2060,8 +2149,118 @@ impl MainView {
         // メニューから開くとフォーカスがなくなるので、Esc を受けられるように戻す
         self.focus.focus(window, cx);
         self.sub_modal = None;
+        self.preset_naming = None;
+        self.appearance_details = false;
         self.modal = Modal::Appearance;
+        match crate::theme::own_presets(cx) {
+            Ok(presets) => self.own_presets = presets,
+            Err(error) => self.error = Some(error.into()),
+        }
         cx.notify();
+    }
+
+    /// 1 つずつ変える行（詳細）を開く・閉じる。
+    pub fn toggle_appearance_details(&mut self, cx: &mut Context<Self>) {
+        self.appearance_details = !self.appearance_details;
+        cx.notify();
+    }
+
+    /// テーマを使う。使えないときは、前のままにして理由を出す。
+    pub fn apply_preset(
+        &mut self,
+        preset: &crate::theme::Preset,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match crate::theme::apply_preset(preset, window, cx) {
+            Ok(()) => self.error = None,
+            Err(error) => self.error = Some(error.into()),
+        }
+        self.sync_color_pickers(window, cx);
+        cx.notify();
+    }
+
+    /// 今の見た目を自分のテーマとして保存して、そのまま名前を書けるようにする。
+    pub fn save_preset(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let taken = |name: &str| self.own_presets.iter().any(|p| p.name == name);
+        let name = (1..)
+            .map(|n| format!("{NEW_PRESET_NAME} {n}"))
+            .find(|name| !taken(name))
+            .expect("使っていない番号がある");
+        let mut presets = self.own_presets.clone();
+        presets.push(crate::theme::current(&name, cx));
+        if self.store_presets(presets, cx) {
+            self.rename_preset(self.own_presets.len() - 1, window, cx);
+        }
+    }
+
+    /// 自分のテーマの名前を、その場で書き直す。
+    pub fn rename_preset(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(preset) = self.own_presets.get(ix) else {
+            return;
+        };
+        let name = preset.name.clone();
+        self.inputs.preset_name.update(cx, |s, cx| {
+            s.set_value(name, window, cx);
+            s.focus(window, cx);
+            s.select_all(window, cx);
+        });
+        self.preset_naming = Some(ix);
+        cx.notify();
+    }
+
+    /// 書いたテーマの名前を保存する。Enter か、ほかの場所を押したとき。
+    pub fn save_preset_name(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(ix) = self.preset_naming else {
+            return;
+        };
+        let name = self.inputs.preset_name.read(cx).value().trim().to_owned();
+        let mut presets = self.own_presets.clone();
+        // 空にしたときと変えていないときは、今の名前のままにする
+        if let Some(preset) = presets
+            .get_mut(ix)
+            .filter(|p| !name.is_empty() && p.name != name)
+        {
+            preset.name = name;
+            if !self.store_presets(presets, cx) {
+                return;
+            }
+        }
+        self.preset_naming = None;
+        self.leave_input(&self.inputs.preset_name.clone(), window, cx);
+        cx.notify();
+    }
+
+    /// 自分のテーマを消す。画面の見た目は変えない。
+    pub fn delete_preset(&mut self, ix: usize, cx: &mut Context<Self>) {
+        if ix >= self.own_presets.len() {
+            return;
+        }
+        let mut presets = self.own_presets.clone();
+        presets.remove(ix);
+        self.preset_naming = None;
+        self.store_presets(presets, cx);
+    }
+
+    /// 自分のテーマの一覧を保存する。保存できなければ、画面の一覧は前のままにする。
+    fn store_presets(
+        &mut self,
+        presets: Vec<crate::theme::Preset>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let saved = crate::theme::set_own_presets(&presets, cx);
+        cx.notify();
+        match saved {
+            Ok(()) => {
+                self.own_presets = presets;
+                self.error = None;
+                true
+            }
+            Err(error) => {
+                self.error = Some(error.into());
+                false
+            }
+        }
     }
 
     /// 色を選ぶところに、今の画面の色を出す。
@@ -3123,8 +3322,8 @@ impl MainView {
         } else if self.pane_prefix || self.pane_resize {
             self.pane_prefix = false;
             self.pane_resize = false;
-        } else if self.person_naming.take().is_some() {
-            // 書きかけの名前を捨てる。担当者のダイアログは開いたまま
+        } else if self.person_naming.take().is_some() || self.preset_naming.take().is_some() {
+            // 書きかけの名前を捨てる。ダイアログは開いたまま
         } else if self.modal != Modal::None {
             self.modal = Modal::None;
             self.issued_ticket = None;
@@ -3146,7 +3345,10 @@ impl MainView {
     pub fn dismiss_own(&mut self, cx: &mut Context<Self>) -> bool {
         self.error = None;
         cx.notify();
-        if self.sub_modal.take().is_some() || self.person_naming.take().is_some() {
+        if self.sub_modal.take().is_some()
+            || self.person_naming.take().is_some()
+            || self.preset_naming.take().is_some()
+        {
         } else if self.modal != Modal::None {
             self.modal = Modal::None;
             self.issued_ticket = None;
@@ -3302,6 +3504,8 @@ pub enum DropTarget {
     Row(usize),
     /// このワークスペースへ移す。`None` は未所属。
     Workspace(Option<Id>),
+    /// AI チャットの入力欄に添える。
+    Chat,
 }
 
 /// 見出しのドラッグ。押し始めた位置から少し動くまでは、ただのクリックとして扱う。
@@ -3534,6 +3738,7 @@ bundled_icons! {
         "maximize-2",
         "rotate-ccw-clock",
         "rotate-ccw",
+        "image",
         "circle-x",
         "paperclip",
         "chevron-down",

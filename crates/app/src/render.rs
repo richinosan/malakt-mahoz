@@ -103,6 +103,10 @@ fn glass(color: Hsla, cx: &App) -> Hsla {
     }
 }
 
+/// 「見た目」のダイアログと、テーマの見本の幅。見本は 1 行に 5 つ並ぶ。
+const APPEARANCE_WIDTH: Pixels = px(680.);
+const PRESET_WIDTH: Pixels = px(124.);
+
 /// 浮かせたパネルのすき間。
 const FLOAT_GAP: Pixels = px(8.);
 
@@ -138,7 +142,7 @@ fn backdrop_layer(cx: &App) -> Option<Img> {
 /// 同梱の画像の小さい絵。選ぶ画面に出す。
 fn scene_thumbnail(scene: &crate::theme::Scene, dark: bool) -> Option<Arc<Image>> {
     use std::sync::OnceLock;
-    static MADE: OnceLock<[Option<Arc<Image>>; 4]> = OnceLock::new();
+    static MADE: OnceLock<[Option<Arc<Image>>; 6]> = OnceLock::new();
     let made = MADE.get_or_init(|| {
         use crate::theme::Scene;
         [
@@ -146,6 +150,8 @@ fn scene_thumbnail(scene: &crate::theme::Scene, dark: bool) -> Option<Arc<Image>
             (Scene::Sky, true),
             (Scene::Forest, false),
             (Scene::Forest, true),
+            (Scene::Dusk, false),
+            (Scene::Dusk, true),
         ]
         .map(|(scene, dark)| {
             scene
@@ -156,6 +162,7 @@ fn scene_thumbnail(scene: &crate::theme::Scene, dark: bool) -> Option<Arc<Image>
     let at = match scene {
         crate::theme::Scene::Sky => 0,
         crate::theme::Scene::Forest => 2,
+        crate::theme::Scene::Dusk => 4,
         _ => return None,
     };
     made[at + usize::from(dark)].clone()
@@ -258,6 +265,47 @@ fn status_badge(status: Status, cx: &App) -> Div {
         .child(status.label())
 }
 
+/// 知らせの中に出す「元に戻す」ボタン。
+fn notice_undo(cx: &mut Context<MainView>) -> impl IntoElement {
+    let theme = cx.theme();
+    Button::new("notice-undo")
+        .icon(app_icon("undo-2").text_color(theme.primary_foreground))
+        .ghost()
+        .xsmall()
+        .tooltip("元に戻す")
+        .on_click(cx.listener(|this, _, _, cx| {
+            this.undo(false, cx);
+        }))
+}
+
+/// 状態を選ぶメニューの中身。選ぶとすぐ変わり、コメントを付けるときだけダイアログを開く。
+fn status_items(
+    mut menu: PopupMenu,
+    view: &WeakEntity<MainView>,
+    task: &Id,
+    current: Status,
+) -> PopupMenu {
+    for status in Status::ALL {
+        let (view, task) = (view.clone(), task.clone());
+        menu = menu.item(
+            PopupMenuItem::new(status.label())
+                .checked(status == current)
+                .on_click(move |_, _, cx| {
+                    // ウィンドウを閉じたあとなら、反映する先がない
+                    let _ = view.update(cx, |this, cx| this.set_status(&task, status, cx));
+                }),
+        );
+    }
+    let (view, task) = (view.clone(), task.clone());
+    menu.separator()
+        .item(
+            PopupMenuItem::new("コメントを付けて変更…").on_click(move |_, window, cx| {
+                // ウィンドウを閉じたあとなら、反映する先がない
+                let _ = view.update(cx, |this, cx| this.ask_status(&task, window, cx));
+            }),
+        )
+}
+
 /// 優先度。棒の本数と色で見分ける。
 fn priority_label(priority: Prio, cx: &App) -> Div {
     let theme = cx.theme();
@@ -321,13 +369,30 @@ fn workspace_color(color: Option<&str>) -> Option<Hsla> {
     Some(rgb(hex).into())
 }
 
-fn workspace_icon(icon: Option<&str>, color: Option<&str>) -> Icon {
-    let icon = Icon::default().path(crate::state::workspace_icon_path(icon));
+/// ワークスペースのアイコン。自分で足した画像はそのままの色で、ほかは選んだ色の線画で出す。
+fn workspace_icon(icon: Option<&str>, color: Option<&str>, size: Pixels, cx: &App) -> AnyElement {
+    let custom = icon
+        .filter(|icon| malakt_core::icon::is_custom(icon))
+        .and_then(|icon| crate::icons::custom_image(icon, cx));
+    if let Some(image) = custom {
+        return img(image)
+            .size(size)
+            .flex_none()
+            .object_fit(ObjectFit::Contain)
+            .into_any_element();
+    }
+    let icon = Icon::default()
+        .path(crate::state::workspace_icon_path(icon))
+        .size(size)
+        .flex_none();
     match workspace_color(color) {
-        Some(color) => icon.text_color(color),
-        None => icon,
+        Some(color) => icon.text_color(color).into_any_element(),
+        None => icon.into_any_element(),
     }
 }
+
+/// 左のメニューの行に出すアイコンの大きさ。
+const NAV_ICON_SIZE: Pixels = px(14.);
 
 /// 同梱の線画アイコン。
 pub(crate) fn app_icon(name: &str) -> Icon {
@@ -384,7 +449,7 @@ impl MainView {
     fn nav_link(
         &self,
         id: impl Into<ElementId>,
-        icon: Icon,
+        icon: impl IntoElement,
         label: impl Into<SharedString>,
         active: bool,
         cx: &App,
@@ -405,14 +470,14 @@ impl MainView {
             })
             .when(!active, |d| d.hover(|s| s.bg(theme.accent.opacity(0.6))))
             .active(|s| s.bg(theme.accent).opacity(0.8))
-            .child(icon.small().flex_none())
+            .child(icon)
             .child(div().flex_1().truncate().child(label.into()))
     }
 
     fn nav_item(
         &self,
         id: impl Into<ElementId>,
-        icon: Icon,
+        icon: impl IntoElement,
         label: impl Into<SharedString>,
         nav: Nav,
         cx: &mut Context<Self>,
@@ -568,11 +633,12 @@ impl MainView {
                         .on_mouse_down_out(
                             cx.listener(|this, _, window, cx| this.save_workspace_name(window, cx)),
                         )
-                        .child(
-                            workspace_icon(ws.icon.as_deref(), ws.color.as_deref())
-                                .small()
-                                .flex_none(),
-                        )
+                        .child(workspace_icon(
+                            ws.icon.as_deref(),
+                            ws.color.as_deref(),
+                            NAV_ICON_SIZE,
+                            cx,
+                        ))
                         .child(
                             div().flex_1().min_w_0().mx(px(-8.)).child(
                                 Input::new(&self.inputs.workspace_name)
@@ -588,7 +654,7 @@ impl MainView {
                 } else {
                     self.nav_item(
                         ("ws", ix),
-                        workspace_icon(ws.icon.as_deref(), ws.color.as_deref()),
+                        workspace_icon(ws.icon.as_deref(), ws.color.as_deref(), NAV_ICON_SIZE, cx),
                         ws.name.clone(),
                         Nav::Workspace(id),
                         cx,
@@ -676,7 +742,7 @@ impl MainView {
                     .gap_1()
                     .child(row().child(self.nav_item(
                         "nav-home",
-                        app_icon("house"),
+                        app_icon("house").size(NAV_ICON_SIZE).flex_none(),
                         "ホーム",
                         Nav::Home,
                         cx,
@@ -685,7 +751,7 @@ impl MainView {
                         row().child(
                             self.nav_link(
                                 "nav-notices",
-                                app_icon("bell"),
+                                app_icon("bell").size(NAV_ICON_SIZE).flex_none(),
                                 "通知",
                                 self.modal == Modal::Notices,
                                 cx,
@@ -710,7 +776,7 @@ impl MainView {
                     )
                     .child(row().child(self.nav_item(
                         "nav-all",
-                        app_icon("list-todo"),
+                        app_icon("list-todo").size(NAV_ICON_SIZE).flex_none(),
                         "すべてのタスク",
                         Nav::All,
                         cx,
@@ -719,7 +785,7 @@ impl MainView {
                         self.drop_zone(row().id("drop-unfiled"), DropTarget::Workspace(None), cx)
                             .child(self.nav_item(
                                 "nav-unfiled",
-                                app_icon("inbox"),
+                                app_icon("inbox").size(NAV_ICON_SIZE).flex_none(),
                                 "未所属",
                                 Nav::Unfiled,
                                 cx,
@@ -796,7 +862,7 @@ impl MainView {
     // ---- 上のバー ----
 
     /// 今の画面の名前と、その下に出す一言、名前の左に出すアイコン。
-    fn header_title(&self) -> (SharedString, Option<&'static str>, Option<Icon>) {
+    fn header_title(&self, cx: &App) -> (SharedString, Option<&'static str>, Option<AnyElement>) {
         match &self.nav {
             Nav::Home => ("ホーム".into(), None, None),
             Nav::All => ("すべてのタスク".into(), Some("タスク一覧"), None),
@@ -807,7 +873,7 @@ impl MainView {
                     self.list_title(),
                     Some("タスク一覧"),
                     ws.map(|w| {
-                        workspace_icon(w.icon.as_deref(), w.color.as_deref()).size(TILE_ICON_SIZE)
+                        workspace_icon(w.icon.as_deref(), w.color.as_deref(), TILE_ICON_SIZE, cx)
                     }),
                 )
             }
@@ -1054,8 +1120,8 @@ impl MainView {
         };
         // 分けているときは、今のペインの場所を出す
         let (title, subtitle, icon) = match self.focused_child() {
-            Some(child) => child.read(cx).header_title(),
-            None => self.header_title(),
+            Some(child) => child.read(cx).header_title(cx),
+            None => self.header_title(cx),
         };
         let unread = self.unread_notices;
         let lock_enabled = self.lock_enabled(cx);
@@ -1367,10 +1433,12 @@ impl MainView {
                                 .justify_center()
                                 .rounded_md()
                                 .bg(theme.muted)
-                                .child(
-                                    workspace_icon(ws.icon.as_deref(), ws.color.as_deref())
-                                        .size(CARD_ICON_SIZE),
-                                ),
+                                .child(workspace_icon(
+                                    ws.icon.as_deref(),
+                                    ws.color.as_deref(),
+                                    CARD_ICON_SIZE,
+                                    cx,
+                                )),
                         )
                         .child(
                             col()
@@ -2236,6 +2304,24 @@ impl MainView {
             })
     }
 
+    /// 状態を押して選ぶメニュー。選ぶとすぐ変わる。
+    fn status_menu(
+        &self,
+        id: impl Into<ElementId>,
+        task: &Id,
+        current: Status,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let view = cx.entity().downgrade();
+        let task = task.clone();
+        Button::new(id)
+            .ghost()
+            .small()
+            .justify_start()
+            .child(status_badge(current, cx))
+            .dropdown_menu(move |menu, _, _| status_items(menu, &view, &task, current))
+    }
+
     fn priority_options(current: Prio) -> Vec<(SharedString, bool, u8)> {
         [Prio::High, Prio::Mid, Prio::Low, Prio::None]
             .into_iter()
@@ -2343,11 +2429,12 @@ impl MainView {
                             }))
                             .test_support(),
                     )
-                    .child(
-                        workspace_icon(ws.icon.as_deref(), ws.color.as_deref())
-                            .small()
-                            .flex_none(),
-                    )
+                    .child(div().flex_none().child(workspace_icon(
+                        ws.icon.as_deref(),
+                        ws.color.as_deref(),
+                        NAV_ICON_SIZE,
+                        cx,
+                    )))
                     .child(
                         div()
                             .min_w_0()
@@ -2517,19 +2604,7 @@ impl MainView {
                 )
                 .when(has_chips, |d| d.child(chips))
         };
-        let status = {
-            let id = id.clone();
-            div().flex().child(
-                status_badge(task.status, cx)
-                    .id(("status", ix))
-                    .cursor_pointer()
-                    .hover(|s| s.border_color(theme.primary))
-                    .active(|s| s.bg(theme.accent))
-                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                        this.ask_status(&id, window, cx)
-                    })),
-            )
-        };
+        let status = self.status_menu(("status", ix), &id, task.status, cx);
         let current = Prio::of(task.priority);
         let priority = {
             let id = id.clone();
@@ -2576,6 +2651,7 @@ impl MainView {
 
         let view = cx.entity().downgrade();
         let menu_id = id.clone();
+        let menu_status = task.status;
         let drag = self.task_drag.as_ref().filter(|d| d.moved);
         let dragged = drag.is_some_and(|d| d.id == id);
         // 落とすと入る側の縁に線を出す
@@ -2676,7 +2752,7 @@ impl MainView {
         };
         // 右クリックで、その行の操作を出す
         row_el
-            .context_menu(move |menu, _, _| {
+            .context_menu(move |menu, window, cx| {
                 let item = |label: &'static str,
                             run: fn(&mut MainView, Id, &mut Window, &mut Context<MainView>)| {
                     let view = view.clone();
@@ -2689,9 +2765,10 @@ impl MainView {
                 menu.item(item("開く", |this, id, window, cx| {
                     this.open_panel(&id, window, cx)
                 }))
-                .item(item("状態を変更", |this, id, window, cx| {
-                    this.ask_status(&id, window, cx)
-                }))
+                .submenu("状態を変更", window, cx, {
+                    let (view, id) = (view.clone(), menu_id.clone());
+                    move |menu, _, _| status_items(menu, &view, &id, menu_status)
+                })
                 .separator()
                 .item(item("削除", |this, id, _, cx| {
                     this.modal = Modal::DeleteTasks(vec![id]);
@@ -3417,10 +3494,7 @@ impl MainView {
                 } else {
                     button.framed(cx)
                 };
-                button.on_click(cx.listener(move |this, _, window, cx| {
-                    this.ask_status(&id, window, cx);
-                    this.modal = Modal::Status(id.clone(), status);
-                }))
+                button.on_click(cx.listener(move |this, _, _, cx| this.set_status(&id, status, cx)))
             };
             if open {
                 actions = actions
@@ -3429,7 +3503,16 @@ impl MainView {
             } else {
                 actions = actions.child(set("再開する", "to-reopen", Status::NeedsAction, true));
             }
-            actions
+            let id = task.id.clone();
+            actions.child(
+                Button::new("status-with-comment")
+                    .icon(app_icon("message-square-plus"))
+                    .framed(cx)
+                    .tooltip("コメントを付けて状態を変更")
+                    .on_click(
+                        cx.listener(move |this, _, window, cx| this.ask_status(&id, window, cx)),
+                    ),
+            )
         };
 
         let pinned: Vec<_> = detail.comments.iter().filter(|c| c.pinned).collect();
@@ -3534,21 +3617,13 @@ impl MainView {
         }
 
         // プロパティ
-        let status_chips = {
-            let id = task.id.clone();
-            self.property("状態", cx).child(
-                div().flex().child(
-                    status_badge(task.status, cx)
-                        .id("p-status")
-                        .cursor_pointer()
-                        .hover(|s| s.border_color(theme.primary))
-                        .active(|s| s.bg(theme.accent))
-                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                            this.ask_status(&id, window, cx)
-                        })),
-                ),
-            )
-        };
+        let status_chips = self
+            .property("状態", cx)
+            .child(
+                div()
+                    .flex()
+                    .child(self.status_menu("p-status", &task.id, task.status, cx)),
+            );
         let current_priority = Prio::of(task.priority);
         let prio_chips = self.value_menu(
             "p-prio",
@@ -4266,6 +4341,30 @@ impl MainView {
                 .text_color(theme.muted_foreground)
                 .child(text)
         };
+        let presets = self.preset_tiles(cx);
+        let open = self.appearance_details;
+        let toggle = row()
+            .id("details-toggle")
+            .h_8()
+            .px_2()
+            .gap_2()
+            .rounded_md()
+            .cursor_pointer()
+            .text_sm()
+            .text_color(theme.muted_foreground)
+            .hover(|s| s.bg(theme.accent))
+            .active(|s| s.bg(theme.primary.opacity(0.4)))
+            .child(
+                app_icon(if open {
+                    "chevron-down"
+                } else {
+                    "chevron-right"
+                })
+                .small(),
+            )
+            .child("詳細")
+            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.toggle_appearance_details(cx)))
+            .test_support();
         let mut body = col().gap_2().child(
             row()
                 .gap_2()
@@ -4419,13 +4518,36 @@ impl MainView {
                     )
                     .child(reset("float-reset", false)),
             );
-        let body = body.when_some(self.error.clone(), |d, error| {
-            d.child(div().text_sm().text_color(theme.danger).child(error))
-        });
+        let details = if !open {
+            None
+        } else if self.motion {
+            Some(
+                body.with_animation("details-in", appear(160), |d, t| d.opacity(t))
+                    .into_any_element(),
+            )
+        } else {
+            Some(body.into_any_element())
+        };
+        // 画面に入りきらないときは、ダイアログの中でスクロールする
+        let body = col().min_h_0().child(
+            col()
+                .id("appearance-scroll")
+                .min_h_0()
+                .gap_2()
+                // 右の端はスクロールバーの場所
+                .pr_4()
+                .overflow_y_scrollbar()
+                .child(presets)
+                .child(toggle)
+                .children(details)
+                .when_some(self.error.clone(), |d, error| {
+                    d.child(div().text_sm().text_color(theme.danger).child(error))
+                }),
+        );
         let (title, width, over) = match self.sub_modal {
-            None => return self.dialog("見た目", body, cx),
+            None => return self.dialog_as("dialog", APPEARANCE_WIDTH, "見た目", body, cx),
             Some(SubModal::Font) => ("フォント", px(400.), self.font_picker(cx)),
-            Some(SubModal::Scene) => ("背景の画像", px(668.), self.scene_picker(cx)),
+            Some(SubModal::Scene) => ("背景の画像", px(680.), self.scene_picker(cx)),
         };
         let over = self.dialog_as("dialog", width, title, over, cx);
         let over = if self.motion {
@@ -4437,8 +4559,210 @@ impl MainView {
         div()
             .absolute()
             .inset_0()
-            .child(self.dialog_as("dialog-under", px(460.), "見た目", body, cx))
+            .child(self.dialog_as("dialog-under", APPEARANCE_WIDTH, "見た目", body, cx))
             .child(over)
+    }
+
+    /// テーマの見本。おすすめ、自分で保存したもの、今の見た目を保存するボタンの順に並べる。
+    fn preset_tiles(&self, cx: &mut Context<Self>) -> Div {
+        use crate::theme::{Preset, Scene};
+        let theme = cx.theme().clone();
+        let now = crate::theme::current("", cx);
+        let frame = |id: ElementId, selected: bool| {
+            col()
+                .id(id)
+                .w(PRESET_WIDTH)
+                .gap_1()
+                .p_1()
+                .rounded_lg()
+                .cursor_pointer()
+                .border_2()
+                .border_color(if selected {
+                    theme.primary
+                } else {
+                    theme.transparent
+                })
+                .hover(|s| s.bg(theme.accent))
+                .active(|s| s.bg(theme.primary.opacity(0.4)))
+        };
+        // 見本は、そのテーマの画像と色で、浮かせたパネルの形を小さく描く
+        let picture = |preset: &Preset| {
+            let dark = preset.dark(theme.is_dark());
+            let (accent, page) = preset.swatch(dark);
+            let (accent, page): (Hsla, Hsla) = (accent.into(), page.into());
+            let ink = if dark {
+                gpui_kit::white()
+            } else {
+                gpui_kit::black()
+            };
+            let image = scene_thumbnail(&preset.scene, dark);
+            let seen = image.is_some() || matches!(preset.scene, Scene::File(_));
+            let panel = if seen {
+                page.opacity(1. - f32::from(preset.clear) / 100.)
+            } else {
+                page.blend(ink.opacity(0.06))
+            };
+            let inset = if preset.floating { px(6.) } else { px(0.) };
+            let radius = if preset.floating { px(4.) } else { px(0.) };
+            let part = |fill: Hsla| div().rounded(radius).bg(fill);
+            div()
+                .relative()
+                .h(px(72.))
+                .rounded_md()
+                .overflow_hidden()
+                .border_1()
+                .border_color(theme.border)
+                .bg(page)
+                .children(image.map(|image| {
+                    img(image)
+                        .absolute()
+                        .inset_0()
+                        .size_full()
+                        .object_fit(ObjectFit::Cover)
+                }))
+                .when(matches!(preset.scene, Scene::File(_)), |d| {
+                    d.child(
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(app_icon("image").text_color(ink.opacity(0.5))),
+                    )
+                })
+                .child(
+                    row()
+                        .absolute()
+                        .inset(inset)
+                        .items_stretch()
+                        .gap(inset.min(px(3.)).max(px(1.)))
+                        .child(part(panel).w(px(22.)))
+                        .child(
+                            part(panel).flex_1().p(px(5.)).child(
+                                col()
+                                    .gap(px(4.))
+                                    .child(div().w(px(26.)).h(px(5.)).rounded_full().bg(accent))
+                                    .child(
+                                        div()
+                                            .w_full()
+                                            .h(px(3.))
+                                            .rounded_full()
+                                            .bg(ink.opacity(0.45)),
+                                    )
+                                    .child(
+                                        div()
+                                            .w(relative(0.6))
+                                            .h(px(3.))
+                                            .rounded_full()
+                                            .bg(ink.opacity(0.3)),
+                                    ),
+                            ),
+                        ),
+                )
+        };
+        let name = |text: SharedString| div().h_6().px_1().text_sm().truncate().child(text);
+        let mut tiles = row().flex_wrap().items_start().gap_1();
+        for (ix, preset) in Preset::recommended().into_iter().enumerate() {
+            let selected = preset.same_look(&now);
+            tiles = tiles.child(
+                frame(("preset", ix).into(), selected)
+                    .child(picture(&preset))
+                    .child(name(preset.name.clone().into()))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        this.apply_preset(&preset, window, cx)
+                    }))
+                    .test_support(),
+            );
+        }
+        for (ix, preset) in self.own_presets.iter().enumerate() {
+            let group = SharedString::from(format!("own-preset-{ix}"));
+            let label = if self.preset_naming == Some(ix) {
+                // その場で名前を書く。Enter かほかの場所を押すと保存、Esc で取り消し
+                div()
+                    .h_6()
+                    .on_mouse_down_out(
+                        cx.listener(|this, _, window, cx| this.save_preset_name(window, cx)),
+                    )
+                    // 名前を書いている間は、見本を押したことにしない
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .child(
+                        Input::new(&self.inputs.preset_name)
+                            .id("preset-input")
+                            .aria_label("テーマの名前")
+                            .text_sm()
+                            .h_6()
+                            .bg(theme.background)
+                            .border_color(theme.ring)
+                            .px_1(),
+                    )
+                    .into_any_element()
+            } else {
+                name(preset.name.clone().into())
+                    .id(("own-preset-name", ix))
+                    .rounded_sm()
+                    .hover(|s| s.bg(theme.muted))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        cx.stop_propagation();
+                        this.rename_preset(ix, window, cx)
+                    }))
+                    .test_support()
+                    .into_any_element()
+            };
+            let chosen = preset.clone();
+            tiles = tiles.child(
+                frame(("own-preset", ix).into(), preset.same_look(&now))
+                    .group(group.clone())
+                    .relative()
+                    .child(picture(preset))
+                    .child(label)
+                    .child(
+                        div()
+                            .absolute()
+                            .top(px(6.))
+                            .right(px(6.))
+                            .rounded_md()
+                            .bg(theme.background)
+                            .opacity(0.)
+                            .group_hover(group, |s| s.opacity(1.))
+                            .child(
+                                Button::new(("own-preset-delete", ix))
+                                    .icon(app_icon("trash"))
+                                    .ghost()
+                                    .xsmall()
+                                    .tooltip("削除")
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        cx.stop_propagation();
+                                        this.delete_preset(ix, cx)
+                                    })),
+                            ),
+                    )
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        this.apply_preset(&chosen, window, cx)
+                    }))
+                    .test_support(),
+            );
+        }
+        tiles.child(
+            frame("preset-save".into(), false)
+                .child(
+                    div()
+                        .h(px(72.))
+                        .rounded_md()
+                        .border_1()
+                        .border_dashed()
+                        .border_color(theme.input)
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(app_icon("plus").text_color(theme.muted_foreground)),
+                )
+                .child(name("今の見た目を保存".into()))
+                .on_click(
+                    cx.listener(|this, _: &ClickEvent, window, cx| this.save_preset(window, cx)),
+                )
+                .test_support(),
+        )
     }
 
     /// この PC に入っている書体の一覧。
@@ -4722,8 +5046,58 @@ impl MainView {
                             ),
                     );
                 }
-                let none_found = found.is_empty();
+                categories = categories.child(div().flex_1()).child({
+                    let ws = id.clone();
+                    Button::new("icon-add-image")
+                        .icon(app_icon("image-plus"))
+                        .ghost()
+                        .large()
+                        .tooltip("画像を追加")
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.add_icon_image(ws.clone(), window, cx)
+                        }))
+                });
+                // 自分で足した画像は、絞り込んでいないときに先頭に出す
+                let (custom, custom_error) =
+                    if query.trim().is_empty() && self.icon_category.is_none() {
+                        match self.db.read(cx).store.custom_icons() {
+                            Ok(names) => (names, None),
+                            Err(error) => (
+                                Vec::new(),
+                                Some(format!("追加した画像を読めませんでした。{error}")),
+                            ),
+                        }
+                    } else {
+                        (Vec::new(), None)
+                    };
+                let none_found = found.is_empty() && custom.is_empty();
                 let mut icons = row().gap_1().flex_wrap();
+                for (ix, name) in custom.into_iter().enumerate() {
+                    let (ws, color) = (id.clone(), color.clone());
+                    let selected = chosen == name;
+                    icons = icons.child(
+                        div()
+                            .id(("ws-custom-icon", ix))
+                            .size(px(40.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_md()
+                            .cursor_pointer()
+                            .border_1()
+                            .border_color(if selected {
+                                theme.foreground
+                            } else {
+                                theme.transparent
+                            })
+                            .hover(|s| s.bg(theme.secondary_hover))
+                            .child(workspace_icon(Some(&name), None, PICKER_ICON_SIZE, cx))
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                this.set_workspace_icon(&ws, Some(&name), color.as_deref(), cx)
+                            }))
+                            .test_support(),
+                    );
+                }
                 for (ix, name) in found.into_iter().enumerate() {
                     let (ws, color) = (id.clone(), color.clone());
                     let selected = chosen == name;
@@ -4743,9 +5117,12 @@ impl MainView {
                                 theme.transparent
                             })
                             .hover(|s| s.bg(theme.secondary_hover))
-                            .child(
-                                workspace_icon(Some(name), color.as_deref()).size(PICKER_ICON_SIZE),
-                            )
+                            .child(workspace_icon(
+                                Some(name),
+                                color.as_deref(),
+                                PICKER_ICON_SIZE,
+                                cx,
+                            ))
                             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                                 this.set_workspace_icon(&ws, Some(name), color.as_deref(), cx)
                             }))
@@ -4778,6 +5155,9 @@ impl MainView {
                                 d.child(muted("見つかりません。".to_owned()))
                             }),
                     )
+                    .when_some(custom_error, |d, error| {
+                        d.child(div().text_sm().text_color(theme.danger).child(error))
+                    })
                     .when_some(self.error.clone(), |d, error| {
                         d.child(div().text_sm().text_color(theme.danger).child(error))
                     });
@@ -5775,6 +6155,12 @@ impl MainView {
                                         d.bg(theme.primary).text_color(theme.primary_foreground)
                                     })
                                     .child(text)
+                                    .when(
+                                        !is_error
+                                            && self.notice.is_some()
+                                            && self.notice == self.notice_undo,
+                                        |d| d.child(notice_undo(cx)),
+                                    )
                                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                                         this.error = None;
                                         this.notice = None;
@@ -6036,6 +6422,12 @@ impl Render for MainView {
                                         d.bg(theme.primary).text_color(theme.primary_foreground)
                                     })
                                     .child(text)
+                                    .when(
+                                        !is_error
+                                            && self.notice.is_some()
+                                            && self.notice == self.notice_undo,
+                                        |d| d.child(notice_undo(cx)),
+                                    )
                                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                                         this.error = None;
                                         this.notice = None;
