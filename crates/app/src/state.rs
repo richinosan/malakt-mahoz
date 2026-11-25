@@ -1074,6 +1074,52 @@ impl MainView {
         }
     }
 
+    /// ワークスペースのいちばん上の親。
+    pub fn root_of<'a>(&'a self, id: &'a str) -> &'a str {
+        let mut at = id;
+        // 親をたどる。壊れたデータで輪になっていても、ワークスペースの数で止まる
+        for _ in 0..self.workspaces.len() {
+            match self
+                .workspaces
+                .iter()
+                .find(|w| w.id == at)
+                .and_then(|w| w.parent_id.as_deref())
+            {
+                Some(parent) => at = parent,
+                None => break,
+            }
+        }
+        at
+    }
+
+    /// その担当者を、そのワークスペースで選べるか。`None` は、どのワークスペースにも入っていないタスク。
+    pub fn person_is_in(&self, person: &Person, workspace: Option<&str>) -> bool {
+        if person.is_global() {
+            return true;
+        }
+        let Some(root) = workspace.map(|w| self.root_of(w)) else {
+            return false;
+        };
+        person.workspace_ids.iter().any(|w| self.root_of(w) == root)
+    }
+
+    /// そのワークスペースで選べる担当者。すべてのワークスペースで使う人と、
+    /// そのワークスペース（のいちばん上の親）で使う人。
+    pub fn people_in(&self, workspace: Option<&str>) -> Vec<&Person> {
+        self.people
+            .iter()
+            .filter(|p| self.person_is_in(p, workspace))
+            .collect()
+    }
+
+    /// 今の場所で選べる担当者。ワークスペースを開いていないときは全員。
+    pub fn people_here(&self) -> Vec<&Person> {
+        match self.current_workspace() {
+            Some(w) => self.people_in(Some(w)),
+            None => self.people.iter().collect(),
+        }
+    }
+
     pub fn person_name(&self, id: &str) -> &str {
         self.people
             .iter()
@@ -1564,11 +1610,19 @@ impl MainView {
     pub fn mention_candidates(&self, cx: &App) -> Vec<Person> {
         let text = self.inputs.comment.read(cx).value();
         match mention::pending(&text) {
-            Some(query) => mention::candidates(query, &self.people)
-                .into_iter()
-                .take(8)
-                .cloned()
-                .collect(),
+            Some(query) => {
+                // 開いているタスクのワークスペースで選べる人だけ
+                let workspace = self
+                    .detail
+                    .as_ref()
+                    .and_then(|d| d.task.workspace_id.as_deref());
+                let people: Vec<Person> = self.people_in(workspace).into_iter().cloned().collect();
+                mention::candidates(query, &people)
+                    .into_iter()
+                    .take(8)
+                    .cloned()
+                    .collect()
+            }
             None => Vec::new(),
         }
     }
@@ -2140,6 +2194,82 @@ impl MainView {
             // 一覧を読み直して、増えた行を出す
             self.reload(cx);
             self.rename_person(person.id, window, cx);
+        }
+    }
+
+    /// 開いているタスクのワークスペースで使う担当者を「新規担当者」という名前で足し、
+    /// そのタスクの担当にして、担当を選ぶところの行でそのまま名前を書けるようにする。
+    pub fn add_assignee_person(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(detail) = &self.detail else { return };
+        let (task, workspace) = (detail.task.id.clone(), detail.task.workspace_id.clone());
+        // 足すのと担当にするのを、元に戻すときの 1 つの段にする
+        let Some(person) = self.write(cx, |s| {
+            let person = match &workspace {
+                Some(w) => s.create_local_person(NEW_PERSON_NAME, w)?,
+                None => s.create_person(NEW_PERSON_NAME, false)?,
+            };
+            let mut draft = TaskDraft::from(&s.task(&task)?);
+            draft.assignee_ids.push(person.id.clone());
+            s.update_task(&task, &draft)?;
+            Ok(person)
+        }) else {
+            return;
+        };
+        self.reload(cx);
+        self.assignee_picker = true;
+        // メニューが閉じるときのフォーカス戻しのあとで、名前の欄に移る
+        cx.defer_in(window, move |this, window, cx| {
+            this.rename_person(person.id.clone(), window, cx)
+        });
+    }
+
+    /// ほかのワークスペースの担当者を、開いているタスクのワークスペースでも使えるようにして、
+    /// そのタスクの担当にする。
+    pub fn register_assignee(&mut self, person: &str, cx: &mut Context<Self>) {
+        let Some(detail) = &self.detail else { return };
+        let (task, workspace) = (detail.task.id.clone(), detail.task.workspace_id.clone());
+        let done = self.write(cx, |s| {
+            if let Some(w) = &workspace {
+                s.share_person(person, w)?;
+            }
+            let mut draft = TaskDraft::from(&s.task(&task)?);
+            if !draft.assignee_ids.iter().any(|a| a == person) {
+                draft.assignee_ids.push(person.to_owned());
+            }
+            s.update_task(&task, &draft)
+        });
+        if done.is_some() {
+            self.reload(cx);
+        }
+    }
+
+    /// 担当者を使うワークスペースを付ける・外す。全部外すと、すべてのワークスペースで使う。
+    pub fn toggle_person_workspace(
+        &mut self,
+        person: &str,
+        workspace: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(current) = self.people.iter().find(|p| p.id == person) else {
+            return;
+        };
+        let mut ids = current.workspace_ids.clone();
+        match ids.iter().position(|w| w == workspace) {
+            Some(i) => {
+                ids.remove(i);
+            }
+            None => ids.push(workspace.to_owned()),
+        }
+        self.set_person_workspaces(person, ids, cx);
+    }
+
+    /// 担当者を使うワークスペースを決める。空なら、すべてのワークスペースで使う。
+    pub fn set_person_workspaces(&mut self, person: &str, ids: Vec<Id>, cx: &mut Context<Self>) {
+        if self
+            .write(cx, |s| s.set_person_workspaces(person, &ids))
+            .is_some()
+        {
+            self.reload(cx);
         }
     }
 

@@ -202,6 +202,14 @@ const MIGRATIONS: &[&str] = &[
         created_at INTEGER NOT NULL
     ) STRICT, WITHOUT ROWID;
     "#,
+    // 12: 担当者を使うワークスペース。行がない担当者は、すべてのワークスペースで使う
+    r#"
+    CREATE TABLE person_workspaces (
+        person_id TEXT NOT NULL REFERENCES people(id) ON DELETE CASCADE,
+        workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+        PRIMARY KEY (person_id, workspace_id)
+    ) STRICT, WITHOUT ROWID;
+    "#,
 ];
 
 pub(crate) fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {

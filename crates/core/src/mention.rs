@@ -73,6 +73,7 @@ mod tests {
             note: String::new(),
             created_at: 0,
             updated_at: 0,
+            workspace_ids: Vec::new(),
         }
     }
 

@@ -204,6 +204,19 @@ impl Store {
     pub fn delete_workspace(&mut self, id: &str) -> Result<()> {
         let tx = self.conn.transaction()?;
         crate::links::rehome_before_delete(&tx, id)?;
+        // 消すワークスペースの中でだけ使っていた担当者も消す。残すと、すべてのワークスペースに出てしまう
+        tx.execute(
+            "WITH RECURSIVE sub(id) AS ( \
+                 SELECT id FROM workspaces WHERE id = ?1 \
+                 UNION ALL \
+                 SELECT w.id FROM workspaces w JOIN sub ON w.parent_id = sub.id) \
+             DELETE FROM people \
+             WHERE id IN (SELECT person_id FROM person_workspaces) \
+               AND NOT EXISTS (SELECT 1 FROM person_workspaces pw \
+                               WHERE pw.person_id = people.id \
+                                 AND pw.workspace_id NOT IN (SELECT id FROM sub))",
+            params![id],
+        )?;
         let n = tx.execute("DELETE FROM workspaces WHERE id = ?1", params![id])?;
         found(n, "ワークスペース", id)?;
         tx.commit()?;
@@ -221,6 +234,11 @@ impl Store {
         )?;
         let rows = stmt.query_map(params![id], |r| r.get(0))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// そのワークスペースのいちばん上の親。
+    pub fn workspace_root(&self, id: &str) -> Result<Id> {
+        Ok(self.workspace_path(id)?.swap_remove(0).id)
     }
 
     /// 最上位からそのワークスペースまでの道筋（パンくず用）。
@@ -324,6 +342,7 @@ impl Store {
             note: String::new(),
             created_at: now,
             updated_at: now,
+            workspace_ids: Vec::new(),
         };
         let tx = self.conn.transaction()?;
         if is_self {
@@ -334,6 +353,93 @@ impl Store {
         Ok(person)
     }
 
+    /// そのワークスペースのいちばん上の親と、そのサブワークスペースで使う担当者を作る。
+    pub fn create_local_person(&mut self, name: &str, workspace_id: &str) -> Result<Person> {
+        let name = required_line(name, "名前")?;
+        let root = self.workspace_root(workspace_id)?;
+        let now = now_ms();
+        let person = Person {
+            id: new_id(),
+            name,
+            is_self: false,
+            note: String::new(),
+            created_at: now,
+            updated_at: now,
+            workspace_ids: vec![root],
+        };
+        let tx = self.conn.transaction()?;
+        insert_person(&tx, &person)?;
+        put_person_workspaces(&tx, &person)?;
+        tx.commit()?;
+        Ok(person)
+    }
+
+    /// 担当者を使うワークスペースを決める。空なら、すべてのワークスペースで使う。
+    /// 渡したワークスペースは、いちばん上の親に直して持つ。
+    pub fn set_person_workspaces(&mut self, id: &str, workspace_ids: &[Id]) -> Result<()> {
+        let mut roots = Vec::new();
+        for w in workspace_ids {
+            let root = self.workspace_root(w)?;
+            if !roots.contains(&root) {
+                roots.push(root);
+            }
+        }
+        let tx = self.conn.transaction()?;
+        let is_self: Option<bool> = tx
+            .query_row(
+                "SELECT is_self FROM people WHERE id = ?1",
+                params![id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        match is_self {
+            None => return Err(Error::NotFound(format!("担当者 {id}"))),
+            Some(true) if !roots.is_empty() => {
+                return Err(Error::Invalid(
+                    "「自分」は、すべてのワークスペースで使います".into(),
+                ));
+            }
+            Some(_) => {}
+        }
+        tx.execute(
+            "DELETE FROM person_workspaces WHERE person_id = ?1",
+            params![id],
+        )?;
+        for root in &roots {
+            tx.execute(
+                "INSERT INTO person_workspaces(person_id, workspace_id) VALUES (?1, ?2)",
+                params![id, root],
+            )?;
+        }
+        tx.execute(
+            "UPDATE people SET updated_at = ?2 WHERE id = ?1",
+            params![id, now_ms()],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// 担当者を、そのワークスペース（のいちばん上の親）でも使えるようにする。
+    /// すべてのワークスペースで使う担当者は、そのまま。
+    pub fn share_person(&mut self, id: &str, workspace_id: &str) -> Result<()> {
+        let root = self.workspace_root(workspace_id)?;
+        let mut ids: Vec<Id> = self
+            .conn
+            .prepare_cached("SELECT workspace_id FROM person_workspaces WHERE person_id = ?1")?
+            .query_map(params![id], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        if ids.is_empty() || ids.contains(&root) {
+            let exists: bool = self.conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM people WHERE id = ?1)",
+                params![id],
+                |r| r.get(0),
+            )?;
+            return found(usize::from(exists), "担当者", id);
+        }
+        ids.push(root);
+        self.set_person_workspaces(id, &ids)
+    }
+
     /// 自分が先頭、あとは名前順。
     pub fn people(&self) -> Result<Vec<Person>> {
         let mut stmt = self.conn.prepare_cached(
@@ -341,7 +447,18 @@ impl Store {
              FROM people ORDER BY is_self DESC, name, id",
         )?;
         let rows = stmt.query_map([], person_from_row)?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
+        let mut people: Vec<Person> = rows.collect::<rusqlite::Result<_>>()?;
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT person_id, workspace_id FROM person_workspaces ORDER BY workspace_id",
+        )?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let (person, workspace): (Id, Id) = (row.get(0)?, row.get(1)?);
+            if let Some(p) = people.iter_mut().find(|p| p.id == person) {
+                p.workspace_ids.push(workspace);
+            }
+        }
+        Ok(people)
     }
 
     pub fn update_person(&mut self, id: &str, name: &str, note: &str) -> Result<()> {
@@ -1286,6 +1403,7 @@ impl Store {
                 p.is_self = same;
             }
             insert_person(&tx, &p)?;
+            put_person_workspaces(&tx, &p)?;
         }
         for t in &data.tasks {
             tx.execute(
@@ -1461,6 +1579,21 @@ fn insert_person(conn: &Connection, p: &Person) -> rusqlite::Result<usize> {
     ])
 }
 
+/// 担当者を使うワークスペースを、`p` のとおりに置き換える。
+fn put_person_workspaces(conn: &Connection, p: &Person) -> rusqlite::Result<()> {
+    conn.execute(
+        "DELETE FROM person_workspaces WHERE person_id = ?1",
+        params![p.id],
+    )?;
+    for w in &p.workspace_ids {
+        conn.execute(
+            "INSERT OR IGNORE INTO person_workspaces(person_id, workspace_id) VALUES (?1, ?2)",
+            params![p.id, w],
+        )?;
+    }
+    Ok(())
+}
+
 fn insert_task(conn: &Connection, t: &Task) -> rusqlite::Result<()> {
     conn.prepare_cached(
         "INSERT INTO tasks(id, workspace_id, title, description, status, priority, due, \
@@ -1608,6 +1741,7 @@ fn person_from_row(r: &Row<'_>) -> rusqlite::Result<Person> {
         note: r.get(3)?,
         created_at: r.get(4)?,
         updated_at: r.get(5)?,
+        workspace_ids: Vec::new(),
     })
 }
 
@@ -1811,6 +1945,89 @@ mod tests {
         assert_eq!(s.workspace_subtree_ids(&other.id).unwrap(), [other.id]);
         assert!(matches!(s.workspace_path("nope"), Err(Error::NotFound(_))));
         assert_eq!(s.workspace_path(&c.id).unwrap().len(), 3);
+    }
+
+    #[test]
+    fn local_people_belong_to_the_top_workspace() {
+        let mut s = store();
+        s.ensure_self().unwrap();
+        let a = s.create_workspace(None, "A").unwrap();
+        let sub = s.create_workspace(Some(&a.id), "A-1").unwrap();
+        let b = s.create_workspace(None, "B").unwrap();
+        // サブワークスペースで作っても、いちばん上の親のものになる
+        let sato = s.create_local_person("佐藤", &sub.id).unwrap();
+        assert_eq!(sato.workspace_ids, [a.id.clone()]);
+        let get = |s: &Store, id: &str| {
+            s.people()
+                .unwrap()
+                .into_iter()
+                .find(|p| p.id == id)
+                .unwrap()
+        };
+        assert_eq!(get(&s, &sato.id), sato);
+        assert!(!sato.is_global());
+
+        // ほかのワークスペースでも使えるようにする。2 回しても同じ
+        s.share_person(&sato.id, &b.id).unwrap();
+        s.share_person(&sato.id, &b.id).unwrap();
+        let mut both = vec![a.id.clone(), b.id.clone()];
+        both.sort();
+        assert_eq!(get(&s, &sato.id).workspace_ids, both);
+        // すべてのワークスペースで使う担当者は、そのまま
+        let me = s.people().unwrap().remove(0);
+        s.share_person(&me.id, &b.id).unwrap();
+        assert!(get(&s, &me.id).is_global());
+        assert!(matches!(
+            s.share_person("nope", &b.id),
+            Err(Error::NotFound(_))
+        ));
+        // 「自分」は、ワークスペースを決められない
+        assert!(matches!(
+            s.set_person_workspaces(&me.id, std::slice::from_ref(&b.id)),
+            Err(Error::Invalid(_))
+        ));
+        assert!(matches!(
+            s.set_person_workspaces("nope", &[]),
+            Err(Error::NotFound(_))
+        ));
+
+        // 片方のワークスペースを消しても、もう片方で使っているので残る
+        s.delete_workspace(&b.id).unwrap();
+        assert_eq!(get(&s, &sato.id).workspace_ids, [a.id.clone()]);
+        // 使っているワークスペースがなくなると、担当者も消える。「自分」は残る
+        s.undo_mark().unwrap();
+        s.delete_workspace(&a.id).unwrap();
+        let left = s.people().unwrap();
+        assert_eq!(left.len(), 1);
+        assert!(left[0].is_self);
+        // 元に戻すと、担当者もワークスペースとの対応も戻る
+        assert!(s.undo().unwrap());
+        assert_eq!(get(&s, &sato.id).workspace_ids, [a.id.clone()]);
+
+        // 空にすると、すべてのワークスペースで使う
+        s.set_person_workspaces(&sato.id, &[]).unwrap();
+        assert!(get(&s, &sato.id).is_global());
+        s.set_person_workspaces(&sato.id, std::slice::from_ref(&sub.id))
+            .unwrap();
+        assert_eq!(get(&s, &sato.id).workspace_ids, [a.id]);
+    }
+
+    #[test]
+    fn local_people_survive_export_and_import() {
+        let mut s = store();
+        s.ensure_self().unwrap();
+        let a = s.create_workspace(None, "A").unwrap();
+        let sato = s.create_local_person("佐藤", &a.id).unwrap();
+        let mut zip = std::io::Cursor::new(Vec::new());
+        crate::archive::export(&s, &mut zip).unwrap();
+        let mut other = store();
+        crate::archive::import(&mut other, &mut zip).unwrap();
+        assert_eq!(other.people().unwrap(), s.people().unwrap());
+        // 取り込み直すと、書き出したときの対応に戻る
+        other.set_person_workspaces(&sato.id, &[]).unwrap();
+        zip.set_position(0);
+        crate::archive::import(&mut other, &mut zip).unwrap();
+        assert_eq!(other.people().unwrap(), s.people().unwrap());
     }
 
     #[test]
@@ -3040,7 +3257,7 @@ mod disk_tests {
                 .map(|i| {
                     let draft = TaskDraft {
                         title: format!("タスク {i}"),
-                        description: "長い説明。".repeat(400),
+                        description: "長い説明。".repeat(800),
                         ..Default::default()
                     };
                     s.create_task(None, &draft).unwrap().id

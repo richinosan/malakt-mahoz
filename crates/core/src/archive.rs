@@ -78,6 +78,8 @@ impl Data {
         for p in &mut self.people {
             p.name = normalize_line(&p.name);
             p.note = normalize(&p.note);
+            p.workspace_ids.sort_unstable();
+            p.workspace_ids.dedup();
         }
         for t in &mut self.tasks {
             t.title = normalize_line(&t.title);

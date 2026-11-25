@@ -3918,6 +3918,159 @@ fn escape_after_cancelling_a_name_closes_what_is_open(cx: &mut TestAppContext) {
     .unwrap();
 }
 
+/// タスクの「担当者を登録」はメニューを開く。いちばん下の「新規担当として登録」は、ダイアログを
+/// 出さずに「新規担当者」を足して担当にし、その行で名前を書ける。足した人は親のワークスペースと
+/// そのサブワークスペースで選べる。ほかのワークスペースの人は、メニューから選ぶとここでも選べる。
+#[gpui_kit::test]
+fn assignees_are_registered_from_a_menu(cx: &mut TestAppContext) {
+    start(cx);
+    let (window, view) = open(cx, wide());
+    let (a, sub, b, tanaka, id) = cx.update(|cx| {
+        db::shared(cx).update(cx, |db, cx| {
+            cx.notify();
+            let s = &mut db.store;
+            let a = s.create_workspace(None, "Lorem").unwrap().id;
+            let sub = s.create_workspace(Some(&a), "Ipsum").unwrap().id;
+            let b = s.create_workspace(None, "Dolor").unwrap().id;
+            let tanaka = s.create_local_person("田中", &b).unwrap().id;
+            let draft = malakt_core::TaskDraft {
+                title: "Lorem ipsum".into(),
+                ..Default::default()
+            };
+            let id = s.create_task(Some(&sub), &draft).unwrap().id;
+            (a, sub, b, tanaka, id)
+        })
+    });
+    cx.update_window(window, |_, window, cx| {
+        view.update(cx, |v, cx| {
+            v.reload(cx);
+            v.open_panel(&id, window, cx)
+        })
+    })
+    .unwrap();
+    cx.run_until_parked();
+    let assignees = |cx: &mut TestAppContext| store(cx, |s| s.task(&id).unwrap()).assignee_ids;
+    let person = |cx: &mut TestAppContext, name: &str| {
+        store(cx, |s| s.people().unwrap())
+            .into_iter()
+            .find(|p| p.name == name)
+    };
+    // ほかのワークスペースの人は、担当を選ぶところに並ばない
+    cx.update(|cx| {
+        let view = view.read(cx);
+        let here = view.people_in(Some(&sub));
+        assert!(here.iter().all(|p| p.id != tanaka));
+        assert!(view.people_in(Some(&b)).iter().any(|p| p.id == tanaka));
+        assert!(view.people_in(None).iter().all(|p| p.id != tanaka));
+    });
+
+    // メニューのいちばん下が「新規担当として登録」。押すとすぐ増えて担当に入り、名前を書ける
+    ui(cx, window, |window, cx| window.click("p-assignees", cx));
+    ui(cx, window, |window, cx| window.click("p-add-person", cx));
+    ui(cx, window, |window, cx| {
+        window.press("up", cx);
+        window.press("enter", cx);
+    });
+    cx.run_until_parked();
+    let new = person(cx, malakt_mahoz::state::NEW_PERSON_NAME).unwrap();
+    assert_eq!(new.workspace_ids, std::slice::from_ref(&a));
+    assert_eq!(assignees(cx), std::slice::from_ref(&new.id));
+    cx.update(|cx| {
+        let view = view.read(cx);
+        assert_eq!(view.modal, Modal::None);
+        assert_eq!(view.person_naming.as_ref(), Some(&new.id));
+        assert_eq!(
+            view.inputs.name.read(cx).value().as_ref(),
+            malakt_mahoz::state::NEW_PERSON_NAME
+        );
+    });
+    ui(cx, window, |window, cx| {
+        assert!(window.find("person-input").visible());
+        window.input("佐藤", cx);
+        window.press("enter", cx);
+    });
+    assert_eq!(person(cx, "佐藤").unwrap().id, new.id);
+    // 名前を書いても、担当のまま
+    assert_eq!(assignees(cx), std::slice::from_ref(&new.id));
+    cx.update(|cx| {
+        let view = view.read(cx);
+        assert_eq!(view.person_naming, None);
+        // 親のワークスペースでもサブワークスペースでも選べて、ほかのワークスペースでは選べない
+        assert!(view.people_in(Some(&a)).iter().any(|p| p.id == new.id));
+        assert!(view.people_in(Some(&sub)).iter().any(|p| p.id == new.id));
+        assert!(view.people_in(Some(&b)).iter().all(|p| p.id != new.id));
+    });
+
+    // メニューの上には、ほかのワークスペースの人が並ぶ。選ぶと、ここでも選べるようになって担当に入る
+    ui(cx, window, |window, cx| window.click("p-add-person", cx));
+    ui(cx, window, |window, cx| {
+        window.press("down", cx);
+        window.press("enter", cx);
+    });
+    cx.run_until_parked();
+    let mut both = vec![a.clone(), b.clone()];
+    both.sort();
+    assert_eq!(person(cx, "田中").unwrap().workspace_ids, both);
+    let mut two = vec![new.id.clone(), tanaka.clone()];
+    two.sort();
+    assert_eq!(assignees(cx), two);
+    cx.update(|cx| {
+        assert!(view
+            .read(cx)
+            .people_in(Some(&sub))
+            .iter()
+            .any(|p| p.id == tanaka));
+    });
+
+    // 元に戻すと、担当からも、このワークスペースからも外れる
+    cx.update(|cx| view.update(cx, |v, cx| v.undo(false, cx)));
+    assert_eq!(
+        person(cx, "田中").unwrap().workspace_ids,
+        std::slice::from_ref(&b)
+    );
+    assert_eq!(assignees(cx), std::slice::from_ref(&new.id));
+
+    // 担当者のダイアログで、すべてのワークスペースで使う担当者にできる
+    cx.update_window(window, |_, window, cx| {
+        view.update(cx, |v, cx| v.open_people(window, cx))
+    })
+    .unwrap();
+    let row = cx.update(|cx| {
+        let view = view.read(cx);
+        view.people.iter().position(|p| p.id == new.id).unwrap()
+    });
+    ui(cx, window, |window, cx| {
+        window.click(("person-scope", row), cx)
+    });
+    ui(cx, window, |window, cx| {
+        window.press("down", cx);
+        window.press("enter", cx);
+    });
+    assert!(person(cx, "佐藤").unwrap().is_global());
+    cx.update(|cx| {
+        assert!(view
+            .read(cx)
+            .people_in(Some(&b))
+            .iter()
+            .any(|p| p.id == new.id));
+    });
+    // 3 つ目は 2 つ目のワークスペース。選ぶと、そこでだけ使う
+    let row = cx.update(|cx| {
+        let view = view.read(cx);
+        view.people.iter().position(|p| p.id == new.id).unwrap()
+    });
+    ui(cx, window, |window, cx| {
+        window.click(("person-scope", row), cx)
+    });
+    ui(cx, window, |window, cx| {
+        window.press("down", cx);
+        window.press("down", cx);
+        window.press("down", cx);
+        window.press("enter", cx);
+    });
+    assert_eq!(person(cx, "佐藤").unwrap().workspace_ids, [b]);
+}
+
 /// 担当者は、ダイアログの中で「新規担当者」として増やし、その行で名前を書く。
 #[gpui_kit::test]
 fn people_are_added_and_named_in_the_list(cx: &mut TestAppContext) {
