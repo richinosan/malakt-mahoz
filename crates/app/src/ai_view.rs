@@ -257,7 +257,7 @@ fn chip(
         .flex()
         .flex_none()
         .items_center()
-        .rounded_md()
+        .rounded(feel::md())
         .border_1()
         .text_xs()
         .cursor_pointer()
@@ -784,7 +784,7 @@ impl AiPane {
                         .gap_2()
                         .px_2()
                         .py_1()
-                        .rounded_md()
+                        .rounded(feel::md())
                         .items_center()
                         .text_sm()
                         .cursor_pointer()
@@ -902,7 +902,7 @@ impl AiPane {
             col()
                 .gap_2()
                 .p_3()
-                .rounded_lg()
+                .rounded(feel::lg())
                 .border_1()
                 .border_color(theme.border)
                 .bg(theme.background)
@@ -954,7 +954,7 @@ impl AiPane {
                     .when(model_open, |d| {
                         d.child(
                             col()
-                                .rounded_md()
+                                .rounded(feel::md())
                                 .border_1()
                                 .border_color(theme.border)
                                 .bg(theme.background)
@@ -1218,7 +1218,7 @@ impl AiPane {
                 .items_center()
                 .h_7()
                 .px_2()
-                .rounded_md()
+                .rounded(feel::md())
                 .text_xs()
         };
         let mut tray = col().id("ai-tray").gap_1().pb_2();
@@ -1333,7 +1333,7 @@ impl AiPane {
                     .items_center()
                     .px_2()
                     .h_10()
-                    .rounded_md()
+                    .rounded(feel::md())
                     .when(active, |d| d.bg(theme.muted))
                     .lit(theme.muted, cx)
                     .child(
@@ -1423,81 +1423,92 @@ impl AiPane {
             let opened = self.run_open.as_deref() == Some(run.id.as_str());
             let (toggle, retry) = (run.id.clone(), run.id.clone());
             let task = run.tasks.first().map(|(id, _)| id.clone());
-            let mut entry = col().rounded_md().hover(|s| s.bg(theme.muted)).child(
-                row()
-                    .gap_2()
-                    .items_center()
-                    .px_2()
-                    .h_10()
-                    .child(
-                        row()
-                            .id(("ai-run-row", ix))
-                            .flex_1()
-                            .min_w_0()
-                            .h_full()
-                            .gap_2()
-                            .items_center()
-                            .cursor_pointer()
-                            .child(
-                                div()
-                                    .flex_none()
-                                    .text_color(if failed { theme.danger } else { theme.success })
-                                    .child(
-                                        app_icon(if failed { "circle-x" } else { "circle-check" })
+            let mut entry = col()
+                .rounded(feel::md())
+                .hover(|s| s.bg(theme.muted))
+                .child(
+                    row()
+                        .gap_2()
+                        .items_center()
+                        .px_2()
+                        .h_10()
+                        .child(
+                            row()
+                                .id(("ai-run-row", ix))
+                                .flex_1()
+                                .min_w_0()
+                                .h_full()
+                                .gap_2()
+                                .items_center()
+                                .cursor_pointer()
+                                .child(
+                                    div()
+                                        .flex_none()
+                                        .text_color(if failed {
+                                            theme.danger
+                                        } else {
+                                            theme.success
+                                        })
+                                        .child(
+                                            app_icon(if failed {
+                                                "circle-x"
+                                            } else {
+                                                "circle-check"
+                                            })
                                             .size_4(),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .truncate()
-                                    .text_sm()
-                                    .child(Self::run_title(run.kind, &run.tasks)),
-                            )
-                            .child(
-                                div()
-                                    .flex_none()
-                                    .text_xs()
-                                    .text_color(theme.muted_foreground)
-                                    .child(malakt_core::view::format_relative(run.at, now)),
-                            )
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.run_open = if this.run_open.as_deref() == Some(toggle.as_str())
-                                {
-                                    None
-                                } else {
-                                    Some(toggle.clone())
-                                };
-                                cx.notify();
-                            }))
-                            .test_support(),
-                    )
-                    .when(failed, |d| {
-                        d.child(feel::gloss(
-                            Button::new(("ai-run-retry", ix))
-                                .icon(app_icon("refresh-cw"))
-                                .ghost()
-                                .xsmall()
-                                .tooltip("もう一度実行")
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .truncate()
+                                        .text_sm()
+                                        .child(Self::run_title(run.kind, &run.tasks)),
+                                )
+                                .child(
+                                    div()
+                                        .flex_none()
+                                        .text_xs()
+                                        .text_color(theme.muted_foreground)
+                                        .child(malakt_core::view::format_relative(run.at, now)),
+                                )
                                 .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.session.update(cx, |s, cx| s.retry_run(&retry, cx));
-                                })),
-                        ))
-                    })
-                    .when_some(task.filter(|_| self.main.is_some()), |d, task| {
-                        d.child(feel::gloss(
-                            Button::new(("ai-run-task", ix))
-                                .icon(app_icon("list-todo"))
-                                .ghost()
-                                .xsmall()
-                                .tooltip("タスクを開く")
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.open_task(&task, window, cx);
-                                })),
-                        ))
-                    }),
-            );
+                                    this.run_open =
+                                        if this.run_open.as_deref() == Some(toggle.as_str()) {
+                                            None
+                                        } else {
+                                            Some(toggle.clone())
+                                        };
+                                    cx.notify();
+                                }))
+                                .test_support(),
+                        )
+                        .when(failed, |d| {
+                            d.child(feel::gloss(
+                                Button::new(("ai-run-retry", ix))
+                                    .icon(app_icon("refresh-cw"))
+                                    .ghost()
+                                    .xsmall()
+                                    .tooltip("もう一度実行")
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.session.update(cx, |s, cx| s.retry_run(&retry, cx));
+                                    })),
+                            ))
+                        })
+                        .when_some(task.filter(|_| self.main.is_some()), |d, task| {
+                            d.child(feel::gloss(
+                                Button::new(("ai-run-task", ix))
+                                    .icon(app_icon("list-todo"))
+                                    .ghost()
+                                    .xsmall()
+                                    .tooltip("タスクを開く")
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.open_task(&task, window, cx);
+                                    })),
+                            ))
+                        }),
+                );
             if opened {
                 entry = entry.child(
                     run_details(run, &theme)
@@ -1528,7 +1539,7 @@ impl AiPane {
                         .max_w(relative(0.9))
                         .px_3()
                         .py_2()
-                        .rounded_lg()
+                        .rounded(feel::lg())
                         .bg(theme.primary)
                         .text_color(theme.primary_foreground)
                         .elevate(Elevation::Low, cx)
@@ -1600,7 +1611,7 @@ impl AiPane {
                         .max_w(relative(0.9))
                         .px_3()
                         .py_1()
-                        .rounded_lg()
+                        .rounded(feel::lg())
                         .border_1()
                         .border_color(theme.border)
                         .text_xs()
@@ -1613,7 +1624,7 @@ impl AiPane {
                 .id(("ai-error", ix))
                 .px_2()
                 .py_1()
-                .rounded_md()
+                .rounded(feel::md())
                 .bg(theme.danger)
                 .text_color(theme.danger_foreground)
                 .text_sm()
@@ -1660,7 +1671,7 @@ impl AiPane {
             Vec::new()
         };
         col()
-            .rounded_md()
+            .rounded(feel::md())
             .border_1()
             .border_color(theme.border)
             .bg(theme.background)
@@ -1674,7 +1685,7 @@ impl AiPane {
                     .items_center()
                     .text_xs()
                     .cursor_pointer()
-                    .rounded_md()
+                    .rounded(feel::md())
                     .lit(theme.muted, cx)
                     .active(|s| s.opacity(0.6))
                     .child(
@@ -1945,7 +1956,7 @@ impl AiPane {
                 .px_2()
                 .mr_1()
                 .h_6()
-                .rounded_md()
+                .rounded(feel::md())
                 .bg(theme.warning)
                 .text_color(theme.warning_foreground)
                 .text_xs()
@@ -2153,7 +2164,7 @@ impl AiPane {
                 .gap_2()
                 .m_3()
                 .p_3()
-                .rounded_md()
+                .rounded(feel::md())
                 .border_1()
                 .border_color(theme.primary)
                 .bg(theme.background)
@@ -2264,7 +2275,7 @@ impl AiPane {
                         // 入力欄と、サービス・モデル・effort・送信を 1 つの枠にまとめる
                         col()
                             .id("ai-composer")
-                            .rounded_lg()
+                            .rounded(feel::lg())
                             .border_1()
                             .border_color(theme.input)
                             .bg(theme.background)
@@ -2288,7 +2299,7 @@ impl AiPane {
                                             .pr_0p5()
                                             .h_6()
                                             .items_center()
-                                            .rounded_md()
+                                            .rounded(feel::md())
                                             .bg(theme.secondary)
                                             .text_xs()
                                             .child(app_icon("list-todo").size_3().flex_none())
@@ -2659,7 +2670,7 @@ impl AiPane {
                 .pl_2()
                 .pr_1()
                 .gap_1()
-                .rounded_md()
+                .rounded(feel::md())
                 .text_xs()
                 .cursor_pointer()
                 .active(|s| s.opacity(0.6))

@@ -142,7 +142,10 @@ fn floating_card(fill: Hsla, edges: [Pixels; 4], cx: &App) -> Div {
         .border_1()
         .border_color(feel::rim(cx))
         .bg(fill)
-        .elevate(Elevation::Low, cx)
+        .map(|d| match feel::panel_shadow(cx) {
+            Some(shadow) => d.shadow(shadow),
+            None => d.elevate(Elevation::Low, cx),
+        })
 }
 
 /// 画面の後ろに敷く画像。
@@ -225,7 +228,7 @@ fn chip(
         .id(id)
         .px_2()
         .py_0p5()
-        .rounded_md()
+        .rounded(feel::md())
         .border_1()
         .text_sm()
         .cursor_pointer()
@@ -433,7 +436,7 @@ fn card(cx: &App) -> Div {
     col()
         .p_4()
         .gap_2()
-        .rounded_lg()
+        .rounded(feel::lg())
         .border_1()
         .border_color(theme.border)
         .bg(glass(theme.popover, cx))
@@ -531,7 +534,7 @@ impl MainView {
             .gap_2()
             .px_3()
             .py_2()
-            .rounded_md()
+            .rounded(feel::md())
             .text_sm()
             .cursor_pointer()
             .when(active, |d| {
@@ -569,7 +572,7 @@ impl MainView {
         };
         let theme = cx.theme();
         let over = drag.over.as_ref().is_some_and(|(t, _)| *t == target);
-        el.rounded_md()
+        el.rounded(feel::md())
             .when(over, |d| d.bg(theme.primary.opacity(0.25)))
             .on_mouse_move(cx.listener(move |this, event: &MouseMoveEvent, _, cx| {
                 this.drag_task_over(target.clone(), event.position, cx)
@@ -612,7 +615,7 @@ impl MainView {
                     .flex_none()
                     .items_center()
                     .justify_center()
-                    .rounded_md()
+                    .rounded(feel::md())
                     .cursor_pointer()
                     .text_color(theme.muted_foreground)
                     .lit(theme.muted, cx)
@@ -705,7 +708,7 @@ impl MainView {
                         .px_3()
                         // 入力欄の高さに足して、読むときの行と同じ高さにする
                         .py(px(3.2))
-                        .rounded_md()
+                        .rounded(feel::md())
                         .text_sm()
                         .bg(theme.accent)
                         .text_color(theme.accent_foreground)
@@ -969,7 +972,7 @@ impl MainView {
             .h_8()
             .px_1()
             .gap_0p5()
-            .rounded_md()
+            .rounded(feel::md())
             .border_1()
             .border_color(theme.border)
             .bg(theme.muted);
@@ -984,7 +987,7 @@ impl MainView {
             let active = choice == current;
             toggle = toggle.child(
                 div()
-                    .rounded_md()
+                    .rounded(feel::md())
                     .when(active, |d| {
                         d.bg(theme.background).elevate(Elevation::Mid, cx)
                     })
@@ -1079,7 +1082,7 @@ impl MainView {
                     .flex_none()
                     .items_center()
                     .justify_center()
-                    .rounded_md()
+                    .rounded(feel::md())
                     .text_color(theme.foreground)
                     .hover(move |s| s.bg(hover_bg).text_color(hover_fg))
                     .active(move |s| s.bg(active_bg).text_color(hover_fg))
@@ -1238,7 +1241,7 @@ impl MainView {
                             .flex()
                             .items_center()
                             .justify_center()
-                            .rounded_md()
+                            .rounded(feel::md())
                             .bg(theme.muted)
                             .child(icon),
                     )
@@ -1454,7 +1457,7 @@ impl MainView {
             .child(if count == 0 {
                 div()
                     .p_4()
-                    .rounded_lg()
+                    .rounded(feel::lg())
                     .border_1()
                     .border_dashed()
                     .border_color(theme.border)
@@ -1471,7 +1474,7 @@ impl MainView {
                     .flex_none()
                     .border_1()
                     .border_color(theme.border)
-                    .rounded_lg()
+                    .rounded(feel::lg())
                     .bg(glass(theme.popover, cx))
                     .overflow_hidden()
                     .relative()
@@ -1504,7 +1507,7 @@ impl MainView {
                         .items_center()
                         .border_1()
                         .border_color(theme.border)
-                        .rounded_lg()
+                        .rounded(feel::lg())
                         .bg(glass(theme.popover, cx))
                         .cursor_pointer()
                         .hover(|s| s.border_color(theme.primary))
@@ -1516,7 +1519,7 @@ impl MainView {
                                 .flex()
                                 .items_center()
                                 .justify_center()
-                                .rounded_md()
+                                .rounded(feel::md())
                                 .bg(theme.muted)
                                 .child(workspace_icon(
                                     ws.icon.as_deref(),
@@ -1809,7 +1812,7 @@ impl MainView {
             .gap_2()
             .flex_wrap()
             .p_2()
-            .rounded_md()
+            .rounded(feel::md())
             .bg(theme.secondary)
             .child(div().text_sm().child(format!("{count} 件を選択中")))
             .child(
@@ -1904,7 +1907,7 @@ impl MainView {
                 .gap_1p5()
                 .px_3()
                 .py_1p5()
-                .rounded_md()
+                .rounded(feel::md())
                 .text_sm()
                 .cursor_pointer()
                 .when(on, |d| d.bg(theme.background).font_weight(FontWeight::BOLD))
@@ -2071,7 +2074,7 @@ impl MainView {
             .min_h_0()
             .border_1()
             .border_color(theme.border)
-            .rounded_lg()
+            .rounded(feel::lg())
             .bg(glass(theme.popover, cx))
             .elevate(Elevation::Low, cx)
             .overflow_hidden()
@@ -2293,7 +2296,7 @@ impl MainView {
                     .px(px(6.))
                     .py_0p5()
                     .gap_1()
-                    .rounded_md()
+                    .rounded(feel::md())
                     .cursor_pointer()
                     .when(open.is_some(), |d| d.bg(theme.accent))
                     .lit(theme.accent, cx)
@@ -2508,7 +2511,7 @@ impl MainView {
                             .flex()
                             .items_center()
                             .justify_center()
-                            .rounded_md()
+                            .rounded(feel::md())
                             .text_color(theme.muted_foreground)
                             .hover(|s| s.bg(theme.accent).text_color(theme.foreground))
                             .sunk(theme.primary.opacity(0.4), cx)
@@ -3095,7 +3098,10 @@ impl MainView {
         col()
             .gap_1()
             .when(boxed, |d| {
-                d.p_2().border_1().border_color(theme.border).rounded_md()
+                d.p_2()
+                    .border_1()
+                    .border_color(theme.border)
+                    .rounded(feel::md())
             })
             .child(
                 row()
@@ -3171,7 +3177,7 @@ impl MainView {
             .gap_2()
             .px_2()
             .py_1p5()
-            .rounded_md()
+            .rounded(feel::md())
             .border_1()
             .border_color(theme.border)
             .bg(theme.popover)
@@ -3308,7 +3314,7 @@ impl MainView {
             .mx(px(-8.))
             .px_2()
             .py_1()
-            .rounded_md()
+            .rounded(feel::md())
             .cursor_pointer()
             .lit(theme.accent.opacity(0.4), cx)
             .when(self.assignee_picker, |d| d.bg(theme.accent.opacity(0.4)))
@@ -3329,7 +3335,7 @@ impl MainView {
     fn assignee_picker(&self, task: &Todo, cx: &mut Context<Self>) -> Div {
         let theme = cx.theme().clone();
         let mut list = col()
-            .rounded_md()
+            .rounded(feel::md())
             .border_1()
             .border_color(theme.border)
             .bg(theme.background);
@@ -3383,7 +3389,7 @@ impl MainView {
                             .gap_1()
                             .px_2()
                             .py_1()
-                            .rounded_md()
+                            .rounded(feel::md())
                             .border_1()
                             .text_xs()
                             .cursor_pointer()
@@ -3477,7 +3483,7 @@ impl MainView {
                     .mx(px(-8.))
                     .px_2()
                     .py_1()
-                    .rounded_md()
+                    .rounded(feel::md())
                     .border_1()
                     .border_color(gpui_kit::transparent_black())
                     .text_xl()
@@ -3628,7 +3634,7 @@ impl MainView {
                                 .gap_1()
                                 .items_center()
                                 .px_1()
-                                .rounded_md()
+                                .rounded(feel::md())
                                 .cursor_pointer()
                                 .lit(theme.muted, cx)
                                 .child(format!("AI の記録 {}", runs.len()))
@@ -4024,7 +4030,7 @@ impl MainView {
                     .p_2()
                     .border_1()
                     .border_color(theme.border)
-                    .rounded_md()
+                    .rounded(feel::md())
                     .child(
                         row()
                             .gap_2()
@@ -4147,7 +4153,8 @@ impl MainView {
             .gap_2()
             .border_b_1()
             .border_color(theme.border)
-            .bg(theme.popover)
+            // 浮かせたパネルの中では、パネルの地と角の丸みをそのまま見せる
+            .when(!crate::theme::floating_now(), |d| d.bg(theme.popover))
             .child(
                 div()
                     .flex_1()
@@ -4249,7 +4256,7 @@ impl MainView {
                         col()
                             .gap_1()
                             .p_2()
-                            .rounded_md()
+                            .rounded(feel::md())
                             .bg(theme.secondary)
                             .child(section_title("ピン留め"))
                             .children(pinned.iter().enumerate().map(|(i, c)| {
@@ -4264,7 +4271,7 @@ impl MainView {
                         col()
                             .gap_1()
                             .p_2()
-                            .rounded_md()
+                            .rounded(feel::md())
                             .border_1()
                             .border_color(theme.border)
                             .child(section_title("完了報告"))
@@ -4384,11 +4391,31 @@ impl MainView {
                 .when_some(width, |d, width| {
                     d.w(width).border_l_1().border_color(theme.border)
                 })
+                // 浮かせたパネルの中に収めて、角をパネルに合わせる
+                .when(crate::theme::floating_now(), |d| {
+                    let half = FLOAT_GAP / 2.;
+                    let corner = px(15.);
+                    d.top(half)
+                        .right(FLOAT_GAP)
+                        .bottom(FLOAT_GAP)
+                        .rounded_tr(corner)
+                        .rounded_br(corner)
+                        .when(sheet, |d| {
+                            d.left(half).rounded_tl(corner).rounded_bl(corner)
+                        })
+                        .overflow_hidden()
+                })
                 // 一覧の上に重ねるときは、影で浮かせる
                 .when(!sheet && crate::theme::overlay(cx), |d| {
                     d.elevate(Elevation::High, cx)
                 })
-                .bg(theme.background)
+                // 背景の画像の上では、後ろが少し透ける
+                .bg(match crate::theme::backdrop(cx) {
+                    Some(backdrop) if crate::theme::floating_now() => {
+                        theme.background.opacity((backdrop.alpha + 1.) / 2.)
+                    }
+                    _ => theme.background,
+                })
                 .occlude()
                 .flex()
                 .flex_col()
@@ -4487,7 +4514,14 @@ impl MainView {
                     .max_h(relative(0.9))
                     .p_4()
                     .gap_3()
-                    .rounded_lg()
+                    // 浮かせたパネルと同じ丸みにする
+                    .map(|d| {
+                        if crate::theme::floating_now() {
+                            d.rounded(px(16.))
+                        } else {
+                            d.rounded(feel::lg())
+                        }
+                    })
                     .border_1()
                     .border_color(theme.border)
                     .bg(theme.background)
@@ -4548,7 +4582,7 @@ impl MainView {
             .h_8()
             .px_2()
             .gap_2()
-            .rounded_md()
+            .rounded(feel::md())
             .cursor_pointer()
             .text_sm()
             .text_color(theme.muted_foreground)
@@ -4577,7 +4611,7 @@ impl MainView {
                         .h_8()
                         .px_3()
                         .gap_2()
-                        .rounded_md()
+                        .rounded(feel::md())
                         .border_1()
                         .border_color(theme.input)
                         .cursor_pointer()
@@ -4637,7 +4671,7 @@ impl MainView {
                             .h_8()
                             .px_3()
                             .gap_2()
-                            .rounded_md()
+                            .rounded(feel::md())
                             .border_1()
                             .border_color(theme.input)
                             .cursor_pointer()
@@ -4837,7 +4871,7 @@ impl MainView {
                 .w(PRESET_WIDTH)
                 .gap_1()
                 .p_1()
-                .rounded_lg()
+                .rounded(feel::lg())
                 .cursor_pointer()
                 .border_2()
                 .border_color(if selected {
@@ -4871,7 +4905,7 @@ impl MainView {
             div()
                 .relative()
                 .h(px(56.))
-                .rounded_md()
+                .rounded(feel::md())
                 .overflow_hidden()
                 .border_1()
                 .border_color(theme.border)
@@ -4987,7 +5021,7 @@ impl MainView {
                             .absolute()
                             .top(px(6.))
                             .right(px(6.))
-                            .rounded_md()
+                            .rounded(feel::md())
                             .bg(theme.background)
                             .opacity(0.)
                             .group_hover(group, |s| s.opacity(1.))
@@ -5014,7 +5048,7 @@ impl MainView {
                 .child(
                     div()
                         .h(px(56.))
-                        .rounded_md()
+                        .rounded(feel::md())
                         .border_1()
                         .border_dashed()
                         .border_color(theme.input)
@@ -5089,7 +5123,7 @@ impl MainView {
                 .relative()
                 .h(px(56.))
                 .items_stretch()
-                .rounded_md()
+                .rounded(feel::md())
                 .overflow_hidden()
                 .border_1()
                 .border_color(theme.border)
@@ -5119,7 +5153,7 @@ impl MainView {
                     .w(PRESET_WIDTH)
                     .gap_1()
                     .p_1()
-                    .rounded_lg()
+                    .rounded(feel::lg())
                     .cursor_pointer()
                     .border_2()
                     .border_color(if layout.shown(chat, cx) {
@@ -5162,7 +5196,7 @@ impl MainView {
                             .h(px(40.))
                             .px_3()
                             .gap_2()
-                            .rounded_md()
+                            .rounded(feel::md())
                             .cursor_pointer()
                             .when(selected, |d| d.bg(theme.accent))
                             .lit(theme.accent.opacity(0.6), cx)
@@ -5228,7 +5262,7 @@ impl MainView {
                 .w(px(152.))
                 .gap_1()
                 .p_1()
-                .rounded_lg()
+                .rounded(feel::lg())
                 .cursor_pointer()
                 .border_2()
                 .border_color(if selected {
@@ -5241,7 +5275,7 @@ impl MainView {
                 .child(
                     div()
                         .h(px(80.))
-                        .rounded_md()
+                        .rounded(feel::md())
                         .overflow_hidden()
                         .border_1()
                         .border_color(theme.border)
@@ -5374,7 +5408,7 @@ impl MainView {
                             .flex()
                             .items_center()
                             .justify_center()
-                            .rounded_md()
+                            .rounded(feel::md())
                             .cursor_pointer()
                             .border_1()
                             .border_color(if selected {
@@ -5408,7 +5442,7 @@ impl MainView {
                     let active = self.icon_category == Some(category);
                     categories = categories.child(
                         div()
-                            .rounded_md()
+                            .rounded(feel::md())
                             .when(active, |d| d.bg(theme.secondary_hover))
                             .child(feel::gloss(
                                 Button::new(("icon-category", ix))
@@ -5461,7 +5495,7 @@ impl MainView {
                             .flex()
                             .items_center()
                             .justify_center()
-                            .rounded_md()
+                            .rounded(feel::md())
                             .cursor_pointer()
                             .border_1()
                             .border_color(if selected {
@@ -5487,7 +5521,7 @@ impl MainView {
                             .flex()
                             .items_center()
                             .justify_center()
-                            .rounded_md()
+                            .rounded(feel::md())
                             .cursor_pointer()
                             .border_1()
                             .border_color(if selected {
@@ -5641,7 +5675,7 @@ impl MainView {
                                 .flex()
                                 .items_center()
                                 .px_2()
-                                .rounded_md()
+                                .rounded(feel::md())
                                 .border_1()
                                 .border_color(gpui_kit::transparent_black())
                                 .cursor_pointer()
@@ -5848,7 +5882,7 @@ impl MainView {
                             col()
                                 .gap_1()
                                 .p_2()
-                                .rounded_md()
+                                .rounded(feel::md())
                                 .bg(theme.secondary)
                                 .child(
                                     div()
@@ -5915,7 +5949,7 @@ impl MainView {
                             .id(("notice", ix))
                             .gap_0p5()
                             .p_2()
-                            .rounded_md()
+                            .rounded(feel::md())
                             .cursor_pointer()
                             .lit(theme.secondary_hover, cx)
                             .when(n.is_unread(), |d| d.bg(theme.secondary))
@@ -6574,7 +6608,7 @@ impl MainView {
                     .max_w(px(320.))
                     .px_3()
                     .py_2()
-                    .rounded_md()
+                    .rounded(feel::md())
                     .border_1()
                     .border_color(theme.primary)
                     .bg(theme.popover)
@@ -6603,7 +6637,7 @@ impl MainView {
                                     .id("pane-notice")
                                     .px_3()
                                     .py_2()
-                                    .rounded_md()
+                                    .rounded(feel::md())
                                     .elevate(Elevation::High, cx)
                                     .text_sm()
                                     .cursor_pointer()
@@ -6718,7 +6752,13 @@ impl Render for MainView {
             }
             panel
                 .with_animation("panel-in", appear(180), |panel, t| {
-                    panel.right(px(-48.) * (1. - t)).opacity(t)
+                    // 浮かせたパネルの中では、右のすき間の分だけ内側で止まる
+                    let rest = if crate::theme::floating_now() {
+                        FLOAT_GAP
+                    } else {
+                        px(0.)
+                    };
+                    panel.right(rest + px(-48.) * (1. - t)).opacity(t)
                 })
                 .into_any_element()
         });
@@ -6843,7 +6883,7 @@ impl Render for MainView {
                     .max_w(px(320.))
                     .px_3()
                     .py_2()
-                    .rounded_md()
+                    .rounded(feel::md())
                     .border_1()
                     .border_color(theme.primary)
                     .bg(theme.popover)
@@ -6884,7 +6924,7 @@ impl Render for MainView {
                                     .gap_3()
                                     .px_3()
                                     .py_2()
-                                    .rounded_md()
+                                    .rounded(feel::md())
                                     .elevate(Elevation::High, cx)
                                     .text_sm()
                                     .cursor_pointer()

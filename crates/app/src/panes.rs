@@ -707,7 +707,7 @@ impl MainView {
                     div()
                         .px_3()
                         .py_1()
-                        .rounded_md()
+                        .rounded(feel::md())
                         .bg(theme.primary)
                         .text_color(theme.primary_foreground)
                         .text_sm()
