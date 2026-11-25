@@ -23,6 +23,7 @@ use malakt_core::{Comment, DueRule, Role as Raci, Roles, Status, Task as Todo, W
 
 use crate::ai::ShellPlace;
 use crate::ai_view::{docked_width, TASKS_MIN};
+use crate::feel::{self, Lit, Sunk};
 use crate::shadow::{Elevate, Elevation};
 use crate::state::{
     Column, CommentMode, Detail, DropTarget, Editing, MainView, Modal, Nav, SubModal,
@@ -111,138 +112,6 @@ impl Framed for Button {
         .elevate(Elevation::Low, cx)
     }
 }
-
-/// 乗せたとき・押したとき・選んでいるときの塗り方。テーマの `Feel` で変わる。
-/// 乗せた部品 1 つにだけ塗るので、描く量は増えない。
-pub(crate) mod feel {
-    use super::*;
-    use crate::theme::Feel;
-
-    fn white(alpha: f32) -> Hsla {
-        gpui_kit::white().opacity(alpha)
-    }
-
-    fn edge(color: Hsla, offset: f32, blur: f32, inset: bool) -> BoxShadow {
-        BoxShadow {
-            color,
-            offset: point(px(0.), px(offset)),
-            blur_radius: px(blur),
-            spread_radius: px(0.),
-            inset,
-        }
-    }
-
-    /// ガラスの面。上が明るい反射。
-    fn sheen(top: f32, bottom: f32) -> Background {
-        linear_gradient(
-            180.,
-            linear_color_stop(white(top), 0.),
-            linear_color_stop(white(bottom), 1.),
-        )
-    }
-
-    /// 乗せたとき。
-    pub fn hover(s: StyleRefinement, color: Hsla, cx: &App) -> StyleRefinement {
-        let theme = cx.theme();
-        let dark = theme.mode.is_dark();
-        match crate::theme::feel(cx) {
-            Feel::Standard => s.bg(color),
-            Feel::Glass => {
-                let (top, bottom) = if dark { (0.2, 0.05) } else { (0.6, 0.2) };
-                s.bg(sheen(top, bottom)).shadow(vec![
-                    // 上の縁の光と、外ににじむ光
-                    edge(white(if dark { 0.45 } else { 0.9 }), 1., 0., true),
-                    edge(white(if dark { 0.14 } else { 0.5 }), 0., 8., false),
-                ])
-            }
-            Feel::Crisp => s.bg(theme.foreground.opacity(0.08)),
-            Feel::Tint => s.bg(theme.primary.opacity(0.14)),
-        }
-    }
-
-    /// 押している間。
-    pub fn press(s: StyleRefinement, color: Hsla, cx: &App) -> StyleRefinement {
-        let theme = cx.theme();
-        match crate::theme::feel(cx) {
-            Feel::Standard => s.bg(color),
-            // 上が暗く下が明るい。面が沈んで見える
-            Feel::Glass => s
-                .bg(linear_gradient(
-                    180.,
-                    linear_color_stop(gpui_kit::black().opacity(0.16), 0.),
-                    linear_color_stop(white(0.1), 1.),
-                ))
-                .shadow(vec![edge(gpui_kit::black().opacity(0.3), 1., 3., true)]),
-            Feel::Crisp => s.bg(theme.foreground.opacity(0.16)),
-            Feel::Tint => s.bg(theme.primary.opacity(0.28)),
-        }
-    }
-
-    /// 枠つきのボタンの、乗せたときと押している間の色。部品が 1 色しか受け取らないので、面の色だけを変える。
-    pub fn button(hover: Hsla, active: Hsla, cx: &App) -> (Hsla, Hsla) {
-        let theme = cx.theme();
-        let dark = theme.mode.is_dark();
-        match crate::theme::feel(cx) {
-            Feel::Standard => (hover, active),
-            Feel::Glass => (
-                theme.background.blend(white(if dark { 0.22 } else { 0.8 })),
-                theme.background.blend(gpui_kit::black().opacity(0.18)),
-            ),
-            Feel::Crisp => (
-                theme.background.blend(theme.foreground.opacity(0.08)),
-                theme.background.blend(theme.foreground.opacity(0.16)),
-            ),
-            Feel::Tint => (
-                theme.background.blend(theme.primary.opacity(0.14)),
-                theme.background.blend(theme.primary.opacity(0.28)),
-            ),
-        }
-    }
-
-    /// 選んでいる行や項目の面。
-    pub fn selected<E: Styled>(el: E, color: Hsla, cx: &App) -> E {
-        let theme = cx.theme();
-        let dark = theme.mode.is_dark();
-        match crate::theme::feel(cx) {
-            Feel::Standard => el.bg(color),
-            Feel::Glass => {
-                let (top, bottom) = if dark { (0.16, 0.08) } else { (0.7, 0.4) };
-                el.bg(sheen(top, bottom)).shadow(vec![edge(
-                    white(if dark { 0.35 } else { 0.9 }),
-                    1.,
-                    0.,
-                    true,
-                )])
-            }
-            Feel::Crisp => el.bg(theme.foreground.opacity(0.12)),
-            Feel::Tint => el.bg(theme.primary.opacity(0.2)),
-        }
-    }
-
-    /// 浮かせたパネルの縁。ガラスのときは細い光の線にする。
-    pub fn rim(cx: &App) -> Hsla {
-        match crate::theme::feel(cx) {
-            Feel::Glass => white(if cx.theme().mode.is_dark() { 0.22 } else { 0.7 }),
-            _ => cx.theme().border,
-        }
-    }
-}
-
-/// 乗せたときの塗り方を、テーマに合わせて付ける。
-pub(crate) trait Lit: InteractiveElement + Sized {
-    fn lit(self, color: Hsla, cx: &App) -> Self {
-        self.hover(|s| feel::hover(s, color, cx))
-    }
-}
-impl<E: InteractiveElement> Lit for E {}
-
-/// 押している間の塗り方を、テーマに合わせて付ける。
-pub(crate) trait Sunk: StatefulInteractiveElement + Sized {
-    fn sunk(self, color: Hsla, cx: &App) -> Self {
-        self.active(|s| feel::press(s, color, cx))
-    }
-}
-impl<E: StatefulInteractiveElement> Sunk for E {}
 
 /// 背景の画像を出しているときは、面を透かして塗る。
 fn glass(color: Hsla, cx: &App) -> Hsla {
@@ -416,14 +285,16 @@ fn status_badge(status: Status, cx: &App) -> Div {
 /// 知らせの中に出す「元に戻す」ボタン。
 fn notice_undo(cx: &mut Context<MainView>) -> impl IntoElement {
     let theme = cx.theme();
-    Button::new("notice-undo")
-        .icon(app_icon("undo-2").text_color(theme.primary_foreground))
-        .ghost()
-        .small()
-        .tooltip("元に戻す")
-        .on_click(cx.listener(|this, _, _, cx| {
-            this.undo(false, cx);
-        }))
+    feel::gloss(
+        Button::new("notice-undo")
+            .icon(app_icon("undo-2").text_color(theme.primary_foreground))
+            .ghost()
+            .small()
+            .tooltip("元に戻す")
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.undo(false, cx);
+            })),
+    )
 }
 
 /// 状態を選ぶメニューの中身。選ぶとすぐ変わり、コメントを付けるときだけダイアログを開く。
@@ -880,7 +751,7 @@ impl MainView {
                                     .child("タスク管理"),
                             ),
                     )
-                    .child(
+                    .child(feel::gloss(
                         Button::new("close-sidebar")
                             .icon(app_icon("x"))
                             .framed(cx)
@@ -888,7 +759,7 @@ impl MainView {
                             .on_click(
                                 cx.listener(move |this, _, _, cx| this.toggle_sidebar(wide, cx)),
                             ),
-                    ),
+                    )),
             )
             .child(
                 col()
@@ -957,7 +828,7 @@ impl MainView {
                             .text_color(theme.muted_foreground)
                             .child(app_icon("layers").xsmall().flex_none())
                             .child(div().flex_1().text_xs().child("ワークスペース"))
-                            .child(
+                            .child(feel::gloss(
                                 Button::new("add-workspace")
                                     .icon(app_icon("plus"))
                                     .ghost()
@@ -966,7 +837,7 @@ impl MainView {
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.add_workspace(None, window, cx)
                                     })),
-                            ),
+                            )),
                     )
                     .when(!self.workspaces.is_empty(), |d| d.child(tree)),
             )
@@ -1067,7 +938,7 @@ impl MainView {
                     .when(active, |d| {
                         d.bg(theme.background).elevate(Elevation::Mid, cx)
                     })
-                    .child(
+                    .child(feel::gloss(
                         Button::new(("theme", ix))
                             .icon(app_icon(icon))
                             .ghost()
@@ -1085,7 +956,7 @@ impl MainView {
                                 }
                                 cx.notify();
                             })),
-                    ),
+                    )),
             );
         }
         toggle
@@ -1299,7 +1170,7 @@ impl MainView {
                 })
                 .child(
                     // ボタンのある場所はマウスを受け止める（右のボタンと同じ理由）
-                    div().occlude().child(
+                    div().occlude().child(feel::gloss(
                         Button::new("toggle-sidebar")
                             .icon(app_icon("menu"))
                             .framed(cx)
@@ -1307,7 +1178,7 @@ impl MainView {
                             .on_click(
                                 cx.listener(move |this, _, _, cx| this.toggle_sidebar(wide, cx)),
                             ),
-                    ),
+                    )),
                 )
                 .when_some(icon, |d, icon| {
                     d.child(
@@ -1352,7 +1223,7 @@ impl MainView {
                 // これがないと、Windows ではボタンを離したときのクリックがウィンドウの移動に取られる
                 .occlude()
                 .child(self.theme_toggle(cx))
-                .child(
+                .child(feel::gloss(
                     Button::new("pane-split")
                         .icon(app_icon("columns-2"))
                         .tooltip("右に分割（Ctrl+B → v）")
@@ -1364,8 +1235,9 @@ impl MainView {
                                 cx,
                             )
                         })),
-                )
-                .child(
+                ))
+                .child(feel::gloss_when(
+                    !(self.ai_session.read(cx).busy),
                     Button::new("ai-toggle")
                         .icon(app_icon("sparkles"))
                         // AI が動いている間は、回る印に変わる
@@ -1374,20 +1246,22 @@ impl MainView {
                         .rounded(px(999.))
                         .tooltip("AI チャット")
                         .on_click(cx.listener(|this, _, window, cx| this.toggle_ai(window, cx))),
-                )
+                ))
                 // 新しい版を取ってあるときだけ出る。閉じても同じ版に入れ替わる
                 .children(update_ready.map(|version| {
-                    Button::new("update-now")
-                        .icon(app_icon("refresh-cw"))
-                        .framed(cx)
-                        .rounded(px(999.))
-                        .tooltip(format!("v{version} に更新して再起動"))
-                        .on_click(cx.listener(|this, _, _, cx| this.update_now(cx)))
+                    feel::gloss_round(
+                        Button::new("update-now")
+                            .icon(app_icon("refresh-cw"))
+                            .framed(cx)
+                            .rounded(px(999.))
+                            .tooltip(format!("v{version} に更新して再起動"))
+                            .on_click(cx.listener(|this, _, _, cx| this.update_now(cx))),
+                    )
                 }))
                 .child(
                     div()
                         .relative()
-                        .child(
+                        .child(feel::gloss_round(
                             Button::new("open-notices")
                                 .icon(app_icon("bell"))
                                 .framed(cx)
@@ -1397,7 +1271,7 @@ impl MainView {
                                     this.modal = Modal::Notices;
                                     cx.notify();
                                 })),
-                        )
+                        ))
                         .when(unread > 0, |d| {
                             d.child(
                                 div()
@@ -1923,12 +1797,17 @@ impl MainView {
             ("bulk-assignees", "担当", Modal::BulkAssignees),
             ("bulk-categories", "カテゴリ", Modal::BulkCategories),
         ] {
-            bar = bar.child(Button::new(button).label(label).small().on_click(
-                cx.listener(move |this, _, window, cx| this.open_bulk(modal.clone(), window, cx)),
+            bar = bar.child(feel::gloss(
+                Button::new(button)
+                    .label(label)
+                    .small()
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.open_bulk(modal.clone(), window, cx)
+                    })),
             ));
         }
         bar.child(div().flex_1())
-            .child(
+            .child(feel::gloss(
                 Button::new("bulk-move")
                     .label("移動")
                     .small()
@@ -1936,8 +1815,8 @@ impl MainView {
                         this.modal = Modal::MoveTasks(this.selected_ids());
                         cx.notify();
                     })),
-            )
-            .child(
+            ))
+            .child(feel::gloss(
                 Button::new("bulk-delete")
                     .label("削除")
                     .danger()
@@ -1946,8 +1825,8 @@ impl MainView {
                         this.modal = Modal::DeleteTasks(this.selected_ids());
                         cx.notify();
                     })),
-            )
-            .child(
+            ))
+            .child(feel::gloss(
                 Button::new("bulk-clear")
                     .label("選択を解除")
                     .ghost()
@@ -1956,7 +1835,7 @@ impl MainView {
                         this.selected.clear();
                         cx.notify();
                     })),
-            )
+            ))
     }
 
     fn render_list(&self, table: bool, cx: &mut Context<Self>) -> Div {
@@ -2026,7 +1905,7 @@ impl MainView {
         if let Some(id) = workspace_id.clone() {
             let (c, d) = (id.clone(), id.clone());
             header = header
-                .child(
+                .child(feel::gloss(
                     Button::new("ws-settings")
                         .icon(app_icon("sliders-horizontal"))
                         .tooltip("タスク追加時の既定値")
@@ -2034,22 +1913,22 @@ impl MainView {
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.open_workspace_settings(&d, window, cx)
                         })),
-                )
-                .child(
+                ))
+                .child(feel::gloss(
                     Button::new("ws-export")
                         .icon(app_icon("download"))
                         .tooltip("エクスポート")
                         .framed(cx)
                         .on_click(cx.listener(|this, _, window, cx| this.export(window, cx))),
-                )
-                .child(
+                ))
+                .child(feel::gloss(
                     Button::new("ws-import")
                         .icon(app_icon("upload"))
                         .tooltip("インポート")
                         .framed(cx)
                         .on_click(cx.listener(|this, _, window, cx| this.import(window, cx))),
-                )
-                .child(
+                ))
+                .child(feel::gloss(
                     Button::new("ws-delete")
                         .icon(app_icon("trash"))
                         .tooltip("削除")
@@ -2058,16 +1937,16 @@ impl MainView {
                             this.modal = Modal::DeleteWorkspace(c.clone());
                             cx.notify();
                         })),
-                );
+                ));
         }
-        header = header.child(
+        header = header.child(feel::gloss(
             Button::new("new-task-open")
                 .icon(app_icon("plus"))
                 .label("新しいタスク")
                 .primary()
                 .elevate(Elevation::Low, cx)
                 .on_click(cx.listener(|this, _, window, cx| this.add_task(window, cx))),
-        );
+        ));
 
         let rows = if visible == 0 {
             col()
@@ -2088,7 +1967,7 @@ impl MainView {
                     "完了したタスクはありません。"
                 })
                 .when(active > 0, |d| {
-                    d.child(
+                    d.child(feel::gloss(
                         Button::new("clear-filters")
                             .label("絞り込みを解除")
                             .small()
@@ -2100,7 +1979,7 @@ impl MainView {
                                 this.refilter();
                                 cx.notify();
                             })),
-                    )
+                    ))
                 })
         } else {
             let (sizes, height) = self.row_sizes[usize::from(!table)].clone();
@@ -2206,16 +2085,20 @@ impl MainView {
             .vertical_scrollbar(&self.page_scroll)
             // 右下の「＋」。どこまでスクロールしていても、新しいタスクを始められる
             .child(
-                div().absolute().right_6().bottom(px(16.)).child(
-                    Button::new("fab-new-task")
-                        .icon(app_icon("plus"))
-                        .primary()
-                        .large()
-                        .rounded(px(999.))
-                        .elevate(Elevation::High, cx)
-                        .tooltip("新しいタスク")
-                        .on_click(cx.listener(|this, _, window, cx| this.add_task(window, cx))),
-                ),
+                div()
+                    .absolute()
+                    .right_6()
+                    .bottom(px(16.))
+                    .child(feel::gloss_round(
+                        Button::new("fab-new-task")
+                            .icon(app_icon("plus"))
+                            .primary()
+                            .large()
+                            .rounded(px(999.))
+                            .elevate(Elevation::High, cx)
+                            .tooltip("新しいタスク")
+                            .on_click(cx.listener(|this, _, window, cx| this.add_task(window, cx))),
+                    )),
             )
     }
 
@@ -3015,13 +2898,15 @@ impl MainView {
         let view = cx.entity().downgrade();
         let submit = move || {
             let view = view.clone();
-            Button::new("quick-add-submit")
-                .label("追加")
-                .primary()
-                .on_click(move |_, window, cx| {
-                    // ウィンドウを閉じたあとなら、反映する先がない
-                    let _ = view.update(cx, |this, cx| this.submit_quick_add(window, cx));
-                })
+            feel::gloss(
+                Button::new("quick-add-submit")
+                    .label("追加")
+                    .primary()
+                    .on_click(move |_, window, cx| {
+                        // ウィンドウを閉じたあとなら、反映する先がない
+                        let _ = view.update(cx, |this, cx| this.submit_quick_add(window, cx));
+                    }),
+            )
         };
         // 追加のボタンは「更新」の列に置く。隠しているときは右の端に出す
         let updated_shown = self.shown_columns().any(|c| c.column == Column::Updated);
@@ -3090,7 +2975,7 @@ impl MainView {
                             .text_color(theme.muted_foreground)
                             .child(view::format_bytes(a.size)),
                     )
-                    .child(
+                    .child(feel::gloss(
                         Button::new(("att-open", ix))
                             .label("開く")
                             .ghost()
@@ -3098,8 +2983,8 @@ impl MainView {
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.open_attachment(&open_id, cx);
                             })),
-                    )
-                    .child(
+                    ))
+                    .child(feel::gloss(
                         Button::new(("att-save", ix))
                             .label("保存")
                             .ghost()
@@ -3107,8 +2992,8 @@ impl MainView {
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.save_attachment(&save_id, window, cx);
                             })),
-                    )
-                    .child(
+                    ))
+                    .child(feel::gloss(
                         Button::new(("att-del", ix))
                             .label("削除")
                             .ghost()
@@ -3116,7 +3001,7 @@ impl MainView {
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.write(cx, |s| s.delete_attachment(&delete_id));
                             })),
-                    ),
+                    )),
             );
         }
         col()
@@ -3135,12 +3020,12 @@ impl MainView {
                         )
                     })
                     .child(div().flex_1())
-                    .child(
+                    .child(feel::gloss(
                         Button::new("att-add")
                             .label("ファイルを追加")
                             .small()
                             .on_click(cx.listener(|this, _, window, cx| this.attach(window, cx))),
-                    ),
+                    )),
             )
             .child(list)
     }
@@ -3171,7 +3056,7 @@ impl MainView {
                     .child(view::format_relative(c.created_at, now))
                     .when(c.is_edited(), |d| d.child("（編集済み）"))
                     .child(div().flex_1())
-                    .child(
+                    .child(feel::gloss(
                         Button::new(("edit-comment", ix))
                             .label("編集")
                             .ghost()
@@ -3179,10 +3064,10 @@ impl MainView {
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.start_edit_comment(&edit_id, window, cx)
                             })),
-                    )
+                    ))
                     // 完了報告は最初から上に固定されているので、留めない
                     .when(!c.is_completion_report(), |d| {
-                        d.child(
+                        d.child(feel::gloss(
                             Button::new(("pin", ix))
                                 .label(if pinned {
                                     "ピン留めを外す"
@@ -3194,9 +3079,9 @@ impl MainView {
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.write(cx, |s| s.set_comment_pinned(&pin_id, !pinned));
                                 })),
-                        )
+                        ))
                     })
-                    .child(
+                    .child(feel::gloss(
                         Button::new(("del-comment", ix))
                             .label("削除")
                             .ghost()
@@ -3204,7 +3089,7 @@ impl MainView {
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.write(cx, |s| s.delete_comment(&delete_id));
                             })),
-                    ),
+                    )),
             )
             .child({
                 let body = if links.is_empty() {
@@ -3480,14 +3365,14 @@ impl MainView {
             list = list.child(item);
         }
         col().gap_1().child(list).child(
-            row().child(
+            row().child(feel::gloss(
                 Button::new("p-add-person")
                     .icon(app_icon("user-plus"))
                     .label("担当者を登録")
                     .ghost()
                     .small()
                     .on_click(cx.listener(|this, _, window, cx| this.open_people(window, cx))),
-            ),
+            )),
         )
     }
 
@@ -3587,7 +3472,7 @@ impl MainView {
                                 })
                                 .test_support(),
                         )
-                        .child(
+                        .child(feel::gloss(
                             Button::new("ai-track-retry")
                                 .icon(app_icon("refresh-cw"))
                                 .ghost()
@@ -3596,7 +3481,7 @@ impl MainView {
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.ai_session.update(cx, |s, cx| s.retry_track(&id, cx));
                                 })),
-                        )
+                        ))
                         .into_any_element(),
                 )
             } else if session.arranging.contains(&task.id) {
@@ -3635,7 +3520,7 @@ impl MainView {
                                 })
                                 .test_support(),
                         )
-                        .child(
+                        .child(feel::gloss(
                             Button::new("ai-note-retry")
                                 .icon(app_icon("refresh-cw"))
                                 .ghost()
@@ -3644,7 +3529,7 @@ impl MainView {
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.ai_session.update(cx, |s, cx| s.retry_arrange(&id, cx));
                                 })),
-                        )
+                        ))
                         .into_any_element()
                 })
             }
@@ -3663,7 +3548,7 @@ impl MainView {
                     .items_center()
                     .text_sm()
                     .text_color(theme.muted_foreground)
-                    .child(
+                    .child(feel::gloss(
                         Button::new("ai-task-chat")
                             .icon(app_icon("sparkles"))
                             .ghost()
@@ -3672,8 +3557,8 @@ impl MainView {
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.chat_about_task(&id, window, cx);
                             })),
-                    )
-                    .child(
+                    ))
+                    .child(feel::gloss(
                         Button::new("task-terminal")
                             .icon(app_icon("terminal"))
                             .ghost()
@@ -3685,7 +3570,7 @@ impl MainView {
                                     this.open_task_terminal(&id, window, cx);
                                 }
                             })),
-                    )
+                    ))
                     .when(!runs.is_empty(), |d| {
                         d.child(
                             row()
@@ -3739,18 +3624,21 @@ impl MainView {
         let status_actions = {
             let id = task.id.clone();
             let mut actions = row().gap_2().flex_wrap();
-            let set = |label: &'static str, key: &'static str, status: Status, primary: bool| {
-                let id = id.clone();
-                let button = Button::new(key)
-                    .icon(app_icon(status_icon(status)))
-                    .label(label);
-                let button = if primary {
-                    button.primary()
-                } else {
-                    button.framed(cx)
+            let set =
+                |label: &'static str, key: &'static str, status: Status, primary: bool| {
+                    let id = id.clone();
+                    let button = Button::new(key)
+                        .icon(app_icon(status_icon(status)))
+                        .label(label);
+                    let button = if primary {
+                        button.primary()
+                    } else {
+                        button.framed(cx)
+                    };
+                    feel::gloss(button.on_click(
+                        cx.listener(move |this, _, _, cx| this.set_status(&id, status, cx)),
+                    ))
                 };
-                button.on_click(cx.listener(move |this, _, _, cx| this.set_status(&id, status, cx)))
-            };
             if open {
                 actions = actions
                     .child(set("完了にする", "to-completed", Status::Completed, true))
@@ -3759,7 +3647,7 @@ impl MainView {
                 actions = actions.child(set("再開する", "to-reopen", Status::NeedsAction, true));
             }
             let id = task.id.clone();
-            actions.child(
+            actions.child(feel::gloss(
                 Button::new("status-with-comment")
                     .icon(app_icon("message-square-plus"))
                     .framed(cx)
@@ -3767,7 +3655,7 @@ impl MainView {
                     .on_click(
                         cx.listener(move |this, _, window, cx| this.ask_status(&id, window, cx)),
                     ),
-            )
+            ))
         };
 
         let pinned: Vec<_> = detail.comments.iter().filter(|c| c.pinned).collect();
@@ -3778,7 +3666,7 @@ impl MainView {
                 .child(
                     row()
                         .gap_2()
-                        .child(
+                        .child(feel::gloss(
                             Button::new("desc-save")
                                 .label("保存")
                                 .primary()
@@ -3786,8 +3674,8 @@ impl MainView {
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.save_description(window, cx)
                                 })),
-                        )
-                        .child(
+                        ))
+                        .child(feel::gloss(
                             Button::new("desc-cancel")
                                 .label("キャンセル")
                                 .small()
@@ -3795,7 +3683,7 @@ impl MainView {
                                     this.editing = None;
                                     cx.notify();
                                 })),
-                        )
+                        ))
                         .child(
                             div()
                                 .text_xs()
@@ -3828,7 +3716,7 @@ impl MainView {
                 .child(
                     row()
                         .gap_1()
-                        .child(
+                        .child(feel::gloss(
                             Button::new("desc-edit")
                                 .label("編集")
                                 .ghost()
@@ -3836,8 +3724,8 @@ impl MainView {
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.start_editing(Editing::Description, window, cx)
                                 })),
-                        )
-                        .child(
+                        ))
+                        .child(feel::gloss(
                             Button::new("desc-quote")
                                 .label("選択範囲にコメント")
                                 .ghost()
@@ -3845,7 +3733,7 @@ impl MainView {
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.quote_selection(window, cx)
                                 })),
-                        ),
+                        )),
                 )
         };
 
@@ -3960,7 +3848,7 @@ impl MainView {
             );
         } else if let Some(tracked) = self.ai_session.read(cx).tracked_for(task) {
             let id = task.id.clone();
-            percent = percent.child(
+            percent = percent.child(feel::gloss(
                 Button::new("ai-tracked-undo")
                     .icon(app_icon("undo-2"))
                     .ghost()
@@ -3969,7 +3857,7 @@ impl MainView {
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.ai_session.update(cx, |s, cx| s.undo_track(&id, cx));
                     })),
-            );
+            ));
         }
 
         let mut categories = row().gap_1p5().flex_wrap();
@@ -3996,10 +3884,14 @@ impl MainView {
                 row()
                     .gap_2()
                     .child(div().text_sm().truncate().child(parent.title.clone()))
-                    .child(Button::new("parent-open").label("開く").xsmall().on_click(
-                        cx.listener(move |this, _, window, cx| this.open_panel(&id, window, cx)),
+                    .child(feel::gloss(
+                        Button::new("parent-open").label("開く").xsmall().on_click(
+                            cx.listener(move |this, _, window, cx| {
+                                this.open_panel(&id, window, cx)
+                            }),
+                        ),
                     ))
-                    .child(
+                    .child(feel::gloss(
                         Button::new("parent-clear")
                             .label("外す")
                             .ghost()
@@ -4007,7 +3899,7 @@ impl MainView {
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.edit_task(cx, |d| d.parent_id = None)
                             })),
-                    )
+                    ))
             }
             None => div()
                 .text_sm()
@@ -4019,35 +3911,37 @@ impl MainView {
             let id = task.id.clone();
             let link_id = task.id.clone();
             let shared = !task.linked_workspace_ids.is_empty();
-            let mut places =
-                col().gap_1().child(
-                    row()
-                        .gap_2()
-                        .items_center()
-                        .child(
-                            div()
-                                .text_sm()
-                                .child(self.workspace_name(task.workspace_id.as_deref())),
-                        )
-                        .child(Button::new("move-task").label("移動").xsmall().on_click(
-                            cx.listener(move |this, _, _, cx| {
+            let mut places = col().gap_1().child(
+                row()
+                    .gap_2()
+                    .items_center()
+                    .child(
+                        div()
+                            .text_sm()
+                            .child(self.workspace_name(task.workspace_id.as_deref())),
+                    )
+                    .child(feel::gloss(
+                        Button::new("move-task")
+                            .label("移動")
+                            .xsmall()
+                            .on_click(cx.listener(move |this, _, _, cx| {
                                 this.modal = Modal::MoveTasks(vec![id.clone()]);
                                 cx.notify();
-                            }),
+                            })),
+                    ))
+                    .when_some(task.workspace_id.clone().filter(|_| shared), |d, home| {
+                        let task_id = task.id.clone();
+                        d.child(feel::gloss(
+                            Button::new("unlink-home")
+                                .label("外す")
+                                .ghost()
+                                .xsmall()
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.unlink_task_from(&task_id, &home, cx)
+                                })),
                         ))
-                        .when_some(task.workspace_id.clone().filter(|_| shared), |d, home| {
-                            let task_id = task.id.clone();
-                            d.child(
-                                Button::new("unlink-home")
-                                    .label("外す")
-                                    .ghost()
-                                    .xsmall()
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.unlink_task_from(&task_id, &home, cx)
-                                    })),
-                            )
-                        }),
-                );
+                    }),
+            );
             for (ix, linked) in task.linked_workspace_ids.iter().enumerate() {
                 let (task_id, linked_id) = (task.id.clone(), linked.clone());
                 places = places.child(
@@ -4055,7 +3949,7 @@ impl MainView {
                         .gap_2()
                         .items_center()
                         .child(div().text_sm().child(self.workspace_name(Some(linked))))
-                        .child(
+                        .child(feel::gloss(
                             Button::new(("unlink", ix))
                                 .label("外す")
                                 .ghost()
@@ -4063,13 +3957,13 @@ impl MainView {
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.unlink_task_from(&task_id, &linked_id, cx)
                                 })),
-                        ),
+                        )),
                 );
             }
             // どこにも入っていないタスクは「移動」で入れる
             places.when(task.workspace_id.is_some(), |d| {
                 d.child(
-                    row().child(
+                    row().child(feel::gloss(
                         Button::new("link-add")
                             .label("ほかのワークスペースと同期")
                             .ghost()
@@ -4078,7 +3972,7 @@ impl MainView {
                                 this.modal = Modal::LinkTask(link_id.clone());
                                 cx.notify();
                             })),
-                    ),
+                    )),
                 )
             })
         };
@@ -4127,7 +4021,7 @@ impl MainView {
                             })
                             .when(open, |d| d.child(div().flex_1()))
                             .when(resolved, |d| {
-                                d.child(
+                                d.child(feel::gloss(
                                     Button::new(("thread-toggle", ix))
                                         .label(if open { "折りたたむ" } else { "開く" })
                                         .ghost()
@@ -4135,9 +4029,9 @@ impl MainView {
                                         .on_click(cx.listener(move |this, _, _, cx| {
                                             this.toggle_thread(&toggle_id, cx)
                                         })),
-                                )
+                                ))
                             })
-                            .child(
+                            .child(feel::gloss(
                                 Button::new(("thread-resolve", ix))
                                     .label(if resolved {
                                         "再開する"
@@ -4149,7 +4043,7 @@ impl MainView {
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         this.set_thread_resolved(&resolve_id, !resolved, cx)
                                     })),
-                            ),
+                            )),
                     );
             if open {
                 if let Some(anchor) = &c.anchor {
@@ -4180,7 +4074,7 @@ impl MainView {
                     }
                 }
                 thread = thread.child(replies).child(
-                    row().child(
+                    row().child(feel::gloss(
                         Button::new(("thread-reply", ix))
                             .label("返信")
                             .ghost()
@@ -4188,7 +4082,7 @@ impl MainView {
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.start_reply(&reply_id, window, cx)
                             })),
-                    ),
+                    )),
                 );
             }
             comments = comments.child(thread);
@@ -4223,26 +4117,26 @@ impl MainView {
         }
 
         let delete_id = task.id.clone();
-        let bar =
-            row()
-                .flex_none()
-                .h_12()
-                .px_4()
-                .gap_2()
-                .border_b_1()
-                .border_color(theme.border)
-                .bg(theme.popover)
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .truncate()
-                        .text_sm()
-                        .font_weight(FontWeight::BOLD)
-                        .child("タスクの詳細"),
-                )
-                .child({
-                    let link_task = task.id.clone();
+        let bar = row()
+            .flex_none()
+            .h_12()
+            .px_4()
+            .gap_2()
+            .border_b_1()
+            .border_color(theme.border)
+            .bg(theme.popover)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_sm()
+                    .font_weight(FontWeight::BOLD)
+                    .child("タスクの詳細"),
+            )
+            .child({
+                let link_task = task.id.clone();
+                feel::gloss(
                     Button::new("copy-link")
                         .icon(app_icon("link"))
                         .tooltip("リンクをコピー")
@@ -4250,10 +4144,12 @@ impl MainView {
                         .small()
                         .on_click(
                             cx.listener(move |this, _, _, cx| this.copy_task_link(&link_task, cx)),
-                        )
-                })
-                .child({
-                    let ticket_task = task.id.clone();
+                        ),
+                )
+            })
+            .child({
+                let ticket_task = task.id.clone();
+                feel::gloss(
                     Button::new("ticket-open")
                         .icon(app_icon("bookmark"))
                         .tooltip("完了チケット")
@@ -4261,16 +4157,17 @@ impl MainView {
                         .small()
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.open_ticket_dialog(&ticket_task, cx)
-                        }))
-                })
-                .child(
-                    Button::new("close-panel")
-                        .icon(app_icon("x"))
-                        .tooltip("閉じる")
-                        .framed(cx)
-                        .small()
-                        .on_click(cx.listener(|this, _, _, cx| this.close_panel(cx))),
-                );
+                        })),
+                )
+            })
+            .child(feel::gloss(
+                Button::new("close-panel")
+                    .icon(app_icon("x"))
+                    .tooltip("閉じる")
+                    .framed(cx)
+                    .small()
+                    .on_click(cx.listener(|this, _, _, cx| this.close_panel(cx))),
+            ));
         let content =
             col()
                 .p_4()
@@ -4285,7 +4182,7 @@ impl MainView {
                         .text_sm()
                         .text_color(theme.muted_foreground)
                         .child(status_badge(task.status, cx))
-                        .child(
+                        .child(feel::gloss(
                             Button::new("history")
                                 .icon(app_icon("rotate-ccw-clock"))
                                 .label("変更履歴")
@@ -4295,7 +4192,7 @@ impl MainView {
                                     this.modal = Modal::History;
                                     cx.notify();
                                 })),
-                        )
+                        ))
                         .child(format!(
                             "{}　作成 {}　更新 {}",
                             self.workspace_name(task.workspace_id.as_deref()),
@@ -4409,7 +4306,7 @@ impl MainView {
                                     .text_xs()
                                     .text_color(theme.muted_foreground)
                                     .child(div().flex_1().min_w_0().truncate().child(text))
-                                    .child(
+                                    .child(feel::gloss(
                                         Button::new("comment-cancel")
                                             .label("キャンセル")
                                             .ghost()
@@ -4417,7 +4314,7 @@ impl MainView {
                                             .on_click(cx.listener(|this, _, window, cx| {
                                                 this.cancel_comment_mode(window, cx)
                                             })),
-                                    ),
+                                    )),
                             )
                         })
                         .child(Textarea::new(&self.inputs.comment).h(px(88.)))
@@ -4425,7 +4322,7 @@ impl MainView {
                         .child(
                             row()
                                 .gap_2()
-                                .child(
+                                .child(feel::gloss(
                                     Button::new("comment-submit")
                                         .label(match self.comment_mode {
                                             CommentMode::Edit(_) => "保存",
@@ -4437,16 +4334,16 @@ impl MainView {
                                         .on_click(cx.listener(|this, _, window, cx| {
                                             this.submit_comment(window, cx)
                                         })),
-                                )
+                                ))
                                 .when(is_new && self.pending_anchor.is_none(), |d| {
-                                    d.child(
+                                    d.child(feel::gloss(
                                         Button::new("comment-review")
                                             .label("レビューとしてコメント")
                                             .small()
                                             .on_click(cx.listener(|this, _, window, cx| {
                                                 this.submit_comment_as(true, window, cx)
                                             })),
-                                    )
+                                    ))
                                 })
                                 .child(
                                     div()
@@ -4458,7 +4355,7 @@ impl MainView {
                 )
                 .child(
                     card(cx).child(section_title("削除")).child(
-                        row().child(
+                        row().child(feel::gloss(
                             Button::new("delete-task")
                                 .label("このタスクを削除")
                                 .danger()
@@ -4467,7 +4364,7 @@ impl MainView {
                                     this.modal = Modal::DeleteTasks(vec![delete_id.clone()]);
                                     cx.notify();
                                 })),
-                        ),
+                        )),
                     ),
                 );
 
@@ -4592,7 +4489,7 @@ impl MainView {
                     .child(
                         row()
                             .child(div().flex_1().text_lg().child(title.into()))
-                            .child(
+                            .child(feel::gloss(
                                 Button::new("dialog-close")
                                     .label("閉じる")
                                     .ghost()
@@ -4600,7 +4497,7 @@ impl MainView {
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.close_top_dialog(window, cx)
                                     })),
-                            ),
+                            )),
                     )
                     .child(body)
                     .test_support(),
@@ -5088,7 +4985,7 @@ impl MainView {
                             .bg(theme.background)
                             .opacity(0.)
                             .group_hover(group, |s| s.opacity(1.))
-                            .child(
+                            .child(feel::gloss(
                                 Button::new(("own-preset-delete", ix))
                                     .icon(app_icon("trash"))
                                     .ghost()
@@ -5098,7 +4995,7 @@ impl MainView {
                                         cx.stop_propagation();
                                         this.delete_preset(ix, cx)
                                     })),
-                            ),
+                            )),
                     )
                     .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                         this.apply_preset(&chosen, window, cx)
@@ -5439,13 +5336,15 @@ impl MainView {
                 .child(text)
         };
         let cancel = |cx: &mut Context<Self>| {
-            Button::new("modal-cancel")
-                .label("キャンセル")
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.modal = Modal::None;
-                    this.issued_ticket = None;
-                    cx.notify();
-                }))
+            feel::gloss(
+                Button::new("modal-cancel")
+                    .label("キャンセル")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.modal = Modal::None;
+                        this.issued_ticket = None;
+                        cx.notify();
+                    })),
+            )
         };
         Some(match &self.modal {
             Modal::None => return None,
@@ -5505,7 +5404,7 @@ impl MainView {
                         div()
                             .rounded_md()
                             .when(active, |d| d.bg(theme.secondary_hover))
-                            .child(
+                            .child(feel::gloss(
                                 Button::new(("icon-category", ix))
                                     .icon(app_icon(category.icon()))
                                     .ghost()
@@ -5515,19 +5414,21 @@ impl MainView {
                                         this.icon_category = (!active).then_some(category);
                                         cx.notify();
                                     })),
-                            ),
+                            )),
                     );
                 }
                 categories = categories.child(div().flex_1()).child({
                     let ws = id.clone();
-                    Button::new("icon-add-image")
-                        .icon(app_icon("image-plus"))
-                        .ghost()
-                        .large()
-                        .tooltip("画像を追加")
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.add_icon_image(ws.clone(), window, cx)
-                        }))
+                    feel::gloss(
+                        Button::new("icon-add-image")
+                            .icon(app_icon("image-plus"))
+                            .ghost()
+                            .large()
+                            .tooltip("画像を追加")
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.add_icon_image(ws.clone(), window, cx)
+                            })),
+                    )
                 });
                 // 自分で足した画像は、絞り込んでいないときに先頭に出す
                 let (custom, custom_error) =
@@ -5646,12 +5547,12 @@ impl MainView {
                     )))
                     .child(
                         row().gap_2().justify_end().child(cancel(cx)).child(
-                            Button::new("confirm-delete-workspace")
+                            feel::gloss(Button::new("confirm-delete-workspace")
                                 .label("削除する")
                                 .danger()
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.confirm_delete_workspace(cx)
-                                })),
+                                }))),
                         ),
                     );
                 self.dialog("ワークスペースを削除", body, cx)
@@ -5680,19 +5581,19 @@ impl MainView {
                     .child(
                         row().gap_2().justify_end().child(cancel(cx)).when(shared, |d| {
                             d.child(
-                                Button::new("unlink-here")
+                                feel::gloss(Button::new("unlink-here")
                                     .label("このワークスペースから外す")
                                     .on_click(
                                         cx.listener(|this, _, _, cx| this.unlink_selected_here(cx)),
-                                    ),
+                                    )),
                             )
                         }).child(
-                            Button::new("confirm-delete-tasks")
+                            feel::gloss(Button::new("confirm-delete-tasks")
                                 .label("削除する")
                                 .danger()
                                 .on_click(
                                     cx.listener(|this, _, _, cx| this.confirm_delete_tasks(cx)),
-                                ),
+                                )),
                         ),
                     );
                 self.dialog("タスクを削除", body, cx)
@@ -5753,7 +5654,7 @@ impl MainView {
                             .when(p.is_self, |d| {
                                 d.child(div().text_xs().text_color(theme.primary).child("自分"))
                             })
-                            .child(
+                            .child(feel::gloss(
                                 Button::new(("del-person", ix))
                                     .label("削除")
                                     .ghost()
@@ -5761,11 +5662,11 @@ impl MainView {
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         this.write(cx, |s| s.delete_person(&id));
                                     })),
-                            ),
+                            )),
                     );
                 }
                 let body = col().gap_3().child(list).child(
-                    row().child(
+                    row().child(feel::gloss(
                         Button::new("person-add")
                             .icon(app_icon("plus"))
                             .framed(cx)
@@ -5773,7 +5674,7 @@ impl MainView {
                             .on_click(
                                 cx.listener(|this, _, window, cx| this.add_person(window, cx)),
                             ),
-                    ),
+                    )),
                 );
                 self.dialog("担当者", body, cx)
             }
@@ -5885,14 +5786,14 @@ impl MainView {
                                     .child("Ctrl / ⌘ + Enter で送信"),
                             )
                             .child(cancel(cx))
-                            .child(
+                            .child(feel::gloss(
                                 Button::new("status-submit")
                                     .label(format!("{}にする", next.label()))
                                     .primary()
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.submit_status(window, cx)
                                     })),
-                            ),
+                            )),
                     );
                 self.dialog("状態を変更", body, cx)
             }
@@ -5961,10 +5862,10 @@ impl MainView {
                                 )))
                                 .child(
                                     row().child(
-                                        Button::new("ticket-copy")
+                                        feel::gloss(Button::new("ticket-copy")
                                             .label("コピー")
                                             .small()
-                                            .on_click(cx.listener(|this, _, _, cx| this.copy_ticket(cx))),
+                                            .on_click(cx.listener(|this, _, _, cx| this.copy_ticket(cx)))),
                                     ),
                                 ),
                         )
@@ -5980,19 +5881,19 @@ impl MainView {
                             .child(div().flex_1())
                             .when(active > 0, |d| {
                                 d.child(
-                                    Button::new("ticket-revoke")
+                                    feel::gloss(Button::new("ticket-revoke")
                                         .label("すべて取り消す")
                                         .small()
                                         .on_click(
                                             cx.listener(|this, _, _, cx| this.revoke_tickets(cx)),
-                                        ),
+                                        )),
                                 )
                             })
                             .child(
-                                Button::new("ticket-issue")
+                                feel::gloss(Button::new("ticket-issue")
                                     .label("発行")
                                     .primary()
-                                    .on_click(cx.listener(|this, _, _, cx| this.issue_ticket(cx))),
+                                    .on_click(cx.listener(|this, _, _, cx| this.issue_ticket(cx)))),
                             ),
                     );
                 self.dialog("完了チケット", body, cx)
@@ -6057,14 +5958,14 @@ impl MainView {
                         )
                         .when(self.unread_notices > 0, |d| {
                             d.child(
-                                row().justify_end().child(
+                                row().justify_end().child(feel::gloss(
                                     Button::new("notices-read-all")
                                         .label("すべて既読にする")
                                         .small()
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             this.mark_all_notices_read(cx)
                                         })),
-                                ),
+                                )),
                             )
                         });
                 self.dialog("通知", body, cx)
@@ -6086,21 +5987,21 @@ impl MainView {
                                 .gap_2()
                                 .justify_end()
                                 .child(cancel(cx))
-                                .child(
+                                .child(feel::gloss(
                                     Button::new("bulk-due-clear")
                                         .label("期限なしにする")
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             this.submit_bulk_due(true, cx)
                                         })),
-                                )
-                                .child(
+                                ))
+                                .child(feel::gloss(
                                     Button::new("bulk-due-submit")
                                         .label("変更する")
                                         .primary()
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             this.submit_bulk_due(false, cx)
                                         })),
-                                ),
+                                )),
                         );
                 self.dialog("期限をまとめて変更", body, cx)
             }
@@ -6132,23 +6033,28 @@ impl MainView {
                         .test_support(),
                     );
                 }
-                let body = col()
-                    .gap_3()
-                    .child(modes)
-                    .child(people)
-                    .when_some(self.error.clone(), |d, error| {
-                        d.child(div().text_sm().text_color(cx.theme().danger).child(error))
-                    })
-                    .child(
-                        row().gap_2().justify_end().child(cancel(cx)).child(
-                            Button::new("bulk-assignees-submit")
-                                .label("変更する")
-                                .primary()
-                                .on_click(
-                                    cx.listener(|this, _, _, cx| this.submit_bulk_assignees(cx)),
-                                ),
-                        ),
-                    );
+                let body =
+                    col()
+                        .gap_3()
+                        .child(modes)
+                        .child(people)
+                        .when_some(self.error.clone(), |d, error| {
+                            d.child(div().text_sm().text_color(cx.theme().danger).child(error))
+                        })
+                        .child(
+                            row()
+                                .gap_2()
+                                .justify_end()
+                                .child(cancel(cx))
+                                .child(feel::gloss(
+                                    Button::new("bulk-assignees-submit")
+                                        .label("変更する")
+                                        .primary()
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.submit_bulk_assignees(cx)
+                                        })),
+                                )),
+                        );
                 self.dialog("担当者をまとめて変更", body, cx)
             }
             Modal::BulkCategories => {
@@ -6181,14 +6087,18 @@ impl MainView {
                         d.child(div().text_sm().text_color(cx.theme().danger).child(error))
                     })
                     .child(
-                        row().gap_2().justify_end().child(cancel(cx)).child(
-                            Button::new("bulk-categories-submit")
-                                .label("変更する")
-                                .primary()
-                                .on_click(
-                                    cx.listener(|this, _, _, cx| this.submit_bulk_categories(cx)),
-                                ),
-                        ),
+                        row()
+                            .gap_2()
+                            .justify_end()
+                            .child(cancel(cx))
+                            .child(feel::gloss(
+                                Button::new("bulk-categories-submit")
+                                    .label("変更する")
+                                    .primary()
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.submit_bulk_categories(cx)
+                                    })),
+                            )),
                     );
                 self.dialog("カテゴリをまとめて変更", body, cx)
             }
@@ -6438,14 +6348,18 @@ impl MainView {
                         d.child(div().text_sm().text_color(theme.danger).child(error))
                     })
                     .child(
-                        row().gap_2().justify_end().child(cancel(cx)).child(
-                            Button::new("ws-settings-save")
-                                .label("保存")
-                                .primary()
-                                .on_click(
-                                    cx.listener(|this, _, _, cx| this.save_workspace_settings(cx)),
-                                ),
-                        ),
+                        row()
+                            .gap_2()
+                            .justify_end()
+                            .child(cancel(cx))
+                            .child(feel::gloss(
+                                Button::new("ws-settings-save")
+                                    .label("保存")
+                                    .primary()
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.save_workspace_settings(cx)
+                                    })),
+                            )),
                     );
                 self.dialog(
                     format!("「{}」の設定", self.workspace_name(Some(id))),
@@ -6466,14 +6380,15 @@ impl MainView {
             .bg(theme.background)
             .text_color(theme.foreground)
             .child(div().text_xl().child("ロックされています"))
-            .child(
+            .child(feel::gloss_when(
+                !(self.verifying(cx)),
                 Button::new("unlock")
                     .icon(app_icon("fingerprint-pattern"))
                     .label("パスキーで解除")
                     .primary()
                     .loading(self.verifying(cx))
                     .on_click(cx.listener(|this, _, window, cx| this.request_unlock(window, cx))),
-            )
+            ))
             .when_some(self.error.clone(), |d, error| {
                 d.child(div().text_sm().text_color(theme.danger).child(error))
             })

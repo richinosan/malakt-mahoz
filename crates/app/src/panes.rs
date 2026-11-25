@@ -11,8 +11,8 @@ use gpui_kit::*;
 use malakt_core::panes::{resize_step, Action, Dir, Keys, Layout, PaneId, Rect, PRESETS};
 
 use crate::db;
+use crate::feel::{self, Lit};
 use crate::render::app_icon;
-use crate::render::Lit;
 use crate::session::WindowState;
 use crate::shadow::{Elevate, Elevation};
 use crate::state::{MainView, Nav};
@@ -436,23 +436,23 @@ impl MainView {
                         .truncate()
                         .child(self.pane_title(id, cx)),
                 )
-                .child(
+                .child(feel::gloss(
                     button("pane-split-right", "columns-2", "右に分割").on_click(cx.listener(
                         move |this, _, window, cx| {
                             this.focus_pane(id, cx);
                             this.pane_action(Action::Split(Dir::Right), window, cx)
                         },
                     )),
-                )
-                .child(
+                ))
+                .child(feel::gloss(
                     button("pane-split-down", "rows-2", "下に分割").on_click(cx.listener(
                         move |this, _, window, cx| {
                             this.focus_pane(id, cx);
                             this.pane_action(Action::Split(Dir::Down), window, cx)
                         },
                     )),
-                )
-                .child(
+                ))
+                .child(feel::gloss(
                     button(
                         "pane-zoom",
                         if zoomed { "minimize-2" } else { "maximize-2" },
@@ -466,9 +466,11 @@ impl MainView {
                         this.focus_pane(id, cx);
                         this.pane_action(Action::Zoom, window, cx)
                     })),
-                )
-                .child(button("pane-close", "x", "ペインを閉じる").on_click(
-                    cx.listener(move |this, _, window, cx| this.close_pane(id, window, cx)),
+                ))
+                .child(feel::gloss(
+                    button("pane-close", "x", "ペインを閉じる").on_click(
+                        cx.listener(move |this, _, window, cx| this.close_pane(id, window, cx)),
+                    ),
                 ))
                 .test_support();
             root = root.child(
@@ -594,7 +596,7 @@ impl MainView {
                     let mut keys = div().flex().flex_row().gap_1();
                     for scheme in Keys::ALL {
                         let on = self.pane_keys == scheme;
-                        keys = keys.child(
+                        keys = keys.child(feel::gloss(
                             Button::new(("pane-keys", scheme as usize))
                                 .label(scheme.label())
                                 .xsmall()
@@ -602,7 +604,7 @@ impl MainView {
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.set_pane_keys(scheme, cx)
                                 })),
-                        );
+                        ));
                     }
                     let mut panes = column().child(keys).child(
                         div()
@@ -630,14 +632,14 @@ impl MainView {
                 }
                 PaneOverlay::Presets => {
                     for (n, (name, text)) in PRESETS.into_iter().enumerate() {
-                        body = body.child(
+                        body = body.child(feel::gloss(
                             Button::new(("pane-preset", n))
                                 .label(name)
                                 .ghost()
                                 .on_click(cx.listener(move |this, _, window, cx| {
                                     this.apply_pane_layout(text, window, cx)
                                 })),
-                        );
+                        ));
                     }
                     for (n, (name, text)) in self.pane_presets.iter().cloned().enumerate() {
                         body = body.child(
@@ -647,16 +649,16 @@ impl MainView {
                                 .items_center()
                                 .gap_1()
                                 .child(
-                                    div().flex_1().flex().flex_col().child(
+                                    div().flex_1().flex().flex_col().child(feel::gloss(
                                         Button::new(("pane-preset-own", n))
                                             .label(name)
                                             .ghost()
                                             .on_click(cx.listener(move |this, _, window, cx| {
                                                 this.apply_pane_layout(&text, window, cx)
                                             })),
-                                    ),
+                                    )),
                                 )
-                                .child(
+                                .child(feel::gloss(
                                     Button::new(("pane-preset-delete", n))
                                         .icon(app_icon("trash"))
                                         .ghost()
@@ -665,15 +667,15 @@ impl MainView {
                                         .on_click(cx.listener(move |this, _, _, cx| {
                                             this.delete_pane_preset(n, cx)
                                         })),
-                                ),
+                                )),
                         );
                     }
-                    body = body.child(
+                    body = body.child(feel::gloss(
                         Button::new("pane-preset-save")
                             .icon(app_icon("plus"))
                             .label("今の配置を保存")
                             .on_click(cx.listener(|this, _, _, cx| this.save_pane_preset(cx))),
-                    );
+                    ));
                 }
             }
             let (title, width) = match overlay {
