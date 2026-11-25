@@ -7,6 +7,7 @@ pub mod db;
 pub mod icons;
 pub mod panes;
 pub mod passkey;
+pub mod reminders;
 mod render;
 pub mod session;
 pub mod shadow;
@@ -116,6 +117,7 @@ pub fn init_with(store: malakt_core::Store, ai: AiConfig, cx: &mut App) {
     db::init(store, cx);
     passkey::init(cx);
     ai::init(ai, cx);
+    reminders::init(cx);
     theme::init(cx);
     cx.bind_keys([
         #[cfg(target_os = "macos")]

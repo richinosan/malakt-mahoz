@@ -24,6 +24,10 @@
   <string>11.0</string>
   <key>LSApplicationCategoryType</key>
   <string>public.app-category.productivity</string>
+  <key>NSRemindersFullAccessUsageDescription</key>
+  <string>タスクを期限つきでリマインダーに入れ、リマインダーで完了にしたものをタスクに反映します。</string>
+  <key>NSRemindersUsageDescription</key>
+  <string>タスクを期限つきでリマインダーに入れ、リマインダーで完了にしたものをタスクに反映します。</string>
   <key>NSHighResolutionCapable</key>
   <true/>
 </dict>

@@ -182,6 +182,18 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE workspaces ADD COLUMN icon TEXT;
     ALTER TABLE workspaces ADD COLUMN color TEXT;
     "#,
+    // 10: OS のリマインダーに作ったものの控え。タスクを消したあとにリマインダーを消せるよう、
+    //     タスクへの外部キーは付けない
+    r#"
+    CREATE TABLE reminder_links (
+        kind TEXT NOT NULL,
+        key TEXT NOT NULL,
+        external TEXT NOT NULL,
+        hash TEXT NOT NULL,
+        done INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (kind, key)
+    ) STRICT, WITHOUT ROWID;
+    "#,
 ];
 
 pub(crate) fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
