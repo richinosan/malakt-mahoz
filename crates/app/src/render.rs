@@ -4397,17 +4397,30 @@ impl MainView {
         cx: &mut Context<Self>,
     ) -> Div {
         let theme = cx.theme().clone();
-        div()
-            .absolute()
-            .inset_0()
+        // 外側の暗い所。押して離すまでがここなら、いちばん上のダイアログを閉じる。
+        // ダイアログの中で押し始めて外で離したときは閉じない
+        let backdrop = if id == "dialog" {
+            "dialog-backdrop"
+        } else {
+            "dialog-under-backdrop"
+        };
+        let dialog = div()
+            .id(backdrop)
+            .size_full()
             .flex()
             .items_center()
             .justify_center()
             .bg(theme.overlay)
             .occlude()
+            // 名前を書いている途中で外を押したら、その 1 回は名前を確定するだけにする
+            .capture_any_mouse_down(cx.listener(|this, _, _, _| {
+                this.outside_busy = this.person_naming.is_some() || this.preset_naming.is_some();
+            }))
+            .on_click(cx.listener(|this, _, window, cx| this.dismiss_outside(window, cx)))
             .child(
                 col()
                     .id(id)
+                    .occlude()
                     .w(width)
                     .max_w(relative(0.94))
                     .max_h(relative(0.9))
@@ -4427,24 +4440,14 @@ impl MainView {
                                     .ghost()
                                     .xsmall()
                                     .on_click(cx.listener(|this, _, window, cx| {
-                                        // 重ねたダイアログと、ペインのキーの一覧やプリセットは、いちばん上に出ている
-                                        if this.sub_modal.is_some() {
-                                            this.dismiss_in(window, cx);
-                                            return;
-                                        }
-                                        if this.pane_overlay.take().is_some() {
-                                            cx.notify();
-                                            return;
-                                        }
-                                        this.modal = Modal::None;
-                                        this.issued_ticket = None;
-                                        cx.notify();
+                                        this.close_top_dialog(window, cx)
                                     })),
                             ),
                     )
                     .child(body)
                     .test_support(),
-            )
+            );
+        div().absolute().inset_0().child(dialog)
     }
 
     /// 書体と色。書体の一覧は、この上にもう 1 枚重ねて出す。

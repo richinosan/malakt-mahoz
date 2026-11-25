@@ -3,8 +3,8 @@
 use gpui_kit::component::input::InputState;
 use gpui_kit::test::{TestQueryExt, TestWindowExt};
 use gpui_kit::{
-    px, size, AnyWindowHandle, AppContext, Bounds, Entity, Pixels, Point, Size, TestAppContext,
-    WindowBounds, WindowOptions,
+    px, size, AnyWindowHandle, AppContext, Bounds, Entity, Modifiers, MouseButton, Pixels, Point,
+    Size, TestAppContext, WindowBounds, WindowOptions,
 };
 use malakt_core::view::Tab;
 use malakt_core::{lock, DueRule, Role, Roles, Scope, Status, Store, TaskFilter};
@@ -1445,6 +1445,21 @@ fn completion_ticket_issued_here_and_redeemed_by_command(cx: &mut TestAppContext
             .secret
             .clone()
     });
+    // チケットの文字列は閉じると二度と出せないので、外側を押しても閉じない
+    {
+        let mut at = Point::default();
+        ui(cx, window, |window, _| {
+            at = window.find("dialog").bounds().origin - Point::new(px(4.), px(4.))
+        });
+        let mut v = gpui_kit::VisualTestContext::from_window(window, cx);
+        v.simulate_mouse_down(at, MouseButton::Left, Modifiers::default());
+        v.simulate_mouse_up(at, MouseButton::Left, Modifiers::default());
+        v.run_until_parked();
+    }
+    cx.update(|cx| {
+        assert!(view.read(cx).issued_ticket.is_some());
+        assert_eq!(view.read(cx).modal, Modal::Ticket(id.clone()));
+    });
     // 閉じると、チケットの文字列は画面から消える
     ui(cx, window, |window, cx| window.click("dialog-close", cx));
     cx.update(|cx| assert!(view.read(cx).issued_ticket.is_none()));
@@ -2720,7 +2735,7 @@ fn task_link_is_copied_and_opens_from_a_comment_card(cx: &mut TestAppContext) {
 /// タスクの行をドラッグすると並べ替えられ、左のワークスペースに落とすと移る。
 #[gpui_kit::test]
 fn task_rows_are_dragged_to_reorder_and_to_another_workspace(cx: &mut TestAppContext) {
-    use gpui_kit::{Modifiers, MouseButton, VisualTestContext};
+    use gpui_kit::VisualTestContext;
     start(cx);
     let (window, view) = open(cx, win(1600., 1000.));
     let (ws, _ids) = cx.update(|cx| {
@@ -4080,7 +4095,7 @@ fn undo_redo_and_paste_work_with_keys(cx: &mut TestAppContext) {
 /// 開くと中のタスクと、さらに下のサブワークスペースが出る。
 #[gpui_kit::test]
 fn sub_workspaces_fold_inside_the_task_list(cx: &mut TestAppContext) {
-    use gpui_kit::{Modifiers, MouseButton, VisualTestContext};
+    use gpui_kit::VisualTestContext;
     use malakt_core::view::ListRow;
     start(cx);
     let (ws, hall, setup, press) = cx.update(|cx| {
@@ -4558,4 +4573,105 @@ fn status_changes_from_a_menu_without_a_dialog(cx: &mut TestAppContext) {
             Modal::Status(id.clone(), Status::Completed)
         );
     });
+}
+
+/// ダイアログの外側の暗い所を押すと、いちばん上の 1 枚だけが閉じる。
+/// 中で押し始めて外で離したときは閉じない。書きかけのコメントは残る。
+#[gpui_kit::test]
+fn clicking_outside_closes_the_top_dialog(cx: &mut TestAppContext) {
+    use malakt_mahoz::state::SubModal;
+    start(cx);
+    let (window, view) = open(cx, wide());
+    let id = cx.update(|cx| {
+        view.update(cx, |v, cx| {
+            v.write(cx, |s| {
+                let draft = malakt_core::TaskDraft {
+                    title: "チラシを配る".into(),
+                    ..Default::default()
+                };
+                Ok(s.create_task(None, &draft)?.id)
+            })
+            .unwrap()
+        })
+    });
+    let spot = |cx: &mut TestAppContext, name: &'static str, inside: bool| {
+        let mut at = Point::default();
+        ui(cx, window, |window, _| {
+            let bounds = window.find(name).bounds();
+            at = if inside {
+                bounds.center()
+            } else {
+                bounds.origin - Point::new(px(4.), px(4.))
+            };
+        });
+        at
+    };
+    let press = |cx: &mut TestAppContext, from: Point<Pixels>, to: Point<Pixels>| {
+        let mut v = gpui_kit::VisualTestContext::from_window(window, cx);
+        v.simulate_mouse_down(from, MouseButton::Left, Modifiers::default());
+        v.simulate_mouse_move(to, MouseButton::Left, Modifiers::default());
+        v.simulate_mouse_up(to, MouseButton::Left, Modifiers::default());
+        v.run_until_parked();
+    };
+
+    // 設定の上に書体の一覧を重ねる。外側を押すと一覧だけが閉じ、もう一度押すと設定が閉じる
+    ui(cx, window, |window, cx| {
+        view.update(cx, |v, cx| v.open_appearance(window, cx))
+    });
+    ui(cx, window, |window, cx| window.click("details-toggle", cx));
+    ui(cx, window, |window, cx| window.click("font-open", cx));
+    cx.update(|cx| assert_eq!(view.read(cx).sub_modal, Some(SubModal::Font)));
+    let outside = spot(cx, "dialog", false);
+    press(cx, outside, outside);
+    cx.update(|cx| {
+        assert_eq!(view.read(cx).sub_modal, None);
+        assert_eq!(view.read(cx).modal, Modal::Appearance);
+    });
+
+    // 中で押し始めて外で離しても、外で押し始めて中で離しても、閉じない
+    let inside = spot(cx, "dialog", true);
+    let outside = spot(cx, "dialog", false);
+    press(cx, inside, outside);
+    cx.update(|cx| assert_eq!(view.read(cx).modal, Modal::Appearance));
+    press(cx, outside, inside);
+    cx.update(|cx| assert_eq!(view.read(cx).modal, Modal::Appearance));
+    press(cx, outside, outside);
+    cx.update(|cx| assert_eq!(view.read(cx).modal, Modal::None));
+
+    // 状態の変更に書きかけたコメントは、外側を押して閉じても、同じタスクで開き直すと残っている
+    let ask = |cx: &mut TestAppContext| {
+        cx.update_window(window, |_, window, cx| {
+            view.update(cx, |v, cx| v.ask_status(&id, window, cx))
+        })
+        .unwrap();
+        cx.run_until_parked();
+    };
+    let comment = |cx: &mut TestAppContext| {
+        cx.update(|cx| {
+            view.read(cx)
+                .inputs
+                .status_comment
+                .read(cx)
+                .value()
+                .to_string()
+        })
+    };
+    ask(cx);
+    cx.update_window(window, |_, window, cx| {
+        view.update(cx, |v, cx| {
+            v.inputs
+                .status_comment
+                .update(cx, |s, cx| s.set_value("配り終えた", window, cx))
+        })
+    })
+    .unwrap();
+    let outside = spot(cx, "dialog", false);
+    press(cx, outside, outside);
+    cx.update(|cx| assert_eq!(view.read(cx).modal, Modal::None));
+    ask(cx);
+    assert_eq!(comment(cx), "配り終えた");
+    // キャンセルで閉じたときは残さない
+    ui(cx, window, |window, cx| window.click("modal-cancel", cx));
+    ask(cx);
+    assert_eq!(comment(cx), "");
 }
