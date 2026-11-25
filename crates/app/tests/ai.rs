@@ -736,11 +736,19 @@ fn provider_model_and_effort_are_chosen_in_settings(cx: &mut TestAppContext) {
         ]
     );
 
-    // このモデルで選べない effort は、送る前にエラーになる
+    // このモデルで選べない effort は、押せない
+    assert_eq!(
+        read(cx, |s| Effort::ALL.map(|e| s.effort_allowed(e))),
+        [true, true, false, true, false, true]
+    );
     open_settings(cx, window, &pane);
     ui(cx, window, |window, cx| {
         window.click(("ai-effort", Effort::Medium as usize), cx)
     });
+    assert_eq!(read(cx, |s| s.effort), Effort::High);
+    // 前から選んであった値が合わないときは、送る前にエラーになる
+    let session = session(cx);
+    cx.update(|cx| session.update(cx, |s, cx| s.set_effort(Effort::Medium, cx)));
     say(cx, window, &pane, "もう一度");
     assert_eq!(world.sent().len(), 2);
     assert!(matches!(
