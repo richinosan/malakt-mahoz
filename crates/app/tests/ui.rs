@@ -177,13 +177,23 @@ fn nested_workspaces_and_filing_later(cx: &mut TestAppContext) {
 
     // ワークスペースを作ると、そこへ移動する
     ui(cx, window, |window, cx| window.click("add-workspace", cx));
+    // ダイアログは出ず、「新規ワークスペース」という名前で増えて、その行で名前を書ける
+    cx.update(|cx| {
+        let view = view.read(cx);
+        assert_eq!(view.modal, Modal::None);
+        assert!(view.workspace_naming.as_ref().is_some_and(|n| n.created));
+    });
+    let parent = store(cx, |s| s.workspaces().unwrap()).remove(0);
+    assert_eq!(parent.name, malakt_mahoz::state::NEW_WORKSPACE_NAME);
+    // 名前は全部選ばれているので、打つと置き換わる
     ui(cx, window, |window, cx| {
-        window.click("name-input", cx);
+        assert!(window.find("workspace-name-input").visible());
         window.input("冬のイベント", cx);
         window.press("enter", cx);
     });
     let parent = store(cx, |s| s.workspaces().unwrap()).remove(0);
     assert_eq!(parent.name, "冬のイベント");
+    cx.update(|cx| assert_eq!(view.read(cx).workspace_naming, None));
     cx.update(|cx| assert_eq!(view.read(cx).nav, Nav::Workspace(parent.id.clone())));
 
     // その中に子を作る
@@ -193,11 +203,10 @@ fn nested_workspaces_and_filing_later(cx: &mut TestAppContext) {
     for key in ["down", "down", "down", "enter"] {
         ui(cx, window, |window, cx| window.press(key, cx));
     }
-    ui(cx, window, |window, cx| {
-        window.click("name-input", cx);
-        window.input("会場", cx);
-        window.click("name-submit", cx);
-    });
+    // ほかの場所を押しても保存される
+    ui(cx, window, |window, cx| window.input("会場", cx));
+    ui(cx, window, |window, cx| window.click("quick-add", cx));
+    cx.update(|cx| assert_eq!(view.read(cx).workspace_naming, None));
     let all = store(cx, |s| s.workspaces().unwrap());
     let child = all
         .iter()
@@ -243,15 +252,64 @@ fn nested_workspaces_and_filing_later(cx: &mut TestAppContext) {
         assert_eq!(view.open_counts.get(&child.id), Some(&2));
     });
 
-    // 空の名前では作れず、ダイアログは開いたまま
+    // 何も打たずに Enter を押すと、「新規ワークスペース」のまま残る
     ui(cx, window, |window, cx| window.click("add-workspace", cx));
-    ui(cx, window, |window, cx| window.click("name-submit", cx));
+    ui(cx, window, |window, cx| window.press("enter", cx));
+    let all = store(cx, |s| s.workspaces().unwrap());
+    assert_eq!(all.len(), 3);
+    let added = all
+        .iter()
+        .find(|w| w.name == malakt_mahoz::state::NEW_WORKSPACE_NAME)
+        .expect("新規ワークスペース")
+        .id
+        .clone();
     cx.update(|cx| {
         let view = view.read(cx);
-        assert!(matches!(view.modal, Modal::WorkspaceName { .. }));
-        assert!(view.error.is_some());
+        assert_eq!(view.workspace_naming, None);
+        assert_eq!(view.nav, Nav::Workspace(added.clone()));
     });
-    assert_eq!(store(cx, |s| s.workspaces().unwrap()).len(), 2);
+
+    // 行のメニューの「名前を変更」も、その行で書く。空にして Enter を押すと、前の名前のまま
+    let rename = |cx: &mut TestAppContext| {
+        cx.update_window(window, |_, window, cx| {
+            view.update(cx, |v, cx| v.rename_workspace(added.clone(), window, cx))
+        })
+        .unwrap();
+        cx.run_until_parked();
+    };
+    rename(cx);
+    cx.update(|cx| {
+        let naming = view
+            .read(cx)
+            .workspace_naming
+            .clone()
+            .expect("名前を書いている");
+        assert!(!naming.created);
+    });
+    ui(cx, window, |window, cx| {
+        window.press("backspace", cx);
+        window.press("enter", cx);
+    });
+    assert_eq!(
+        store(cx, |s| s.workspace(&added).unwrap()).name,
+        malakt_mahoz::state::NEW_WORKSPACE_NAME
+    );
+    // Esc は書きかけを捨てる
+    rename(cx);
+    ui(cx, window, |window, cx| window.input("捨てる名前", cx));
+    ui(cx, window, |window, cx| window.press("escape", cx));
+    cx.update(|cx| assert_eq!(view.read(cx).workspace_naming, None));
+    assert_eq!(
+        store(cx, |s| s.workspace(&added).unwrap()).name,
+        malakt_mahoz::state::NEW_WORKSPACE_NAME
+    );
+    // 書いて Enter で変わる
+    rename(cx);
+    ui(cx, window, |window, cx| {
+        window.input("打ち上げ", cx);
+        window.press("enter", cx);
+    });
+    assert_eq!(store(cx, |s| s.workspace(&added).unwrap()).name, "打ち上げ");
 }
 
 /// ウィンドウを 2 枚開くと、片方の変更がもう片方にもすぐ出る。
@@ -511,10 +569,6 @@ fn every_screen_renders_at_any_size(cx: &mut TestAppContext) {
         .unwrap();
         ui(cx, window, |_, _| {});
         let modals = [
-            Modal::WorkspaceName {
-                parent: None,
-                rename: Some(ws.clone()),
-            },
             Modal::DeleteWorkspace(ws.clone()),
             Modal::DeleteTasks(vec![task.clone()]),
             Modal::MoveTasks(vec![task.clone()]),
@@ -1152,14 +1206,14 @@ fn bulk_changes_and_full_new_task_form(cx: &mut TestAppContext) {
 
     // 期限: 正しくない値は断り、ダイアログを開いたままにする
     ui(cx, window, |window, cx| window.click("bulk-due", cx));
-    set(cx, |v| &v.inputs.bulk_due, "来週");
+    set(cx, |v| &v.inputs.bulk_due, "そのうち");
     ui(cx, window, |window, cx| window.click("bulk-due-submit", cx));
     cx.update(|cx| {
         let view = view.read(cx);
         assert_eq!(view.modal, Modal::BulkDue);
         assert!(view.error.is_some());
     });
-    set(cx, |v| &v.inputs.bulk_due, "2026-12-24 18:00");
+    set(cx, |v| &v.inputs.bulk_due, "2026/12/24 午後6時");
     ui(cx, window, |window, cx| window.click("bulk-due-submit", cx));
     let due = |cx: &mut TestAppContext, id: &str| store(cx, |s| s.task(id).unwrap().due);
     assert_eq!(due(cx, &shown[1]).as_deref(), Some("2026-12-24 18:00"));
@@ -1221,8 +1275,8 @@ fn bulk_changes_and_full_new_task_form(cx: &mut TestAppContext) {
             "見積もりを取る"
         );
     });
-    set(cx, |v| &v.inputs.nt_due, "2026-12-01");
-    set(cx, |v| &v.inputs.nt_start, "2026-11-30 09:00");
+    set(cx, |v| &v.inputs.nt_due, "2026年12月1日");
+    set(cx, |v| &v.inputs.nt_start, "2026.11.30 9時");
     set(cx, |v| &v.inputs.nt_categories, "経理");
     ui(cx, window, |window, cx| {
         window.click(("nt-prio", 1usize), cx)
@@ -1538,6 +1592,99 @@ fn title_is_edited_in_place(cx: &mut TestAppContext) {
     });
     assert_eq!(all_tasks(cx)[0].title, "牛乳を買うと卵");
     assert!(cx.update(|cx| view.read(cx).editing.is_none()));
+}
+
+/// 詳細の期限は、日付の欄と時刻の欄で決める。「明日」「11/27 14時」のような書き方も読み、
+/// 保存すると欄は保存した形に直る。一覧のメニューで日付を変えても時刻は残る。
+#[gpui_kit::test]
+fn due_takes_a_time_and_many_spellings(cx: &mut TestAppContext) {
+    use malakt_core::view::{add_days, today};
+    start(cx);
+    let (window, view) = open(cx, wide());
+    ui(cx, window, |window, cx| {
+        window.click("nav-all", cx);
+        window.click("quick-add", cx);
+        window.input("資料を出す", cx);
+        window.press("enter", cx);
+    });
+    ui(cx, window, |window, cx| window.click(("title", 0usize), cx));
+    let due = |cx: &mut TestAppContext| all_tasks(cx)[0].due.clone();
+    let shown = |cx: &mut TestAppContext| {
+        cx.update(|cx| {
+            let inputs = &view.read(cx).inputs;
+            (
+                inputs.due.read(cx).value().to_string(),
+                inputs.due_time.read(cx).value().to_string(),
+            )
+        })
+    };
+    let type_in = |cx: &mut TestAppContext, id: &'static str, text: &'static str| {
+        ui(cx, window, |window, cx| {
+            window.click(id, cx);
+            window.press("secondary-a", cx);
+            window.press("backspace", cx);
+            if !text.is_empty() {
+                window.input(text, cx);
+            }
+            window.press("enter", cx);
+        });
+    };
+
+    // 時刻だけを入れると、今日のその時刻になる
+    type_in(cx, "due-time-input", "14時");
+    assert_eq!(due(cx), Some(format!("{} 14:00", today())));
+    assert_eq!(shown(cx), (today(), "14:00".to_owned()));
+
+    // 日付だけを書き換えても、時刻は残る
+    type_in(cx, "due-input", "明日");
+    let tomorrow = add_days(&today(), 1);
+    assert_eq!(due(cx), Some(format!("{tomorrow} 14:00")));
+    assert_eq!(shown(cx), (tomorrow.clone(), "14:00".to_owned()));
+
+    // 日付の欄に時刻まで書くと、両方が変わる
+    type_in(cx, "due-input", "2027/1/5 午後3時半");
+    assert_eq!(due(cx).as_deref(), Some("2027-01-05 15:30"));
+    assert_eq!(shown(cx), ("2027-01-05".to_owned(), "15:30".to_owned()));
+    type_in(cx, "due-time-input", "9:05");
+    assert_eq!(due(cx).as_deref(), Some("2027-01-05 09:05"));
+
+    // 読めない書き方は断り、書いたものと元の期限を残す
+    type_in(cx, "due-time-input", "25時");
+    assert!(cx.update(|cx| view.read(cx).error.is_some()));
+    assert_eq!(due(cx).as_deref(), Some("2027-01-05 09:05"));
+    assert_eq!(shown(cx).1, "25時");
+
+    // 時刻を空にすると、日付だけの期限に戻る
+    type_in(cx, "due-time-input", "");
+    assert_eq!(due(cx).as_deref(), Some("2027-01-05"));
+    assert!(cx.update(|cx| view.read(cx).error.is_none()));
+
+    // ボタンで日付を変えても時刻は残り、クリアで両方の欄が空になる
+    type_in(cx, "due-time-input", "2pm");
+    ui(cx, window, |window, cx| window.click(("p-due", 1usize), cx));
+    assert_eq!(due(cx), Some(format!("{tomorrow} 14:00")));
+    assert_eq!(shown(cx), (tomorrow.clone(), "14:00".to_owned()));
+
+    // 書き換えてからほかの場所を押しても保存する
+    cx.update_window(window, |_, window, _| window.activate_window())
+        .unwrap();
+    cx.run_until_parked();
+    ui(cx, window, |window, cx| {
+        window.click("due-time-input", cx);
+        window.press("secondary-a", cx);
+        window.press("backspace", cx);
+        window.input("18:00", cx);
+    });
+    ui(cx, window, |window, cx| window.click("due-input", cx));
+    assert_eq!(due(cx), Some(format!("{tomorrow} 18:00")));
+
+    ui(cx, window, |window, cx| window.click(("p-due", 3usize), cx));
+    assert_eq!(due(cx), None);
+    assert_eq!(shown(cx), (String::new(), String::new()));
+
+    // 開始日も同じ書き方を読む
+    type_in(cx, "start-input", "20270104 10時");
+    assert_eq!(all_tasks(cx)[0].start.as_deref(), Some("2027-01-04 10:00"));
 }
 
 /// 上のバーの配色のボタンで、画面の色がその場で変わり、選択が保存される。
@@ -1870,6 +2017,60 @@ fn workspace_icon_is_found_by_search(cx: &mut TestAppContext) {
     });
     let saved = store(cx, |s| s.workspace(&ws).unwrap());
     assert_eq!(saved.icon.as_deref(), Some("cat"));
+
+    // カテゴリで絞る。「動物・自然」の中で、ひらがなで探して絵文字のペンギンを選ぶ
+    ui(cx, window, |window, cx| {
+        window.click(("icon-category", 0usize), cx)
+    });
+    cx.update(|cx| {
+        assert_eq!(
+            view.read(cx).icon_category,
+            Some(malakt_mahoz::icons::Category::Nature)
+        )
+    });
+    ui(cx, window, |window, cx| {
+        window.click("icon-search", cx);
+        window.press("ctrl-a", cx);
+        window.input("ぺんぎん", cx);
+    });
+    ui(cx, window, |window, cx| {
+        window.click(("ws-icon", 0usize), cx)
+    });
+    let saved = store(cx, |s| s.workspace(&ws).unwrap());
+    assert_eq!(saved.icon.as_deref(), Some("emoji-penguin"));
+    // ほかのカテゴリに切り替える
+    ui(cx, window, |window, cx| {
+        window.click(("icon-category", 1usize), cx)
+    });
+    cx.update(|cx| {
+        assert_eq!(
+            view.read(cx).icon_category,
+            Some(malakt_mahoz::icons::Category::Food)
+        )
+    });
+    // もう一度押すとカテゴリが外れる
+    ui(cx, window, |window, cx| {
+        window.click(("icon-category", 1usize), cx)
+    });
+    cx.update(|cx| assert_eq!(view.read(cx).icon_category, None));
+    // どのカテゴリのボタンも押せて、その中の先頭のアイコンを選べる
+    ui(cx, window, |window, cx| {
+        window.click("icon-search", cx);
+        window.press("ctrl-a", cx);
+        window.press("backspace", cx);
+    });
+    for (ix, category) in malakt_mahoz::icons::Category::ALL.into_iter().enumerate() {
+        ui(cx, window, |window, cx| {
+            window.click(("icon-category", ix), cx)
+        });
+        cx.update(|cx| assert_eq!(view.read(cx).icon_category, Some(category)));
+        ui(cx, window, |window, cx| {
+            window.click(("ws-icon", 0usize), cx)
+        });
+        let saved = store(cx, |s| s.workspace(&ws).unwrap());
+        let first = malakt_mahoz::icons::search("", Some(category), &[], 1);
+        assert_eq!(saved.icon.as_deref(), first.first().copied());
+    }
 }
 
 /// 上のバーのメニューのボタンで左のメニューを閉じて開ける。境界で変えた幅は保存される。

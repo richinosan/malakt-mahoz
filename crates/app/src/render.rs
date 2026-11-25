@@ -36,7 +36,7 @@ const fn px(value: f32) -> Pixels {
 }
 
 /// アイコンを選ぶ画面に一度に出す数。それより多いときは検索で絞る。
-const ICONS_SHOWN: usize = 240;
+const ICONS_SHOWN: usize = 400;
 /// 見出しの枠（40px）の中のアイコンの大きさ。
 const TILE_ICON_SIZE: Pixels = px(24.);
 /// ホームのカードの枠（56px）の中のアイコンの大きさ。
@@ -427,6 +427,10 @@ impl MainView {
             };
             let group = SharedString::from(format!("ws-row-{ix}"));
             let active = self.nav == Nav::Workspace(id.clone());
+            let naming = self
+                .workspace_naming
+                .as_ref()
+                .is_some_and(|naming| naming.id == id);
             let view = cx.entity().downgrade();
             let menu_id = id.clone();
             let menu = move |menu: PopupMenu| {
@@ -444,15 +448,16 @@ impl MainView {
                         state.set_value("", window, cx);
                         state.focus(window, cx);
                     });
+                    this.icon_category = None;
                     this.modal = Modal::WorkspaceIcon(id);
                     cx.notify();
                 }))
                 .item(item("名前を変更", |this, id, window, cx| {
-                    this.ask_workspace_name(None, Some(id), window, cx)
+                    this.rename_workspace(id, window, cx)
                 }))
                 .item(item(
                     "サブワークスペースを追加",
-                    |this, id, window, cx| this.ask_workspace_name(Some(id), None, window, cx),
+                    |this, id, window, cx| this.add_workspace(Some(id), window, cx),
                 ))
                 .item(item("設定", |this, id, window, cx| {
                     this.open_workspace_settings(&id, window, cx)
@@ -483,13 +488,49 @@ impl MainView {
                 )
                 .pl(px(12.) * node.depth as f32)
                 .child(caret)
-                .child(self.nav_item(
-                    ("ws", ix),
-                    workspace_icon(ws.icon.as_deref(), ws.color.as_deref()),
-                    ws.name.clone(),
-                    Nav::Workspace(id),
-                    cx,
-                ))
+                .child(if naming {
+                    // その場で名前を書く。文字の大きさも位置も、読むときと同じ。
+                    // Enter かほかの場所を押すと保存、Esc で取り消し
+                    row()
+                        .flex_1()
+                        .min_w_0()
+                        .gap_2()
+                        .px_3()
+                        // 入力欄の高さに足して、読むときの行と同じ高さにする
+                        .py(px(3.2))
+                        .rounded_md()
+                        .text_sm()
+                        .bg(theme.accent)
+                        .text_color(theme.accent_foreground)
+                        .on_mouse_down_out(
+                            cx.listener(|this, _, window, cx| this.save_workspace_name(window, cx)),
+                        )
+                        .child(
+                            workspace_icon(ws.icon.as_deref(), ws.color.as_deref())
+                                .small()
+                                .flex_none(),
+                        )
+                        .child(
+                            div().flex_1().min_w_0().mx(px(-8.)).child(
+                                Input::new(&self.inputs.workspace_name)
+                                    .id("workspace-name-input")
+                                    .aria_label("ワークスペース名")
+                                    .text_sm()
+                                    .bg(theme.background)
+                                    .border_color(theme.ring)
+                                    .px_2(),
+                            ),
+                        )
+                        .into_any_element()
+                } else {
+                    self.nav_item(
+                        ("ws", ix),
+                        workspace_icon(ws.icon.as_deref(), ws.color.as_deref()),
+                        ws.name.clone(),
+                        Nav::Workspace(id),
+                        cx,
+                    )
+                })
                 .child(more)
                 // 右クリックでも同じメニューを出す
                 .context_menu(move |m, _, _| menu(m)),
@@ -617,7 +658,7 @@ impl MainView {
                                     .xsmall()
                                     .tooltip("ワークスペースを追加")
                                     .on_click(cx.listener(|this, _, window, cx| {
-                                        this.ask_workspace_name(None, None, window, cx)
+                                        this.add_workspace(None, window, cx)
                                     })),
                             ),
                     )
@@ -628,9 +669,7 @@ impl MainView {
                 let view = view.clone();
                 menu.item(PopupMenuItem::new("ワークスペースを追加").on_click(
                     move |_, window, cx| {
-                        let _ = view.update(cx, |this, cx| {
-                            this.ask_workspace_name(None, None, window, cx)
-                        });
+                        let _ = view.update(cx, |this, cx| this.add_workspace(None, window, cx));
                     },
                 ))
             });
@@ -2120,14 +2159,19 @@ impl MainView {
             .collect()
     }
 
-    /// 期限の選択肢。今日からの日数で決める。
+    /// 期限の選択肢。今日からの日数で決める。いまの期限に時刻があれば、時刻は残す。
     fn due_options(&self, current: Option<&str>) -> Vec<(SharedString, bool, Option<String>)> {
         let mut options: Vec<(SharedString, bool, Option<String>)> =
             [("今日", 0), ("明日", 1), ("1 週間後", 7), ("1 か月後", 30)]
                 .into_iter()
                 .map(|(label, days)| {
                     let date = view::add_days(&self.today, days);
-                    (label.into(), current == Some(date.as_str()), Some(date))
+                    let checked = current.map(malakt_core::date_of) == Some(date.as_str());
+                    (
+                        label.into(),
+                        checked,
+                        Some(view::with_time_of(&date, current)),
+                    )
                 })
                 .collect();
         options.push(("なし".into(), current.is_none(), None));
@@ -3232,10 +3276,21 @@ impl MainView {
                 .small()
                 .w(px(128.)),
         );
+        due = due.child(
+            Input::new(&self.inputs.due_time)
+                .id("due-time-input")
+                .aria_label("期限の時刻")
+                .small()
+                .w(px(72.)),
+        );
         for (i, (label, days)) in due_buttons.into_iter().enumerate() {
-            due = due.child(chip(("p-due", i), label, false, cx).on_click(cx.listener(
-                move |this, _: &ClickEvent, window, cx| this.set_due_in(days, window, cx),
-            )));
+            due = due.child(
+                chip(("p-due", i), label, false, cx)
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        this.set_due_in(days, window, cx)
+                    }))
+                    .test_support(),
+            );
         }
 
         let mut percent = row().gap_1().flex_wrap();
@@ -4246,36 +4301,6 @@ impl MainView {
         };
         Some(match &self.modal {
             Modal::None => return None,
-            Modal::WorkspaceName { rename, parent } => {
-                let title = if rename.is_some() {
-                    "ワークスペースの名前を変更".to_owned()
-                } else if let Some(parent) = parent {
-                    format!(
-                        "「{}」にサブワークスペースを追加",
-                        self.workspace_name(Some(parent))
-                    )
-                } else {
-                    "ワークスペースを追加".to_owned()
-                };
-                let body = col()
-                    .gap_3()
-                    .child(
-                        Input::new(&self.inputs.name)
-                            .id("name-input")
-                            .aria_label("名前"),
-                    )
-                    .child(
-                        row().gap_2().justify_end().child(cancel(cx)).child(
-                            Button::new("name-submit")
-                                .label(if rename.is_some() { "保存" } else { "追加" })
-                                .primary()
-                                .on_click(
-                                    cx.listener(|this, _, window, cx| this.submit_name(window, cx)),
-                                ),
-                        ),
-                    );
-                self.dialog(title, body, cx)
-            }
             Modal::WorkspaceIcon(id) => {
                 let theme = cx.theme().clone();
                 let current = self.workspaces.iter().find(|w| &w.id == id);
@@ -4318,8 +4343,33 @@ impl MainView {
                     );
                 }
                 let query = self.inputs.icon_search.read(cx).value().to_string();
-                let found =
-                    crate::icons::search(&query, &crate::state::WORKSPACE_ICONS, ICONS_SHOWN);
+                let found = crate::icons::search(
+                    &query,
+                    self.icon_category,
+                    &crate::state::WORKSPACE_ICONS,
+                    ICONS_SHOWN,
+                );
+                // カテゴリはもう一度押すと外れる
+                let mut categories = row().gap_1();
+                for (ix, category) in crate::icons::Category::ALL.into_iter().enumerate() {
+                    let active = self.icon_category == Some(category);
+                    categories = categories.child(
+                        div()
+                            .rounded_md()
+                            .when(active, |d| d.bg(theme.secondary_hover))
+                            .child(
+                                Button::new(("icon-category", ix))
+                                    .icon(app_icon(category.icon()))
+                                    .ghost()
+                                    .large()
+                                    .tooltip(category.label())
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.icon_category = (!active).then_some(category);
+                                        cx.notify();
+                                    })),
+                            ),
+                    );
+                }
                 let none_found = found.is_empty();
                 let mut icons = row().gap_1().flex_wrap();
                 for (ix, name) in found.into_iter().enumerate() {
@@ -4360,9 +4410,15 @@ impl MainView {
                             .prefix(app_icon("search").small())
                             .cleanable(true),
                     )
+                    .child(categories)
                     .child(
                         div()
-                            .id("icon-list")
+                            // カテゴリごとに別のものにして、切り替えたら上から見せる
+                            .id((
+                                "icon-list",
+                                self.icon_category
+                                    .map_or(0, |category| category as usize + 1),
+                            ))
                             .h(px(320.))
                             .overflow_y_scrollbar()
                             .child(icons)
