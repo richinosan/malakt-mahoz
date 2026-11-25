@@ -135,9 +135,12 @@ const QUIET: &[(&str, &str)] = &[
     ("ticket-who#0", "今選んでいる人"),
     ("font#0", "今選んでいるフォント"),
     ("scene#0", "今選んでいる背景の画像"),
-    ("見た目 > preset#0", "今選んでいるテーマ"),
-    ("見た目の詳細 > preset#0", "今選んでいるテーマ"),
-    ("自分のテーマがある見た目 > preset#0", "今選んでいるテーマ"),
+    ("テーマ > preset#0", "今選んでいるテーマ"),
+    ("テーマの詳細 > preset#0", "今選んでいるテーマ"),
+    (
+        "テーマ（自分のテーマあり） > preset#0",
+        "今選んでいるテーマ",
+    ),
     ("own-preset#0", "今選んでいるテーマ"),
     ("layout#0", "今選んでいるレイアウト"),
     ("density#1", "今選んでいる密度"),
@@ -653,23 +656,23 @@ fn screens() -> Vec<(&'static str, Size<Pixels>, Setup)> {
         ("担当者のダイアログ", wide, |cx, w| {
             with_view(cx, w, |v, window, cx| v.open_people(window, cx))
         }),
-        ("見た目", wide, |cx, w| {
+        ("テーマ", wide, |cx, w| {
             with_view(cx, w, |v, window, cx| v.open_appearance(window, cx))
         }),
-        ("自分のテーマがある見た目", wide, |cx, w| {
+        ("テーマ（自分のテーマあり）", wide, |cx, w| {
             with_view(cx, w, |v, window, cx| {
                 v.open_appearance(window, cx);
                 v.save_preset(window, cx);
                 v.save_preset_name(window, cx);
             })
         }),
-        ("見た目の詳細", wide, |cx, w| {
+        ("テーマの詳細", wide, |cx, w| {
             with_view(cx, w, |v, window, cx| {
                 v.open_appearance(window, cx);
                 v.toggle_appearance_details(cx);
             })
         }),
-        ("見た目を変えたところ", wide, |cx, w| {
+        ("テーマを変えたところ", wide, |cx, w| {
             use malakt_mahoz::theme::{Color, Slot};
             with_view(cx, w, |v, window, cx| {
                 v.set_font(Some("Noto Sans"), cx);

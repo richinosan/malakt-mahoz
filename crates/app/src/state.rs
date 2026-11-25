@@ -309,7 +309,7 @@ pub struct MainView {
     pub assignee_picker: bool,
     /// ダイアログの上に重ねて出しているダイアログ。
     pub sub_modal: Option<SubModal>,
-    /// 「見た目」で、1 つずつ変える行（詳細）を開いている。
+    /// 「テーマ」で、1 つずつ変える行（詳細）を開いている。
     pub appearance_details: bool,
     pub appearance_scroll: gpui_kit::ScrollHandle,
     /// 自分で保存したテーマ。
