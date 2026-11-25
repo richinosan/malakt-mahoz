@@ -299,13 +299,30 @@ fn workspace_color(color: Option<&str>) -> Option<Hsla> {
     Some(rgb(hex).into())
 }
 
-fn workspace_icon(icon: Option<&str>, color: Option<&str>) -> Icon {
-    let icon = Icon::default().path(crate::state::workspace_icon_path(icon));
+/// ワークスペースのアイコン。自分で足した画像はそのままの色で、ほかは選んだ色の線画で出す。
+fn workspace_icon(icon: Option<&str>, color: Option<&str>, size: Pixels, cx: &App) -> AnyElement {
+    let custom = icon
+        .filter(|icon| malakt_core::icon::is_custom(icon))
+        .and_then(|icon| crate::icons::custom_image(icon, cx));
+    if let Some(image) = custom {
+        return img(image)
+            .size(size)
+            .flex_none()
+            .object_fit(ObjectFit::Contain)
+            .into_any_element();
+    }
+    let icon = Icon::default()
+        .path(crate::state::workspace_icon_path(icon))
+        .size(size)
+        .flex_none();
     match workspace_color(color) {
-        Some(color) => icon.text_color(color),
-        None => icon,
+        Some(color) => icon.text_color(color).into_any_element(),
+        None => icon.into_any_element(),
     }
 }
+
+/// 左のメニューの行に出すアイコンの大きさ。
+const NAV_ICON_SIZE: Pixels = px(14.);
 
 /// 同梱の線画アイコン。
 pub(crate) fn app_icon(name: &str) -> Icon {
@@ -362,7 +379,7 @@ impl MainView {
     fn nav_link(
         &self,
         id: impl Into<ElementId>,
-        icon: Icon,
+        icon: impl IntoElement,
         label: impl Into<SharedString>,
         active: bool,
         cx: &App,
@@ -383,14 +400,14 @@ impl MainView {
             })
             .when(!active, |d| d.hover(|s| s.bg(theme.accent.opacity(0.6))))
             .active(|s| s.bg(theme.accent).opacity(0.8))
-            .child(icon.small().flex_none())
+            .child(icon)
             .child(div().flex_1().truncate().child(label.into()))
     }
 
     fn nav_item(
         &self,
         id: impl Into<ElementId>,
-        icon: Icon,
+        icon: impl IntoElement,
         label: impl Into<SharedString>,
         nav: Nav,
         cx: &mut Context<Self>,
@@ -546,11 +563,12 @@ impl MainView {
                         .on_mouse_down_out(
                             cx.listener(|this, _, window, cx| this.save_workspace_name(window, cx)),
                         )
-                        .child(
-                            workspace_icon(ws.icon.as_deref(), ws.color.as_deref())
-                                .small()
-                                .flex_none(),
-                        )
+                        .child(workspace_icon(
+                            ws.icon.as_deref(),
+                            ws.color.as_deref(),
+                            NAV_ICON_SIZE,
+                            cx,
+                        ))
                         .child(
                             div().flex_1().min_w_0().mx(px(-8.)).child(
                                 Input::new(&self.inputs.workspace_name)
@@ -566,7 +584,7 @@ impl MainView {
                 } else {
                     self.nav_item(
                         ("ws", ix),
-                        workspace_icon(ws.icon.as_deref(), ws.color.as_deref()),
+                        workspace_icon(ws.icon.as_deref(), ws.color.as_deref(), NAV_ICON_SIZE, cx),
                         ws.name.clone(),
                         Nav::Workspace(id),
                         cx,
@@ -654,7 +672,7 @@ impl MainView {
                     .gap_1()
                     .child(row().child(self.nav_item(
                         "nav-home",
-                        app_icon("house"),
+                        app_icon("house").size(NAV_ICON_SIZE).flex_none(),
                         "ホーム",
                         Nav::Home,
                         cx,
@@ -663,7 +681,7 @@ impl MainView {
                         row().child(
                             self.nav_link(
                                 "nav-notices",
-                                app_icon("bell"),
+                                app_icon("bell").size(NAV_ICON_SIZE).flex_none(),
                                 "通知",
                                 self.modal == Modal::Notices,
                                 cx,
@@ -688,7 +706,7 @@ impl MainView {
                     )
                     .child(row().child(self.nav_item(
                         "nav-all",
-                        app_icon("list-todo"),
+                        app_icon("list-todo").size(NAV_ICON_SIZE).flex_none(),
                         "すべてのタスク",
                         Nav::All,
                         cx,
@@ -697,7 +715,7 @@ impl MainView {
                         self.drop_zone(row().id("drop-unfiled"), DropTarget::Workspace(None), cx)
                             .child(self.nav_item(
                                 "nav-unfiled",
-                                app_icon("inbox"),
+                                app_icon("inbox").size(NAV_ICON_SIZE).flex_none(),
                                 "未所属",
                                 Nav::Unfiled,
                                 cx,
@@ -774,7 +792,7 @@ impl MainView {
     // ---- 上のバー ----
 
     /// 今の画面の名前と、その下に出す一言、名前の左に出すアイコン。
-    fn header_title(&self) -> (SharedString, Option<&'static str>, Option<Icon>) {
+    fn header_title(&self, cx: &App) -> (SharedString, Option<&'static str>, Option<AnyElement>) {
         match &self.nav {
             Nav::Home => ("ホーム".into(), None, None),
             Nav::All => ("すべてのタスク".into(), Some("タスク一覧"), None),
@@ -785,7 +803,7 @@ impl MainView {
                     self.list_title(),
                     Some("タスク一覧"),
                     ws.map(|w| {
-                        workspace_icon(w.icon.as_deref(), w.color.as_deref()).size(TILE_ICON_SIZE)
+                        workspace_icon(w.icon.as_deref(), w.color.as_deref(), TILE_ICON_SIZE, cx)
                     }),
                 )
             }
@@ -1032,8 +1050,8 @@ impl MainView {
         };
         // 分けているときは、今のペインの場所を出す
         let (title, subtitle, icon) = match self.focused_child() {
-            Some(child) => child.read(cx).header_title(),
-            None => self.header_title(),
+            Some(child) => child.read(cx).header_title(cx),
+            None => self.header_title(cx),
         };
         let unread = self.unread_notices;
         let lock_enabled = self.lock_enabled(cx);
@@ -1345,10 +1363,12 @@ impl MainView {
                                 .justify_center()
                                 .rounded_md()
                                 .bg(theme.muted)
-                                .child(
-                                    workspace_icon(ws.icon.as_deref(), ws.color.as_deref())
-                                        .size(CARD_ICON_SIZE),
-                                ),
+                                .child(workspace_icon(
+                                    ws.icon.as_deref(),
+                                    ws.color.as_deref(),
+                                    CARD_ICON_SIZE,
+                                    cx,
+                                )),
                         )
                         .child(
                             col()
@@ -4569,8 +4589,58 @@ impl MainView {
                             ),
                     );
                 }
-                let none_found = found.is_empty();
+                categories = categories.child(div().flex_1()).child({
+                    let ws = id.clone();
+                    Button::new("icon-add-image")
+                        .icon(app_icon("image-plus"))
+                        .ghost()
+                        .large()
+                        .tooltip("画像を追加")
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.add_icon_image(ws.clone(), window, cx)
+                        }))
+                });
+                // 自分で足した画像は、絞り込んでいないときに先頭に出す
+                let (custom, custom_error) =
+                    if query.trim().is_empty() && self.icon_category.is_none() {
+                        match self.db.read(cx).store.custom_icons() {
+                            Ok(names) => (names, None),
+                            Err(error) => (
+                                Vec::new(),
+                                Some(format!("追加した画像を読めませんでした。{error}")),
+                            ),
+                        }
+                    } else {
+                        (Vec::new(), None)
+                    };
+                let none_found = found.is_empty() && custom.is_empty();
                 let mut icons = row().gap_1().flex_wrap();
+                for (ix, name) in custom.into_iter().enumerate() {
+                    let (ws, color) = (id.clone(), color.clone());
+                    let selected = chosen == name;
+                    icons = icons.child(
+                        div()
+                            .id(("ws-custom-icon", ix))
+                            .size(px(40.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_md()
+                            .cursor_pointer()
+                            .border_1()
+                            .border_color(if selected {
+                                theme.foreground
+                            } else {
+                                theme.transparent
+                            })
+                            .hover(|s| s.bg(theme.secondary_hover))
+                            .child(workspace_icon(Some(&name), None, PICKER_ICON_SIZE, cx))
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                this.set_workspace_icon(&ws, Some(&name), color.as_deref(), cx)
+                            }))
+                            .test_support(),
+                    );
+                }
                 for (ix, name) in found.into_iter().enumerate() {
                     let (ws, color) = (id.clone(), color.clone());
                     let selected = chosen == name;
@@ -4590,9 +4660,12 @@ impl MainView {
                                 theme.transparent
                             })
                             .hover(|s| s.bg(theme.secondary_hover))
-                            .child(
-                                workspace_icon(Some(name), color.as_deref()).size(PICKER_ICON_SIZE),
-                            )
+                            .child(workspace_icon(
+                                Some(name),
+                                color.as_deref(),
+                                PICKER_ICON_SIZE,
+                                cx,
+                            ))
                             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                                 this.set_workspace_icon(&ws, Some(name), color.as_deref(), cx)
                             }))
@@ -4625,6 +4698,9 @@ impl MainView {
                                 d.child(muted("見つかりません。".to_owned()))
                             }),
                     )
+                    .when_some(custom_error, |d, error| {
+                        d.child(div().text_sm().text_color(theme.danger).child(error))
+                    })
                     .when_some(self.error.clone(), |d, error| {
                         d.child(div().text_sm().text_color(theme.danger).child(error))
                     });

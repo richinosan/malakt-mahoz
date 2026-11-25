@@ -3,7 +3,9 @@
 
 use std::collections::HashMap;
 use std::io::Read;
-use std::sync::OnceLock;
+use std::sync::{Arc, Mutex, OnceLock};
+
+use gpui_kit::{App, RenderImage};
 
 /// 1 行に 1 アイコン。「名前、タグ（空白区切り）、SVG の中身」をタブで区切ってある。
 static DATA: &str = include_str!("../assets/icons/lucide.tsv");
@@ -431,6 +433,102 @@ pub fn pick(words: &[&str]) -> Option<&'static str> {
     })
 }
 
+/// 自分で足す画像の、長い辺の大きさ（ピクセル）。いちばん大きく出す所の 2 倍より少し大きい。
+pub const CUSTOM_ICON_PX: u32 = 96;
+/// 選べる画像ファイルの大きさの上限。
+const MAX_SOURCE_BYTES: u64 = 20 * 1024 * 1024;
+
+/// 画像ファイル（PNG・JPEG・SVG）を読んで、アイコン用の小さな PNG にする。
+pub fn shrink_file(path: &std::path::Path) -> Result<Vec<u8>, String> {
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let size = std::fs::metadata(path)
+        .map_err(|error| format!("画像 {name} を読めませんでした。{error}"))?
+        .len();
+    if size > MAX_SOURCE_BYTES {
+        return Err(format!(
+            "画像 {name} が大きすぎます（{} MB まで）。",
+            MAX_SOURCE_BYTES / 1024 / 1024
+        ));
+    }
+    let bytes =
+        std::fs::read(path).map_err(|error| format!("画像 {name} を読めませんでした。{error}"))?;
+    shrink(&bytes).map_err(|error| {
+        format!("画像 {name} を開けませんでした（PNG・JPEG・SVG を選んでください）。{error}")
+    })
+}
+
+/// 画像を、長い辺が [`CUSTOM_ICON_PX`] に収まる PNG にする。
+pub fn shrink(bytes: &[u8]) -> Result<Vec<u8>, String> {
+    let text = bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(bytes);
+    let is_svg = text
+        .iter()
+        .find(|b| !b.is_ascii_whitespace())
+        .is_some_and(|&b| b == b'<');
+    if is_svg {
+        return shrink_svg(bytes);
+    }
+    let decoded = image::load_from_memory(bytes).map_err(|error| error.to_string())?;
+    let small = if decoded.width() > CUSTOM_ICON_PX || decoded.height() > CUSTOM_ICON_PX {
+        decoded.resize(
+            CUSTOM_ICON_PX,
+            CUSTOM_ICON_PX,
+            image::imageops::FilterType::Lanczos3,
+        )
+    } else {
+        decoded
+    };
+    let mut png = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgba8(small.into_rgba8())
+        .write_to(&mut png, image::ImageFormat::Png)
+        .map_err(|error| error.to_string())?;
+    Ok(png.into_inner())
+}
+
+fn shrink_svg(bytes: &[u8]) -> Result<Vec<u8>, String> {
+    use resvg::{tiny_skia, usvg};
+    let tree = usvg::Tree::from_data(bytes, &usvg::Options::default())
+        .map_err(|error| error.to_string())?;
+    let size = tree.size();
+    let scale = CUSTOM_ICON_PX as f32 / size.width().max(size.height());
+    let width = ((size.width() * scale).round() as u32).clamp(1, CUSTOM_ICON_PX);
+    let height = ((size.height() * scale).round() as u32).clamp(1, CUSTOM_ICON_PX);
+    let mut pixmap =
+        tiny_skia::Pixmap::new(width, height).ok_or("画像の大きさが正しくありません")?;
+    resvg::render(
+        &tree,
+        tiny_skia::Transform::from_scale(scale, scale),
+        &mut pixmap.as_mut(),
+    );
+    pixmap.encode_png().map_err(|error| error.to_string())
+}
+
+/// 自分で足した画像を、描ける形で返す。一度読んだものは覚えておく（名前は中身から決まるので、変わらない）。
+pub fn custom_image(name: &str, cx: &App) -> Option<Arc<RenderImage>> {
+    static LOADED: OnceLock<Mutex<HashMap<String, Arc<RenderImage>>>> = OnceLock::new();
+    let loaded = LOADED.get_or_init(Default::default);
+    if let Some(image) = loaded.lock().ok()?.get(name) {
+        return Some(image.clone());
+    }
+    let png = crate::db::shared(cx)
+        .read(cx)
+        .store
+        .custom_icon(name)
+        .ok()??;
+    let mut pixels = image::load_from_memory_with_format(&png, image::ImageFormat::Png)
+        .ok()?
+        .into_rgba8();
+    // 描く側は BGRA で持つ
+    for pixel in pixels.pixels_mut() {
+        pixel.0.swap(0, 2);
+    }
+    let image = Arc::new(RenderImage::new(vec![image::Frame::new(pixels)]));
+    loaded.lock().ok()?.insert(name.to_owned(), image.clone());
+    Some(image)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -521,5 +619,44 @@ mod tests {
         // 絵文字の SVG は 32 の枠で、塗りで描く
         let svg = String::from_utf8(svg("emoji-penguin").unwrap()).unwrap();
         assert!(svg.contains(r#"viewBox="0 0 32 32""#) && svg.ends_with("</svg>"));
+    }
+
+    fn png_size(png: &[u8]) -> (u32, u32) {
+        let image = image::load_from_memory(png).unwrap();
+        (image.width(), image.height())
+    }
+
+    #[test]
+    fn images_are_shrunk_to_small_pngs() {
+        // 大きな画像は、縦横の比をそのままに小さくする
+        let big = image::RgbaImage::from_pixel(400, 200, image::Rgba([200, 40, 40, 255]));
+        let mut source = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(big)
+            .write_to(&mut source, image::ImageFormat::Png)
+            .unwrap();
+        let png = shrink(source.get_ref()).unwrap();
+        assert_eq!(png_size(&png), (CUSTOM_ICON_PX, CUSTOM_ICON_PX / 2));
+        assert!(png.len() <= malakt_core::icon::MAX_CUSTOM_ICON_BYTES);
+
+        // 小さな画像は大きくしない
+        let small = image::RgbImage::from_pixel(20, 30, image::Rgb([0, 0, 0]));
+        let mut source = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(small)
+            .write_to(&mut source, image::ImageFormat::Jpeg)
+            .unwrap();
+        assert_eq!(png_size(&shrink(source.get_ref()).unwrap()), (20, 30));
+
+        // SVG は色のまま絵にする
+        let svg = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 20"><rect width="10" height="20" fill="#3366ff"/></svg>"##;
+        let png = shrink(svg).unwrap();
+        assert_eq!(png_size(&png), (CUSTOM_ICON_PX / 2, CUSTOM_ICON_PX));
+        let pixel = *image::load_from_memory(&png)
+            .unwrap()
+            .into_rgba8()
+            .get_pixel(5, 5);
+        assert_eq!(pixel.0, [0x33, 0x66, 0xff, 0xff]);
+
+        assert!(shrink(b"lorem ipsum").is_err());
+        assert!(shrink(b"<p>lorem</p>").is_err());
     }
 }

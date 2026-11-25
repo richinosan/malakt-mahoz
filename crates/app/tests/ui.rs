@@ -3662,3 +3662,95 @@ fn undo_redo_and_paste_work_with_keys(cx: &mut TestAppContext) {
     key(cx, "secondary-z");
     assert_eq!(all_tasks(cx).len(), 3);
 }
+
+/// 自分の画像を足すと、小さくして保存され、ワークスペースのアイコンになる。足した画像はあとからも選べる。
+#[gpui_kit::test]
+fn an_image_becomes_a_workspace_icon(cx: &mut TestAppContext) {
+    start(cx);
+    let (window, view) = open(cx, wide());
+    let ws = cx.update(|cx| {
+        db::shared(cx).update(cx, |db, cx| {
+            cx.notify();
+            let ws = db.store.create_workspace(None, "Lorem").unwrap();
+            db.store
+                .set_workspace_icon(&ws.id, Some("rocket"), Some("orange"))
+                .unwrap();
+            ws.id
+        })
+    });
+    cx.run_until_parked();
+    cx.update(|cx| {
+        view.update(cx, |v, cx| {
+            v.modal = Modal::WorkspaceIcon(ws.clone());
+            cx.notify();
+        })
+    });
+    ui(cx, window, |window, _| {
+        assert!(window.find("icon-add-image").visible());
+        assert!(window.try_find(("ws-custom-icon", 0usize)).is_none());
+    });
+
+    let dir = tempfile::tempdir().unwrap();
+    // 開けないファイルは、名前を出して断る。アイコンはそのまま
+    let text = dir.path().join("notes.png");
+    std::fs::write(&text, "lorem ipsum").unwrap();
+    cx.update(|cx| view.update(cx, |v, cx| v.add_icon_file(&ws, &text, cx)));
+    cx.update(|cx| {
+        let error = view.read(cx).error.clone().unwrap();
+        assert!(error.contains("notes.png"), "{error}");
+    });
+    assert_eq!(
+        store(cx, |s| s.workspace(&ws).unwrap()).icon.as_deref(),
+        Some("rocket")
+    );
+    assert!(store(cx, |s| s.custom_icons().unwrap()).is_empty());
+
+    // SVG は色のまま小さな PNG になる
+    let svg = dir.path().join("logo.svg");
+    std::fs::write(
+        &svg,
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 400"><circle cx="200" cy="200" r="180" fill="#e5484d"/></svg>"##,
+    )
+    .unwrap();
+    cx.update(|cx| view.update(cx, |v, cx| v.add_icon_file(&ws, &svg, cx)));
+    cx.run_until_parked();
+    let saved = store(cx, |s| s.workspace(&ws).unwrap());
+    let custom = saved.icon.clone().unwrap();
+    assert!(malakt_core::icon::is_custom(&custom), "{custom}");
+    assert_eq!(saved.color.as_deref(), Some("orange"));
+    let png = store(cx, |s| s.custom_icon(&custom).unwrap()).unwrap();
+    assert!(png.len() < 16 * 1024, "{} バイト", png.len());
+    cx.update(|cx| assert_eq!(view.read(cx).error, None));
+    cx.update(|cx| {
+        assert!(malakt_mahoz::icons::custom_image(&custom, cx).is_some());
+    });
+
+    // ほかのアイコンにしても、足した画像は一覧の先頭に残っていて、押すと戻せる
+    ui(cx, window, |window, cx| {
+        assert!(window.find(("ws-custom-icon", 0usize)).visible());
+        window.click(("ws-icon", 13usize), cx)
+    });
+    assert_eq!(
+        store(cx, |s| s.workspace(&ws).unwrap()).icon.as_deref(),
+        Some("rocket")
+    );
+    ui(cx, window, |window, cx| {
+        window.click(("ws-custom-icon", 0usize), cx)
+    });
+    assert_eq!(
+        store(cx, |s| s.workspace(&ws).unwrap()).icon,
+        Some(custom.clone())
+    );
+
+    // 同じ画像をもう一度足しても増えない
+    cx.update(|cx| view.update(cx, |v, cx| v.add_icon_file(&ws, &svg, cx)));
+    assert_eq!(store(cx, |s| s.custom_icons().unwrap()), [custom]);
+
+    // 絞り込んでいる間は、足した画像を出さない
+    ui(cx, window, |window, cx| {
+        window.click(("icon-category", 0usize), cx)
+    });
+    ui(cx, window, |window, _| {
+        assert!(window.try_find(("ws-custom-icon", 0usize)).is_none());
+    });
+}
