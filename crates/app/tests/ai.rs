@@ -1966,3 +1966,35 @@ fn an_icon_that_cannot_be_picked_is_reported(cx: &mut TestAppContext) {
     let saved = first_workspace(cx);
     assert_eq!(saved.icon, None);
 }
+
+/// 「新しいタスク」で追加したタスクは、タイトルを書き終えるまで AI が整えない。
+#[gpui_kit::test]
+fn a_task_being_named_waits_for_its_title(cx: &mut TestAppContext) {
+    let world = start(cx);
+    world.keys.set(Provider::Claude, "k").unwrap();
+    let (window, view) = open(cx, wide());
+    ui(cx, window, |window, cx| window.click("nav-all", cx));
+    cx.run_until_parked();
+
+    ui(cx, window, |window, cx| window.click("new-task-open", cx));
+    for _ in 0..20 {
+        cx.run_until_parked();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    cx.update(|cx| assert!(view.read(cx).naming_task.is_some()));
+    assert!(world.sent().is_empty(), "書いている間は送らない");
+
+    world.reply(text_reply("そのままにしました。"));
+    ui(cx, window, |window, cx| {
+        window.input("会場を予約する", cx);
+        window.press("enter", cx);
+    });
+    wait(cx, "AI が整え終わる", |s| {
+        !s.busy && !s.items.is_empty()
+    });
+    let sent = world.sent();
+    assert_eq!(sent.len(), 1);
+    let body = sent[0].2.to_string();
+    assert!(body.contains("会場を予約する"), "{body}");
+    assert!(!body.contains("新規タスク"), "{body}");
+}

@@ -59,8 +59,6 @@ pub enum Modal {
     BulkAssignees,
     /// 選んだタスクのカテゴリをまとめて変える
     BulkCategories,
-    /// 項目を入れてタスクを作る
-    NewTask,
     /// 通知の一覧
     Notices,
     /// 完了チケットの発行
@@ -76,6 +74,9 @@ pub struct WorkspaceNaming {
     /// 追加したばかりで、最初の名前を書いている
     pub created: bool,
 }
+
+/// 追加したばかりのタスクのタイトル。
+pub const NEW_TASK_TITLE: &str = "新規タスク";
 
 /// 追加したばかりのワークスペースの名前。
 pub const NEW_WORKSPACE_NAME: &str = "新規ワークスペース";
@@ -151,11 +152,6 @@ pub struct Inputs {
     pub ws_context: Entity<TextareaState>,
     pub bulk_due: Entity<InputState>,
     pub bulk_categories: Entity<InputState>,
-    pub nt_title: Entity<InputState>,
-    pub nt_start: Entity<InputState>,
-    pub nt_due: Entity<InputState>,
-    pub nt_categories: Entity<InputState>,
-    pub nt_description: Entity<TextareaState>,
 }
 
 pub struct MainView {
@@ -164,6 +160,8 @@ pub struct MainView {
     pub nav: Nav,
     pub collapsed: HashSet<Id>,
     pub include_descendants: bool,
+    /// 追加したばかりで、詳細で最初のタイトルを書いているタスク。
+    pub naming_task: Option<Id>,
     /// 左のメニューで名前を書いているワークスペース。
     pub workspace_naming: Option<WorkspaceNaming>,
     /// アイコンを選ぶ画面で選んでいるカテゴリ。
@@ -189,7 +187,6 @@ pub struct MainView {
     pub bulk_people: Vec<Id>,
     pub bulk_category_add: bool,
     /// 新しいタスクのダイアログで編集中の下書き（入力欄にないもの: 優先度・担当者）
-    pub new_task: TaskDraft,
     /// 一覧の最後の追加行に入れている状態・優先度・担当・期限
     pub quick: TaskDraft,
     /// `quick` を作ったときの行き先。行き先が変わったら作り直す
@@ -326,11 +323,6 @@ impl MainView {
             ),
             bulk_due: input(window, cx, "11/27 14:00"),
             bulk_categories: input(window, cx, "「、」で区切って入力"),
-            nt_title: input(window, cx, "タイトル"),
-            nt_start: input(window, cx, "11/27 14:00"),
-            nt_due: input(window, cx, "11/27 14:00"),
-            nt_categories: input(window, cx, "「、」で区切って入力"),
-            nt_description: area(window, cx, "説明"),
         };
 
         let ai_session = ai::shared(cx);
@@ -340,6 +332,7 @@ impl MainView {
             cx.observe(&ai_session, |_, _, cx| cx.notify()),
             // 今見ている場所を、AI に伝えられるようにしておく
             cx.observe_self(|this, cx| {
+                this.finish_naming_task(cx);
                 let place = this.ai_place();
                 let workspace = match &this.nav {
                     Nav::Workspace(id) => Some(id.clone()),
@@ -527,6 +520,7 @@ impl MainView {
             include_descendants: true,
             icon_category: None,
             workspace_naming: None,
+            naming_task: None,
             workspaces: Vec::new(),
             tree: Vec::new(),
             open_counts: HashMap::new(),
@@ -545,7 +539,6 @@ impl MainView {
             bulk_mode: ListMode::Add,
             bulk_people: Vec::new(),
             bulk_category_add: true,
-            new_task: TaskDraft::default(),
             quick: TaskDraft::default(),
             quick_nav: None,
             quick_touched: false,
@@ -1016,11 +1009,25 @@ impl MainView {
         cx.notify();
     }
 
-    pub fn save_title(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+    pub fn save_title(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let title = self.inputs.title.read(cx).value().to_string();
         self.edit_task(cx, |d| d.title = title);
         if self.error.is_none() {
             self.editing = None;
+            self.leave_input(&self.inputs.title.clone(), window, cx);
+        }
+    }
+
+    /// Enter で書き終えた入力欄は消えるので、フォーカスを画面に戻して Esc などのキーを受けられるようにする。
+    /// ほかの場所を押して書き終えたときは、押した先のフォーカスをそのままにする。
+    fn leave_input(
+        &mut self,
+        input: &Entity<InputState>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if input.read(cx).focus_handle(cx).is_focused(window) {
+            self.focus.focus(window, cx);
         }
     }
 
@@ -1680,18 +1687,23 @@ impl MainView {
         }
     }
 
-    // ---- 新しいタスク（項目を入れて作る） ----
+    // ---- 新しいタスク ----
 
-    /// 新しいタスクのダイアログを開く。いまのワークスペースの既定値と、
-    /// 上の入力欄に書きかけたタイトルを入れておく。
-    pub fn open_new_task(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// 「新規タスク」というタイトルで追加して、詳細でそのままタイトルを書けるようにする。
+    /// いまのワークスペースの既定値が入る。上の入力欄に書きかけたタイトルがあれば、それで作る。
+    pub fn add_task(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let workspace = self.current_workspace().map(str::to_owned);
-        let title = Self::take(&self.inputs.quick_add.clone(), window, cx);
+        let typed = self.inputs.quick_add.read(cx).value().trim().to_owned();
+        let title = if typed.is_empty() {
+            NEW_TASK_TITLE
+        } else {
+            typed.as_str()
+        };
         let draft = match self
             .db
             .read(cx)
             .store
-            .draft_for(workspace.as_deref(), title.trim())
+            .draft_for(workspace.as_deref(), title)
         {
             Ok(draft) => draft,
             Err(error) => {
@@ -1700,73 +1712,37 @@ impl MainView {
                 return;
             }
         };
-        let set = |input: &Entity<InputState>,
-                   value: String,
-                   window: &mut Window,
-                   cx: &mut Context<Self>| {
-            input.update(cx, |s, cx| s.set_value(value, window, cx));
+        let Some(task) = self.write(cx, |s| s.create_task_shown(workspace.as_deref(), &draft))
+        else {
+            return;
         };
-        let inputs = &self.inputs;
-        set(&inputs.nt_title.clone(), draft.title.clone(), window, cx);
-        set(
-            &inputs.nt_start.clone(),
-            draft.start.clone().unwrap_or_default(),
-            window,
-            cx,
-        );
-        set(
-            &inputs.nt_due.clone(),
-            draft.due.clone().unwrap_or_default(),
-            window,
-            cx,
-        );
-        set(
-            &inputs.nt_categories.clone(),
-            draft.categories.join("、"),
-            window,
-            cx,
-        );
-        let description = draft.description.clone();
-        self.inputs
-            .nt_description
-            .update(cx, |s, cx| s.set_value(description, window, cx));
-        self.inputs.nt_title.update(cx, |s, cx| s.focus(window, cx));
-        self.new_task = draft;
-        self.error = None;
-        self.modal = Modal::NewTask;
-        cx.notify();
+        Self::take(&self.inputs.quick_add.clone(), window, cx);
+        self.query.tab = view::Tab::Open;
+        if typed.is_empty() {
+            // タイトルを書き終えるまで、AI に整えさせない
+            let id = task.id.clone();
+            self.ai_session.update(cx, |session, _| session.hold(id));
+        }
+        self.open_panel(&task.id, window, cx);
+        if typed.is_empty() {
+            self.naming_task = Some(task.id);
+            self.start_editing(Editing::Title, window, cx);
+            // すぐ打ち替えられるように、タイトルを全部選んでおく
+            self.inputs
+                .title
+                .update(cx, |s, cx| s.select_all(window, cx));
+        }
     }
 
-    pub fn toggle_new_task_assignee(&mut self, person: &str, cx: &mut Context<Self>) {
-        toggle(&mut self.new_task.assignee_ids, person);
-        cx.notify();
-    }
-
-    pub fn set_new_task_priority(&mut self, priority: u8, cx: &mut Context<Self>) {
-        self.new_task.priority = priority;
-        cx.notify();
-    }
-
-    pub fn submit_new_task(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.modal != Modal::NewTask {
+    /// 最初のタイトルを書き終えた（保存した、取り消した、ほかのタスクに移った）ら、AI に整えさせる。
+    fn finish_naming_task(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = &self.naming_task else { return };
+        if self.editing == Some(Editing::Title) && self.panel.as_ref() == Some(id) {
             return;
         }
-        let read = |input: &Entity<InputState>| input.read(cx).value().trim().to_owned();
-        let some = |value: String| (!value.is_empty()).then_some(value);
-        let mut draft = self.new_task.clone();
-        draft.title = read(&self.inputs.nt_title);
-        let now = view::now();
-        let when = |value: String| some(when::resolve(&value, &now, None));
-        draft.start = when(read(&self.inputs.nt_start));
-        draft.due = when(read(&self.inputs.nt_due));
-        draft.categories = split_list(self.inputs.nt_categories.read(cx).value().as_ref());
-        draft.description = self.inputs.nt_description.read(cx).value().to_string();
-        let workspace = self.current_workspace().map(str::to_owned);
-        let created = self.write(cx, |s| s.create_task_shown(workspace.as_deref(), &draft));
-        if let Some(task) = created {
-            self.modal = Modal::None;
-            self.query.tab = view::Tab::Open;
-            self.open_panel(&task.id, window, cx);
+        if let Some(id) = self.naming_task.take() {
+            self.ai_session
+                .update(cx, |session, cx| session.release(&id, cx));
         }
     }
 
@@ -1855,7 +1831,7 @@ impl MainView {
             }
         }
         self.workspace_naming = None;
-        self.focus.focus(window, cx);
+        self.leave_input(&self.inputs.workspace_name.clone(), window, cx);
         cx.notify();
     }
 

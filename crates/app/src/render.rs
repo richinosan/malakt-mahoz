@@ -1704,7 +1704,7 @@ impl MainView {
                 .label("新しいタスク")
                 .primary()
                 .elevate(Elevation::Low, cx)
-                .on_click(cx.listener(|this, _, window, cx| this.open_new_task(window, cx))),
+                .on_click(cx.listener(|this, _, window, cx| this.add_task(window, cx))),
         );
 
         let rows = if visible == 0 {
@@ -1839,9 +1839,7 @@ impl MainView {
                         .rounded(px(999.))
                         .elevate(Elevation::High, cx)
                         .tooltip("新しいタスク")
-                        .on_click(
-                            cx.listener(|this, _, window, cx| this.open_new_task(window, cx)),
-                        ),
+                        .on_click(cx.listener(|this, _, window, cx| this.add_task(window, cx))),
                 ),
             )
     }
@@ -4722,107 +4720,6 @@ impl MainView {
                         ),
                     );
                 self.dialog("カテゴリをまとめて変更", body, cx)
-            }
-            Modal::NewTask => {
-                let theme = cx.theme().clone();
-                let label = |text: &'static str| div().text_sm().child(text);
-                let mut priority = row().gap_1().flex_wrap();
-                for (ix, p) in Prio::ALL.into_iter().enumerate() {
-                    priority = priority.child(
-                        chip(
-                            ("nt-prio", ix),
-                            p.label(),
-                            Prio::of(self.new_task.priority) == p,
-                            cx,
-                        )
-                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                            this.set_new_task_priority(p.value(), cx)
-                        }))
-                        .test_support(),
-                    );
-                }
-                let mut assignees = row().gap_1().flex_wrap();
-                for (ix, p) in self.people.iter().enumerate() {
-                    let pid = p.id.clone();
-                    assignees = assignees.child(
-                        chip(
-                            ("nt-as", ix),
-                            p.name.clone(),
-                            self.new_task.assignee_ids.contains(&p.id),
-                            cx,
-                        )
-                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                            this.toggle_new_task_assignee(&pid, cx)
-                        }))
-                        .test_support(),
-                    );
-                }
-                let field = |text: &'static str, input: Input| {
-                    col().gap_1().child(label(text)).child(input)
-                };
-                let form = col()
-                    .gap_3()
-                    .child(field(
-                        "タイトル",
-                        Input::new(&self.inputs.nt_title)
-                            .id("nt-title")
-                            .aria_label("タイトル"),
-                    ))
-                    .child(
-                        col()
-                            .gap_1()
-                            .child(label("説明"))
-                            .child(Textarea::new(&self.inputs.nt_description).h(px(96.))),
-                    )
-                    .child(col().gap_1().child(label("優先度")).child(priority))
-                    .when(!self.people.is_empty(), |d| {
-                        d.child(col().gap_1().child(label("担当者")).child(assignees))
-                    })
-                    .child(field(
-                        "開始日",
-                        Input::new(&self.inputs.nt_start)
-                            .id("nt-start")
-                            .aria_label("開始日"),
-                    ))
-                    .child(field(
-                        "期限",
-                        Input::new(&self.inputs.nt_due)
-                            .id("nt-due")
-                            .aria_label("期限"),
-                    ))
-                    .child(field(
-                        "カテゴリ",
-                        Input::new(&self.inputs.nt_categories)
-                            .id("nt-categories")
-                            .aria_label("カテゴリ"),
-                    ));
-                let place = self.workspace_name(self.current_workspace());
-                let body = col()
-                    .gap_3()
-                    .min_h_0()
-                    .child(muted(format!("「{place}」")))
-                    .child(
-                        div()
-                            .id("new-task-scroll")
-                            .flex_1()
-                            .min_h_0()
-                            .overflow_y_scrollbar()
-                            .child(form),
-                    )
-                    .when_some(self.error.clone(), |d, error| {
-                        d.child(div().text_sm().text_color(theme.danger).child(error))
-                    })
-                    .child(
-                        row().gap_2().justify_end().child(cancel(cx)).child(
-                            Button::new("new-task-submit")
-                                .label("作成")
-                                .primary()
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.submit_new_task(window, cx)
-                                })),
-                        ),
-                    );
-                self.dialog("新しいタスク", body, cx)
             }
             Modal::LinkTask(id) => {
                 let task = self
