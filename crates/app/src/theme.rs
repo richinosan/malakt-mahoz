@@ -21,6 +21,7 @@ const SCENE: &str = "scene";
 const SCENE_CLEAR: &str = "scene.clear";
 const SCENE_BLUR: &str = "scene.blur";
 const CARDS: &str = "list.cards";
+const FLOAT: &str = "panels.float";
 /// 背景の画像を出したときの、面の透明度とぼかしの最初の値（0〜100）。
 pub const DEFAULT_CLEAR: u8 = 40;
 pub const DEFAULT_BLUR: u8 = 30;
@@ -515,6 +516,19 @@ pub fn blur(cx: &App) -> u8 {
 pub fn cards(cx: &App) -> bool {
     let store = &db::shared(cx).read(cx).store;
     store.setting(CARDS).ok().flatten().as_deref() == Some("1")
+}
+
+/// 左のメニュー・上のバー・中身を、角丸のカードとして浮かせる。
+pub fn floating(cx: &App) -> bool {
+    let store = &db::shared(cx).read(cx).store;
+    store.setting(FLOAT).ok().flatten().as_deref() == Some("1")
+}
+
+/// パネルを浮かせるかどうかを変える。
+pub fn set_floating(on: bool, cx: &mut App) -> malakt_core::Result<()> {
+    db::shared(cx).update(cx, |db, _| db.store.set_setting(FLOAT, on.then_some("1")))?;
+    cx.refresh_windows();
+    Ok(())
 }
 
 /// 今、画面の後ろに敷いている画像。
