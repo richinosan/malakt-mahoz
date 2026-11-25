@@ -136,6 +136,17 @@ pub const MAX_CONTEXT_CHARS: usize = 4000;
 /// ワークスペースごとの分の長さの上限。
 pub const MAX_WORKSPACE_CONTEXT_CHARS: usize = 2000;
 
+/// 整えられなかった理由を、タスクの画面に出す短い言葉にする。くわしい理由はホバーで出す。
+pub fn arrange_note_label(note: &str) -> &'static str {
+    if note.contains("API キー") {
+        "API キーがありません"
+    } else if note.contains("を読み込めませんでした") {
+        "リンクを読み込めませんでした"
+    } else {
+        "AI に接続できませんでした"
+    }
+}
+
 /// ワークスペースごとの「AI に伝えること」の保存先。
 pub fn workspace_context_key(workspace: &str) -> String {
     format!("ai.context.ws.{workspace}")
@@ -761,6 +772,17 @@ impl Session {
         // オンにしたときは、今あるタスクをもう見たものにして、次に作られたものから始める
         self.known = None;
         self.arrange_notes.clear();
+        self.tasks_changed(cx);
+        cx.notify();
+    }
+
+    /// 整えられなかったタスクを、もう一度整える。
+    pub fn retry_arrange(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.arrange_notes.remove(id);
+        // まだ見ていないタスクに戻すと、次の確認で整える
+        if let Some(known) = &mut self.known {
+            known.remove(id);
+        }
         self.tasks_changed(cx);
         cx.notify();
     }

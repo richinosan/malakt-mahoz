@@ -1588,6 +1588,31 @@ fn a_task_whose_link_cannot_be_read_is_left_alone(cx: &mut TestAppContext) {
     let tasks = all_tasks(cx);
     assert_eq!(tasks[0].title, "https://github.com/o/r/pull/7");
     assert_eq!(tasks[0].description, "");
+    assert_eq!(
+        malakt_mahoz::ai::arrange_note_label(&note),
+        "リンクを読み込めませんでした"
+    );
+    assert_eq!(
+        malakt_mahoz::ai::arrange_note_label(
+            "AI がタスクを整えられませんでした: サーバーがエラーを返しました（500）。overloaded"
+        ),
+        "AI に接続できませんでした"
+    );
+
+    // 読めるようになってからやり直すと、AI が整える
+    world.github.lock().unwrap().clear();
+    world.reply(tool_reply(
+        "t1",
+        "update_task",
+        json!({"id": task, "title": "ログインを直す"}),
+    ));
+    world.reply(text_reply("整えました。"));
+    let session = session(cx);
+    cx.update(|cx| session.update(cx, |s, cx| s.retry_arrange(&task, cx)));
+    wait(cx, "AI が整え終わる", |s| {
+        !s.busy && s.arrange_notes.is_empty()
+    });
+    assert_eq!(all_tasks(cx)[0].title, "ログインを直す");
 }
 
 /// AI が「取得できなかった」「未確認」と書いても、タスクには入れない。
