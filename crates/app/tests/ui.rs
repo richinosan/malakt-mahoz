@@ -3284,20 +3284,22 @@ fn standard_keys_work_on_the_list(cx: &mut TestAppContext) {
     // 何も選んでいないときの F2 は、見ているワークスペースの名前の変更
     key(cx, "f2");
     cx.update(|cx| {
-        assert_eq!(
-            view.read(cx).modal,
-            Modal::WorkspaceName {
-                parent: None,
-                rename: Some(ws.clone())
-            }
-        )
+        let naming = view.read(cx).workspace_naming.clone();
+        assert_eq!(naming.map(|n| n.id), Some(ws.clone()));
     });
     // 名前の入力欄の中では、↓ や Delete は一覧に届かない
     key(cx, "down");
     key(cx, "delete");
-    cx.update(|cx| assert_eq!(view.read(cx).cursor, None));
-    key(cx, "escape");
-    cx.update(|cx| assert_eq!(view.read(cx).modal, Modal::None));
+    cx.update(|cx| {
+        let v = view.read(cx);
+        assert_eq!(v.cursor, None);
+        assert_eq!(v.modal, Modal::None);
+    });
+    ui(cx, window, |window, cx| {
+        window.input("しごと", cx);
+        window.press("enter", cx);
+    });
+    assert_eq!(store(cx, |s| s.workspace(&ws).unwrap()).name, "しごと");
 
     // ↓ で 1 行目、もう一度で 2 行目。End と Home で端へ
     key(cx, "down");
@@ -3346,7 +3348,6 @@ fn standard_keys_work_on_the_list(cx: &mut TestAppContext) {
         assert_eq!(v.editing, Some(malakt_mahoz::state::Editing::Title));
     });
     ui(cx, window, |window, cx| {
-        window.press("secondary-a", cx);
         window.input("二の次", cx);
         window.press("enter", cx);
     });
@@ -3397,10 +3398,18 @@ fn standard_keys_work_on_the_list(cx: &mut TestAppContext) {
     key(cx, "escape");
     cx.update(|cx| assert_eq!(view.read(cx).cursor, None));
 
-    // Ctrl+N で新しいタスク、F1 でキーの一覧、Ctrl+, でフォントとカラー
+    // Ctrl+N で新しいタスクができて、そのままタイトルを書ける
     key(cx, "secondary-n");
-    cx.update(|cx| assert_eq!(view.read(cx).modal, Modal::NewTask));
+    ui(cx, window, |window, cx| {
+        window.input("四", cx);
+        window.press("enter", cx);
+    });
+    let tasks = all_tasks(cx);
+    assert_eq!(tasks.len(), 4);
+    assert!(tasks.iter().any(|t| t.title == "四"));
     key(cx, "escape");
+
+    // F1 でキーの一覧、Ctrl+, でフォントとカラー
     key(cx, "f1");
     cx.update(|cx| {
         assert_eq!(

@@ -156,10 +156,23 @@ impl MainView {
                 });
             }))
         }
-        let d = anywhere::<NewTask>(d, cx, |v, window, cx| v.open_new_task(window, cx));
+        let d = anywhere::<NewTask>(d, cx, |v, window, cx| v.add_task(window, cx));
         let d = anywhere::<Find>(d, cx, |v, window, cx| v.find(window, cx));
         let d = anywhere::<Reload>(d, cx, |v, _, cx| v.reload(cx));
-        let d = list::<Rename>(d, cx, |v, window, cx| v.rename(window, cx));
+        // F2 は、選んでいるタスクがなければ、見ているワークスペースの名前を左のメニューで変える
+        let d = d.on_action(cx.listener(|this, _: &Rename, window, cx| {
+            if !this.list_keys(window) {
+                cx.propagate();
+                return;
+            }
+            if this.in_pane(window, cx, |v, window, cx| v.rename_task(window, cx)) {
+                return;
+            }
+            match this.shown_nav(cx) {
+                Nav::Workspace(id) => this.rename_workspace(id, window, cx),
+                _ => cx.propagate(),
+            }
+        }));
         let d = list::<DeleteSelected>(d, cx, |v, _, cx| v.delete_targets(cx));
         let d = list::<OpenSelected>(d, cx, |v, window, cx| v.open_cursor(window, cx));
         let d = list::<CursorUp>(d, cx, |v, _, cx| v.move_cursor(-1, false, cx));
@@ -313,27 +326,27 @@ impl MainView {
         true
     }
 
-    /// F2。選んでいるタスクのタイトルを、なければ見ているワークスペースの名前を変える。
-    fn rename(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+    /// F2。選んでいるタスクのタイトルを、詳細でその場で変える。相手のタスクがなければ `false`。
+    fn rename_task(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         if self.editing.is_some() {
-            return false;
+            return true;
         }
         let task = self
             .cursor_index()
             .map(|ix| self.tasks[self.visible[ix]].id.clone())
             .or_else(|| self.panel.clone());
-        if let Some(id) = task {
-            if self.panel.as_deref() != Some(id.as_str()) {
-                self.open_panel(&id, window, cx);
-            }
-            self.start_editing(Editing::Title, window, cx);
-            return self.editing.is_some();
+        let Some(id) = task else {
+            return false;
+        };
+        if self.panel.as_deref() != Some(id.as_str()) {
+            self.open_panel(&id, window, cx);
         }
-        if let Nav::Workspace(id) = self.nav.clone() {
-            self.ask_workspace_name(None, Some(id), window, cx);
-            return true;
-        }
-        false
+        self.start_editing(Editing::Title, window, cx);
+        // すぐ打ち替えられるように、タイトルを全部選んでおく
+        self.inputs
+            .title
+            .update(cx, |title, cx| title.select_all(window, cx));
+        true
     }
 
     /// Delete。消す前に確認を出す。
