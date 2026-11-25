@@ -229,13 +229,42 @@ impl Mirror {
         // 失敗したものがあるときは、次の回にやり直す
         self.last = errors.is_empty().then_some(wanted);
         if !errors.is_empty() {
-            cx.emit(Failed(
-                format!("リマインダーに反映できませんでした。{}", errors.join("、")).into(),
-            ));
+            cx.emit(Failed(failure_text(&errors).into()));
         }
         // 完了を受け取ったときは、データの変更の知らせでもう一度合わせる
         if std::mem::take(&mut self.again) && !changed {
             self.request(false, cx);
         }
+    }
+}
+
+/// 失敗を 1 行にまとめる。いくつもあるときは、最初の 1 つと件数だけを出す。
+fn failure_text(errors: &[String]) -> String {
+    match errors {
+        [only] => format!("リマインダーに反映できませんでした。{only}"),
+        [first, ..] => format!(
+            "リマインダーに反映できませんでした（{} 件）。{first}",
+            errors.len()
+        ),
+        [] => String::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::failure_text;
+
+    #[test]
+    fn many_failures_show_the_first_and_the_count() {
+        let one = ["「A」: 保存できませんでした".to_owned()];
+        assert_eq!(
+            failure_text(&one),
+            "リマインダーに反映できませんでした。「A」: 保存できませんでした"
+        );
+        let many = [one[0].clone(), "「B」: 保存できませんでした".to_owned()];
+        assert_eq!(
+            failure_text(&many),
+            "リマインダーに反映できませんでした（2 件）。「A」: 保存できませんでした"
+        );
     }
 }
