@@ -399,6 +399,19 @@ pub fn summary(name: &str, args: &Value) -> String {
     }
 }
 
+/// ユーザーのメッセージの最後に添える、今日の日付と今の画面。
+/// `extra` は、今開いているワークスペースについての前提と指示。
+pub fn turn_note(today: &str, place: &str, extra: &str) -> String {
+    let mut note = format!("\n\n（アプリからの補足）\n今日は {today} です。");
+    for part in [place, extra] {
+        if !part.trim().is_empty() {
+            note.push('\n');
+            note.push_str(part.trim());
+        }
+    }
+    note
+}
+
 /// `run_shell` のコマンドが動くシェルの説明。
 pub fn shell_name() -> &'static str {
     if cfg!(windows) {
@@ -408,9 +421,10 @@ pub fn shell_name() -> &'static str {
     }
 }
 
-/// AI への最初の指示。`place` は、ユーザーが今開いている場所の説明。
-/// `context` は、ユーザーが設定に書いた、いつも伝える前提と指示。
-pub fn system_prompt(today: &str, place: &str, context: &str) -> String {
+/// AI への最初の指示。`context` は、ユーザーが設定に書いた、いつも伝える前提と指示。
+/// 会話の途中で変わると、それまでの考えのブロックを送り返せなくなるので、
+/// 日付や今の画面のように変わるものは入れない（[`turn_note`] でメッセージに添える）。
+pub fn system_prompt(context: &str) -> String {
     let shell = shell_name();
     let context = if context.trim().is_empty() {
         String::new()
@@ -423,8 +437,7 @@ pub fn system_prompt(today: &str, place: &str, context: &str) -> String {
     let prompt = format!(
         "あなたは、タスク管理アプリ malakt-mahoz の中で動くアシスタントです。\
          ツールを使って、ユーザーのタスク、ワークスペース、担当者を読み書きできます。\n\
-         - 今日は {today} です。日付は YYYY-MM-DD で渡します。\n\
-         - {place}\n\
+         - 日付は YYYY-MM-DD で渡します。今日の日付と、ユーザーが今開いている画面は、ユーザーのメッセージの最後にアプリが添えます。\n\
          - 頼まれた操作は、確認を取らずにツールで実行してください。タスクの削除とシェルのコマンドは、アプリが実行の前にユーザーへ確認を出します。\n\
          - ID はツールで調べてから使ってください。ID を作らないでください。\n\
          - GitHub のリンクの中身は、必ず {GITHUB_FETCH} で取ってきてください（アプリが、ユーザーのログイン済みの gh で読みます）。{RUN_SHELL} で gh を呼ぶのは、{GITHUB_FETCH} で読めない種類のものだけにしてください。\n\
@@ -626,17 +639,20 @@ mod tests {
     }
 
     #[test]
-    fn system_prompt_carries_today_and_place() {
-        let prompt = system_prompt("2026-11-24", "ユーザーは「家」を開いています。", "");
-        assert!(prompt.contains("2026-11-24"));
-        assert!(prompt.contains("「家」"));
+    fn the_system_prompt_stays_the_same_between_requests() {
+        let prompt = system_prompt("");
         assert!(prompt.contains("github_fetch"));
         // シェルの種類と、聞き返さない・言い訳しない決まり
         assert!(prompt.contains(shell_name()));
         assert!(prompt.contains("聞き返さずに実行"));
         assert!(prompt.contains("途中の失敗"));
         assert!(!prompt.contains("前提と指示"));
-        let prompt = system_prompt("2026-11-24", "", " PR は必ずレビューする \n");
+        let prompt = system_prompt(" PR は必ずレビューする \n");
         assert!(prompt.ends_with("いつも従ってください。\nPR は必ずレビューする"));
+
+        // 日付と今の画面は、メッセージに添える
+        let note = turn_note("2026-11-24", "ユーザーは「家」を開いています。", "");
+        assert!(note.contains("2026-11-24") && note.ends_with("「家」を開いています。"));
+        assert!(turn_note("2026-11-24", "", "敬語で").ends_with("です。\n敬語で"));
     }
 }
