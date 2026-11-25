@@ -853,10 +853,12 @@ impl Session {
              - 説明には、リンクの URL と要点を書く。ユーザーが書いた文は消さない。\n\
              - 中身から分かる範囲で、優先度や期限を入れる。\n\
              - 直すところがなければ、何も変えない。\n\
-             - タスクを新しく作らない。消さない。\n",
+             - タスクを新しく作らない。消さない。\n\
+             - タイトルと説明には、タスクの中身だけを書く。読めなかったリンクや、確かめられなかったことについての注記を書かない。\n",
         );
+        let mut any = false;
         for task in &tasks {
-            message.push_str(&format!(
+            let mut section = format!(
                 "\n## タスク（id: {}）\nタイトル: {}\n説明: {}\n",
                 task.id,
                 task.title,
@@ -865,16 +867,19 @@ impl Session {
                 } else {
                     task.description.as_str()
                 }
-            ));
+            );
+            let mut read = 0;
             for link in task.links.iter().take(MAX_ARRANGE_LINKS) {
                 let url = link.url();
                 match Self::fetch_github(this, &config, link, cx).await {
-                    Ok(content) => message.push_str(&format!(
-                        "### {url} の中身\n{}\n",
-                        clip_tail(&content, MAX_WATCH_CHARS)
-                    )),
+                    Ok(content) => {
+                        read += 1;
+                        section.push_str(&format!(
+                            "### {url} の中身\n{}\n",
+                            clip_tail(&content, MAX_WATCH_CHARS)
+                        ));
+                    }
                     Err(error) => {
-                        message.push_str(&format!("### {url} は読み込めませんでした\n"));
                         let note: SharedString =
                             format!("{url} を読み込めませんでした: {error}").into();
                         this.update(cx, |s, cx| {
@@ -886,6 +891,14 @@ impl Session {
                     }
                 }
             }
+            // リンクを 1 つも読めなかったタスクは、AI に渡さず元のまま残す
+            if read > 0 || task.links.is_empty() {
+                message.push_str(&section);
+                any = true;
+            }
+        }
+        if !any {
+            return Ok(notes);
         }
         this.update(cx, |s, cx| {
             s.turns.push(Turn::User(message));
@@ -1806,6 +1819,10 @@ impl Session {
                         let waiting: Vec<String> = task_links(&s.db.read(cx).store)
                             .map(|all| s.new_tasks(all).into_iter().map(|t| t.id).collect())
                             .unwrap_or_default();
+                        // 自動の整理では、読めなかったことの注記をタスクに書かせない
+                        let cleaned = (!s.arranging.is_empty())
+                            .then(|| without_fetch_notes(&s.db.read(cx).store, &call.args));
+                        let args = cleaned.as_ref().unwrap_or(&call.args);
                         let result = s.db.update(cx, |db, cx| {
                             // 自分が登録されていれば、コメントの書き手にする
                             let author = db
@@ -1815,7 +1832,7 @@ impl Session {
                                 .and_then(|p| p.into_iter().find(|p| p.is_self))
                                 .map(|p| p.id);
                             let result =
-                                tools::execute(&mut db.store, author.as_deref(), name, &call.args);
+                                tools::execute(&mut db.store, author.as_deref(), name, args);
                             cx.notify();
                             result
                         });
@@ -1836,7 +1853,10 @@ impl Session {
         cx: &mut AsyncApp,
     ) -> Result<String, String> {
         match Self::run_command(this, (config.gh)(link), cx).await {
-            Ok(output) if output.code == Some(0) => Ok(output.stdout),
+            Ok(output) if output.code == Some(0) && !output.stdout.trim().is_empty() => {
+                Ok(output.stdout)
+            }
+            Ok(output) if output.code == Some(0) => Err("gh の出力が空でした".into()),
             Ok(output) => Err(format!(
                 "gh が失敗しました（終了コード {}）: {}",
                 output.code.map_or("なし".to_owned(), |c| c.to_string()),
@@ -1998,6 +2018,55 @@ fn now_label() -> String {
         .chars()
         .skip(5)
         .collect()
+}
+
+/// 読めなかった・確かめられなかったことを書いた文の目印。
+const FETCH_NOTE_MARKS: &[&str] = &[
+    "取得でき",
+    "取得に失敗",
+    "取得失敗",
+    "読み込めな",
+    "読み込めません",
+    "読めな",
+    "読めません",
+    "アクセスでき",
+    "確認できな",
+    "確認できません",
+    "未確認",
+];
+
+fn is_fetch_note(text: &str) -> bool {
+    FETCH_NOTE_MARKS.iter().any(|mark| text.contains(mark))
+}
+
+/// AI がタスクに書こうとしたタイトルと説明から、読めなかったことの注記を除く。
+/// 元のタスクにあった文は残す。
+fn without_fetch_notes(store: &malakt_core::Store, args: &Value) -> Value {
+    let mut args = args.clone();
+    let before = args
+        .get("id")
+        .and_then(Value::as_str)
+        .and_then(|id| store.task(id).ok());
+    let (old_title, old_description) = before.map(|t| (t.title, t.description)).unwrap_or_default();
+    let Some(map) = args.as_object_mut() else {
+        return args;
+    };
+    if map
+        .get("title")
+        .and_then(Value::as_str)
+        .is_some_and(|title| is_fetch_note(title) && title != old_title)
+    {
+        map.remove("title");
+    }
+    if let Some(description) = map.get("description").and_then(Value::as_str) {
+        let kept: Vec<&str> = description
+            .lines()
+            .filter(|line| !is_fetch_note(line) || old_description.lines().any(|old| old == *line))
+            .collect();
+        let kept = kept.join("\n").trim_end().to_owned();
+        map.insert("description".into(), Value::String(kept));
+    }
+    args
 }
 
 fn gone<E>(_: E) -> String {

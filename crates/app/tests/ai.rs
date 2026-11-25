@@ -1379,6 +1379,83 @@ fn a_new_task_is_arranged_by_the_ai(cx: &mut TestAppContext) {
     let _ = view;
 }
 
+/// Enter で送り、Shift+Enter は改行になる。
+#[gpui_kit::test]
+fn enter_sends_and_shift_enter_breaks_the_line(cx: &mut TestAppContext) {
+    let world = start(cx);
+    world.keys.set(Provider::Claude, "k").unwrap();
+    let (window, view) = open(cx, wide());
+    let pane = open_chat(cx, window, &view);
+    world.reply(text_reply("はい。"));
+    ui(cx, window, |window, cx| {
+        pane.update(cx, |pane, cx| pane.focus_input(window, cx));
+        window.input("1 行目", cx);
+        window.press("shift-enter", cx);
+        window.input("2 行目", cx);
+    });
+    assert!(world.sent().is_empty());
+    ui(cx, window, |window, cx| window.press("enter", cx));
+    wait(cx, "返事が来る", |s| !s.busy && s.items.len() >= 2);
+    let sent = world.sent();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(
+        sent[0].2["messages"][0]["content"].as_str().unwrap(),
+        "1 行目\n2 行目"
+    );
+}
+
+/// リンクを読めなかったタスクは AI に渡さず、元のまま残す。
+#[gpui_kit::test]
+fn a_task_whose_link_cannot_be_read_is_left_alone(cx: &mut TestAppContext) {
+    let world = start(cx);
+    world.keys.set(Provider::Claude, "k").unwrap();
+    *world.github.lock().unwrap() = if cfg!(windows) {
+        " & exit 1".into()
+    } else {
+        "; exit 1".into()
+    };
+    let task = new_task(cx, "https://github.com/o/r/pull/7");
+    wait(cx, "理由が出る", |s| {
+        !s.busy && !s.arrange_notes.is_empty()
+    });
+    assert!(world.sent().is_empty());
+    let note = read(cx, |s| s.arrange_notes[&task].clone());
+    assert!(note.contains("読み込めませんでした"), "{note}");
+    let tasks = all_tasks(cx);
+    assert_eq!(tasks[0].title, "https://github.com/o/r/pull/7");
+    assert_eq!(tasks[0].description, "");
+}
+
+/// AI が「取得できなかった」「未確認」と書いても、タスクには入れない。
+#[gpui_kit::test]
+fn fetch_notes_never_reach_the_task(cx: &mut TestAppContext) {
+    let world = start(cx);
+    world.keys.set(Provider::Claude, "k").unwrap();
+    let task = new_task(cx, "https://github.com/o/r/pull/7");
+    world.reply(tool_reply(
+        "t1",
+        "update_task",
+        json!({
+            "id": task,
+            "title": "PR 7（題名は未確認）",
+            "description": "PR: https://github.com/o/r/pull/7\n\n※リンク先の内容を取得できなかったため、概要と題名は未確認（タイトルはそのまま）。",
+        }),
+    ));
+    world.reply(text_reply("整えました。"));
+    wait(cx, "AI が整え終わる", |s| {
+        !s.busy && !s.items.is_empty()
+    });
+    assert_eq!(world.sent().len(), 2);
+    let message = world.sent()[0].2["messages"][0]["content"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(message.contains("注記を書かない"), "{message}");
+    let tasks = all_tasks(cx);
+    assert_eq!(tasks[0].title, "https://github.com/o/r/pull/7");
+    assert_eq!(tasks[0].description, "PR: https://github.com/o/r/pull/7");
+}
+
 /// API キーがなければ、どこにも通信しない。理由を出し、キーを入れると動く。
 #[gpui_kit::test]
 fn a_new_task_waits_for_the_key(cx: &mut TestAppContext) {

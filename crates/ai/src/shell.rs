@@ -152,13 +152,52 @@ fn pump(reader: impl Read, mut emit: impl FnMut(String)) {
     }
 }
 
+/// PATH から、実行するファイルを探す。`exts` は、名前に足して試す拡張子（Windows の PATHEXT）。
+/// Windows の `gh` は `gh.exe` とは限らず、`gh.cmd` のこともある。
+fn find_program(
+    name: &str,
+    dirs: &[PathBuf],
+    exts: &[String],
+    exists: impl Fn(&std::path::Path) -> bool,
+) -> Option<PathBuf> {
+    if name.contains(['/', '\\']) {
+        return None;
+    }
+    let has_ext = std::path::Path::new(name).extension().is_some();
+    dirs.iter().find_map(|dir| {
+        if has_ext && exists(&dir.join(name)) {
+            return Some(dir.join(name));
+        }
+        exts.iter()
+            .map(|ext| dir.join(format!("{name}{ext}")))
+            .find(|path| exists(path))
+    })
+}
+
+/// 起こすプログラム。Windows では PATH と PATHEXT から探し、`.cmd` や `.bat` も見つける。
+fn program_path(program: &str) -> PathBuf {
+    if !cfg!(windows) {
+        return program.into();
+    }
+    let dirs: Vec<PathBuf> = std::env::var_os("PATH")
+        .map(|path| std::env::split_paths(&path).collect())
+        .unwrap_or_default();
+    let exts: Vec<String> = std::env::var("PATHEXT")
+        .unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into())
+        .split(';')
+        .filter(|ext| !ext.is_empty())
+        .map(str::to_owned)
+        .collect();
+    find_program(program, &dirs, &exts, |path| path.is_file()).unwrap_or_else(|| program.into())
+}
+
 /// コマンドを起こす。出力と終了は、別のスレッドから `on_event` に届く。
 /// 最後に必ず [`Event::Exit`] が 1 回届く。
 pub fn spawn(
     spec: &Spec,
     on_event: impl Fn(Event) + Send + Sync + 'static,
 ) -> std::io::Result<Handle> {
-    let mut command = Command::new(&spec.program);
+    let mut command = Command::new(program_path(&spec.program));
     command
         .args(&spec.args)
         .envs(spec.env.iter().map(|(k, v)| (k, v)))
@@ -205,6 +244,32 @@ pub fn spawn(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_program_is_found_with_the_extensions_of_the_path() {
+        let dirs = [PathBuf::from("a"), PathBuf::from("b")];
+        let exts = [".EXE".to_owned(), ".CMD".to_owned()];
+        let found = |name: &str, files: &[&str]| {
+            let files: Vec<PathBuf> = files.iter().map(PathBuf::from).collect();
+            find_program(name, &dirs, &exts, |path| files.iter().any(|f| f == path))
+        };
+        // gh.exe がなく、gh.cmd だけがある
+        assert_eq!(
+            found("gh", &["b/gh.CMD"]),
+            Some(PathBuf::from("b").join("gh.CMD"))
+        );
+        // 先のフォルダーが勝ち、同じフォルダーでは PATHEXT の順
+        assert_eq!(
+            found("gh", &["a/gh.CMD", "b/gh.EXE"]),
+            Some(PathBuf::from("a").join("gh.CMD"))
+        );
+        assert_eq!(
+            found("gh.exe", &["b/gh.exe"]),
+            Some(PathBuf::from("b").join("gh.exe"))
+        );
+        assert_eq!(found("gh", &[]), None);
+        assert_eq!(found("./gh", &["a/gh.EXE"]), None);
+    }
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
 
