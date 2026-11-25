@@ -254,7 +254,11 @@ impl AiPane {
     ) -> Self {
         let session = ai::shared(cx);
         let db = db::shared(cx);
-        let input = cx.new(|cx| TextareaState::new(window, cx).placeholder("メッセージを入力"));
+        let input = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .submit_on_enter(true)
+                .placeholder("メッセージを入力")
+        });
         let key_input = cx.new(|cx| {
             InputState::new(window, cx)
                 .masked(true)
@@ -274,13 +278,8 @@ impl AiPane {
             cx.observe(&session, |this, _, cx| this.sync(cx)),
             cx.observe(&db, |_, _, cx| cx.notify()),
             cx.subscribe_in(&input, window, |this, _, event: &InputEvent, window, cx| {
-                if matches!(
-                    event,
-                    InputEvent::PressEnter {
-                        secondary: true,
-                        ..
-                    }
-                ) {
+                // Enter で送り、Shift+Enter で改行する
+                if matches!(event, InputEvent::PressEnter { shift: false, .. }) {
                     this.submit(window, cx);
                 }
             }),
@@ -1712,7 +1711,7 @@ impl AiPane {
                             })
                             .when(!busy, |d| {
                                 d.child(
-                                    icon_button("ai-send", "arrow-up", "送信（Ctrl / ⌘ + Enter）")
+                                    icon_button("ai-send", "arrow-up", "送信（Enter）")
                                         .primary()
                                         .on_click(cx.listener(|this, _, window, cx| {
                                             this.submit(window, cx)

@@ -129,7 +129,7 @@ pub fn definitions() -> Vec<ToolDef> {
         },
         ToolDef {
             name: RUN_SHELL,
-            description: "ユーザーの PC のシェルでコマンドを 1 つ実行し、出力を返す。実行の前にユーザーに確認が出る。",
+            description: "ユーザーの PC のシェル（Windows は cmd.exe、ほかは sh）でコマンドを 1 つ実行し、出力を返す。実行の前にユーザーに確認が出る。",
             schema: object(json!({"command": {"type": "string"}}), &["command"]),
         },
     ]
@@ -399,8 +399,18 @@ pub fn summary(name: &str, args: &Value) -> String {
     }
 }
 
+/// `run_shell` のコマンドが動くシェルの説明。
+pub fn shell_name() -> &'static str {
+    if cfg!(windows) {
+        "Windows の cmd.exe（コマンドは `&` や `&&` でつなぐ。`;` ではつなげない。sh や PowerShell の書き方は使えない）"
+    } else {
+        "sh"
+    }
+}
+
 /// AI への最初の指示。`place` は、ユーザーが今開いている場所の説明。
 pub fn system_prompt(today: &str, place: &str) -> String {
+    let shell = shell_name();
     format!(
         "あなたは、タスク管理アプリ malakt-mahoz の中で動くアシスタントです。\
          ツールを使って、ユーザーのタスク、ワークスペース、担当者を読み書きできます。\n\
@@ -408,7 +418,10 @@ pub fn system_prompt(today: &str, place: &str) -> String {
          - {place}\n\
          - 頼まれた操作は、確認を取らずにツールで実行してください。タスクの削除とシェルのコマンドは、アプリが実行の前にユーザーへ確認を出します。\n\
          - ID はツールで調べてから使ってください。ID を作らないでください。\n\
-         - GitHub のリンクの中身が要るときは、{GITHUB_FETCH} で取ってきてください。\n\
+         - GitHub のリンクの中身は、必ず {GITHUB_FETCH} で取ってきてください（アプリが、ユーザーのログイン済みの gh で読みます）。{RUN_SHELL} で gh を呼ぶのは、{GITHUB_FETCH} で読めない種類のものだけにしてください。\n\
+         - {RUN_SHELL} のコマンドは {shell} で動きます。そのシェルの書き方で書いてください。\n\
+         - タスクの追加、書き換え、整理のように元に戻せる操作は、「〜しましょうか」と聞き返さずに実行し、結果だけを伝えてください。聞き返すのは、頼まれたことが 2 通り以上に読めて、どちらかで結果が大きく変わるときだけです。\n\
+         - ツールが失敗したら、やり方を変えてやり直してください。返事には最後の結果だけを書き、途中の失敗、その原因、ツールやシェルの事情は書かないでください。どうしてもできなかったときだけ、できなかったことと、ユーザーにしてほしいことを 1 文で書いてください。\n\
          - 返事は短く、ユーザーの言葉（ふつうは日本語）で書いてください。記法は使わず、ふつうの文章で書いてください。"
     )
 }
@@ -608,5 +621,9 @@ mod tests {
         assert!(prompt.contains("2026-11-24"));
         assert!(prompt.contains("「家」"));
         assert!(prompt.contains("github_fetch"));
+        // シェルの種類と、聞き返さない・言い訳しない決まり
+        assert!(prompt.contains(shell_name()));
+        assert!(prompt.contains("聞き返さずに実行"));
+        assert!(prompt.contains("途中の失敗"));
     }
 }
