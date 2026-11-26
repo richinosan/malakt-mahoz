@@ -7283,6 +7283,10 @@ impl Render for MainView {
         } else {
             (None, ai)
         };
+        let page_fill = match crate::theme::backdrop(cx) {
+            Some(backdrop) => theme.background.opacity(backdrop.alpha * 0.45),
+            None => theme.background,
+        };
         let body = div()
             .id("main-view")
             .key_context("MainView")
@@ -7336,55 +7340,54 @@ impl Render for MainView {
                             .min_h_0()
                             .relative()
                             // 背景の画像の上では、中身の後ろも薄く塗って文字を読めるようにする
-                            .map(|d| {
-                                let fill = match crate::theme::backdrop(cx) {
-                                    Some(backdrop) => {
-                                        theme.background.opacity(backdrop.alpha * 0.45)
-                                    }
-                                    None => theme.background,
-                                };
-                                if crate::theme::floating(cx) {
-                                    let half = FLOAT_GAP / 2.;
-                                    d.child(floating_card(
-                                        fill,
-                                        [half, FLOAT_GAP, FLOAT_GAP, half],
-                                        cx,
-                                    ))
-                                } else if crate::theme::backdrop(cx).is_some() {
-                                    d.bg(fill)
-                                } else {
-                                    d
-                                }
-                            })
+                            .when(
+                                !crate::theme::floating(cx) && crate::theme::backdrop(cx).is_some(),
+                                |d| d.bg(page_fill),
+                            )
                             .items_stretch()
                             .child(
                                 // 画面を切り替えたときは、少し下から浮かび上がる
-                                div().flex_1().min_w_0().h_full().relative().child({
-                                    let own = div()
-                                        .size_full()
-                                        .relative()
-                                        .child(
-                                            div()
-                                                .absolute()
-                                                .top_0()
-                                                .bottom_0()
-                                                .left_0()
-                                                .right(beside.unwrap_or(px(0.)))
-                                                .child(main)
-                                                .with_animation(
-                                                    ElementId::Name(
-                                                        format!("page-{:?}", self.nav).into(),
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .h_full()
+                                    .relative()
+                                    // 浮かせたカードはタスクの画面だけを包み、右に並べた AI チャットの
+                                    // 手前で角丸の端として閉じる
+                                    .when(crate::theme::floating(cx), |d| {
+                                        let half = FLOAT_GAP / 2.;
+                                        d.child(floating_card(
+                                            page_fill,
+                                            [half, FLOAT_GAP, FLOAT_GAP, half],
+                                            cx,
+                                        ))
+                                    })
+                                    .child({
+                                        let own = div()
+                                            .size_full()
+                                            .relative()
+                                            .child(
+                                                div()
+                                                    .absolute()
+                                                    .top_0()
+                                                    .bottom_0()
+                                                    .left_0()
+                                                    .right(beside.unwrap_or(px(0.)))
+                                                    .child(main)
+                                                    .with_animation(
+                                                        ElementId::Name(
+                                                            format!("page-{:?}", self.nav).into(),
+                                                        ),
+                                                        appear(160),
+                                                        |page, t| {
+                                                            page.top(px(8.) * (1. - t)).opacity(t)
+                                                        },
                                                     ),
-                                                    appear(160),
-                                                    |page, t| {
-                                                        page.top(px(8.) * (1. - t)).opacity(t)
-                                                    },
-                                                ),
-                                        )
-                                        .children(panel)
-                                        .into_any_element();
-                                    self.render_panes(own, area, cx)
-                                }),
+                                            )
+                                            .children(panel)
+                                            .into_any_element();
+                                        self.render_panes(own, area, cx)
+                                    }),
                             )
                             .children(ai_beside)
                             .children(ai_over),
