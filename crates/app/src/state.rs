@@ -223,6 +223,8 @@ pub enum SubModal {
     Scene,
     /// ワークスペースの AI のルール（ワークスペースの設定の上に重ねる）
     Rules,
+    /// アプリ内ブラウザのデータを消す前の確認
+    ClearBrowser,
 }
 
 /// 詳細で日付と時刻を入れる 2 つの項目。
@@ -2681,6 +2683,18 @@ impl MainView {
         }
     }
 
+    /// アプリ内ブラウザのログインの情報とキャッシュを消す。
+    pub fn clear_browser_data(&mut self, cx: &mut Context<Self>) {
+        self.sub_modal = None;
+        let cleared = crate::term::shared(cx).update(cx, |terms, cx| terms.clear_browser_data(cx));
+        match cleared {
+            Ok(()) => self.show_notice("ブラウザのデータを消しました。".into()),
+            Err(error) => self.error = Some(error.into()),
+        }
+        crate::browser::count_usage(cx);
+        cx.notify();
+    }
+
     /// ディスクの使用量。
     pub fn usage(&self, cx: &App) -> malakt_core::Usage {
         self.db.read(cx).store.usage().unwrap_or_default()
@@ -2702,6 +2716,8 @@ impl MainView {
         self.appearance_pinned = false;
         self.preview_pick = None;
         self.ai_settings.update(cx, |s, cx| s.show_rules(None, cx));
+        // 「データ」に出す、アプリ内ブラウザのデータの大きさ
+        crate::browser::count_usage(cx);
         self.appearance_scroll
             .set_offset(gpui_kit::Point::default());
         // 開いたらすぐ、設定を探す文字を書ける
@@ -4292,7 +4308,19 @@ impl MainView {
         };
         let opened = crate::term::shared(cx)
             .update(cx, |terms, cx| terms.open(profile, context, cx).is_some());
-        // シェルを見える所に出す
+        self.reveal_shell(window, cx);
+        if opened {
+            // チャットを開くと入力欄に移るので、あらためてターミナルに移す
+            crate::term::shared(cx).update(cx, |terms, cx| {
+                terms.focus_wanted = true;
+                cx.notify();
+            });
+        }
+        cx.notify();
+    }
+
+    /// シェルの場所（ターミナルとブラウザのタブ）を見える所に出す。
+    pub fn reveal_shell(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let place = self.ai_session.read(cx).shell_place;
         let mut in_window = false;
         match place {
@@ -4316,13 +4344,6 @@ impl MainView {
         }
         if !in_window && (!self.ai_open || self.ai_session.read(cx).chat_window.is_some()) {
             self.toggle_ai(window, cx);
-        }
-        if opened {
-            // チャットを開くと入力欄に移るので、あらためてターミナルに移す
-            crate::term::shared(cx).update(cx, |terms, cx| {
-                terms.focus_wanted = true;
-                cx.notify();
-            });
         }
         cx.notify();
     }
@@ -4976,6 +4997,9 @@ bundled_icons! {
         "signal-low",
         "circle",
         "link",
+        "external-link",
+        "rotate-cw",
+        "app-window",
     ],
 }
 

@@ -41,6 +41,7 @@ const VIEW_TOOLS: &[&str] = &[
     "open_dialog",
     "open_window",
     "open_terminal",
+    "browser",
     "lock",
     "set_app_options",
     "update_now",
@@ -72,7 +73,7 @@ pub fn is_session_tool(name: &str) -> bool {
 }
 
 pub fn is_app_tool(name: &str) -> bool {
-    is_view_tool(name) || is_session_tool(name)
+    is_view_tool(name) || is_session_tool(name) || name == crate::browser::READ_TOOL
 }
 
 const SORTS: [(&str, Sort); 8] = [
@@ -266,6 +267,29 @@ pub fn definitions() -> Vec<ToolDef> {
             description: "ターミナルを開く。task_id を渡すと、そのタスクのワークスペースのフォルダーで開く。shell は get_screen の terminal_shells の id（選んだシェルは次からも使う）。",
             schema: object(
                 json!({"task_id": {"type": "string"}, "shell": {"type": "string"}}),
+                &[],
+            ),
+        },
+        ToolDef {
+            name: "browser",
+            description: "アプリ内ブラウザ（シェルの場所のタブ）を操作する。open（url を新しいタブで開いて見せる。同じ場所のタブがあればそれを見せる）、list（開いているタブの一覧）、show（tab を見せる）、navigate（tab で url を開く）、back、forward、reload、close（tab を閉じる）、open_external（url か tab のページを OS のブラウザで開く）。tab を省くと、見ているタブ。ページの文字は read_browser で読む。",
+            schema: object(
+                json!({
+                    "action": {"type": "string", "enum": ["open", "list", "show", "navigate", "back", "forward", "reload", "close", "open_external"]},
+                    "url": {"type": "string"},
+                    "tab": {"type": "integer"},
+                }),
+                &["action"],
+            ),
+        },
+        ToolDef {
+            name: crate::browser::READ_TOOL,
+            description: "アプリ内ブラウザのページの文字（url、title、ユーザーが選んでいる文字 selection、本文 text）を読む。tab を省くと、ユーザーが見ているタブ。ログインが要るページも、ユーザーのログインのまま読める。",
+            schema: object(
+                json!({
+                    "tab": {"type": "integer"},
+                    "max_chars": {"type": "integer", "description": "本文の最大の文字数（500〜20000、標準 20000）"},
+                }),
                 &[],
             ),
         },
@@ -476,6 +500,13 @@ pub fn summary(name: &str, args: &Value) -> Option<String> {
         "open_dialog" => "ダイアログを開く".into(),
         "open_window" => "新しいウィンドウを開く".into(),
         "open_terminal" => "ターミナルを開く".into(),
+        "browser" => match arg("action") {
+            "open" => format!("ブラウザで開く: {}", arg("url")),
+            "navigate" => format!("ブラウザで移動: {}", arg("url")),
+            "open_external" => "OS のブラウザで開く".into(),
+            _ => "ブラウザを操作".into(),
+        },
+        "read_browser" => "ブラウザのページを読む".into(),
         "lock" => "ロックを操作".into(),
         "set_app_options" => "アプリの設定を変更".into(),
         "update_now" => "アップデートして再起動".into(),
@@ -599,6 +630,31 @@ fn target(cx: &mut App) -> Option<(AnyWindowHandle, Entity<MainView>)> {
         .cloned()
 }
 
+/// シェルの場所（ターミナルとブラウザのタブ）を見える所に出す。`window` のメインの画面か、
+/// なければ最近使ったメインのウィンドウで出す。
+pub fn reveal_shell(window: &mut Window, cx: &mut App) {
+    let here = window.window_handle();
+    let views: Vec<Entity<MainView>> = cx
+        .default_global::<Views>()
+        .list
+        .iter()
+        .filter(|(w, _)| *w == here)
+        .filter_map(|(_, v)| v.upgrade())
+        .collect();
+    let own = views.into_iter().find(|v| !v.read(cx).embedded);
+    match own {
+        Some(view) => view.update(cx, |view, cx| view.reveal_shell(window, cx)),
+        None => {
+            if let Some((other, view)) = target(cx) {
+                // ウィンドウを閉じていれば、出す先がない
+                let _ = other.update(cx, |_, window, cx| {
+                    view.update(cx, |view, cx| view.reveal_shell(window, cx))
+                });
+            }
+        }
+    }
+}
+
 /// 画面のツールを、メインのウィンドウで実行する。
 pub fn run_view_tool(name: &str, args: &Value, cx: &mut App) -> Result<String, String> {
     let (window, view) = target(cx).ok_or("メインのウィンドウが開いていません")?;
@@ -661,6 +717,14 @@ impl MainView {
                 json!({"opened": true})
             }
             "open_terminal" => self.ai_open_terminal(args, window, cx)?,
+            "browser" => {
+                let mut reveal = false;
+                let value = crate::browser::run_tool(args, &mut reveal, cx)?;
+                if reveal {
+                    self.reveal_shell(window, cx);
+                }
+                value
+            }
             "lock" => match required(args, "action")? {
                 "lock_now" => {
                     crate::db::lock_now(cx);

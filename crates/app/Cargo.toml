@@ -30,11 +30,17 @@ serde.workspace = true
 serde_json.workspace = true
 flate2 = "1"
 resvg = { version = "0.45", default-features = false }
+# アプリ内ブラウザ。OS のブラウザの部品（Windows は WebView2、macOS は WKWebView、Linux は WebKitGTK）を使う
+wry = "0.58"
 
 [dev-dependencies]
 gpui-kit = { version = "0.11.0", features = ["test-support"] }
 tempfile = "3"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+
+# Linux の WebKitGTK は GTK の上で動く
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = "0.19"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"

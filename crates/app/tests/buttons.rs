@@ -60,6 +60,11 @@ const NOT_BUTTONS: &[&str] = &[
     "folder-cursor",
     "keys-help",
     "app-keys",
+    // ブラウザの入れ物と、ページ・失敗・使用量の文字。ボタンは tests/browser.rs で押す
+    "browser",
+    "browser-page",
+    "browser-error",
+    "browser-usage",
 ];
 
 /// 押せるものの縦と横の、いちばん小さい大きさ（拡大率を掛ける前の値）。
@@ -334,6 +339,8 @@ fn fresh(cx: &mut TestAppContext, size: Size<Pixels>) -> World {
             // 前の画面で「今すぐロック」を押していても、ロックを解いて始める
             db.unlocked = true;
         });
+        // 前の画面で開いたターミナルとブラウザのタブを閉じる
+        malakt_mahoz::term::shared(cx).update(cx, |terms, cx| terms.close_all(cx));
         // 前の画面で変えた書体と色を、新しいデータ（何も選んでいない）に合わせて戻す
         malakt_mahoz::theme::init(cx);
         cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(String::new()));

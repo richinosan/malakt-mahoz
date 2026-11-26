@@ -279,6 +279,7 @@ enum SettingKey {
     AutoUpdate,
     Export,
     Import,
+    BrowserData,
     AlertTimed,
     AlertDate,
     AlertHour,
@@ -3875,7 +3876,10 @@ impl MainView {
                     malakt_core::tasklink::strip(&c.body)
                 };
                 div().text_sm().when(!body.is_empty(), |d| {
-                    d.child(TextView::markdown(("comment-body", ix), body))
+                    d.child(
+                        TextView::markdown(("comment-body", ix), body)
+                            .on_link_click(crate::browser::on_link),
+                    )
                 })
             })
             .children(
@@ -4529,7 +4533,11 @@ impl MainView {
                     div()
                         .id("detail-description")
                         .text_sm()
-                        .child(TextView::new(&self.description_view)),
+                        .child(
+                            TextView::new(&self.description_view)
+                                .on_link_click(crate::browser::on_link),
+                        )
+                        .test_support(),
                 )
                 .child(
                     row()
@@ -5032,9 +5040,10 @@ impl MainView {
                             .bg(theme.secondary)
                             .child(section_title("ピン留め"))
                             .children(pinned.iter().enumerate().map(|(i, c)| {
-                                div()
-                                    .text_sm()
-                                    .child(TextView::markdown(("pinned-body", i), c.body.clone()))
+                                div().text_sm().child(
+                                    TextView::markdown(("pinned-body", i), c.body.clone())
+                                        .on_link_click(crate::browser::on_link),
+                                )
                             })),
                     )
                 })
@@ -5643,6 +5652,39 @@ impl MainView {
             None | Some(SubModal::Rules) => return sized("dialog", body, cx),
             Some(SubModal::Font) => ("フォント", px(400.), self.font_picker(cx)),
             Some(SubModal::Scene) => ("背景の画像", px(680.), self.scene_picker(cx)),
+            Some(SubModal::ClearBrowser) => {
+                let body = col()
+                    .gap_3()
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("アプリ内ブラウザのログインの情報とキャッシュを消します。サイトからはログアウトします。"),
+                    )
+                    .child(
+                        row()
+                            .gap_2()
+                            .justify_end()
+                            .child(feel::gloss(
+                                Button::new("browser-clear-cancel")
+                                    .label("キャンセル")
+                                    .ghost()
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.sub_modal = None;
+                                        cx.notify();
+                                    })),
+                            ))
+                            .child(feel::gloss(
+                                Button::new("browser-clear-confirm")
+                                    .label("消す")
+                                    .danger()
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| this.clear_browser_data(cx)),
+                                    ),
+                            )),
+                    );
+                ("ブラウザのデータを消す", px(440.), body)
+            }
         };
         let over = self.dialog_as("dialog", width, title, over, cx);
         let over = if self.motion {
@@ -6108,6 +6150,20 @@ impl MainView {
                 Some("書き出したファイルを読み込む"),
                 list(&["読み込み", "復元"]),
             ),
+            Setting::new(
+                Section::Data,
+                SettingKey::BrowserData,
+                "ブラウザのデータ",
+                Some("アプリ内ブラウザのログインの情報とキャッシュ"),
+                list(&[
+                    "ブラウザ",
+                    "Cookie",
+                    "キャッシュ",
+                    "ログイン",
+                    "使用量",
+                    "容量",
+                ]),
+            ),
         ]);
         all
     }
@@ -6509,6 +6565,33 @@ impl MainView {
                         .on_click(cx.listener(|this, _, window, cx| this.import(window, cx))),
                 )
                 .into_any_element(),
+                SettingKey::BrowserData => {
+                    let size = crate::term::shared(cx).read(cx).usage;
+                    row()
+                        .gap_3()
+                        .child(
+                            div()
+                                .id("browser-usage")
+                                .text_sm()
+                                .text_color(theme.muted_foreground)
+                                .child(match size {
+                                    Some(size) => view::format_bytes(size),
+                                    None => "…".to_owned(),
+                                })
+                                .test_support(),
+                        )
+                        .child(feel::gloss(
+                            Button::new("browser-clear")
+                                .label("消す")
+                                .outline()
+                                .small()
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.sub_modal = Some(SubModal::ClearBrowser);
+                                    cx.notify();
+                                })),
+                        ))
+                        .into_any_element()
+                }
             };
         setting_line(item.name, item.note, control, false, first, &theme)
     }
@@ -8406,6 +8489,8 @@ impl Render for MainView {
                 .text_color(theme.foreground)
                 .child(self.render_header(false, wide, window, cx))
                 .child(div().flex_1().min_h_0().child(self.render_lock_screen(cx)))
+                // ロックしている間は、ブラウザのページも隠す
+                .child(crate::browser::frame_end(true, window, cx))
                 .into_any_element();
         }
         let main_width = if wide && sidebar {
@@ -8653,6 +8738,15 @@ impl Render for MainView {
                     )
                 },
             )
+            // ブラウザのページは画面の上に重なるので、ダイアログやメニューが出ている間は隠す
+            .child(crate::browser::frame_end(
+                !matches!(self.modal, Modal::None)
+                    || self.sub_modal.is_some()
+                    || self.pane_overlay.is_some()
+                    || self.column_menu.is_some(),
+                window,
+                cx,
+            ))
             .into_any_element();
         body
     }
