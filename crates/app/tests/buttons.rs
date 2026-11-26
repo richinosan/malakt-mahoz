@@ -88,6 +88,8 @@ const MUST: &[&str] = &[
     "own-preset-name",
     "own-preset-delete",
     "customize-nav",
+    "export-all",
+    "import-all",
     "font-open",
     "font",
     "font-reset",
@@ -184,9 +186,26 @@ const QUIET: &[(&str, &str)] = &[
         "今開いているカテゴリ",
     ),
     (
-        "カスタマイズの AI > customize-nav#5",
+        "設定の AI のモデル > customize-nav#5",
         "今開いているカテゴリ",
     ),
+    ("設定の AI の動作 > customize-nav#6", "今開いているカテゴリ"),
+    ("設定の GitHub > customize-nav#7", "今開いているカテゴリ"),
+    (
+        "ロックのダイアログ > customize-nav#8",
+        "今開いているカテゴリ",
+    ),
+    (
+        "ロックを有効にしたダイアログ > customize-nav#8",
+        "今開いているカテゴリ",
+    ),
+    (
+        "ロックを有効にした通知 > customize-nav#9",
+        "今開いているカテゴリ",
+    ),
+    ("設定のデータ > customize-nav#11", "今開いているカテゴリ"),
+    ("export-all", "OS の保存先の選択を開く"),
+    ("import-all", "OS のファイル選択を開く"),
     (
         "カスタマイズ（自分のテーマあり） > preset#0",
         "今選んでいるテーマ",
@@ -775,10 +794,35 @@ fn screens() -> Vec<(&'static str, Size<Pixels>, Setup)> {
                 v.show_appearance_section(CustomizeSection::Display, window, cx);
             })
         }),
-        ("カスタマイズの AI", wide, |cx, w| {
+        ("設定の AI のモデル", wide, |cx, w| {
             with_view(cx, w, |v, window, cx| {
                 v.open_appearance(window, cx);
-                v.show_appearance_section(CustomizeSection::Ai, window, cx);
+                v.show_appearance_section(CustomizeSection::AiModel, window, cx);
+            })
+        }),
+        ("設定の AI の動作", wide, |cx, w| {
+            with_view(cx, w, |v, window, cx| {
+                v.open_appearance(window, cx);
+                v.show_appearance_section(CustomizeSection::AiBehavior, window, cx);
+            })
+        }),
+        ("設定の GitHub", wide, |cx, w| {
+            with_view(cx, w, |v, window, cx| {
+                v.open_appearance(window, cx);
+                v.show_appearance_section(CustomizeSection::AiGithub, window, cx);
+            })
+        }),
+        ("設定のデータ", wide, |cx, w| {
+            with_view(cx, w, |v, window, cx| {
+                v.open_appearance(window, cx);
+                v.show_appearance_section(CustomizeSection::Data, window, cx);
+            })
+        }),
+        ("ロックを有効にした通知", wide, |cx, w| {
+            with_view(cx, w, |v, window, cx| {
+                v.write(cx, malakt_core::lock::enable);
+                v.open_appearance(window, cx);
+                v.show_appearance_section(CustomizeSection::Notices, window, cx);
             })
         }),
         (

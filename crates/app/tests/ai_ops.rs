@@ -596,5 +596,12 @@ fn the_ai_changes_the_lock_options(cx: &mut TestAppContext) {
 
     world.call("open_dialog", json!({"name": "lock"}), "開きました。");
     say(cx, window, &pane, "ロックの設定を開いて");
-    cx.update(|cx| assert_eq!(view.read(cx).modal, Modal::Lock));
+    cx.update(|cx| {
+        let v = view.read(cx);
+        assert_eq!(v.modal, Modal::Appearance);
+        assert_eq!(
+            v.appearance_section,
+            malakt_mahoz::state::CustomizeSection::Lock
+        );
+    });
 }

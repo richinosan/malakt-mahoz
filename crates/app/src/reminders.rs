@@ -62,6 +62,14 @@ pub fn menu_label(cx: &App) -> Option<&'static str> {
     })
 }
 
+/// 「設定」の通知に出す、連携のスイッチの名前。この OS に連携する先がなければ `None`。
+pub fn setting_label(cx: &App) -> Option<&'static str> {
+    Some(match cx.global::<Reminders>().target? {
+        Target::Reminders => "リマインダーと連携",
+        Target::Toasts => "期限の通知を予約",
+    })
+}
+
 pub fn enabled(cx: &App) -> bool {
     db::shared(cx)
         .read(cx)
