@@ -15,6 +15,8 @@ pub struct Db {
     data_version: i64,
     /// 外のコマンドに向けた「解除している」印を最後に書いた時刻（UNIX 秒）。書いていなければ `None`。
     open_mark: Option<i64>,
+    /// どれかのウィンドウで最後にキーやマウスを使った時刻（UNIX 秒）。自動でロックするときに見る。
+    pub last_input: i64,
 }
 
 /// 解除の印を書き直す間隔（秒）。[`lock::OPEN_FOR`] より十分短くする。
@@ -55,7 +57,19 @@ impl Db {
             opened_dir,
             data_version,
             open_mark: None,
+            last_input: unix_now(),
         }
+    }
+
+    /// 操作がないまま、自動でロックする時間が過ぎたか。ロックが無効なときと、
+    /// もうロックしているときは `false`。
+    pub fn idle_lock_due(&self, now: i64) -> bool {
+        self.unlocked
+            && lock::is_enabled(&self.store).unwrap_or(false)
+            && lock::auto_after(&self.store)
+                .ok()
+                .flatten()
+                .is_some_and(|minutes| lock::idle_long_enough(self.last_input, now, minutes))
     }
 
     /// 外のコマンド（MCP サーバーなど）に向けた「解除している」印を、今の状態に合わせる。
@@ -131,6 +145,57 @@ pub fn shared(cx: &App) -> Entity<Db> {
     cx.global::<Shared>().0.clone()
 }
 
+/// キーやマウスを使ったことを記録する。自動でロックするまでの時間は、ここから数え直す。
+pub fn note_input(cx: &mut App) {
+    let now = unix_now();
+    let db = shared(cx);
+    // 同じ秒のうちは書き直さない（マウスを動かしている間は何度も呼ばれる）
+    if db.read(cx).last_input != now {
+        db.update(cx, |db, _| db.last_input = now);
+    }
+}
+
+/// ウィンドウの中のマウスの操作を見張る部品。ウィンドウの一番外側に置く。
+/// キーは [`watch_keys`] でアプリ全体を見張る。
+pub fn input_watcher() -> impl IntoElement {
+    canvas(
+        |_, _, _| (),
+        |_, _, window, _| {
+            // ほかの部品が受け止めた操作も数えるよう、外から内へ届く途中（Capture）で見る
+            window.on_mouse_event(|_: &MouseDownEvent, phase, _, cx| {
+                if phase == DispatchPhase::Capture {
+                    note_input(cx);
+                }
+            });
+            window.on_mouse_event(|_: &MouseMoveEvent, phase, _, cx| {
+                if phase == DispatchPhase::Capture {
+                    note_input(cx);
+                }
+            });
+            window.on_mouse_event(|_: &ScrollEvent, phase, _, cx| {
+                if phase == DispatchPhase::Capture {
+                    note_input(cx);
+                }
+            });
+        },
+    )
+    .absolute()
+    .size_full()
+}
+
+/// どのウィンドウでキーを押しても、操作として記録する。起動時に 1 回呼ぶ。
+pub fn watch_keys(cx: &mut App) {
+    // ターミナルのように、キーを自分で受け止める部品の入力も数えるよう、届く前に見る
+    cx.intercept_keystrokes(|_, _, cx| note_input(cx)).detach();
+}
+
+/// 操作がないまま、自動でロックする時間が過ぎていたらロックする。
+pub fn lock_if_idle(now: i64, cx: &mut App) {
+    if shared(cx).read(cx).idle_lock_due(now) {
+        lock_now(cx);
+    }
+}
+
 /// すべてのウィンドウをロックする。ロックが無効なら何もしない。
 pub fn lock_now(cx: &mut App) {
     shared(cx).update(cx, |db, cx| {
@@ -144,8 +209,13 @@ pub fn lock_now(cx: &mut App) {
 }
 
 /// ロックの解除・有効化のあとに呼ぶ。外のコマンドに向けた印を、今の状態に合わせる。
+/// 自動でロックするまでの時間も、ここから数え直す。
 pub fn sync_open_mark(cx: &mut App) {
-    shared(cx).update(cx, |db, _| db.sync_open_mark(unix_now()));
+    shared(cx).update(cx, |db, _| {
+        let now = unix_now();
+        db.last_input = now;
+        db.sync_open_mark(now);
+    });
 }
 
 /// アプリを閉じるときに呼ぶ。閉じたあとは、ロックが有効なら外のコマンドから読めない。
@@ -159,7 +229,7 @@ pub fn close_open_mark(cx: &mut App) {
 const WATCH_EVERY: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// 外からの変更と日付の変わり目を見張る。2 秒ごとに確かめ、変わっていたら全ウィンドウを読み直させる
-/// （読み直しのときに、期限が今日の通知も作られる）。
+/// （読み直しのときに、期限が今日の通知も作られる）。操作がないまま決めた時間が過ぎたら、ロックする。
 pub fn watch(cx: &mut App) {
     cx.spawn(async move |cx| {
         let mut day = malakt_core::view::today();
@@ -168,6 +238,7 @@ pub fn watch(cx: &mut App) {
             let today = malakt_core::view::today();
             let new_day = std::mem::replace(&mut day, today.clone()) != today;
             cx.update(|cx| {
+                lock_if_idle(unix_now(), cx);
                 shared(cx).update(cx, |db, cx| {
                     db.sync_open_mark(unix_now());
                     if db.changed_outside() || new_day {
@@ -227,5 +298,27 @@ mod tests {
         db.sync_open_mark(1_300);
         assert!(db.open_mark.is_none());
         assert!(allows(9_999));
+    }
+
+    #[test]
+    fn idle_lock_waits_for_the_chosen_minutes() {
+        let mut db = Db::new(Store::open_in_memory().unwrap(), true);
+        db.last_input = 1_000;
+        // ロックが無効なら、時間を選んでいてもロックしない
+        lock::set_auto_after(&mut db.store, Some(5)).unwrap();
+        assert!(!db.idle_lock_due(1_000 + 3_600));
+        lock::enable(&mut db.store).unwrap();
+        assert!(!db.idle_lock_due(1_000 + 5 * 60 - 1));
+        assert!(db.idle_lock_due(1_000 + 5 * 60));
+        // 操作したら数え直す
+        db.last_input = 1_200;
+        assert!(!db.idle_lock_due(1_000 + 5 * 60));
+        // 「しない」なら、いくら待ってもロックしない
+        lock::set_auto_after(&mut db.store, None).unwrap();
+        assert!(!db.idle_lock_due(1_000 + 86_400));
+        // もうロックしているなら、もう一度はロックしない
+        lock::set_auto_after(&mut db.store, Some(1)).unwrap();
+        db.unlocked = false;
+        assert!(!db.idle_lock_due(1_000 + 86_400));
     }
 }

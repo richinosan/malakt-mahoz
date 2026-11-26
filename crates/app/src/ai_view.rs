@@ -3440,7 +3440,11 @@ impl Render for AiPane {
             .relative()
             .bg(theme.background)
             .text_color(theme.foreground)
-            .children(chat_drop);
+            .children(chat_drop)
+            // 別のウィンドウでは、ここでもマウスの操作を見張る（自動でロックするまでの時間）
+            .when(self.mode != PaneMode::Docked, |d| {
+                d.child(crate::db::input_watcher())
+            });
         match self.mode {
             PaneMode::ShellWindow => base
                 .size_full()

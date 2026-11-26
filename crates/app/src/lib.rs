@@ -125,6 +125,7 @@ pub fn init_with(store: malakt_core::Store, ai: AiConfig, cx: &mut App) {
     gpui_kit::component::set_locale("ja");
     load_fonts(cx);
     db::init(store, cx);
+    db::watch_keys(cx);
     passkey::init(cx);
     ai::init(ai, cx);
     term::init(cx);

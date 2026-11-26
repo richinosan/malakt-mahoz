@@ -66,6 +66,8 @@ pub enum Modal {
     Ticket(Id),
     /// 書体と色
     Appearance,
+    /// ロック（有効・無効、自動でロックするまでの時間、ロック中の通知）
+    Lock,
 }
 
 /// 左のメニューで、その場で名前を書いているワークスペース。
@@ -329,6 +331,8 @@ pub struct MainView {
     pub assignee_picker: bool,
     /// ダイアログの上に重ねて出しているダイアログ。
     pub sub_modal: Option<SubModal>,
+    /// ロック中に OS の通知を押したときの、その通知。解除したら開く。
+    pub open_after_unlock: Option<Id>,
     /// 「カスタマイズ」で、1 つずつ変える行（詳細）を開いている。
     pub appearance_details: bool,
     pub appearance_scroll: gpui_kit::ScrollHandle,
@@ -734,6 +738,7 @@ impl MainView {
             pane_keys: Default::default(),
             pane_overlay: None,
             sub_modal: None,
+            open_after_unlock: None,
             appearance_details: false,
             appearance_scroll: gpui_kit::ScrollHandle::new(),
             own_presets: Vec::new(),
@@ -3252,6 +3257,51 @@ impl MainView {
         });
     }
 
+    /// ロックの設定を開く。
+    pub fn open_lock_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // メニューから開くとフォーカスがなくなるので、Esc を受けられるように戻す
+        self.focus.focus(window, cx);
+        self.error = None;
+        self.modal = Modal::Lock;
+        cx.notify();
+    }
+
+    /// 操作がないまま自動でロックするまでの分数。自動でロックしないなら `None`。
+    pub fn auto_lock(&self, cx: &App) -> Option<u32> {
+        lock::auto_after(&self.db.read(cx).store).ok().flatten()
+    }
+
+    /// ロック中の OS の通知に何を出すか。
+    pub fn locked_notices(&self, cx: &App) -> lock::LockedNotices {
+        lock::locked_notices(&self.db.read(cx).store).unwrap_or_default()
+    }
+
+    /// 自動でロックするまでの分数を変える。`None` で自動でロックしない。
+    pub fn set_auto_lock(&mut self, minutes: Option<u32>, cx: &mut Context<Self>) -> bool {
+        let saved = self
+            .write(cx, |s| lock::set_auto_after(s, minutes))
+            .is_some();
+        if saved {
+            // 選んだときから数える
+            crate::db::note_input(cx);
+        }
+        cx.notify();
+        saved
+    }
+
+    /// ロック中の OS の通知に何を出すかを変える。
+    pub fn set_locked_notices(
+        &mut self,
+        notices: lock::LockedNotices,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let saved = self
+            .write(cx, |s| lock::set_locked_notices(s, notices))
+            .is_some();
+        cx.notify();
+        saved
+    }
+
     pub fn disable_lock(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.with_passkey("ロックを無効にする", window, cx, |this, cx| {
             if this.write(cx, lock::disable).is_some() {
@@ -3422,11 +3472,20 @@ impl MainView {
     // ---- 通知 ----
 
     /// 期限が今日のタスクの通知を作り、まだ出していない通知を OS の通知に出す。
-    /// ロック中はタイトルを外に出さないよう、解除してから出す。
+    /// ロック中も出す。そのときはコメントの本文を出さず、タイトルも設定によっては出さない
+    /// （[`lock::LockedNotices`]）。ロック中に押された通知は、解除してから開く。
     pub fn deliver_notices(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.unlocked(cx) {
-            return;
+        let unlocked = self.unlocked(cx);
+        if unlocked {
+            if let Some(id) = self.open_after_unlock.take() {
+                self.open_notice(&id, window, cx);
+            }
         }
+        let shown = if unlocked {
+            None
+        } else {
+            Some(lock::locked_notices(&self.db.read(cx).store).unwrap_or_default())
+        };
         let today = view::today();
         let (pending, changed) = self.db.update(cx, |db, cx| {
             let (pending, made) = db.take_notices(&today);
@@ -3442,14 +3501,27 @@ impl MainView {
         for notice in pending {
             let view = cx.entity().downgrade();
             let id = notice.id.clone();
+            let title = match shown {
+                Some(lock::LockedNotices::Hidden) => "新しい通知があります".to_owned(),
+                _ => notice.headline(),
+            };
             let mut note = gpui_kit::component::notification::Notification::new()
                 .id1::<Notice>(SharedString::from(notice.id.clone()))
-                .title(notice.headline())
+                .title(title)
                 .system()
                 .on_click(move |_, window, cx| {
-                    let _ = view.update(cx, |this, cx| this.open_notice(&id, window, cx));
+                    // ウィンドウを閉じたあとなら、開く先がない
+                    let _ = view.update(cx, |this, cx| {
+                        if this.unlocked(cx) {
+                            this.open_notice(&id, window, cx);
+                        } else {
+                            this.open_after_unlock = Some(id.clone());
+                            this.request_unlock(window, cx);
+                        }
+                    });
                 });
-            if !notice.excerpt.is_empty() {
+            // コメントの本文は、解除している間だけ出す
+            if shown.is_none() && !notice.excerpt.is_empty() {
                 note = note.message(notice.excerpt.clone());
             }
             window.push_notification(note, cx);

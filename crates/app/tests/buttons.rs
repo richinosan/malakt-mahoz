@@ -63,7 +63,7 @@ const NOT_BUTTONS: &[&str] = &[
 /// 押せるものの縦と横の、いちばん小さい大きさ（拡大率を掛ける前の値）。
 const MIN_HIT: f32 = 17.5;
 /// スイッチは部品の高さが決まっている。ラベルごと押せるので、横に広い。
-const WIDE_SWITCHES: &[&str] = &["cards-switch", "float-switch"];
+const WIDE_SWITCHES: &[&str] = &["cards-switch", "float-switch", "lock-switch"];
 
 /// 詳細のパネルの上の端に並ぶボタン。
 const PANEL_BAR: &[&str] = &["copy-link", "ticket-open", "close-panel"];
@@ -104,6 +104,9 @@ const MUST: &[&str] = &[
     "density",
     "feel",
     "shell-choice",
+    "lock-switch",
+    "auto-lock",
+    "locked-notices",
 ];
 
 /// ロックを設定したときだけ出るもの。ロックは tests/ui.rs で確かめる。
@@ -684,6 +687,19 @@ fn screens() -> Vec<(&'static str, Size<Pixels>, Setup)> {
         ("担当者のダイアログ", wide, |cx, w| {
             with_view(cx, w, |v, window, cx| v.open_people(window, cx))
         }),
+        ("ロックのダイアログ", wide, |cx, w| {
+            with_view(cx, w, |v, window, cx| v.open_lock_settings(window, cx))
+        }),
+        (
+            "ロックを有効にしたダイアログ",
+            wide,
+            |cx, w| {
+                with_view(cx, w, |v, window, cx| {
+                    v.write(cx, malakt_core::lock::enable);
+                    v.open_lock_settings(window, cx);
+                })
+            },
+        ),
         ("カスタマイズ", wide, |cx, w| {
             with_view(cx, w, |v, window, cx| v.open_appearance(window, cx))
         }),

@@ -1742,20 +1742,13 @@ impl MainView {
                                     this.import(window, cx)
                                 }))
                                 .separator()
-                                .item(if lock_enabled {
-                                    item("今すぐロック", |_, window, cx| {
-                                        window.dispatch_action(Box::new(LockNow), cx)
-                                    })
-                                } else {
-                                    item("ロックを有効にする", |this, window, cx| {
-                                        this.enable_lock(window, cx)
-                                    })
-                                });
+                                .item(item("ロック", |this, window, cx| {
+                                    this.open_lock_settings(window, cx)
+                                }));
                             let menu = if lock_enabled {
-                                menu.item(item(
-                                    "ロックを無効にする",
-                                    |this, window, cx| this.disable_lock(window, cx),
-                                ))
+                                menu.item(item("今すぐロック", |_, window, cx| {
+                                    window.dispatch_action(Box::new(LockNow), cx)
+                                }))
                             } else {
                                 menu
                             };
@@ -5155,6 +5148,111 @@ impl MainView {
             )
     }
 
+    /// ロックの設定。値はその場のメニューで選ぶ。
+    fn render_lock_settings(&self, cx: &mut Context<Self>) -> Div {
+        let theme = cx.theme().clone();
+        let enabled = self.lock_enabled(cx);
+        let verifying = self.verifying(cx);
+        let label = |text: &'static str| {
+            div()
+                .w(px(112.))
+                .flex_none()
+                .text_sm()
+                .text_color(theme.muted_foreground)
+                .child(text)
+        };
+        let view = cx.entity().downgrade();
+        let muted = theme.muted_foreground;
+        // 押すと、選べる値のメニューが開くボタン
+        let choice = |id: &'static str, shown: SharedString| {
+            Button::new(id).outline().h_8().child(
+                row()
+                    .min_w_0()
+                    .gap_2()
+                    .child(div().flex_1().min_w_0().truncate().child(shown))
+                    .child(app_icon("chevron-down").small().text_color(muted)),
+            )
+        };
+        let mut body = col().gap_2().child(
+            row().gap_2().child(label("ロック")).child(
+                div().flex_1().flex().child(
+                    Switch::new("lock-switch")
+                        .label("パスキーで開く")
+                        .checked(enabled)
+                        .disabled(verifying)
+                        .on_click(cx.listener(|this, on: &bool, window, cx| {
+                            if *on {
+                                this.enable_lock(window, cx)
+                            } else {
+                                this.disable_lock(window, cx)
+                            }
+                        })),
+                ),
+            ),
+        );
+        // 自動でロックする時間と通知は、ロックが有効なときだけ
+        if enabled {
+            let auto = self.auto_lock(cx);
+            let auto_view = view.clone();
+            let auto_menu = choice("auto-lock", auto_lock_label(auto).into()).dropdown_menu(
+                move |mut menu, _, _| {
+                    let options = std::iter::once(None)
+                        .chain(malakt_core::lock::AUTO_CHOICES.into_iter().map(Some));
+                    for minutes in options {
+                        let view = auto_view.clone();
+                        menu = menu.item(
+                            PopupMenuItem::new(auto_lock_label(minutes))
+                                .checked(auto == minutes)
+                                .on_click(move |_, _, cx| {
+                                    // ウィンドウを閉じたあとなら、反映する先がない
+                                    let _ = view.update(cx, |this, cx| {
+                                        this.set_auto_lock(minutes, cx);
+                                    });
+                                }),
+                        );
+                    }
+                    menu
+                },
+            );
+            let notices = self.locked_notices(cx);
+            let notice_menu = choice("locked-notices", notices.label().into()).dropdown_menu(
+                move |mut menu, _, _| {
+                    for option in malakt_core::lock::LockedNotices::ALL {
+                        let view = view.clone();
+                        menu = menu.item(
+                            PopupMenuItem::new(option.label())
+                                .checked(notices == option)
+                                .on_click(move |_, _, cx| {
+                                    // ウィンドウを閉じたあとなら、反映する先がない
+                                    let _ = view.update(cx, |this, cx| {
+                                        this.set_locked_notices(option, cx);
+                                    });
+                                }),
+                        );
+                    }
+                    menu
+                },
+            );
+            body = body
+                .child(
+                    row()
+                        .gap_2()
+                        .child(label("自動でロック"))
+                        .child(div().flex_1().min_w_0().flex().child(auto_menu)),
+                )
+                .child(
+                    row()
+                        .gap_2()
+                        .child(label("ロック中の通知"))
+                        .child(div().flex_1().min_w_0().flex().child(notice_menu)),
+                );
+        }
+        let body = body.when_some(self.error.clone(), |d, error| {
+            d.child(div().text_sm().text_color(theme.danger).child(error))
+        });
+        self.dialog("ロック", body, cx)
+    }
+
     /// 書体と色。書体の一覧は、この上にもう 1 枚重ねて出す。
     fn render_appearance(&self, cx: &mut Context<Self>) -> Div {
         let theme = cx.theme().clone();
@@ -6189,6 +6287,7 @@ impl MainView {
                 self.dialog(title, body, cx)
             }
             Modal::Appearance => self.render_appearance(cx),
+            Modal::Lock => self.render_lock_settings(cx),
             Modal::DeleteWorkspace(id) => {
                 let name = self.workspace_name(Some(id));
                 let body = col()
@@ -7460,6 +7559,8 @@ impl Render for MainView {
             })
             .text_color(theme.foreground)
             .children(backdrop_layer(cx))
+            // 操作がないまま決めた時間が過ぎたらロックするので、マウスの操作を見張る
+            .child(crate::db::input_watcher())
             // 上のバーは、ウィンドウの端から端まで 1 本
             .child(self.render_header(true, wide, window, cx))
             .child(
@@ -7613,4 +7714,13 @@ fn paste_item(view: &WeakEntity<MainView>, cx: &App) -> PopupMenuItem {
             // ウィンドウを閉じたあとなら、反映する先がない
             let _ = view.update(cx, |this, cx| this.paste_here(cx));
         })
+}
+
+/// 自動でロックするまでの時間の表示。`None` は自動でロックしない。
+fn auto_lock_label(minutes: Option<u32>) -> String {
+    match minutes {
+        None => "しない".to_owned(),
+        Some(m) if m % 60 == 0 => format!("{} 時間", m / 60),
+        Some(m) => format!("{m} 分"),
+    }
 }
