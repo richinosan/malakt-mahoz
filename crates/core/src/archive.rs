@@ -57,6 +57,8 @@ pub struct Data {
     /// 添付の名前や大きさ。中身は zip の `files/<ハッシュ>` に 1 つずつ入る。
     pub attachments: Vec<Attachment>,
     pub task_defaults: Vec<TaskDefaults>,
+    /// タスクごとの、期限をいつ知らせるかの上書き。
+    pub task_alerts: Vec<crate::alert::TaskAlerts>,
 }
 
 impl Data {
@@ -133,6 +135,16 @@ impl Data {
                 return bad("タスク");
             }
         }
+        if let Some(a) = self
+            .task_alerts
+            .iter()
+            .find(|a| !self.tasks.iter().any(|t| t.id == a.task_id))
+        {
+            return Err(Error::Invalid(format!(
+                "期限の通知の設定の、タスク {} がありません",
+                a.task_id
+            )));
+        }
         // ハッシュは zip の中のファイル名になるので、16 進 64 桁だけを通す
         if self.attachments.iter().any(|a| {
             a.id.is_empty()
@@ -188,6 +200,10 @@ pub fn export<W: Write + Seek>(store: &Store, out: W) -> Result<Manifest> {
     put(
         "data/task_defaults.json",
         serde_json::to_vec(&data.task_defaults)?,
+    )?;
+    put(
+        "data/task_alerts.json",
+        serde_json::to_vec(&data.task_alerts)?,
     )?;
     put(
         "data/attachments.json",
@@ -268,6 +284,11 @@ fn read_zip<R: Read + Seek>(zip: &mut ZipArchive<R>) -> Result<(Manifest, Data)>
         .iter()
         .map(crate::defaults::clean)
         .collect::<Result<_>>()?;
+    let task_alerts: Vec<crate::alert::TaskAlerts> = read_optional(zip, "data/task_alerts.json")?;
+    let task_alerts = task_alerts
+        .iter()
+        .map(crate::alert::clean_task)
+        .collect::<Result<_>>()?;
     let workspaces: Vec<Workspace> = read_json(zip, "data/workspaces.json")?;
     let mut icons: Vec<(String, Vec<u8>)> = Vec::new();
     for w in &workspaces {
@@ -296,6 +317,7 @@ fn read_zip<R: Read + Seek>(zip: &mut ZipArchive<R>) -> Result<(Manifest, Data)>
         changes: read_json(zip, "data/changes.json")?,
         attachments,
         task_defaults,
+        task_alerts,
     };
     data.normalize();
     data.validate()?;

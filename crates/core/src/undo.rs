@@ -29,6 +29,7 @@ const TABLES: &[&str] = &[
     "blobs",
     "attachments",
     "task_defaults",
+    "task_alerts",
     "task_links",
     "tickets",
 ];

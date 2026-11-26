@@ -8,7 +8,7 @@ use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::color_picker::ColorPicker;
 use gpui_kit::component::input::{Input, Textarea};
-use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu, PopupMenu, PopupMenuItem};
+use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
 use gpui_kit::component::scroll::ScrollableElement;
 use gpui_kit::component::slider::{Slider, SliderState};
 use gpui_kit::component::spinner::Spinner;
@@ -24,6 +24,7 @@ use malakt_core::{Comment, DueRule, Role as Raci, Roles, Status, Task as Todo, W
 use crate::ai::ShellPlace;
 use crate::ai_view::{docked_width, TASKS_MIN};
 use crate::feel::{self, Lit, Sunk};
+use crate::scroll::Menus;
 use crate::shadow::{Elevate, Elevation};
 use crate::state::{
     Column, CommentMode, Detail, DropTarget, Editing, MainView, Modal, Nav, SubModal, When,
@@ -234,6 +235,16 @@ const APPEARANCE_HEIGHT: Pixels = px(620.);
 const CONTROL_WIDTH: Pixels = px(220.);
 const PRESET_WIDTH: Pixels = px(124.);
 
+/// 期限の通知で選べるものと、その名前。`timed` は時刻つきの期限（何分前）、ほかは日付だけの期限（何日前）。
+fn alert_kind(timed: bool) -> (&'static [u32], fn(u32) -> String) {
+    use malakt_core::alert;
+    if timed {
+        (&alert::TIMED_CHOICES, alert::timed_label)
+    } else {
+        (&alert::DATE_CHOICES, alert::date_label)
+    }
+}
+
 /// 「カスタマイズ」の設定 1 つ。
 struct Setting {
     section: crate::state::CustomizeSection,
@@ -266,6 +277,9 @@ enum SettingKey {
     AutoUpdate,
     Export,
     Import,
+    AlertTimed,
+    AlertDate,
+    AlertHour,
 }
 
 impl Setting {
@@ -840,6 +854,77 @@ impl MainView {
         line
     }
 
+    /// 詳細の「通知」。押すと、期限をいつ知らせるかのメニューが開く。期限がなければ出さない。
+    fn task_alert_menu(
+        &self,
+        task_id: &str,
+        due: Option<&str>,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        use malakt_core::alert;
+        let due = due?;
+        let timed = malakt_core::time_of(due).is_some();
+        let standard = self.due_alert_standard(cx);
+        let own = self.task_alerts(task_id, cx);
+        let (choices, label) = alert_kind(timed);
+        let (own, base) = if timed {
+            (own.timed, standard.timed)
+        } else {
+            (own.date, standard.date)
+        };
+        let shown = match &own {
+            Some(values) => alert::summary(values, label),
+            None => format!("標準（{}）", alert::summary(&base, label)),
+        };
+        let muted = cx.theme().muted_foreground;
+        let view = cx.entity().downgrade();
+        let task_id = task_id.to_owned();
+        let chosen = own.clone().unwrap_or_else(|| base.clone());
+        let standard_label = format!("標準に合わせる（{}）", alert::summary(&base, label));
+        let menu = Button::new("task-alerts")
+            .outline()
+            .small()
+            .child(
+                row()
+                    .min_w_0()
+                    .gap_2()
+                    .child(div().min_w_0().truncate().child(shown))
+                    .child(app_icon("chevron-down").small().text_color(muted)),
+            )
+            .pop_menu(move |mut menu, _, _| {
+                let reset_view = view.clone();
+                let reset_task = task_id.clone();
+                menu = menu
+                    .item(
+                        PopupMenuItem::new(standard_label.clone())
+                            .checked(own.is_none())
+                            .on_click(move |_, _, cx| {
+                                // ウィンドウを閉じたあとなら、反映する先がない
+                                let _ = reset_view.update(cx, |this, cx| {
+                                    this.reset_task_alerts(&reset_task, timed, cx);
+                                });
+                            }),
+                    )
+                    .separator();
+                for value in choices.iter().copied() {
+                    let view = view.clone();
+                    let task_id = task_id.clone();
+                    menu = menu.item(
+                        PopupMenuItem::new(label(value))
+                            .checked(chosen.contains(&value))
+                            .on_click(move |_, _, cx| {
+                                // ウィンドウを閉じたあとなら、反映する先がない
+                                let _ = view.update(cx, |this, cx| {
+                                    this.toggle_task_alert(&task_id, timed, value, cx);
+                                });
+                            }),
+                    );
+                }
+                menu
+            });
+        Some(div().flex().child(menu).into_any_element())
+    }
+
     fn due_label(&self, task: &Todo, cx: &App) -> Div {
         let theme = cx.theme();
         let Some(due) = &task.due else {
@@ -1119,7 +1204,7 @@ impl MainView {
                 .when(!active, |b| {
                     b.opacity(0.).group_hover(group.clone(), |s| s.opacity(1.))
                 })
-                .dropdown_menu({
+                .pop_menu({
                     let menu = menu.clone();
                     move |m, _, _| menu(m)
                 });
@@ -1177,7 +1262,7 @@ impl MainView {
                 })
                 .child(more)
                 // 右クリックでも同じメニューを出す
-                .context_menu(move |m, _, _| menu(m)),
+                .right_menu(move |m, _, _| menu(m)),
             );
         }
 
@@ -1286,7 +1371,7 @@ impl MainView {
                     .when(!self.workspaces.is_empty(), |d| d.child(tree)),
             )
             // 何もないところの右クリックで、ワークスペースを足せる
-            .context_menu(move |menu, _, _| {
+            .right_menu(move |menu, _, _| {
                 let view = view.clone();
                 menu.item(PopupMenuItem::new("ワークスペースを追加").on_click(
                     move |_, window, cx| {
@@ -1466,7 +1551,7 @@ impl MainView {
                     )
                     .test_support(),
                 )
-                .context_menu(move |m, _, _| menu(m)),
+                .right_menu(move |m, _, _| menu(m)),
             );
         }
         let view = cx.entity().downgrade();
@@ -1491,7 +1576,7 @@ impl MainView {
             .child(nav)
             .test_support()
             // 何もないところの右クリックで、ワークスペースを足せる（広げたときと同じ）
-            .context_menu(move |menu, _, _| {
+            .right_menu(move |menu, _, _| {
                 let view = view.clone();
                 menu.item(PopupMenuItem::new("ワークスペースを追加").on_click(
                     move |_, window, cx| {
@@ -1865,7 +1950,7 @@ impl MainView {
                         .ghost()
                         .small()
                         .tooltip("設定")
-                        .dropdown_menu(move |menu, _, _| {
+                        .pop_menu(move |menu, _, _| {
                             let item = |label: &'static str,
                                         run: fn(
                                 &mut MainView,
@@ -2094,7 +2179,7 @@ impl MainView {
                     .child(self.due_label(task, cx).w(px(170.)).truncate().text_sm())
                     .test_support()
                     // 右クリックで、期限の見せ方を選ぶ
-                    .context_menu(move |menu, _, _| {
+                    .right_menu(move |menu, _, _| {
                         crate::state::due_format_items(menu, &view, format)
                     })
             })
@@ -2197,7 +2282,7 @@ impl MainView {
                     .child(div().flex_1().min_w_0().truncate().child(current))
                     .child(app_icon("chevron-down").xsmall().flex_none()),
             )
-            .dropdown_menu(move |mut menu, _, _| {
+            .pop_menu(move |mut menu, _, _| {
                 for (label, checked, value) in options.iter().cloned() {
                     let view = view.clone();
                     menu = menu.item(PopupMenuItem::new(label).checked(checked).on_click(
@@ -2712,7 +2797,7 @@ impl MainView {
                             .child(card),
                     )
                     // 何もないところの右クリックで、コピーしたタスクを貼り付けられる
-                    .context_menu(move |menu, _, cx| menu.item(paste_item(&view, cx))),
+                    .right_menu(move |menu, _, cx| menu.item(paste_item(&view, cx))),
             )
             .vertical_scrollbar(&self.page_scroll)
             // 右下の「＋」。どこまでスクロールしていても、新しいタスクを始められる
@@ -3017,7 +3102,7 @@ impl MainView {
             .py_0p5()
             .justify_start()
             .child(value_shown(shown))
-            .dropdown_menu(move |mut menu, _, _| {
+            .pop_menu(move |mut menu, _, _| {
                 for (label, checked, value) in options.iter().cloned() {
                     let view = view.clone();
                     let apply = apply.clone();
@@ -3047,7 +3132,7 @@ impl MainView {
             .small()
             .justify_start()
             .child(value_shown(status_badge(current, cx)))
-            .dropdown_menu(move |menu, _, _| status_items(menu, &view, &task, current))
+            .pop_menu(move |menu, _, _| status_items(menu, &view, &task, current))
     }
 
     fn priority_options(current: Prio) -> Vec<(SharedString, bool, u8)> {
@@ -3196,7 +3281,7 @@ impl MainView {
         self.drop_zone(el, DropTarget::Workspace(Some(ws.id.clone())), cx)
             .rounded_none()
             .test_support()
-            .context_menu(move |menu, _, _| {
+            .right_menu(move |menu, _, _| {
                 let item =
                     |label: &'static str, run: fn(&mut MainView, Id, &mut Context<MainView>)| {
                         let view = view.clone();
@@ -3388,7 +3473,7 @@ impl MainView {
                 ))
                 .test_support()
                 // 右クリックで、期限の見せ方を選ぶ（行のメニューは開かない）
-                .context_menu(move |menu, _, _| crate::state::due_format_items(menu, &view, format))
+                .right_menu(move |menu, _, _| crate::state::due_format_items(menu, &view, format))
         };
         let updated = div()
             .text_sm()
@@ -3499,7 +3584,7 @@ impl MainView {
         };
         // 右クリックで、その行の操作を出す
         row_el
-            .context_menu(move |menu, window, cx| {
+            .right_menu(move |menu, window, cx| {
                 let item = |label: &'static str,
                             run: fn(&mut MainView, Id, &mut Window, &mut Context<MainView>)| {
                     let view = view.clone();
@@ -4112,7 +4197,7 @@ impl MainView {
                     .label("担当者を登録")
                     .ghost()
                     .small()
-                    .dropdown_menu(move |menu, _, _| person_items(menu, &view, &others)),
+                    .pop_menu(move |menu, _, _| person_items(menu, &view, &others)),
             ),
         )
     }
@@ -4924,6 +5009,10 @@ impl MainView {
                         .child(self.property("担当", cx).child(people))
                         .child(self.property("開始日", cx).child(start))
                         .child(self.property("期限", cx).child(due))
+                        .when_some(
+                            self.task_alert_menu(&task.id, task.due.as_deref(), cx),
+                            |d, menu| d.child(self.property("通知", cx).child(menu)),
+                        )
                         .child(self.property("進捗", cx).child(percent))
                         .child(self.property("カテゴリ", cx).child(categories))
                         .child(self.property("親タスク", cx).child(parent))
@@ -5315,14 +5404,22 @@ impl MainView {
                 ),
             );
         }
+        // 低いウィンドウで入りきらないときは、カテゴリの列だけスクロールする
         let nav = col()
             .w(px(208.))
             .flex_none()
             .min_h_0()
-            .pr_3()
             .border_r_1()
             .border_color(theme.border)
-            .child(nav);
+            .child(
+                div()
+                    .id("customize-nav-list")
+                    .size_full()
+                    // 右の端はスクロールバーの場所
+                    .pr_3()
+                    .child(nav)
+                    .overflow_y_scrollbar(),
+            );
 
         // 右: カテゴリごとに見出しとカード。検索中は、合う設定のあるカテゴリをすべて並べる
         let sections: Vec<Section> = if searching {
@@ -5573,6 +5670,29 @@ impl MainView {
                 list(&["時間"]),
             ));
         }
+        all.extend([
+            Setting::new(
+                Section::Notices,
+                SettingKey::AlertTimed,
+                "時刻つきの期限",
+                None,
+                list(&["期限", "通知", "リマインダー", "分前", "時間前"]),
+            ),
+            Setting::new(
+                Section::Notices,
+                SettingKey::AlertDate,
+                "日付だけの期限",
+                None,
+                list(&["期限", "通知", "リマインダー", "当日", "前日"]),
+            ),
+            Setting::new(
+                Section::Notices,
+                SettingKey::AlertHour,
+                "日付だけの期限の時刻",
+                None,
+                list(&["期限", "通知", "時刻"]),
+            ),
+        ]);
         if let Some(name) = crate::reminders::setting_label(cx) {
             all.push(Setting::new(
                 Section::Notices,
@@ -5651,6 +5771,11 @@ impl MainView {
                     &theme,
                 );
             }
+            SettingKey::AlertTimed | SettingKey::AlertDate => {
+                return edge(div())
+                    .child(self.due_alert_row(item, item.key == SettingKey::AlertTimed, cx))
+                    .into_any_element();
+            }
             _ => {}
         }
         let look = crate::theme::look(cx);
@@ -5693,7 +5818,45 @@ impl MainView {
                 .test_support()
         };
         let control: AnyElement = match item.key {
-            SettingKey::Themes | SettingKey::Layouts | SettingKey::Ai(_) => unreachable!(),
+            SettingKey::Themes
+            | SettingKey::Layouts
+            | SettingKey::Ai(_)
+            | SettingKey::AlertTimed
+            | SettingKey::AlertDate => unreachable!(),
+            SettingKey::AlertHour => {
+                let hour = self.due_alert_standard(cx).hour;
+                row()
+                    .gap_1()
+                    .flex_wrap()
+                    .justify_end()
+                    .children(
+                        malakt_core::alert::HOUR_CHOICES
+                            .into_iter()
+                            .enumerate()
+                            .map(|(ix, h)| {
+                                chip(
+                                    ("alert-hour", ix),
+                                    malakt_core::alert::hour_label(h),
+                                    hour == h,
+                                    cx,
+                                )
+                                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                    this.set_due_alert_hour(h, cx);
+                                }))
+                                .test_support()
+                            }),
+                    )
+                    .child(
+                        reset(
+                            "alert-hour-reset",
+                            hour != malakt_core::alert::STANDARD_HOUR,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.set_due_alert_hour(malakt_core::alert::STANDARD_HOUR, cx);
+                        })),
+                    )
+                    .into_any_element()
+            }
             SettingKey::Scene => {
                 let scene = crate::theme::scene(cx);
                 let has_scene = scene != crate::theme::Scene::None;
@@ -5853,7 +6016,7 @@ impl MainView {
                 let view = cx.entity().downgrade();
                 let auto = self.auto_lock(cx);
                 menu_choice("auto-lock", auto_lock_label(auto).into(), &theme)
-                    .dropdown_menu(move |mut menu, _, _| {
+                    .pop_menu(move |mut menu, _, _| {
                         let options = std::iter::once(None)
                             .chain(malakt_core::lock::AUTO_CHOICES.into_iter().map(Some));
                         for minutes in options {
@@ -5877,7 +6040,7 @@ impl MainView {
                 let view = cx.entity().downgrade();
                 let notices = self.locked_notices(cx);
                 menu_choice("locked-notices", notices.label().into(), &theme)
-                    .dropdown_menu(move |mut menu, _, _| {
+                    .pop_menu(move |mut menu, _, _| {
                         for option in malakt_core::lock::LockedNotices::ALL {
                             let view = view.clone();
                             menu = menu.item(
@@ -5921,6 +6084,67 @@ impl MainView {
             .into_any_element(),
         };
         setting_line(item.name, item.note, control, false, first, &theme)
+    }
+
+    /// 期限をいつ知らせるかの行。上に名前、下に選べるものを並べ、押すたびに入れる・外す。
+    fn due_alert_row(&self, item: &Setting, timed: bool, cx: &mut Context<Self>) -> Div {
+        use malakt_core::alert;
+        let standard = self.due_alert_standard(cx);
+        let (choices, label) = alert_kind(timed);
+        let (chosen, base, prefix, reset_id) = if timed {
+            (
+                standard.timed,
+                alert::STANDARD_TIMED,
+                "alert-timed",
+                "alert-timed-reset",
+            )
+        } else {
+            (
+                standard.date,
+                alert::STANDARD_DATE,
+                "alert-date",
+                "alert-date-reset",
+            )
+        };
+        let changed = chosen != base;
+        let chips = row()
+            .gap_1()
+            .flex_wrap()
+            .children(choices.iter().copied().enumerate().map(|(ix, value)| {
+                chip((prefix, ix), label(value), chosen.contains(&value), cx)
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        if timed {
+                            this.toggle_due_alert_timed(value, cx);
+                        } else {
+                            this.toggle_due_alert_date(value, cx);
+                        }
+                    }))
+                    .test_support()
+            }));
+        col()
+            .py_3()
+            .gap_2()
+            .child(
+                row()
+                    .gap_4()
+                    .child(div().flex_1().min_w_0().text_sm().child(item.name))
+                    .child(
+                        Button::new(reset_id)
+                            .icon(app_icon("rotate-ccw"))
+                            .ghost()
+                            .small()
+                            .tooltip("標準に戻す")
+                            .when(!changed, |b| b.invisible().disabled(true))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if timed {
+                                    this.set_due_alert_timed(base, cx);
+                                } else {
+                                    this.set_due_alert_date(base, cx);
+                                }
+                            })),
+                    ),
+            )
+            .child(chips)
     }
 
     /// テーマの見本。おすすめ、自分で保存したもの、今のテーマを保存するボタンの順に並べる。
@@ -6740,7 +6964,7 @@ impl MainView {
                             .ghost()
                             .xsmall()
                             .tooltip(label)
-                            .dropdown_menu(move |menu, _, _| {
+                            .pop_menu(move |menu, _, _| {
                                 person_workspace_items(menu, &view, &person, &current, &roots)
                             })
                     });

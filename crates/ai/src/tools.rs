@@ -363,6 +363,24 @@ pub fn definitions() -> Vec<ToolDef> {
             ),
         },
         ToolDef {
+            name: "get_due_alerts",
+            description: "期限をいつ知らせるか（OS の通知とリマインダー）を返す。task_id を渡すと、そのタスクで使うもの（own が null なら全体の標準のまま）。",
+            schema: object(json!({"task_id": {"type": "string"}}), &[]),
+        },
+        ToolDef {
+            name: "set_due_alerts",
+            description: "期限をいつ知らせるかを変える。渡した項目だけが変わる。task_id を省くと全体の標準、渡すとそのタスクだけの上書き。timed_minutes は時刻つきの期限の何分前か（0 で期限ちょうど、例 [0, 5, 60, 1440]、[] で知らせない）。date_days は日付だけの期限の何日前か（0 で当日、1 で前日、[] で知らせない）。タスクで null を渡すと、その側は標準に合わせる。hour は日付だけの期限を知らせる時刻（0〜23 時、全体だけ）。",
+            schema: object(
+                json!({
+                    "task_id": {"type": "string"},
+                    "timed_minutes": {"type": ["array", "null"], "items": {"type": "integer", "minimum": 0, "maximum": malakt_core::alert::MAX_MINUTES}},
+                    "date_days": {"type": ["array", "null"], "items": {"type": "integer", "minimum": 0, "maximum": malakt_core::alert::MAX_DAYS}},
+                    "hour": {"type": "integer", "minimum": 0, "maximum": 23},
+                }),
+                &[],
+            ),
+        },
+        ToolDef {
             name: GITHUB_FETCH,
             description: "GitHub のリンク（issue、プルリクエスト、リポジトリ、ファイル、コミット）の中身を gh コマンドで取ってくる。",
             schema: object(json!({"url": {"type": "string"}}), &["url"]),
@@ -799,6 +817,45 @@ fn task_json(task: &Task) -> Value {
 }
 
 /// 一覧では、説明を省いて短くする。
+/// 期限をいつ知らせるか。`task_id` があれば、そのタスクの上書きも。
+fn due_alerts_json(store: &Store, task_id: Option<&str>) -> Result<Value, String> {
+    use malakt_core::alert;
+    let core = |e: malakt_core::Error| e.to_string();
+    let standard = store.due_alert_standard().map_err(core)?;
+    let text = |timed: &[u32], date: &[u32]| {
+        json!({
+            "timed": alert::summary(timed, alert::timed_label),
+            "date": alert::summary(date, alert::date_label),
+        })
+    };
+    let mut out = json!({
+        "standard": {
+            "timed_minutes": standard.timed,
+            "date_days": standard.date,
+            "hour": standard.hour,
+            "text": text(&standard.timed, &standard.date),
+        },
+    });
+    if let Some(id) = task_id {
+        store.task(id).map_err(core)?;
+        let own = store.task_alerts(id).map_err(core)?;
+        let timed = own.timed.clone().unwrap_or_else(|| standard.timed.clone());
+        let date = own.date.clone().unwrap_or_else(|| standard.date.clone());
+        out["task_id"] = json!(id);
+        out["own"] = if own.is_standard() {
+            Value::Null
+        } else {
+            json!({"timed_minutes": own.timed, "date_days": own.date})
+        };
+        out["used"] = json!({
+            "timed_minutes": timed,
+            "date_days": date,
+            "text": text(&timed, &date),
+        });
+    }
+    Ok(out)
+}
+
 fn task_row(task: &Task) -> Value {
     let mut row = task_json(task);
     if let Some(map) = row.as_object_mut() {
@@ -882,6 +939,7 @@ pub fn execute(
                 })
                 .collect();
             task["active_tickets"] = json!(store.active_ticket_count(id).map_err(core)?);
+            task["due_alerts"] = due_alerts_json(store, Some(id))?;
             task["subtasks"] = store
                 .subtasks(id)
                 .map_err(core)?
@@ -1207,6 +1265,89 @@ pub fn execute(
                 json!({"read": ids.len()})
             }
         },
+        "get_due_alerts" => due_alerts_json(store, optional(args, "task_id"))?,
+        "set_due_alerts" => {
+            let task_id = optional(args, "task_id");
+            let list = |key: &str| -> Result<Option<Option<Vec<u32>>>, String> {
+                match args.get(key) {
+                    None => Ok(None),
+                    Some(Value::Null) => Ok(Some(None)),
+                    Some(Value::Array(items)) => items
+                        .iter()
+                        .map(|v| {
+                            v.as_u64()
+                                .and_then(|n| u32::try_from(n).ok())
+                                .ok_or_else(|| format!("{key} は 0 以上の整数の並びです: {v}"))
+                        })
+                        .collect::<Result<Vec<u32>, String>>()
+                        .map(|v| Some(Some(v))),
+                    Some(v) => Err(format!("{key} は整数の並びです: {v}")),
+                }
+            };
+            let timed = list("timed_minutes")?;
+            let date = list("date_days")?;
+            let hour = match args.get("hour") {
+                None | Some(Value::Null) => None,
+                Some(v) => Some(
+                    v.as_u64()
+                        .and_then(|n| u32::try_from(n).ok())
+                        .ok_or_else(|| format!("hour は 0〜23 です: {v}"))?,
+                ),
+            };
+            if timed.is_none() && date.is_none() && hour.is_none() {
+                return Err("timed_minutes・date_days・hour のどれかを渡してください".into());
+            }
+            // 先に全部の値を確かめ、1 つでも正しくなければ何も変えない
+            for values in [&timed, &date].into_iter().flatten().flatten() {
+                if values.len() > malakt_core::alert::MAX_ALERTS {
+                    return Err(format!(
+                        "通知は 1 つの期限に {} 個までです",
+                        malakt_core::alert::MAX_ALERTS
+                    ));
+                }
+            }
+            if let Some(v) = timed.as_ref().and_then(Option::as_deref) {
+                malakt_core::alert::clean_timed(v).map_err(core)?;
+            }
+            if let Some(v) = date.as_ref().and_then(Option::as_deref) {
+                malakt_core::alert::clean_date(v).map_err(core)?;
+            }
+            match task_id {
+                Some(id) => {
+                    if hour.is_some() {
+                        return Err(
+                            "hour は全体の標準だけで変えられます（task_id を省いてください）"
+                                .into(),
+                        );
+                    }
+                    let mut own = store.task_alerts(id).map_err(core)?;
+                    if let Some(v) = timed {
+                        own.timed = v;
+                    }
+                    if let Some(v) = date {
+                        own.date = v;
+                    }
+                    store.set_task_alerts(&own).map_err(core)?;
+                }
+                None => {
+                    if matches!(timed, Some(None)) || matches!(date, Some(None)) {
+                        return Err(
+                            "全体の標準には null を渡せません。[] で知らせないにできます".into(),
+                        );
+                    }
+                    if let Some(hour) = hour {
+                        store.set_due_alert_hour(hour).map_err(core)?;
+                    }
+                    if let Some(Some(v)) = &timed {
+                        store.set_due_alert_timed(v).map_err(core)?;
+                    }
+                    if let Some(Some(v)) = &date {
+                        store.set_due_alert_date(v).map_err(core)?;
+                    }
+                }
+            }
+            due_alerts_json(store, task_id)?
+        }
         "get_workspace_settings" => {
             let id = required(args, "id")?;
             let workspace = store.workspace(id).map_err(core)?;
@@ -1396,6 +1537,8 @@ pub fn summary(name: &str, args: &Value) -> String {
         "list_notices" => "通知を取得".into(),
         "mark_notices_read" => "通知を既読にする".into(),
         "get_workspace_settings" => "ワークスペースの設定を取得".into(),
+        "get_due_alerts" => "期限の通知のタイミングを取得".into(),
+        "set_due_alerts" => "期限の通知のタイミングを変更".into(),
         "update_workspace_settings" => "ワークスペースの設定を変更".into(),
         GITHUB_FETCH => format!("GitHub から取得: {}", arg("url")),
         SLACK_FETCH => format!("Slack から取得: {}", arg("url")),
@@ -1477,6 +1620,60 @@ mod tests {
 
     fn run(store: &mut Store, name: &str, args: Value) -> Value {
         serde_json::from_str(&execute(store, None, name, &args).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn due_alerts_can_be_read_and_changed() {
+        let mut store = Store::open_in_memory().unwrap();
+        let task = run(
+            &mut store,
+            "create_task",
+            json!({"title": "会議", "due": "2026-12-24 18:00"}),
+        );
+        let got = run(&mut store, "get_due_alerts", json!({}));
+        assert_eq!(got["standard"]["timed_minutes"], json!([0]));
+        assert_eq!(got["standard"]["text"]["date"], "当日");
+        let set = run(
+            &mut store,
+            "set_due_alerts",
+            json!({"timed_minutes": [5, 0], "date_days": [1], "hour": 8}),
+        );
+        assert_eq!(set["standard"]["timed_minutes"], json!([0, 5]));
+        assert_eq!(set["standard"]["hour"], 8);
+        assert_eq!(set["standard"]["text"]["timed"], "期限ちょうど、5 分前");
+        // タスクだけの上書きと、標準に戻す
+        let own = run(
+            &mut store,
+            "set_due_alerts",
+            json!({"task_id": task["id"], "timed_minutes": [15]}),
+        );
+        assert_eq!(own["used"]["timed_minutes"], json!([15]));
+        assert_eq!(own["used"]["date_days"], json!([1]));
+        let task_json = run(&mut store, "get_task", json!({"id": task["id"]}));
+        assert_eq!(task_json["due_alerts"]["own"]["timed_minutes"], json!([15]));
+        let back = run(
+            &mut store,
+            "set_due_alerts",
+            json!({"task_id": task["id"], "timed_minutes": null}),
+        );
+        assert_eq!(back["own"], Value::Null);
+        // 正しくない値では何も変えない
+        for bad in [
+            json!({}),
+            json!({"timed_minutes": [0], "date_days": [99]}),
+            json!({"hour": 24}),
+            json!({"timed_minutes": null}),
+            json!({"task_id": task["id"], "hour": 7}),
+            json!({"task_id": "nope", "timed_minutes": [0]}),
+        ] {
+            assert!(
+                execute(&mut store, None, "set_due_alerts", &bad).is_err(),
+                "{bad}"
+            );
+        }
+        let got = run(&mut store, "get_due_alerts", json!({}));
+        assert_eq!(got["standard"]["timed_minutes"], json!([0, 5]));
+        assert_eq!(got["standard"]["date_days"], json!([1]));
     }
 
     #[test]

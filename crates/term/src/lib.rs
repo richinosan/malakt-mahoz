@@ -505,6 +505,22 @@ impl Terminal {
             .scroll_display(if up { Scroll::PageUp } else { Scroll::PageDown });
     }
 
+    /// さかのぼっている行数と、さかのぼれる行数。
+    pub fn scroll_lines(&self) -> (usize, usize) {
+        let term = self.term.lock();
+        (term.grid().display_offset(), term.grid().history_size())
+    }
+
+    /// `back` 行さかのぼった所を出す（0 は今の出力）。
+    pub fn scroll_to(&self, back: usize) {
+        let mut term = self.term.lock();
+        let now = term.grid().display_offset() as i32;
+        let back = back.min(term.grid().history_size()) as i32;
+        if back != now {
+            term.scroll_display(Scroll::Delta(back - now));
+        }
+    }
+
     /// いちばん下（今の出力）に戻す。
     pub fn to_bottom(&self) {
         self.term.lock().scroll_display(Scroll::Bottom);

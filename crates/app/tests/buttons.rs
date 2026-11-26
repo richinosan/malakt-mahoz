@@ -111,6 +111,10 @@ const MUST: &[&str] = &[
     "lock-switch",
     "auto-lock",
     "locked-notices",
+    "alert-timed",
+    "alert-date",
+    "alert-hour",
+    "task-alerts",
 ];
 
 /// ロックを設定したときだけ出るもの。ロックは tests/ui.rs で確かめる。
@@ -207,6 +211,8 @@ const QUIET: &[(&str, &str)] = &[
     ("設定のデータ > customize-nav#11", "今開いているカテゴリ"),
     ("export-all", "OS の保存先の選択を開く"),
     ("import-all", "OS のファイル選択を開く"),
+    ("設定の通知 > customize-nav#9", "今開いているカテゴリ"),
+    ("alert-hour#0", "今選んでいる時刻"),
     (
         "カスタマイズ（自分のテーマあり） > preset#0",
         "今選んでいるテーマ",
@@ -285,7 +291,8 @@ fn seed() -> (Store, String, String) {
         .unwrap();
     s.add_attachment(&task.id, Some(&me.id), "見取り図.txt", b"plan")
         .unwrap();
-    // 期限が今日のタスクは、通知に出る
+    // 期限が今日のタスクは、通知に出る。日付だけの期限は 0:00 に知らせ、テストを走らせる時刻によらず出す
+    s.set_due_alert_hour(0).unwrap();
     let today = TaskDraft {
         title: "申込書を出す".into(),
         due: Some(malakt_core::view::today()),
@@ -600,6 +607,9 @@ fn fingerprint(cx: &mut TestAppContext, world: &World) -> String {
             "density",
             "due.format",
             "feel",
+            "due_alerts.timed",
+            "due_alerts.date",
+            "due_alerts.hour",
         ] {
             data.push_str(&format!("{:?}", store.setting(key).unwrap()));
         }
@@ -824,6 +834,12 @@ fn screens() -> Vec<(&'static str, Size<Pixels>, Setup)> {
         ("ロックを有効にした通知", wide, |cx, w| {
             with_view(cx, w, |v, window, cx| {
                 v.write(cx, malakt_core::lock::enable);
+                v.open_appearance(window, cx);
+                v.show_appearance_section(CustomizeSection::Notices, window, cx);
+            })
+        }),
+        ("設定の通知", wide, |cx, w| {
+            with_view(cx, w, |v, window, cx| {
                 v.open_appearance(window, cx);
                 v.show_appearance_section(CustomizeSection::Notices, window, cx);
             })

@@ -8,7 +8,8 @@ use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{
     Copy as CopyText, Input, InputEvent, InputState, MoveDown, MoveUp, Textarea, TextareaState,
 };
-use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
+use gpui_kit::component::menu::PopupMenuItem;
+use gpui_kit::component::scroll::ScrollableElement;
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::text::TextView;
 use gpui_kit::component::{ActiveTheme, Sizable};
@@ -21,6 +22,7 @@ use crate::ai::{self, Decision, Item, KeyState, LineKind, Run, Session, ShellPla
 use crate::db::{self, Db};
 use crate::feel::{self, Lit};
 use crate::render::app_icon;
+use crate::scroll::{self, Menus};
 use crate::shadow::{Elevate, Elevation};
 use crate::state::{DropTarget, MainView};
 use crate::term::{self, TermPane};
@@ -811,7 +813,7 @@ impl AiPane {
             .border_color(theme.border)
             .bg(theme.secondary)
             .child(self.settings.clone())
-            .overflow_y_scroll()
+            .overflow_y_scrollbar()
             .flex_1()
             .min_h_0()
             .with_animation("ai-settings-in", appear(), |el, delta| el.opacity(delta))
@@ -1157,9 +1159,9 @@ impl AiPane {
             .id("ai-chats-list")
             .flex_1()
             .min_h_0()
-            .overflow_y_scroll()
             .child(list)
             .test_support()
+            .overflow_y_scrollbar()
             .into_any_element()
     }
 
@@ -1285,9 +1287,9 @@ impl AiPane {
             .id("ai-runs-list")
             .flex_1()
             .min_h_0()
-            .overflow_y_scroll()
             .child(list)
             .test_support()
+            .overflow_y_scrollbar()
             .into_any_element()
     }
 
@@ -1359,7 +1361,7 @@ impl AiPane {
                         .child(TextView::markdown(("ai-text", ix), text.clone()).selectable(true))
                         .test_support()
                         // 右クリックで、返答を丸ごとコピーする
-                        .context_menu({
+                        .right_menu({
                             let text = text.clone();
                             move |menu, _, _| {
                                 let text = text.clone();
@@ -1579,7 +1581,7 @@ impl AiPane {
                 provider.label().into(),
                 "サービス".into(),
             )
-            .dropdown_menu_with_anchor(Anchor::BottomLeft, move |mut menu, _, _| {
+            .pop_menu_at(Anchor::BottomLeft, move |mut menu, _, _| {
                 for p in Provider::ALL {
                     let pane = pane.clone();
                     menu = menu.item(
@@ -1608,7 +1610,7 @@ impl AiPane {
             div()
                 .min_w_0()
                 .overflow_hidden()
-                .child(pill("ai-pick-model", shown, tip).dropdown_menu_with_anchor(
+                .child(pill("ai-pick-model", shown, tip).pop_menu_at(
                     Anchor::BottomLeft,
                     move |mut menu, _, _| {
                         for (m, label) in models.iter().zip(&labels) {
@@ -1648,7 +1650,7 @@ impl AiPane {
             let allowed = Effort::ALL.map(|e| session.effort_allowed(e));
             pills.push(
                 pill("ai-pick-effort", effort.label().into(), "effort".into())
-                    .dropdown_menu_with_anchor(Anchor::BottomLeft, move |mut menu, _, _| {
+                    .pop_menu_at(Anchor::BottomLeft, move |mut menu, _, _| {
                         for (e, allowed) in Effort::ALL.into_iter().zip(allowed) {
                             let pane = pane.clone();
                             menu = menu.item(
@@ -1794,7 +1796,7 @@ impl AiPane {
                 ))
                 .child(
                     // 残りの操作は、名前の付いたメニューにまとめる
-                    icon_button("ai-menu", "ellipsis", "メニュー").dropdown_menu_with_anchor(
+                    icon_button("ai-menu", "ellipsis", "メニュー").pop_menu_at(
                         Anchor::TopRight,
                         move |menu, _, _| {
                             let item = |label: &'static str,
@@ -2017,14 +2019,20 @@ impl AiPane {
             })
             .child(
                 div()
-                    .id("ai-messages")
+                    .relative()
                     // 設定を開いている間は、設定がチャットの場所を全部使う
                     .when(self.settings_open || self.side.is_some(), |d| d.hidden())
                     .flex_1()
                     .min_h_0()
-                    .overflow_y_scroll()
-                    .track_scroll(&self.chat_scroll)
-                    .child(list),
+                    .child(
+                        div()
+                            .id("ai-messages")
+                            .size_full()
+                            .overflow_y_scroll()
+                            .track_scroll(&self.chat_scroll)
+                            .child(list),
+                    )
+                    .child(scroll::bar("ai-messages", &self.chat_scroll)),
             )
             .children(pending)
             .child(
@@ -2411,10 +2419,15 @@ impl AiPane {
             }),
         )
         .track_scroll(&self.shell_scroll)
+        .size_full();
         // 入力行は出力のすぐ下に続く。画面がいっぱいになったら、出力の側が送られる
-        .h(SHELL_ROW * count as f32)
-        .flex_shrink(1.)
-        .min_h_0();
+        let lines = div()
+            .relative()
+            .h(SHELL_ROW * count as f32)
+            .flex_shrink(1.)
+            .min_h_0()
+            .child(lines)
+            .child(scroll::bar_on_dark("ai-shell", &self.shell_scroll));
 
         col()
             .id("ai-shell")
@@ -2713,8 +2726,9 @@ impl AiPane {
                     }),
             ))
             .child(
-                icon_button("term-shells", "chevron-down", "シェルを選ぶ")
-                    .dropdown_menu_with_anchor(Anchor::TopRight, move |mut menu, _, _| {
+                icon_button("term-shells", "chevron-down", "シェルを選ぶ").pop_menu_at(
+                    Anchor::TopRight,
+                    move |mut menu, _, _| {
                         for (id, name) in &profiles {
                             let (shared, id) = (shared.clone(), id.clone());
                             menu = menu.item(
@@ -2733,36 +2747,35 @@ impl AiPane {
                             );
                         }
                         menu
-                    }),
+                    },
+                ),
             )
             .when(active.is_some(), |d| {
-                d.child(
-                    icon_button("term-mcp", "plug", "MCP に登録").dropdown_menu_with_anchor(
-                        Anchor::TopRight,
-                        |menu, _, _| {
-                            use crate::mcp_register::Agent;
-                            let typed = |name: &'static str, agent: Agent| {
-                                PopupMenuItem::new(name)
-                                    .icon(app_icon("terminal"))
-                                    .on_click(move |_, _, cx| {
-                                        term::shared(cx).update(cx, |terms, cx| {
-                                            terms.type_mcp_command(agent, cx);
-                                        })
+                d.child(icon_button("term-mcp", "plug", "MCP に登録").pop_menu_at(
+                    Anchor::TopRight,
+                    |menu, _, _| {
+                        use crate::mcp_register::Agent;
+                        let typed = |name: &'static str, agent: Agent| {
+                            PopupMenuItem::new(name)
+                                .icon(app_icon("terminal"))
+                                .on_click(move |_, _, cx| {
+                                    term::shared(cx).update(cx, |terms, cx| {
+                                        terms.type_mcp_command(agent, cx);
                                     })
-                            };
-                            menu.item(typed("Claude Code", Agent::Claude))
-                                .item(typed("Codex", Agent::Codex))
-                                .item(
-                                    PopupMenuItem::new("Cursor")
-                                        .icon(app_icon("plug"))
-                                        .on_click(|_, _, cx| {
-                                            term::shared(cx)
-                                                .update(cx, |terms, cx| terms.add_to_cursor(cx))
-                                        }),
-                                )
-                        },
-                    ),
-                )
+                                })
+                        };
+                        menu.item(typed("Claude Code", Agent::Claude))
+                            .item(typed("Codex", Agent::Codex))
+                            .item(
+                                PopupMenuItem::new("Cursor")
+                                    .icon(app_icon("plug"))
+                                    .on_click(|_, _, cx| {
+                                        term::shared(cx)
+                                            .update(cx, |terms, cx| terms.add_to_cursor(cx))
+                                    }),
+                            )
+                    },
+                ))
             })
     }
 }

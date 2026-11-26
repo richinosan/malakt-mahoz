@@ -348,6 +348,54 @@ fn nothing_is_sent_without_a_key(cx: &mut TestAppContext) {
     assert!(world.fetched.lock().unwrap().is_empty());
 }
 
+/// 会話が長くなると、右にスクロールバーが出る。つまみをドラッグして、前の発言に戻れる。
+#[gpui_kit::test]
+fn the_chat_has_a_scrollbar(cx: &mut TestAppContext) {
+    let _world = start(cx);
+    let (window, view) = open(cx, wide());
+    let _pane = open_chat(cx, window, &view);
+    let session = session(cx);
+    cx.update(|cx| {
+        session.update(cx, |s, cx| {
+            for n in 0..60 {
+                s.items.push(Item::User(format!("発言 {n}").into()));
+            }
+            cx.notify();
+        })
+    });
+    ui(cx, window, |_, _| {});
+    let mut visual = gpui_kit::VisualTestContext::from_window(window, cx);
+    let bar = visual
+        .debug_bounds("scrollbar-ai-messages")
+        .expect("チャットにスクロールバーがある");
+    // ホイールでいちばん下へ
+    visual.simulate_event(gpui_kit::ScrollEvent {
+        position: bar.center(),
+        delta: ScrollDelta::Pixels(point(px(0.), px(-100_000.))),
+        ..Default::default()
+    });
+    let shown = |cx: &mut TestAppContext, n: usize| {
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.find(("ai-user", n)).visible()
+        })
+        .unwrap()
+    };
+    assert!(shown(cx, 59), "いちばん下の発言が見える");
+    assert!(!shown(cx, 0));
+    // つまみは下の端にある。上の端までドラッグする
+    let x = bar.right() - px(6.);
+    ui(cx, window, |window, cx| {
+        window.drag(
+            point(x, bar.bottom() - px(12.)),
+            point(x, bar.top() - px(400.)),
+            cx,
+        );
+    });
+    assert!(shown(cx, 0), "最初の発言まで戻る");
+    assert!(!shown(cx, 59));
+}
+
 /// 設定で API キーを保存すると、キーチェーンに入り、画面には末尾だけが出る。
 #[gpui_kit::test]
 fn the_key_is_saved_to_the_keychain_from_settings(cx: &mut TestAppContext) {

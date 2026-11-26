@@ -210,6 +210,15 @@ const MIGRATIONS: &[&str] = &[
         PRIMARY KEY (person_id, workspace_id)
     ) STRICT, WITHOUT ROWID;
     "#,
+    // 13: 期限の通知。タスクごとの、いつ知らせるかの上書きと、通知に出す期限
+    r#"
+    CREATE TABLE task_alerts (
+        task_id TEXT PRIMARY KEY NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        timed TEXT,
+        date TEXT
+    ) STRICT, WITHOUT ROWID;
+    ALTER TABLE notices ADD COLUMN due TEXT;
+    "#,
 ];
 
 pub(crate) fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
