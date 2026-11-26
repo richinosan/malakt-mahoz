@@ -2416,9 +2416,10 @@ impl Session {
     }
 
     /// タスクに書かれている GitHub のリンクを見に行き、前回から進展があれば AI がタスクにコメントする。
-    /// チャットが動いている間とロック中は、何もしない（手が空いてから次の時刻の確認で見る）。
+    /// ロック中も動く（画面を見ていない間の進展も、タスクに残す）。
+    /// チャットが動いている間は何もしない（手が空いてから次の時刻の確認で見る）。
     pub fn check_github(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.busy || !self.db.read(cx).unlocked {
+        if self.busy {
             return false;
         }
         let now = self.watch_now(cx);
