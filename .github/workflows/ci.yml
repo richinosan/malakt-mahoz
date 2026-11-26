@@ -37,13 +37,13 @@ jobs:
       - uses: ./.github/actions/setup
       # ユニットテストと、core・画面のシナリオテストをまとめて実行する
       - run: mise run test
-      # 配布用のアーカイブを組み立てられることを確かめる（中身はデバッグビルド）
+      # 配布用のアーカイブを組み立てられることを確かめる。中身は、テストのときにできたデバッグビルド。
+      # cargo build し直すと、テスト用の機能を外した gpui を全部ビルドし直すことになる
       - name: 配布物を組み立てる
         shell: bash
         env:
           NAME: ${{ matrix.name }}
         run: |
-          cargo build --locked -p malakt-mahoz
           bin=target/debug/malakt-mahoz
           if [ "$RUNNER_OS" = "Windows" ]; then bin="$bin.exe"; fi
           scripts/package.sh 0.0.0 "$NAME" "$bin"

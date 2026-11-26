@@ -5,11 +5,14 @@
 //! ものを「反応しないボタン」として並べ、1 つでもあれば失敗にする。
 
 use std::collections::BTreeSet;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
 
 use gpui_kit::test::{TestQueryExt, TestWindowExt};
 use gpui_kit::{
     px, size, AnyWindowHandle, AppContext, Bounds, ElementId, Entity, Modifiers, MouseButton,
-    Pixels, Point, Role, Size, TestAppContext, VisualTestContext, WindowBounds, WindowOptions,
+    Pixels, Point, Role, Size, TestAppContext, TestDispatcher, VisualTestContext, WindowBounds,
+    WindowOptions,
 };
 use malakt_core::panes::{Action, Dir};
 use malakt_core::view::Priority;
@@ -1041,100 +1044,275 @@ fn screens() -> Vec<(&'static str, Size<Pixels>, Setup)> {
     ]
 }
 
-#[gpui_kit::test]
-fn every_button_responds(cx: &mut TestAppContext) {
-    // タスクから開くターミナルの出力は、別のスレッドから届く
-    cx.executor().allow_parking();
-    cx.update(|cx| malakt_mahoz::init(Store::open_in_memory().unwrap(), cx));
+/// 画面を開いたところで見えるもの。
+struct Opened {
+    first: Vec<ElementId>,
+    overlaps: Vec<String>,
+    small: Vec<String>,
+}
+
+/// 新しい状態から 1 回押した結果。
+#[derive(Default)]
+struct Pressed {
+    /// 押せた（画面に出ていた）
+    found: bool,
+    /// 画面かデータが変わった
+    changed: bool,
+    /// 押して新しく出てきたもの
+    opened: Vec<ElementId>,
+    /// 外側の暗い所を押して閉じたか。ダイアログが出ていなければ `None`
+    outside: Option<bool>,
+}
+
+/// 1 つ目に押すもの: 画面の番号と、その画面で押すものの番号。
+type First = (usize, usize);
+/// 2 つ目に押すもの: 1 つ目と、それを押して出てきたものの番号。
+type Second = (usize, usize, usize);
+
+fn open_screen(cx: &mut TestAppContext, (_, size, setup): &(&str, Size<Pixels>, Setup)) -> Opened {
+    let world = fresh(cx, *size);
+    setup(cx, &world);
+    frame(cx, &world);
+    Opened {
+        first: targets(cx, &world),
+        overlaps: overlapping(cx, &world),
+        small: too_small(cx, &world),
+    }
+}
+
+fn press_first(
+    cx: &mut TestAppContext,
+    (size, setup, first, one): &(Size<Pixels>, Setup, &[ElementId], &ElementId),
+) -> Pressed {
+    let world = fresh(cx, *size);
+    setup(cx, &world);
+    let before = fingerprint(cx, &world);
+    if !click(cx, &world, one) {
+        return Pressed::default();
+    }
+    let after = fingerprint(cx, &world);
+    if before == after {
+        return Pressed {
+            found: true,
+            ..Pressed::default()
+        };
+    }
+    let opened = targets(cx, &world)
+        .into_iter()
+        .filter(|id| !first.contains(id))
+        .collect();
+    // 開いたダイアログは、外側の暗い所を押すと閉じる
+    let world = fresh(cx, *size);
+    setup(cx, &world);
+    frame(cx, &world);
+    click(cx, &world, one);
+    Pressed {
+        found: true,
+        changed: true,
+        opened,
+        outside: click_outside(cx, &world),
+    }
+}
+
+fn press_second(
+    cx: &mut TestAppContext,
+    (size, setup, one, two): &(Size<Pixels>, Setup, &ElementId, &ElementId),
+) -> Pressed {
+    let world = fresh(cx, *size);
+    setup(cx, &world);
+    frame(cx, &world);
+    click(cx, &world, one);
+    let before = fingerprint(cx, &world);
+    // 開き直したら出てこないものは、押せない
+    if !click(cx, &world, two) {
+        return Pressed::default();
+    }
+    let after = fingerprint(cx, &world);
+    Pressed {
+        found: true,
+        changed: before != after,
+        opened: Vec::new(),
+        // 中のボタンを押したあと（一覧を重ねたあとなど）も、外側を押すと閉じる
+        outside: click_outside(cx, &world),
+    }
+}
+
+/// `items` を CPU の数のスレッドで分けて `work` に渡し、結果を `items` の順で返す。
+/// スレッドごとにアプリを 1 つ作り、空いたスレッドが次のものを取る。
+/// どれも `fresh` で新しいデータと新しいウィンドウから始めるので、どのスレッドで押しても同じ結果になる。
+fn pool<T: Sync, R: Send>(items: &[T], work: fn(&mut TestAppContext, &T) -> R) -> Vec<R> {
+    let next = AtomicUsize::new(0);
+    let done: Mutex<Vec<(usize, R)>> = Mutex::new(Vec::with_capacity(items.len()));
+    let workers = std::thread::available_parallelism()
+        .map_or(1, |n| n.get())
+        .min(items.len());
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..workers)
+            .map(|n| {
+                let (next, done) = (&next, &done);
+                std::thread::Builder::new()
+                    .name(format!("every_button_responds-{n}"))
+                    .stack_size(8 << 20)
+                    .spawn_scoped(scope, move || {
+                        let dispatcher = TestDispatcher::new(0);
+                        let scheduler = dispatcher.scheduler().clone();
+                        let mut cx = TestAppContext::build(
+                            dispatcher.clone(),
+                            Some("every_button_responds"),
+                        );
+                        // タスクから開くターミナルの出力は、別のスレッドから届く
+                        cx.executor().allow_parking();
+                        cx.update(|cx| malakt_mahoz::init(Store::open_in_memory().unwrap(), cx));
+                        loop {
+                            let at = next.fetch_add(1, Ordering::Relaxed);
+                            let Some(item) = items.get(at) else {
+                                break;
+                            };
+                            let result = work(&mut cx, item);
+                            done.lock().unwrap().push((at, result));
+                        }
+                        cx.run_until_parked();
+                        cx.update(|cx| {
+                            cx.background_executor().forbid_parking();
+                            cx.quit();
+                        });
+                        cx.run_until_parked();
+                        drop(cx);
+                        dispatcher.drain_tasks();
+                        drop(dispatcher);
+                        scheduler.end_test();
+                    })
+                    .expect("スレッドを立てる")
+            })
+            .collect();
+        for handle in handles {
+            if let Err(panic) = handle.join() {
+                std::panic::resume_unwind(panic);
+            }
+        }
+    });
+    let mut done = done.into_inner().unwrap();
+    done.sort_by_key(|(at, _)| *at);
+    done.into_iter().map(|(_, result)| result).collect()
+}
+
+/// 画面に出ているボタンを 1 つずつ、新しい状態から押す。
+///
+/// 1 回押すたびに新しいデータと新しいウィンドウで始めるので、押す順は結果に関わらない。
+/// そこで、画面を開く・1 つ目を押す・2 つ目を押す、をそれぞれ CPU の数のスレッドで分けて押す。
+/// どれを押すか（同じ名前の中のボタンは、前の画面までに押していれば押さない）と結果のまとめは、
+/// 画面の順に 1 つのスレッドで決める。
+#[test]
+fn every_button_responds() {
+    let screens = screens();
     let quiet = |screen: &str, id: &ElementId| {
         let key = key_of(id);
         QUIET
             .iter()
             .any(|(quiet, _)| *quiet == key || *quiet == format!("{screen} > {key}"))
     };
-    let mut dead: Vec<String> = Vec::new();
-    let mut pressed: BTreeSet<String> = BTreeSet::new();
+
+    let opened = pool(&screens, open_screen);
     let mut overlaps: Vec<String> = Vec::new();
     let mut small: Vec<String> = Vec::new();
-    let mut stuck: Vec<String> = Vec::new();
-    let mut outside = 0;
+    let mut firsts: Vec<First> = Vec::new();
+    for (s, ((screen, _, _), o)) in screens.iter().zip(&opened).enumerate() {
+        assert!(!o.first.is_empty(), "{screen}: 押せるものが見つからない");
+        overlaps.extend(o.overlaps.iter().map(|pair| format!("{screen} > {pair}")));
+        small.extend(o.small.iter().map(|one| format!("{screen} > {one}")));
+        firsts.extend((0..o.first.len()).map(|i| (s, i)));
+    }
+    let jobs: Vec<_> = firsts
+        .iter()
+        .map(|&(s, i)| {
+            let (_, size, setup) = screens[s];
+            (size, setup, opened[s].first.as_slice(), &opened[s].first[i])
+        })
+        .collect();
+    let first: std::collections::HashMap<First, Pressed> = firsts
+        .iter()
+        .copied()
+        .zip(pool(&jobs, press_first))
+        .collect();
 
-    for (screen, size, setup) in screens() {
-        let world = fresh(cx, size);
-        setup(cx, &world);
-        frame(cx, &world);
-        let first = targets(cx, &world);
-        assert!(!first.is_empty(), "{screen}: 押せるものが見つからない");
-        overlaps.extend(
-            overlapping(cx, &world)
-                .into_iter()
-                .map(|pair| format!("{screen} > {pair}")),
-        );
-
-        small.extend(
-            too_small(cx, &world)
-                .into_iter()
-                .map(|one| format!("{screen} > {one}")),
-        );
-
-        for one in &first {
-            let world = fresh(cx, size);
-            setup(cx, &world);
-            let before = fingerprint(cx, &world);
-            if !click(cx, &world, one) {
-                continue;
-            }
-            let after = fingerprint(cx, &world);
-            pressed.insert(name_of(one));
-            if before == after {
-                if !quiet(screen, one) {
-                    dead.push(format!("{screen} > {one:?}"));
-                }
-                continue;
-            }
-            // 押して新しく出てきたもの（メニューやダイアログの中）も、1 つずつ押す
-            let opened: Vec<ElementId> = targets(cx, &world)
-                .into_iter()
-                .filter(|id| !first.contains(id))
-                .collect();
-            for two in &opened {
-                if pressed.contains(&name_of(two)) {
+    // 2 つ目に押すものは、前の画面までに押した名前で決まる。足りない結果を押しては、決め直す
+    let mut second: std::collections::HashMap<Second, Pressed> = std::collections::HashMap::new();
+    loop {
+        let mut dead: Vec<String> = Vec::new();
+        let mut pressed: BTreeSet<String> = BTreeSet::new();
+        let mut stuck: Vec<String> = Vec::new();
+        let mut outside = 0;
+        let mut missing: Vec<Second> = Vec::new();
+        let mut tally = |result: Option<bool>, what: String, outside: &mut usize| match result {
+            Some(true) => *outside += 1,
+            Some(false) => stuck.push(what),
+            None => {}
+        };
+        for (s, (screen, _, _)) in screens.iter().enumerate() {
+            for (i, one) in opened[s].first.iter().enumerate() {
+                let r = &first[&(s, i)];
+                if !r.found {
                     continue;
                 }
-                let world = fresh(cx, size);
-                setup(cx, &world);
-                frame(cx, &world);
-                click(cx, &world, one);
-                let before = fingerprint(cx, &world);
-                // 開き直したら出てこないものは、押せない
-                if !click(cx, &world, two) {
+                pressed.insert(name_of(one));
+                if !r.changed {
+                    if !quiet(screen, one) {
+                        dead.push(format!("{screen} > {one:?}"));
+                    }
                     continue;
                 }
-                let after = fingerprint(cx, &world);
-                pressed.insert(name_of(two));
-                if before == after && !quiet(screen, two) {
-                    dead.push(format!("{screen} > {one:?} > {two:?}"));
+                // 押して新しく出てきたもの（メニューやダイアログの中）も、1 つずつ押す
+                for (j, two) in r.opened.iter().enumerate() {
+                    if pressed.contains(&name_of(two)) {
+                        continue;
+                    }
+                    let Some(p) = second.get(&(s, i, j)) else {
+                        // まだ押していない。押せるものとして先へ進み、押したあとで決め直す
+                        missing.push((s, i, j));
+                        pressed.insert(name_of(two));
+                        continue;
+                    };
+                    if !p.found {
+                        continue;
+                    }
+                    pressed.insert(name_of(two));
+                    if !p.changed && !quiet(screen, two) {
+                        dead.push(format!("{screen} > {one:?} > {two:?}"));
+                    }
+                    tally(
+                        p.outside,
+                        format!("{screen} > {one:?} > {two:?}"),
+                        &mut outside,
+                    );
                 }
-                // 中のボタンを押したあと（一覧を重ねたあとなど）も、外側を押すと閉じる
-                match click_outside(cx, &world) {
-                    Some(true) => outside += 1,
-                    Some(false) => stuck.push(format!("{screen} > {one:?} > {two:?}")),
-                    None => {}
-                }
-            }
-            // 開いたダイアログは、外側の暗い所を押すと閉じる
-            let world = fresh(cx, size);
-            setup(cx, &world);
-            frame(cx, &world);
-            click(cx, &world, one);
-            match click_outside(cx, &world) {
-                Some(true) => outside += 1,
-                Some(false) => stuck.push(format!("{screen} > {one:?}")),
-                None => {}
+                tally(r.outside, format!("{screen} > {one:?}"), &mut outside);
             }
         }
+        if !missing.is_empty() {
+            let jobs: Vec<_> = missing
+                .iter()
+                .map(|&(s, i, j)| {
+                    let (_, size, setup) = screens[s];
+                    (size, setup, &opened[s].first[i], &first[&(s, i)].opened[j])
+                })
+                .collect();
+            let results = pool(&jobs, press_second);
+            second.extend(missing.into_iter().zip(results));
+            continue;
+        }
+        return finish(dead, pressed, overlaps, small, stuck, outside);
     }
+}
 
+/// まとめた結果を確かめる。
+fn finish(
+    dead: Vec<String>,
+    pressed: BTreeSet<String>,
+    overlaps: Vec<String>,
+    small: Vec<String>,
+    stuck: Vec<String>,
+    outside: usize,
+) {
     assert!(
         overlaps.is_empty(),
         "押せるものが重なっている:\n{}",
