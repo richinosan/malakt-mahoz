@@ -27,6 +27,7 @@ use crate::feel::{self, Lit, Sunk};
 use crate::shadow::{Elevate, Elevation};
 use crate::state::{
     Column, CommentMode, Detail, DropTarget, Editing, MainView, Modal, Nav, SubModal, When,
+    RAIL_WIDTH,
 };
 use crate::{Dismiss, LockNow, NewWindow, PanePrefix, ToggleAi};
 use malakt_core::{Id, Person};
@@ -584,6 +585,9 @@ fn workspace_icon(icon: Option<&str>, color: Option<&str>, size: Pixels, cx: &Ap
 
 /// 左のメニューの行に出すアイコンの大きさ。
 const NAV_ICON_SIZE: Pixels = px(14.);
+/// 畳んだ左のメニューの、アイコンの大きさと押せる四角の大きさ（拡大率を掛ける前の値）。
+const RAIL_ICON_SIZE: Pixels = px(18.);
+const RAIL_BUTTON: f32 = 36.;
 
 /// 同梱の線画アイコン。
 pub(crate) fn app_icon(name: &str) -> Icon {
@@ -818,14 +822,61 @@ impl MainView {
         )
     }
 
-    /// 左のメニューを開く・閉じる。狭いウィンドウでは中身と入れ替えで出す。
+    /// 左のメニューを開く・閉じる。広いウィンドウではアイコンだけの列に畳み、
+    /// 狭いウィンドウでは中身と入れ替えで出す。
     fn toggle_sidebar(&mut self, wide: bool, cx: &mut Context<Self>) {
         if wide {
             self.sidebar_hidden = !self.sidebar_hidden;
+            self.sidebar_turns += 1;
         } else {
             self.sidebar_open = !self.sidebar_open;
         }
         cx.notify();
+    }
+
+    /// ワークスペースの「…」と右クリックで出すメニュー。
+    fn workspace_menu(
+        &self,
+        id: Id,
+        cx: &mut Context<Self>,
+    ) -> impl Fn(PopupMenu) -> PopupMenu + Clone + 'static {
+        let view = cx.entity().downgrade();
+        move |menu: PopupMenu| {
+            let item =
+                |label: &'static str,
+                 run: fn(&mut MainView, Id, &mut Window, &mut Context<MainView>)| {
+                    let view = view.clone();
+                    let id = id.clone();
+                    PopupMenuItem::new(label).on_click(move |_, window, cx| {
+                        let _ = view.update(cx, |this, cx| run(this, id.clone(), window, cx));
+                    })
+                };
+            menu.item(item("アイコンを変更", |this, id, window, cx| {
+                // 開いたらすぐ打って探せるよう、検索欄を空にしてフォーカスする
+                this.inputs.icon_search.update(cx, |state, cx| {
+                    state.set_value("", window, cx);
+                    state.focus(window, cx);
+                });
+                this.icon_category = None;
+                this.modal = Modal::WorkspaceIcon(id);
+                cx.notify();
+            }))
+            .item(item("名前を変更", |this, id, window, cx| {
+                this.rename_workspace(id, window, cx)
+            }))
+            .item(item(
+                "サブワークスペースを追加",
+                |this, id, window, cx| this.add_workspace(Some(id), window, cx),
+            ))
+            .item(item("設定", |this, id, window, cx| {
+                this.open_workspace_settings(&id, window, cx)
+            }))
+            .separator()
+            .item(item("削除", |this, id, _, cx| {
+                this.modal = Modal::DeleteWorkspace(id);
+                cx.notify();
+            }))
+        }
     }
 
     fn render_sidebar(&self, wide: bool, cx: &mut Context<Self>) -> Div {
@@ -880,43 +931,7 @@ impl MainView {
                 .workspace_naming
                 .as_ref()
                 .is_some_and(|naming| naming.id == id);
-            let view = cx.entity().downgrade();
-            let menu_id = id.clone();
-            let menu = move |menu: PopupMenu| {
-                let item = |label: &'static str,
-                            run: fn(&mut MainView, Id, &mut Window, &mut Context<MainView>)| {
-                    let view = view.clone();
-                    let id = menu_id.clone();
-                    PopupMenuItem::new(label).on_click(move |_, window, cx| {
-                        let _ = view.update(cx, |this, cx| run(this, id.clone(), window, cx));
-                    })
-                };
-                menu.item(item("アイコンを変更", |this, id, window, cx| {
-                    // 開いたらすぐ打って探せるよう、検索欄を空にしてフォーカスする
-                    this.inputs.icon_search.update(cx, |state, cx| {
-                        state.set_value("", window, cx);
-                        state.focus(window, cx);
-                    });
-                    this.icon_category = None;
-                    this.modal = Modal::WorkspaceIcon(id);
-                    cx.notify();
-                }))
-                .item(item("名前を変更", |this, id, window, cx| {
-                    this.rename_workspace(id, window, cx)
-                }))
-                .item(item(
-                    "サブワークスペースを追加",
-                    |this, id, window, cx| this.add_workspace(Some(id), window, cx),
-                ))
-                .item(item("設定", |this, id, window, cx| {
-                    this.open_workspace_settings(&id, window, cx)
-                }))
-                .separator()
-                .item(item("削除", |this, id, _, cx| {
-                    this.modal = Modal::DeleteWorkspace(id);
-                    cx.notify();
-                }))
-            };
+            let menu = self.workspace_menu(id.clone(), cx);
             // 「…」は、行に乗せたときと、開いているワークスペースでだけ見せる
             let more = Button::new(("ws-more", ix))
                 .icon(app_icon("ellipsis"))
@@ -1136,6 +1151,256 @@ impl MainView {
                 )
                 .test_support(),
         )
+    }
+
+    /// 畳んだ左のメニュー。アイコンだけを縦に並べ、名前は乗せたときに出す。
+    fn render_rail(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let floating = crate::theme::floating(cx);
+        let half = FLOAT_GAP / 2.;
+        // アイコンは列の真ん中に置く。浮かせるときは、カードの真ん中
+        let inset = if floating {
+            (RAIL_WIDTH - RAIL_BUTTON - 4.) / 2. + 4.
+        } else {
+            (RAIL_WIDTH - RAIL_BUTTON) / 2.
+        };
+        let shown = self.shown_nav(cx);
+        let mut nav = col()
+            .id("rail-nav")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scrollbar()
+            .py_3()
+            .pl(px(inset))
+            .gap_1()
+            .child(self.rail_item(
+                "rail-home",
+                app_icon("house").size(RAIL_ICON_SIZE).into_any_element(),
+                "ホーム",
+                Nav::Home,
+                cx,
+            ))
+            .child({
+                let unread = self.unread_notices;
+                self.rail_link(
+                    "rail-notices",
+                    app_icon("bell").size(RAIL_ICON_SIZE).into_any_element(),
+                    "通知",
+                    self.modal == Modal::Notices,
+                    cx,
+                )
+                .when(unread > 0, |d| {
+                    d.child(
+                        div()
+                            .absolute()
+                            .top(px(1.))
+                            .right(px(-2.))
+                            .px_1()
+                            .rounded_full()
+                            .bg(theme.danger)
+                            .text_color(theme.danger_foreground)
+                            .text_xs()
+                            .child(unread.to_string()),
+                    )
+                })
+                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                    this.modal = Modal::Notices;
+                    cx.notify();
+                }))
+                .test_support()
+            })
+            .child(
+                self.rail_item(
+                    "rail-all",
+                    app_icon("list-todo")
+                        .size(RAIL_ICON_SIZE)
+                        .into_any_element(),
+                    "すべてのタスク",
+                    Nav::All,
+                    cx,
+                ),
+            )
+            .child(
+                self.drop_zone(
+                    div().id("rail-drop-unfiled"),
+                    DropTarget::Workspace(None),
+                    cx,
+                )
+                .child(self.rail_item(
+                    "rail-unfiled",
+                    app_icon("inbox").size(RAIL_ICON_SIZE).into_any_element(),
+                    "未所属",
+                    Nav::Unfiled,
+                    cx,
+                )),
+            )
+            .child(
+                div()
+                    .my_1()
+                    .w(px(RAIL_BUTTON))
+                    .h(gpui_kit::px(1.))
+                    .bg(theme.sidebar_border),
+            )
+            .child(
+                div()
+                    .w(px(RAIL_BUTTON))
+                    .flex()
+                    .justify_center()
+                    .child(feel::gloss(
+                        Button::new("rail-add-workspace")
+                            .icon(app_icon("plus"))
+                            .ghost()
+                            .small()
+                            .tooltip("ワークスペースを追加")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.add_workspace(None, window, cx)
+                            })),
+                    )),
+            );
+        for (ix, node) in self.tree.iter().enumerate() {
+            let ws = &self.workspaces[node.index];
+            let nav_to = Nav::Workspace(ws.id.clone());
+            let active = shown == nav_to;
+            // サブワークスペースは少し小さく出して、上のワークスペースと見分ける
+            let size = if node.depth == 0 {
+                RAIL_ICON_SIZE
+            } else {
+                NAV_ICON_SIZE
+            };
+            let menu = self.workspace_menu(ws.id.clone(), cx);
+            nav = nav.child(
+                self.drop_zone(
+                    div().id(("rail-drop-ws", ix)),
+                    DropTarget::Workspace(Some(ws.id.clone())),
+                    cx,
+                )
+                .child(
+                    self.rail_link(
+                        ("rail-ws", ix),
+                        workspace_icon(ws.icon.as_deref(), ws.color.as_deref(), size, cx),
+                        ws.name.clone(),
+                        active,
+                        cx,
+                    )
+                    .on_click(
+                        cx.listener(move |this, _: &ClickEvent, _, cx| this.go(nav_to.clone(), cx)),
+                    )
+                    .test_support(),
+                )
+                .context_menu(move |m, _, _| menu(m)),
+            );
+        }
+        let view = cx.entity().downgrade();
+        col()
+            .id("rail")
+            .size_full()
+            .relative()
+            .text_color(theme.sidebar_foreground)
+            .border_r_1()
+            .border_color(theme.transparent)
+            .when(!floating, |d| {
+                d.bg(glass(theme.sidebar, cx))
+                    .border_color(theme.sidebar_border)
+            })
+            .when(floating, |d| {
+                d.child(floating_card(
+                    glass(theme.sidebar, cx),
+                    [half, half, FLOAT_GAP, FLOAT_GAP],
+                    cx,
+                ))
+            })
+            .child(nav)
+            .test_support()
+            // 何もないところの右クリックで、ワークスペースを足せる（広げたときと同じ）
+            .context_menu(move |menu, _, _| {
+                let view = view.clone();
+                menu.item(PopupMenuItem::new("ワークスペースを追加").on_click(
+                    move |_, window, cx| {
+                        let _ = view.update(cx, |this, cx| this.add_workspace(None, window, cx));
+                    },
+                ))
+            })
+            .into_any_element()
+    }
+
+    /// アイコンだけの列の 1 つ。選んでいるものは色を付け、乗せると名前が出る。
+    fn rail_link(
+        &self,
+        id: impl Into<ElementId>,
+        icon: AnyElement,
+        label: impl Into<SharedString>,
+        active: bool,
+        cx: &App,
+    ) -> Stateful<Div> {
+        let theme = cx.theme();
+        let label: SharedString = label.into();
+        div()
+            .id(id)
+            .relative()
+            .flex()
+            .flex_none()
+            .items_center()
+            .justify_center()
+            .size(px(RAIL_BUTTON))
+            .rounded(feel::md())
+            .cursor_pointer()
+            .when(active, |d| {
+                feel::selected(d, theme.accent, cx).text_color(theme.accent_foreground)
+            })
+            .when(!active, |d| d.lit(theme.accent.opacity(0.6), cx))
+            .active(|s| s.bg(theme.accent).opacity(0.8))
+            .aria_label(label.clone())
+            .tooltip(move |window, cx| {
+                gpui_kit::component::tooltip::Tooltip::new(label.clone()).build(window, cx)
+            })
+            .child(icon)
+    }
+
+    fn rail_item(
+        &self,
+        id: impl Into<ElementId>,
+        icon: AnyElement,
+        label: &'static str,
+        nav: Nav,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        self.rail_link(id, icon, label, self.shown_nav(cx) == nav, cx)
+            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.go(nav.clone(), cx)))
+            .test_support()
+            .into_any_element()
+    }
+
+    /// 広いウィンドウの左の列。開いているときはメニュー、畳んだときはアイコンだけの列。
+    /// 開け閉めのときは、幅を動かして切り替える。
+    fn render_side(&self, cx: &mut Context<Self>) -> AnyElement {
+        let rail = self.sidebar_hidden;
+        let (from, to) = if rail {
+            (self.sidebar_width, RAIL_WIDTH)
+        } else {
+            (RAIL_WIDTH, self.sidebar_width)
+        };
+        let side = div().flex_none().h_full().w(px(to)).child(if rail {
+            self.render_rail(cx)
+        } else {
+            self.render_sidebar(true, cx).into_any_element()
+        });
+        if !self.motion || self.sidebar_turns == 0 {
+            return side.into_any_element();
+        }
+        side.with_animation(
+            ("sidebar-turn", self.sidebar_turns),
+            appear(220),
+            move |d, t| {
+                let d = d.w(px(from + (to - from) * t));
+                // 動いている間だけ、はみ出した所を切る（止まったら境界のつまみを見せる）
+                if t < 1. {
+                    d.overflow_hidden()
+                } else {
+                    d
+                }
+            },
+        )
+        .into_any_element()
     }
 
     // ---- 上のバー ----
@@ -6949,6 +7214,8 @@ impl Render for MainView {
         }
         let main_width = if wide && sidebar {
             width - px(self.sidebar_width)
+        } else if wide {
+            width - px(RAIL_WIDTH)
         } else {
             width
         };
@@ -7061,7 +7328,7 @@ impl Render for MainView {
                     .flex_1()
                     .min_h_0()
                     .items_stretch()
-                    .when(wide && sidebar, |d| d.child(self.render_sidebar(wide, cx)))
+                    .when(wide, |d| d.child(self.render_side(cx)))
                     .child(
                         // 上のバーの下に、タスクの画面と AI チャットを横に並べる
                         row()

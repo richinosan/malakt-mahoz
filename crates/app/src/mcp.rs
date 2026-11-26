@@ -41,16 +41,6 @@ fn instructions() -> String {
     format!("{INSTRUCTIONS_HEAD}{}", tools::COMMENT_RULE)
 }
 
-const WRITES: &[&str] = &[
-    "create_task",
-    "update_task",
-    "move_task",
-    "delete_task",
-    "add_comment",
-    "create_workspace",
-    "create_person",
-];
-
 fn unix_now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -70,11 +60,11 @@ pub fn tool_list() -> Vec<Value> {
             )
         })
         .map(|t| {
-            let description = if t.name == "delete_task" {
-                "タスクを削除する。undo で元に戻せる。"
-            } else {
-                t.description
-            };
+            // 外のエージェントには確認を出さない。代わりに undo で戻せる
+            let description = t.description.replace(
+                "元に戻せないので、実行の前にユーザーに確認が出る。",
+                "undo で元に戻せる。",
+            );
             json!({"name": t.name, "description": description, "inputSchema": t.schema})
         })
         .collect();
@@ -119,7 +109,7 @@ pub fn call_tool(store: &mut Store, now: i64, name: &str, args: &Value) -> Resul
                 .into_iter()
                 .find(|p| p.is_self)
                 .map(|p| p.id);
-            let write = WRITES.contains(&name);
+            let write = tools::WRITES.contains(&name);
             if write {
                 store.undo_mark().map_err(core)?;
             }
@@ -513,7 +503,7 @@ mod tests {
             }
         }
         // 書き込みとして扱うツールは、どれも一覧にある
-        for name in WRITES {
+        for name in tools::WRITES {
             assert!(names.contains(name), "{name}");
         }
         assert!(!missing.exists());

@@ -28,6 +28,8 @@ const NOT_BUTTONS: &[&str] = &[
     "sidebar",
     "sidebar-nav",
     "sidebar-resize",
+    "rail",
+    "rail-nav",
     "detail-panel",
     "dialog",
     // ダイアログの外側の暗い所。真ん中にはダイアログがあるので、端を押して別に確かめる
@@ -123,6 +125,7 @@ const QUIET: &[(&str, &str)] = &[
     ("ws-import", "OS のファイル選択を開く"),
     // 今いる場所・今選んでいる値をもう一度押す
     ("nav-home", "今いる画面"),
+    ("rail-home", "今いる画面"),
     ("nav-all", "今いる画面"),
     ("tab-open", "今のタブ"),
     ("ws#0", "今いるワークスペース"),
@@ -624,6 +627,12 @@ fn screens() -> Vec<(&'static str, Size<Pixels>, Setup)> {
         ("ワークスペース", wide, |cx, w| {
             let workspace = w.workspace.clone();
             with_view(cx, w, |v, _, cx| v.go(Nav::Workspace(workspace), cx))
+        }),
+        ("アイコンだけのメニュー", wide, |cx, w| {
+            with_view(cx, w, |v, _, cx| {
+                v.sidebar_hidden = true;
+                v.go(Nav::Home, cx);
+            })
         }),
         ("タスクの詳細", wide, |cx, w| {
             let task = w.task.clone();

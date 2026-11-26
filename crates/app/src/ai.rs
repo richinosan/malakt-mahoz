@@ -279,8 +279,9 @@ fn saved_bounds(v: &Value) -> Option<[f32; 4]> {
 /// いつも AI に伝える前提と指示の保存先と、長さの上限。
 const CONTEXT_SETTING: &str = "ai.context";
 pub const MAX_CONTEXT_CHARS: usize = 4000;
-/// ワークスペースごとの分の長さの上限。
-pub const MAX_WORKSPACE_CONTEXT_CHARS: usize = 2000;
+pub use malakt_ai::tools::{
+    workspace_context_error, workspace_context_key, MAX_WORKSPACE_CONTEXT_CHARS,
+};
 
 /// 整えられなかった理由を、タスクの画面に出す短い言葉にする。くわしい理由はホバーで出す。
 pub fn arrange_note_label(note: &str) -> &'static str {
@@ -291,19 +292,6 @@ pub fn arrange_note_label(note: &str) -> &'static str {
     } else {
         "AI に接続できませんでした"
     }
-}
-
-/// ワークスペースごとの「AI に伝えること」の保存先。
-pub fn workspace_context_key(workspace: &str) -> String {
-    format!("ai.context.ws.{workspace}")
-}
-
-/// 長すぎる「AI に伝えること」を断る文。
-pub fn workspace_context_error(text: &str) -> Option<String> {
-    let count = text.trim().chars().count();
-    (count > MAX_WORKSPACE_CONTEXT_CHARS).then(|| {
-        format!("AI に伝えることは {MAX_WORKSPACE_CONTEXT_CHARS} 文字までです（今は {count} 文字）")
-    })
 }
 
 /// 入力欄に添えられるタスクの数。
@@ -3381,7 +3369,9 @@ impl Session {
                     let first = s.items.len();
                     for call in &reply.calls {
                         s.items.push(Item::Tool {
-                            summary: tools::summary(&call.name, &call.args).into(),
+                            summary: crate::ai_tools::summary(&call.name, &call.args)
+                                .unwrap_or_else(|| tools::summary(&call.name, &call.args))
+                                .into(),
                             state: ToolState::Running,
                         });
                     }
@@ -3440,8 +3430,14 @@ impl Session {
         system: &str,
         cx: &mut AsyncApp,
     ) -> Result<(Wire, Reply), String> {
-        let turns = this.read_with(cx, |s, _| s.turns.clone()).map_err(gone)?;
-        let definitions = tools::definitions();
+        let (turns, auto) = this
+            .read_with(cx, |s, _| (s.turns.clone(), s.auto))
+            .map_err(gone)?;
+        let mut definitions = tools::definitions();
+        // 画面と設定を変えるツールは、ユーザーが頼んだ会話にだけ渡す
+        if !auto {
+            definitions.extend(crate::ai_tools::definitions());
+        }
         let request = wire::Request {
             model,
             effort,
@@ -3538,29 +3534,44 @@ impl Session {
         cx: &mut AsyncApp,
     ) -> Result<Result<String, ToolError>, String> {
         let name = call.name.as_str();
+        let app_tool = crate::ai_tools::is_app_tool(name);
+        let confirm = if app_tool {
+            crate::ai_tools::needs_confirmation(name, &call.args)
+        } else {
+            tools::needs_confirmation(name)
+        };
         // 並列の会話では、確認が要る操作をしない（確認を出す場所がない）
-        let auto = this
-            .read_with(cx, |s, _| s.auto || s.worker)
+        let (auto, from_app) = this
+            .read_with(cx, |s, _| (s.auto || s.worker, s.auto))
             .map_err(gone)?;
-        if auto && tools::needs_confirmation(name) {
+        if from_app && app_tool {
+            return Ok(Err(ToolError::Failed(
+                "アプリが自動で始めた実行からは、画面と設定は変えられません".into(),
+            )));
+        }
+        if auto && confirm {
             // 確認に答える人がいないので、定期チェックからは実行しない
             return Ok(Err(ToolError::Failed(
                 "定期チェックからは、タスクの削除とコマンドの実行はできません".into(),
             )));
         }
-        if tools::needs_confirmation(name) {
+        if confirm {
             let (tx, rx) = async_channel::bounded(1);
             let asked = this
                 .update(cx, |s, cx| {
                     if s.auto_run || name == tools::RUN_SHELL && s.allow_shell {
                         return false;
                     }
-                    let text = tools::confirmation_text(
-                        &s.db.read(cx).store,
-                        name,
-                        &call.args,
-                        &s.turn_shell,
-                    );
+                    let text = if app_tool {
+                        crate::ai_tools::confirmation_text(name, &call.args)
+                    } else {
+                        tools::confirmation_text(
+                            &s.db.read(cx).store,
+                            name,
+                            &call.args,
+                            &s.turn_shell,
+                        )
+                    };
                     s.pending = Some(Pending {
                         text: text.into(),
                         shell: name == tools::RUN_SHELL,
@@ -3583,6 +3594,16 @@ impl Session {
             return failed(
                 "コメントからの更新では、コメントが書かれたタスクの更新だけができます".into(),
             );
+        }
+        if crate::ai_tools::is_view_tool(name) {
+            let result = cx.update(|cx| crate::ai_tools::run_view_tool(name, &call.args, cx));
+            return Ok(result.map_err(ToolError::Failed));
+        }
+        if crate::ai_tools::is_session_tool(name) {
+            let result = this
+                .update(cx, |s, cx| s.run_setting_tool(name, &call.args, cx))
+                .map_err(gone)?;
+            return Ok(result.map_err(ToolError::Failed));
         }
         match name {
             tools::RUN_SHELL => {
@@ -3667,8 +3688,22 @@ impl Session {
                                 .ok()
                                 .and_then(|p| p.into_iter().find(|p| p.is_self))
                                 .map(|p| p.id);
-                            let result =
-                                tools::execute(&mut db.store, author.as_deref(), name, args);
+                            // 変更は、ツールの呼び出し 1 回を元に戻す 1 つの段にする（Ctrl+Z で戻せる）
+                            let write = tools::WRITES.contains(&name);
+                            let marked = if write {
+                                db.store.undo_mark().map_err(|e| e.to_string())
+                            } else {
+                                Ok(())
+                            };
+                            let result = marked.and_then(|()| {
+                                tools::execute(&mut db.store, author.as_deref(), name, args)
+                            });
+                            if write {
+                                if let Err(e) = db.store.undo_mark() {
+                                    cx.notify();
+                                    return result.and(Err(e.to_string()));
+                                }
+                            }
                             cx.notify();
                             result
                         });

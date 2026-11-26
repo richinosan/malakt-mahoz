@@ -2653,23 +2653,71 @@ fn workspace_icon_is_found_by_search(cx: &mut TestAppContext) {
     }
 }
 
-/// 上のバーのメニューのボタンで左のメニューを閉じて開ける。境界で変えた幅は保存される。
+/// 上のバーのメニューのボタンで左のメニューをアイコンだけの列に畳んで、また広げる。
+/// 境界で変えた幅は保存される。
 #[gpui_kit::test]
 fn sidebar_toggles_and_keeps_its_width(cx: &mut TestAppContext) {
-    use malakt_mahoz::state::{SIDEBAR_MAX, SIDEBAR_WIDTH};
+    use malakt_mahoz::state::{RAIL_WIDTH, SIDEBAR_MAX, SIDEBAR_WIDTH};
     start(cx);
+    let ws = cx.update(|cx| {
+        db::shared(cx).update(cx, |db, _| {
+            db.store.create_workspace(None, "文化祭").unwrap().id
+        })
+    });
     let (window, view) = open(cx, wide());
     ui(cx, window, |window, cx| {
         assert!(window.try_find("nav-all").is_some());
+        assert!(window.try_find("rail").is_none());
         window.click("toggle-sidebar", cx);
     });
+    // 動きが終わるまで進める
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(400));
+    let scale = malakt_mahoz::UI_SCALE;
     ui(cx, window, |window, _| {
-        assert!(window.try_find("nav-all").is_none())
+        assert!(window.try_find("nav-all").is_none());
+        assert!(window.try_find("sidebar-resize").is_none());
+        // 畳んだ列は細く、アイコンだけが並ぶ
+        let rail = window.find("rail").bounds();
+        assert_eq!(rail.size.width, px(RAIL_WIDTH * scale));
+        for id in ["rail-home", "rail-notices", "rail-all", "rail-unfiled"] {
+            assert!(window.try_find(id).is_some(), "{id}");
+        }
+        assert_eq!(window.find("rail-all").label(), Some("すべてのタスク"));
+        assert_eq!(window.find(("rail-ws", 0usize)).label(), Some("文化祭"));
     });
+    // アイコンを押すと、その画面に移る。畳んだまま
+    ui(cx, window, |window, cx| {
+        window.click(("rail-ws", 0usize), cx)
+    });
+    cx.update(|cx| {
+        let v = view.read(cx);
+        assert_eq!(v.nav, Nav::Workspace(ws.clone()));
+        assert!(v.sidebar_hidden);
+    });
+    ui(cx, window, |window, cx| window.click("rail-all", cx));
+    cx.update(|cx| assert_eq!(view.read(cx).nav, Nav::All));
+
     ui(cx, window, |window, cx| window.click("toggle-sidebar", cx));
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(400));
     ui(cx, window, |window, _| {
+        assert!(window.try_find("rail").is_none());
         assert!(window.try_find("nav-all").is_some());
         assert!(window.try_find("sidebar-resize").is_some());
+    });
+
+    // 畳んだ列から名前を変えるときは、名前を書く行が見えるように広げる
+    ui(cx, window, |window, cx| window.click("toggle-sidebar", cx));
+    cx.update(|cx| assert!(view.read(cx).sidebar_hidden));
+    cx.update_window(window, |_, window, cx| {
+        view.update(cx, |v, cx| v.rename_workspace(ws.clone(), window, cx))
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update(|cx| assert!(!view.read(cx).sidebar_hidden));
+    ui(cx, window, |window, _| {
+        assert!(window.try_find("workspace-name-input").is_some())
     });
 
     // 境界をドラッグした幅は、範囲の中に収めて保存する
