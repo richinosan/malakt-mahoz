@@ -108,12 +108,12 @@ pub fn bind(cx: &mut App) {
     });
 }
 
-/// キーの一覧に出す、キーと説明。
 /// 「今すぐロック」のキー。
-pub const LOCK_KEY: &str = if MAC { "⌘L" } else { "Ctrl+L" };
+pub const LOCK_KEY: &str = if MAC { "⇧⌘L" } else { "Ctrl+Shift+L" };
 /// 「新しいウィンドウ」のキー。
 pub const NEW_WINDOW_KEY: &str = if MAC { "⇧⌘N" } else { "Ctrl+Shift+N" };
 
+/// キーの一覧に出す、キーと説明。
 pub fn help() -> Vec<(&'static str, &'static str)> {
     let pick = |windows: &'static str, mac: &'static str| if MAC { mac } else { windows };
     vec![

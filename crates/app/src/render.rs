@@ -224,6 +224,76 @@ pub(crate) fn window_controls(
     Some(controls)
 }
 
+/// ウィンドウのヘッダー（上のバー）を右クリックしたときのメニュー。どのウィンドウのヘッダーも、これを出す。
+/// `main` は、設定を開くタスクの画面。メインのウィンドウなら自分、別ウィンドウなら開いたもとの画面
+/// （ないときは、メインのウィンドウに開く）。
+pub(crate) fn window_menu(
+    menu: PopupMenu,
+    main: Option<WeakEntity<MainView>>,
+    window: &Window,
+    cx: &App,
+) -> PopupMenu {
+    let unlocked = crate::db::shared(cx).read(cx).unlocked;
+    let supported = window.window_controls();
+    let (max_icon, max_label) = if window.is_maximized() {
+        (IconName::WindowRestore, "元のサイズに戻す")
+    } else {
+        (IconName::WindowMaximize, "最大化")
+    };
+    let (full_icon, full_label) = if window.is_fullscreen() {
+        ("minimize-2", "全画面を終了")
+    } else {
+        ("maximize-2", "全画面")
+    };
+    menu.item(
+        // ロックが無効なときは、ロックの設定を開く（`lib.rs` の LockNow）
+        PopupMenuItem::new("ロックする")
+            .icon(app_icon("lock"))
+            .action(Box::new(LockNow))
+            .disabled(!unlocked),
+    )
+    .when(unlocked, |menu| {
+        menu.item(
+            PopupMenuItem::new("新しいウィンドウ")
+                .icon(app_icon("app-window"))
+                .action(Box::new(NewWindow)),
+        )
+        .item(
+            PopupMenuItem::new("設定")
+                .icon(app_icon("settings"))
+                .action(Box::new(crate::shortcuts::OpenSettings))
+                .on_click(move |_, _, cx| crate::open_settings_in(main.as_ref(), None, cx)),
+        )
+    })
+    .separator()
+    .when(supported.minimize, |menu| {
+        menu.item(
+            PopupMenuItem::new("最小化")
+                .icon(Icon::new(IconName::WindowMinimize))
+                .on_click(|_, window, _| window.minimize_window()),
+        )
+    })
+    .when(supported.maximize, |menu| {
+        menu.item(
+            PopupMenuItem::new(max_label)
+                .icon(Icon::new(max_icon))
+                .on_click(|_, window, _| window.zoom_window()),
+        )
+    })
+    .item(
+        PopupMenuItem::new(full_label)
+            .icon(app_icon(full_icon))
+            .action(Box::new(crate::shortcuts::ToggleFullscreen))
+            .on_click(|_, window, _| window.toggle_fullscreen()),
+    )
+    .separator()
+    .item(
+        PopupMenuItem::new("閉じる")
+            .icon(Icon::new(IconName::WindowClose))
+            .on_click(|_, window, _| window.remove_window()),
+    )
+}
+
 /// 背景の画像を出しているときは、面を透かして塗る。
 fn glass(color: Hsla, cx: &App) -> Hsla {
     match crate::theme::backdrop(cx) {
@@ -1755,7 +1825,21 @@ impl MainView {
         toggle
     }
 
+    /// 上のバー。右クリックで、ウィンドウのメニュー（ロック・最小化・閉じるなど）が開く。
     fn render_header(
+        &self,
+        unlocked: bool,
+        wide: bool,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let view = cx.entity().downgrade();
+        self.render_header_bar(unlocked, wide, window, cx)
+            .debug_selector(|| "window-header".into())
+            .right_menu(move |menu, window, cx| window_menu(menu, Some(view.clone()), window, cx))
+    }
+
+    fn render_header_bar(
         &self,
         unlocked: bool,
         wide: bool,

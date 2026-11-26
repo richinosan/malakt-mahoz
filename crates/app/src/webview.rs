@@ -39,20 +39,28 @@ const FOCUS_SCRIPT: &str = r#"(() => {
   window.addEventListener("mouseout", (e) => { if (!e.relatedTarget) post("leave"); }, true);
 })();"#;
 
-/// ページの上の Ctrl+ホイールと Ctrl++ / Ctrl+- / Ctrl+0 を、アプリに知らせる。
+/// ページの上の Ctrl+ホイールと Ctrl++ / Ctrl+- / Ctrl+0、ロックのキー（Ctrl+Shift+L / ⇧⌘L）を、アプリに知らせる。
 /// 拡大率はアプリが変えて、場所の欄の右に出す（OS の部品に任せると、今の拡大率が分からない）。
 /// 中の枠（iframe）からは、いちばん外のページを通して知らせる。
 /// 地図など、自分で Ctrl+ホイールを使うページ（`preventDefault` したもの）はそのまま渡す。
 const ZOOM_SCRIPT: &str = r#"(() => {
   const top = window.top === window;
+  const mac = /Mac/.test(navigator.platform || "");
   const send = (step) => {
     try {
       if (top) window.ipc.postMessage("zoom:" + step);
       else window.top.postMessage({ malaktZoom: step }, "*");
     } catch (_) {}
   };
+  const lock = () => {
+    try {
+      if (top) window.ipc.postMessage("lock");
+      else window.top.postMessage({ malaktLock: true }, "*");
+    } catch (_) {}
+  };
   if (top) {
     window.addEventListener("message", (e) => {
+      if (e.data && e.data.malaktLock === true) { lock(); return; }
       const step = e.data && e.data.malaktZoom;
       if (step === "in" || step === "out" || step === "reset") send(step);
     });
@@ -71,6 +79,11 @@ const ZOOM_SCRIPT: &str = r#"(() => {
   }, { passive: false });
   window.addEventListener("keydown", (e) => {
     if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
+    if (e.shiftKey && e.code === "KeyL" && (mac ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey)) {
+      e.preventDefault();
+      lock();
+      return;
+    }
     let step = null;
     if (e.key === "+" || e.key === "=" || e.key === ";" || e.code === "NumpadAdd") step = "in";
     else if (e.key === "-" || e.code === "NumpadSubtract") step = "out";
@@ -455,6 +468,7 @@ pub fn create(window: &mut Window, setup: Setup) -> Result<Rc<dyn Engine>, Strin
                         "focus" => send(Event::Focused),
                         "enter" => send(Event::Pointer(true)),
                         "leave" => send(Event::Pointer(false)),
+                        "lock" => send(Event::Lock),
                         _ => {
                             if let Some(step) = Zoom::parse(body) {
                                 send(Event::Zoom(step));

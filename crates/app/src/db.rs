@@ -201,6 +201,11 @@ pub fn lock_if_idle(now: i64, cx: &mut App) {
     }
 }
 
+/// ロックが有効か。
+pub fn lock_enabled(cx: &App) -> bool {
+    lock::is_enabled(&shared(cx).read(cx).store).unwrap_or(false)
+}
+
 /// すべてのウィンドウをロックする。ロックが無効なら何もしない。
 pub fn lock_now(cx: &mut App) {
     shared(cx).update(cx, |db, cx| {
