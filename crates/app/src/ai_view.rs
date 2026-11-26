@@ -20,7 +20,7 @@ use malakt_ai::{Effort, Provider};
 
 use crate::ai::{self, Decision, Item, KeyState, LineKind, Run, Session, ShellPlace, ToolState};
 use crate::db::{self, Db};
-use crate::feel::{self, Lit};
+use crate::feel::{self, Grip, Lit};
 use crate::render::app_icon;
 use crate::scroll::{self, Menus};
 use crate::shadow::{Elevate, Elevation};
@@ -2176,6 +2176,8 @@ impl AiPane {
             .border_b_1()
             .border_color(theme.border)
             .bg(theme.background)
+            // 空いているところに乗せるとうっすら、つまんでいる間は少し濃くなる
+            .grip(cx)
             .when(cfg!(target_os = "windows"), |d| {
                 d.window_control_area(WindowControlArea::Drag)
             })

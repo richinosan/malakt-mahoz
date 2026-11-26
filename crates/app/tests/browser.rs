@@ -431,7 +431,7 @@ fn the_page_hides_when_something_is_over_it(cx: &mut TestAppContext) {
     // ダイアログの間は隠れる
     cx.update(|cx| {
         view.update(cx, |v, cx| {
-            v.modal = Modal::People;
+            v.modal = Modal::Notices;
             cx.notify();
         })
     });

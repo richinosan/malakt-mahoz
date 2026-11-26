@@ -52,7 +52,12 @@ fn start(cx: &mut TestAppContext) -> (AnyWindowHandle, Entity<MainView>) {
             ..Default::default()
         };
         gpui_kit::open_window(options, cx, |window, cx| {
-            cx.new(|cx| MainView::new(window, cx))
+            cx.new(|cx| {
+                let mut view = MainView::new(window, cx);
+                // 出入りの動きを待たずに、すぐ最後の位置で確かめる
+                view.motion = false;
+                view
+            })
         })
         .expect("ウィンドウを開く")
     });

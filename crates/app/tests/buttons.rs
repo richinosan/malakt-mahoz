@@ -19,6 +19,7 @@ use malakt_mahoz::{db, MainView, Nav};
 
 /// 押せるものではない入れ物や入力欄。押しても何も変わらないのが正しい。
 const NOT_BUTTONS: &[&str] = &[
+    "appearance-scroll",
     "pane",
     "pane-bar",
     "pane-border",
@@ -167,6 +168,11 @@ const QUIET: &[(&str, &str)] = &[
         "今選んでいるテーマ",
     ),
     ("カスタマイズ > customize-nav#0", "今開いているカテゴリ"),
+    ("ホーム > customize-nav#0", "いちばん上に見えている見出し"),
+    (
+        "担当者のダイアログ > customize-nav#12",
+        "今開いているカテゴリ",
+    ),
     (
         "カスタマイズ（自分のテーマあり） > customize-nav#0",
         "今開いているカテゴリ",
@@ -217,7 +223,11 @@ const QUIET: &[(&str, &str)] = &[
         "ロックを有効にした通知 > customize-nav#10",
         "今開いているカテゴリ",
     ),
-    ("設定のデータ > customize-nav#12", "今開いているカテゴリ"),
+    ("設定のデータ > customize-nav#15", "今開いているカテゴリ"),
+    (
+        "設定のデータ > customize-nav#14",
+        "いちばん下までスクロールしていて、ウィンドウの見出しはもう見えている",
+    ),
     ("export-all", "OS の保存先の選択を開く"),
     ("import-all", "OS のファイル選択を開く"),
     ("設定の通知 > customize-nav#10", "今開いているカテゴリ"),
@@ -324,7 +334,11 @@ fn fresh(cx: &mut TestAppContext, size: Size<Pixels>) -> World {
             // 閉じたあとのウィンドウなら、することがない
             let _ = window.update(cx, |_, window, _| window.remove_window());
         }
-        db::shared(cx).update(cx, |db, _| db.store = store);
+        db::shared(cx).update(cx, |db, _| {
+            db.store = store;
+            // 前の画面で「今すぐロック」を押していても、ロックを解いて始める
+            db.unlocked = true;
+        });
         // 前の画面で開いたターミナルとブラウザのタブを閉じる
         malakt_mahoz::term::shared(cx).update(cx, |terms, cx| terms.close_all(cx));
         // 前の画面で変えた書体と色を、新しいデータ（何も選んでいない）に合わせて戻す
@@ -414,8 +428,27 @@ fn targets(cx: &mut TestAppContext, world: &World) -> Vec<ElementId> {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
         };
+        // 「設定」のスクロールの上下の端で切れているものも、スクロールしないと押せない
+        let settings_view = elements
+            .iter()
+            .find(|e| {
+                e.path()
+                    .last()
+                    .is_some_and(|id| name_of(id) == "appearance-scroll")
+            })
+            .map(|e| e.bounds());
         let mut found: Vec<ElementId> = Vec::new();
         for element in &elements {
+            if settings_view.is_some_and(|view| {
+                let bounds = element.bounds();
+                (bounds.top() < view.top() || bounds.bottom() > view.bottom())
+                    && element
+                        .path()
+                        .iter()
+                        .any(|id| name_of(id) == "appearance-scroll")
+            }) {
+                continue;
+            }
             if list_bottom.is_some_and(|bottom| {
                 element.bounds().center().y > bottom
                     && element.path().iter().any(|id| name_of(id) == "task-list")
