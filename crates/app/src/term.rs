@@ -133,9 +133,11 @@ fn path_with(before: &std::ffi::OsStr, dir: &std::path::Path) -> Option<String> 
 
 /// 開いているターミナルの一覧。ウィンドウをまたいで 1 つ。
 pub struct Terms {
-    db: Entity<Db>,
+    pub(crate) db: Entity<Db>,
     pub tabs: Vec<Tab>,
-    /// 見ているターミナル。`None` なら AI のシェル。
+    /// アプリ内ブラウザのタブ。番号はターミナルと同じ数え方で、作った順に並ぶ。
+    pub pages: Vec<crate::browser::Page>,
+    /// 見ているターミナルかブラウザのタブ。`None` なら AI のシェル。
     pub active: Option<u64>,
     /// 開けるシェル。調べ終わるまでは `None`。
     profiles: Option<Vec<Profile>>,
@@ -143,7 +145,7 @@ pub struct Terms {
     pub profile: Option<String>,
     /// AI のタブで動かすシェル。`None` なら標準（[`Shell::standard`]）。
     pub ai_profile: Option<String>,
-    next: u64,
+    pub(crate) next: u64,
     pub error: Option<SharedString>,
     /// うまくいったことの知らせ。`NOTICE_LIFE` たつと閉じる。
     pub notice: Option<SharedString>,
@@ -162,6 +164,20 @@ pub struct Terms {
     pub register_mcp: bool,
     /// このアプリを起動してから登録を確かめたシェル。
     registered: std::collections::HashSet<String>,
+    /// ブラウザの場所の欄に、キーの入力先を移す。
+    pub focus_bar: bool,
+    /// ブラウザの部品からの知らせを送る口。
+    pub(crate) page_events: async_channel::Sender<(u64, crate::browser::Event)>,
+    /// ウィンドウごとの、描いた回。ページを見せるかを決めるのに使う。
+    pub(crate) frames: crate::browser::Frames,
+    /// メニューを閉じたあとに、描き直しを待っているウィンドウ。
+    pub(crate) rechecking: Vec<WindowId>,
+    /// Linux の GTK の知らせを進めている。
+    pub(crate) pumping: bool,
+    /// 最後に保存した、ブラウザのタブの場所。
+    pub(crate) saved_pages: Option<String>,
+    /// ブラウザのデータの大きさ。数えていなければ `None`。
+    pub usage: Option<u64>,
 }
 
 pub struct SharedTerms(pub Entity<Terms>);
@@ -208,9 +224,20 @@ impl Terms {
             .store
             .setting(AI_SHELL_SETTING)
             .unwrap_or_default();
-        Self {
+        let (page_events, events) = async_channel::unbounded();
+        cx.spawn(async move |this, cx| {
+            while let Ok((id, event)) = events.recv().await {
+                let alive = this.update(cx, |this, cx| this.on_page_event(id, event, cx));
+                if alive.is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+        let mut terms = Self {
             db,
             tabs: Vec::new(),
+            pages: Vec::new(),
             active: None,
             profiles: None,
             profile,
@@ -226,7 +253,16 @@ impl Terms {
             focus_wanted: false,
             register_mcp: false,
             registered: std::collections::HashSet::new(),
-        }
+            focus_bar: false,
+            page_events,
+            frames: Default::default(),
+            rechecking: Vec::new(),
+            pumping: false,
+            saved_pages: None,
+            usage: None,
+        };
+        terms.restore_pages(cx);
+        terms
     }
 
     /// AI のタブで動かすシェル。「カスタマイズ」で選んだもの、選んでいなければ標準のシェル。
@@ -313,11 +349,27 @@ impl Terms {
     }
 
     pub fn activate(&mut self, id: Option<u64>, cx: &mut Context<Self>) {
-        if id.is_none_or(|id| self.tab(id).is_some()) {
+        if id.is_none_or(|id| self.tab(id).is_some() || self.page(id).is_some()) {
             self.active = id;
-            self.focus_wanted = id.is_some();
+            self.focus_wanted = id.is_some_and(|id| self.tab(id).is_some());
+            // 何も開いていないタブは、すぐに場所を書けるようにする
+            self.focus_bar = id
+                .and_then(|id| self.page(id))
+                .is_some_and(|page| page.url == crate::browser::BLANK);
             cx.notify();
         }
+    }
+
+    /// タブの並び（作った順）。ターミナルとブラウザのタブの番号。
+    pub fn order(&self) -> Vec<u64> {
+        let mut ids: Vec<u64> = self
+            .tabs
+            .iter()
+            .map(|tab| tab.id)
+            .chain(self.pages.iter().map(|page| page.id))
+            .collect();
+        ids.sort_unstable();
+        ids
     }
 
     /// ターミナルを開く。`profile` を選んだときは、次の「＋」でも同じシェルを開く。
@@ -467,24 +519,30 @@ impl Terms {
     /// すべてのターミナルを閉じる。アプリを閉じるときに、動いているシェルとその中のプログラムを終わらせる。
     pub fn close_all(&mut self, cx: &mut Context<Self>) {
         self.tabs.clear();
+        // ブラウザのタブの場所は残したまま、次に起動したときに並べ直す
+        self.pages.clear();
         self.active = None;
         cx.notify();
     }
 
     /// ターミナルを閉じる。動いているシェルも終わる。
     pub fn close(&mut self, id: u64, cx: &mut Context<Self>) {
-        let Some(at) = self.tabs.iter().position(|tab| tab.id == id) else {
+        let order = self.order();
+        let Some(at) = order.iter().position(|have| *have == id) else {
             return;
         };
-        self.tabs.remove(at);
+        if let Some(found) = self.tabs.iter().position(|tab| tab.id == id) {
+            self.tabs.remove(found);
+        } else {
+            self.remove_page(id, cx);
+        }
         if self.active == Some(id) {
             // 右どなり、なければ左どなり、それもなければ AI のシェルを見せる
-            self.active = self
-                .tabs
-                .get(at)
-                .or_else(|| at.checked_sub(1).and_then(|at| self.tabs.get(at)))
-                .map(|tab| tab.id);
-            self.focus_wanted = self.active.is_some();
+            let next = order
+                .get(at + 1)
+                .or_else(|| at.checked_sub(1).and_then(|at| order.get(at)))
+                .copied();
+            self.activate(next, cx);
         }
         cx.notify();
     }
@@ -659,7 +717,7 @@ impl Terms {
         .detach();
     }
 
-    fn fail(&mut self, text: String, cx: &mut Context<Self>) {
+    pub(crate) fn fail(&mut self, text: String, cx: &mut Context<Self>) {
         self.error = Some(text.into());
         cx.notify();
     }

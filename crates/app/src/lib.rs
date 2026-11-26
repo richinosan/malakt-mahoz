@@ -4,6 +4,7 @@ pub mod ai;
 pub mod ai_settings;
 pub mod ai_tools;
 pub mod ai_view;
+pub mod browser;
 mod caret;
 pub mod cli;
 pub mod db;
@@ -25,6 +26,7 @@ pub mod state;
 pub mod term;
 pub mod theme;
 pub mod update;
+mod webview;
 
 use std::path::PathBuf;
 

@@ -3768,6 +3768,17 @@ impl Session {
                 "コメントからの更新では、コメントが書かれたタスクの更新だけができます".into(),
             );
         }
+        if name == crate::browser::READ_TOOL {
+            // ページの文字は、OS のブラウザの部品が読み終わってから届く
+            let asked = cx.update(|cx| crate::browser::read_page(&call.args, cx));
+            return match asked {
+                Ok(answer) => match answer.recv().await {
+                    Ok(text) => Ok(Ok(text)),
+                    Err(_) => failed("ページを読む前に、タブが閉じられました".into()),
+                },
+                Err(e) => failed(e),
+            };
+        }
         if crate::ai_tools::is_view_tool(name) {
             let result = cx.update(|cx| crate::ai_tools::run_view_tool(name, &call.args, cx));
             return Ok(result.map_err(ToolError::Failed));

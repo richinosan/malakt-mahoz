@@ -199,6 +199,8 @@ pub struct AiPane {
     shell_focus: FocusHandle,
     /// ターミナルの画面。
     term: Entity<TermPane>,
+    /// ブラウザのタブの画面。
+    browser: Entity<crate::browser::BrowserPane>,
     /// シェルを、チャットの場所まで広げている。
     pub shell_wide: bool,
     /// 別ウィンドウの上のバーを押している（動かすと、ウィンドウを動かし始める）。
@@ -463,6 +465,7 @@ impl AiPane {
             focus: cx.focus_handle(),
             shell_focus: cx.focus_handle(),
             term: cx.new(TermPane::new),
+            browser: cx.new(|cx| crate::browser::BrowserPane::new(window, cx)),
             shell_wide: false,
             input,
             settings,
@@ -754,6 +757,11 @@ impl AiPane {
             // 別ウィンドウのチャットでも、メインのウィンドウで見ている場所を伝える
             .or_else(|| Some(self.session.read(cx).place.clone()).filter(|p| !p.is_empty()))
             .unwrap_or_else(|| "ユーザーは、チャットだけのウィンドウを開いています。".to_owned());
+        // アプリ内ブラウザで見ているページ
+        let place = match crate::browser::ai_place(cx) {
+            Some(page) => format!("{place}\n{page}"),
+            None => place,
+        };
         self.session.update(cx, |s, cx| s.send(text, place, cx))
     }
 
@@ -1358,7 +1366,11 @@ impl AiPane {
                         .py_1()
                         .text_sm()
                         // ドラッグで選んでコピーできる
-                        .child(TextView::markdown(("ai-text", ix), text.clone()).selectable(true))
+                        .child(
+                            TextView::markdown(("ai-text", ix), text.clone())
+                                .selectable(true)
+                                .on_link_click(crate::browser::on_link),
+                        )
                         .test_support()
                         // 右クリックで、返答を丸ごとコピーする
                         .right_menu({
@@ -2233,8 +2245,11 @@ impl AiPane {
         let detached = self.mode == PaneMode::ShellWindow;
         let pane = cx.entity();
         let caret_of = self.shell_input.clone();
-        // 見ているのが AI のシェルか、ターミナルか
-        let on_ai = term::shared(cx).read(cx).active_tab().is_none();
+        // 見ているのが AI のシェルか、ターミナルか、ブラウザか
+        let (on_ai, on_term) = {
+            let terms = term::shared(cx).read(cx);
+            (terms.active.is_none(), terms.active_tab().is_some())
+        };
         // 失敗を先に出す。なければ、うまくいったことの知らせ
         let (term_error, term_failed, term_closing) = {
             let terms = term::shared(cx).read(cx);
@@ -2524,7 +2539,8 @@ impl AiPane {
                     d.child(line)
                 }
             })
-            .when(!on_ai, |d| d.child(self.term.clone()))
+            .when(on_term, |d| d.child(self.term.clone()))
+            .when(!on_ai && !on_term, |d| d.child(self.browser.clone()))
             .when(on_ai, |d| {
                 d.child(
                     col()
@@ -2621,7 +2637,9 @@ impl AiPane {
         let theme = cx.theme().clone();
         let shared = term::shared(cx);
         let terms = shared.read(cx);
-        let active = terms.active_tab().map(|tab| tab.id);
+        let active = terms.active;
+        // MCP の登録は、ターミナルを見ているときだけ
+        let on_term = terms.active_tab().is_some();
         let tab = |id: ElementId, icon: &str, label: SharedString, on: bool| {
             row()
                 .id(id)
@@ -2658,16 +2676,26 @@ impl AiPane {
             })
             .test_support(),
         );
-        for item in &terms.tabs {
-            let id = item.id;
+        for id in terms.order() {
+            let (element_id, icon, label, loading) = match terms.tab(id) {
+                Some(item) => (("term-tab", id as usize), "terminal", item.label(), false),
+                None => match terms.page(id) {
+                    Some(page) => (
+                        ("browser-tab", id as usize),
+                        "globe",
+                        page.label(),
+                        page.loading,
+                    ),
+                    None => continue,
+                },
+            };
+            let mut item = tab(element_id.into(), icon, label, active == Some(id));
+            if loading {
+                // 読み込んでいる間は、アイコンの代わりに回る印
+                item = item.child(div().flex_none().child(Spinner::new().xsmall()));
+            }
             tabs = tabs.child(
-                tab(
-                    ("term-tab", id as usize).into(),
-                    "terminal",
-                    item.label(),
-                    active == Some(id),
-                )
-                .on_click({
+                item.on_click({
                     let shared = shared.clone();
                     move |_, _, cx| shared.update(cx, |terms, cx| terms.activate(Some(id), cx))
                 })
@@ -2725,6 +2753,21 @@ impl AiPane {
                         }
                     }),
             ))
+            .child(feel::gloss(
+                Button::new("browser-new")
+                    .icon(app_icon("globe"))
+                    .tooltip("新しいブラウザのタブ")
+                    .ghost()
+                    .small()
+                    .on_click({
+                        let shared = shared.clone();
+                        move |_, _, cx| {
+                            shared.update(cx, |terms, cx| {
+                                terms.open_page(crate::browser::BLANK, cx);
+                            })
+                        }
+                    }),
+            ))
             .child(
                 icon_button("term-shells", "chevron-down", "シェルを選ぶ").pop_menu_at(
                     Anchor::TopRight,
@@ -2750,7 +2793,7 @@ impl AiPane {
                     },
                 ),
             )
-            .when(active.is_some(), |d| {
+            .when(on_term, |d| {
                 d.child(icon_button("term-mcp", "plug", "MCP に登録").pop_menu_at(
                     Anchor::TopRight,
                     |menu, _, _| {
@@ -2800,6 +2843,7 @@ impl Render for AiPane {
                         .justify_center()
                         .child("ロックされています。メインのウィンドウで解除してください。"),
                 )
+                .child(crate::browser::frame_end(true, window, cx))
                 .into_any_element();
         }
         self.refresh_rows(cx);
@@ -2830,6 +2874,8 @@ impl Render for AiPane {
                 .flex_col()
                 .children(title_bar)
                 .child(self.render_shell(cx))
+                // ブラウザのページを見せるかは、いちばん最後に決める
+                .child(crate::browser::frame_end(false, window, cx))
                 .into_any_element(),
             PaneMode::ChatWindow => {
                 // ウィンドウが狭ければ、シェルはチャットの下に置く
@@ -2863,6 +2909,7 @@ impl Render for AiPane {
                     .flex_col()
                     .children(title_bar)
                     .child(body)
+                    .child(crate::browser::frame_end(false, window, cx))
                     .into_any_element()
             }
             PaneMode::Docked => {
