@@ -23,18 +23,21 @@ pub enum Sort {
     Created,
     Title,
     Status,
+    /// 担当者の名前の順。未割り当ては最後。
+    Assignee,
     /// ドラッグで決めた順。
     Manual,
 }
 
 impl Sort {
-    pub const ALL: [Sort; 7] = [
+    pub const ALL: [Sort; 8] = [
         Sort::Due,
         Sort::Priority,
         Sort::Updated,
         Sort::Created,
         Sort::Title,
         Sort::Status,
+        Sort::Assignee,
         Sort::Manual,
     ];
 
@@ -46,6 +49,7 @@ impl Sort {
             Sort::Created => "作成が新しい順",
             Sort::Title => "タイトル順",
             Sort::Status => "状態順",
+            Sort::Assignee => "担当順",
             Sort::Manual => "手動の順",
         }
     }
@@ -147,8 +151,18 @@ pub fn counts(tasks: &[Task]) -> (usize, usize) {
     (open, tasks.len() - open)
 }
 
-/// 条件に合うタスクの添え字を、並び順どおりに返す。
+/// 条件に合うタスクの添え字を、並び順どおりに返す。担当順では担当者の id で比べる。
 pub fn apply(tasks: &[Task], query: &ListQuery, self_id: Option<&str>) -> Vec<usize> {
+    apply_named(tasks, query, self_id, &|id| id.to_owned())
+}
+
+/// [`apply`] と同じ。担当順では `name` で引いた担当者の名前で比べる。
+pub fn apply_named(
+    tasks: &[Task],
+    query: &ListQuery,
+    self_id: Option<&str>,
+    name: &dyn Fn(&str) -> String,
+) -> Vec<usize> {
     let q = crate::text::normalize_line(&query.q).to_lowercase();
     let mut hits: Vec<usize> = tasks
         .iter()
@@ -187,8 +201,27 @@ pub fn apply(tasks: &[Task], query: &ListQuery, self_id: Option<&str>) -> Vec<us
     // 優先度なし（0）と期限なしは最後に回す
     let prio = |t: &Task| if t.priority == 0 { u8::MAX } else { t.priority };
     let due = |t: &Task| (t.due.is_none(), t.due.clone());
-    hits.sort_by(|&a, &b| {
-        let (a, b) = (&tasks[a], &tasks[b]);
+    // 担当順の比べる名前。担当の並びどおりに、小文字にして持つ
+    let people: HashMap<usize, Vec<String>> = if query.sort == Sort::Assignee {
+        hits.iter()
+            .map(|&i| {
+                let names = tasks[i]
+                    .assignee_ids
+                    .iter()
+                    .map(|id| name(id).to_lowercase())
+                    .collect();
+                (i, names)
+            })
+            .collect()
+    } else {
+        HashMap::new()
+    };
+    let person = |i: usize| {
+        let names = &people[&i];
+        (names.is_empty(), names)
+    };
+    hits.sort_by(|&ia, &ib| {
+        let (a, b) = (&tasks[ia], &tasks[ib]);
         let order = match query.sort {
             Sort::Due => due(a).cmp(&due(b)).then(prio(a).cmp(&prio(b))),
             Sort::Priority => prio(a).cmp(&prio(b)).then(due(a).cmp(&due(b))),
@@ -196,6 +229,7 @@ pub fn apply(tasks: &[Task], query: &ListQuery, self_id: Option<&str>) -> Vec<us
             Sort::Created => b.created_at.cmp(&a.created_at),
             Sort::Title => a.title.to_lowercase().cmp(&b.title.to_lowercase()),
             Sort::Status => (a.status as u8).cmp(&(b.status as u8)),
+            Sort::Assignee => person(ia).cmp(&person(ib)).then(due(a).cmp(&due(b))),
             Sort::Manual => a.position.cmp(&b.position),
         };
         if query.descending {
@@ -878,8 +912,43 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(ids(&tasks, &reversed, None), ["e", "a", "b", "c", "d"]);
-        assert_eq!(Sort::ALL.map(Sort::label).len(), 7);
+        assert_eq!(Sort::ALL.map(Sort::label).len(), 8);
         assert_eq!(Sort::Due.label(), "期限が近い順");
+    }
+
+    #[test]
+    fn sorting_by_assignee_uses_names_and_puts_unassigned_last() {
+        let mk = |id: &str, people: &[&str], due: Option<&str>| {
+            let mut t = task(id, Status::NeedsAction);
+            t.assignee_ids = people.iter().map(|p| (*p).to_owned()).collect();
+            t.due = due.map(str::to_owned);
+            t
+        };
+        let tasks = [
+            mk("a", &[], None),
+            mk("b", &["p2"], None),
+            mk("c", &["p1", "p2"], None),
+            mk("d", &["p1"], Some("2026-12-02")),
+            mk("e", &["p1"], Some("2026-12-01")),
+        ];
+        // p1 は「佐藤」、p2 は「Aoki」。id ではなく名前で比べる
+        let name = |id: &str| match id {
+            "p1" => "佐藤".to_owned(),
+            _ => "Aoki".to_owned(),
+        };
+        let sorted = |descending| {
+            let query = ListQuery {
+                sort: Sort::Assignee,
+                descending,
+                ..Default::default()
+            };
+            apply_named(&tasks, &query, None, &name)
+                .into_iter()
+                .map(|i| tasks[i].id.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(sorted(false), ["b", "e", "d", "c", "a"]);
+        assert_eq!(sorted(true), ["a", "c", "d", "e", "b"]);
     }
 
     #[test]

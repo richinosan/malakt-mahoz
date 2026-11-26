@@ -2739,6 +2739,57 @@ fn sidebar_toggles_and_keeps_its_width(cx: &mut TestAppContext) {
     cx.update(|cx| assert_eq!(second_view.read(cx).sidebar_width, SIDEBAR_MAX));
 }
 
+/// 表の担当の欄は、人が多くて折り返しても、頭文字の丸を上下で切らない。行に入る段だけ出す。
+#[gpui_kit::test]
+fn assignee_cell_wraps_without_cutting(cx: &mut TestAppContext) {
+    start(cx);
+    cx.update(|cx| {
+        db::shared(cx).update(cx, |db, _| {
+            let s = &mut db.store;
+            let ids = ["田中 一郎", "Alice Johnson", "佐藤 花子"]
+                .map(|name| s.create_person(name, false).unwrap().id)
+                .to_vec();
+            let draft = malakt_core::TaskDraft {
+                title: "受付".into(),
+                assignee_ids: ids,
+                ..Default::default()
+            };
+            s.create_task(None, &draft).unwrap();
+        })
+    });
+    let (window, view) = open(cx, wide());
+    cx.update(|cx| view.update(cx, |v, cx| v.go(Nav::All, cx)));
+    let rem = cx.update(|cx| {
+        use gpui_kit::component::ActiveTheme;
+        cx.theme().font_size
+    });
+    // 頭文字の丸 1 段（size_6）と、段の間（gap_y_1）
+    let (line, gap) = (rem * 1.5, rem * 0.25);
+    // 担当のボタンの高さと、表の 1 行の高さ
+    let heights = |cx: &mut TestAppContext| {
+        let mut cell = px(0.);
+        ui(cx, window, |window, _| {
+            cell = window.find(("assignee", 0usize)).bounds().size.height;
+        });
+        let density = cx.update(|cx| view.read(cx).row_density);
+        (cell, px(60. * malakt_mahoz::UI_SCALE * density.rows()))
+    };
+    // 標準の詰め方では 2 段に折り返し、ボタンは 2 段の高さまで伸びて、行の中に収まる
+    let (cell, row) = heights(cx);
+    assert!(cell >= line * 2. + gap, "{cell:?}");
+    assert!(cell <= row, "{cell:?} > {row:?}");
+    // 詰めると 2 段は入らないので、1 段だけ出す
+    cx.update(|cx| {
+        view.update(cx, |v, cx| {
+            v.set_density(malakt_mahoz::theme::Density::Compact, cx)
+        })
+    });
+    let (cell, row) = heights(cx);
+    assert!(cell >= line, "{cell:?}");
+    assert!(cell < line * 2. + gap, "{cell:?}");
+    assert!(cell <= row, "{cell:?} > {row:?}");
+}
+
 /// 左のメニューの矢印は、小さくても押しやすい大きさで押せる。
 #[gpui_kit::test]
 fn tree_caret_has_room_to_press(cx: &mut TestAppContext) {
@@ -2971,18 +3022,65 @@ fn table_columns_resize_reorder_hide_and_sort(cx: &mut TestAppContext) {
             assert_eq!((v.query.sort, v.query.descending), (Sort::Due, false));
         })
     });
-    // 見出しを押すとメニューが開き、もう一度押すと閉じる
+    // 見出しを押すと、その列で並べ替える。押すたびに昇順と降順が入れ替わる
+    let sorted = |cx: &mut TestAppContext| {
+        cx.update(|cx| {
+            let v = view.read(cx);
+            (v.query.sort, v.query.descending)
+        })
+    };
     ui(cx, window, |window, cx| window.click("col-title", cx));
-    cx.update(|cx| assert!(view.read(cx).column_menu.is_some()));
+    assert_eq!(sorted(cx), (Sort::Title, false));
+    cx.update(|cx| assert_eq!(view.read(cx).column_sorted(None), Some(false)));
     ui(cx, window, |window, cx| window.click("col-title", cx));
-    cx.update(|cx| assert!(view.read(cx).column_menu.is_none()));
+    assert_eq!(sorted(cx), (Sort::Title, true));
+    cx.update(|cx| assert_eq!(view.read(cx).column_sorted(None), Some(true)));
+    ui(cx, window, |window, cx| window.click("col-title", cx));
+    assert_eq!(sorted(cx), (Sort::Title, false));
+    // 更新の昇順は古い順（もとの「新しい順」の逆）
+    let updated = ("col-menu", Column::Updated as usize);
+    ui(cx, window, |window, cx| window.click(updated, cx));
+    assert_eq!(sorted(cx), (Sort::Updated, true));
+    cx.update(|cx| {
+        assert_eq!(
+            view.read(cx).column_sorted(Some(Column::Updated)),
+            Some(false)
+        )
+    });
+    ui(cx, window, |window, cx| window.click(updated, cx));
+    assert_eq!(sorted(cx), (Sort::Updated, false));
+    // 担当の列も並べ替えられる（この表では隠しているので、見出しを押したときの処理を呼ぶ）
+    cx.update(|cx| view.update(cx, |v, cx| v.sort_by_column(Some(Column::Assignee), cx)));
+    assert_eq!(sorted(cx), (Sort::Assignee, false));
+
+    // 右クリックでメニューが開き、もう一度右クリックすると閉じる
+    let right_click = |cx: &mut TestAppContext, id: gpui_kit::ElementId| {
+        let mut at = None;
+        ui(cx, window, |window, _| {
+            at = Some(window.try_find(id).unwrap().bounds().center());
+        });
+        let mut v = gpui_kit::VisualTestContext::from_window(window, cx);
+        v.simulate_mouse_down(at.unwrap(), MouseButton::Right, Modifiers::default());
+        v.simulate_mouse_up(at.unwrap(), MouseButton::Right, Modifiers::default());
+        v.run_until_parked();
+    };
+    let menu_of = |cx: &mut TestAppContext| {
+        cx.update(|cx| view.read(cx).column_menu.as_ref().map(|m| m.column))
+    };
+    right_click(cx, "col-title".into());
+    assert_eq!(menu_of(cx), Some(None));
+    // 右クリックでは並べ替えない
+    assert_eq!(sorted(cx), (Sort::Assignee, false));
+    right_click(cx, "col-title".into());
+    assert_eq!(menu_of(cx), None);
+    right_click(cx, ("col-menu", Column::Due as usize).into());
+    assert_eq!(menu_of(cx), Some(Some(Column::Due)));
+    // メニューを開いたまま見出しを押すと、メニューを閉じて並べ替える
     ui(cx, window, |window, cx| {
         window.click(("col-menu", Column::Due as usize), cx)
     });
-    cx.update(|cx| {
-        let open = view.read(cx).column_menu.as_ref().map(|m| m.column);
-        assert_eq!(open, Some(Some(Column::Due)));
-    });
+    assert_eq!(menu_of(cx), None);
+    assert_eq!(sorted(cx), (Sort::Due, false));
 }
 
 /// タスクのリンクをコピーできる。コメントに貼ったリンクはカードになり、押すとそのタスクが開く。
