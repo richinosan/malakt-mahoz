@@ -23,7 +23,7 @@ use malakt_core::{Comment, DueRule, Role as Raci, Status, Task as Todo, WORKSPAC
 
 use crate::ai::ShellPlace;
 use crate::ai_view::{docked_width, TASKS_MIN};
-use crate::feel::{self, Lit, Sunk};
+use crate::feel::{self, Grip, Lit, Sunk};
 use crate::scroll::Menus;
 use crate::shadow::{Elevate, Elevation};
 use crate::state::{
@@ -1765,15 +1765,21 @@ impl MainView {
             .relative()
             .border_b_1()
             .border_color(theme.transparent)
+            // 空いているところに乗せるとうっすら、つまんでいる間は少し濃くなる
             .when(!floating, |d| {
-                d.border_color(theme.border).bg(glass(theme.background, cx))
+                d.border_color(theme.border)
+                    .bg(glass(theme.background, cx))
+                    .grip(cx)
             })
             .when(floating, |d| {
-                d.pt(FLOAT_GAP).pb(half).px(FLOAT_GAP).child(floating_card(
-                    glass(theme.popover, cx),
-                    [FLOAT_GAP, FLOAT_GAP, half, FLOAT_GAP],
-                    cx,
-                ))
+                d.pt(FLOAT_GAP).pb(half).px(FLOAT_GAP).child(
+                    floating_card(
+                        glass(theme.popover, cx),
+                        [FLOAT_GAP, FLOAT_GAP, half, FLOAT_GAP],
+                        cx,
+                    )
+                    .grip(cx),
+                )
             })
             .when(cfg!(target_os = "windows"), |d| {
                 d.window_control_area(WindowControlArea::Drag)
