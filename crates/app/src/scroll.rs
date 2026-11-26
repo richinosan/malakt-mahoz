@@ -178,6 +178,7 @@ mod tests {
         ("feel.rs", include_str!("feel.rs")),
         ("theme.rs", include_str!("theme.rs")),
         ("shortcuts.rs", include_str!("shortcuts.rs")),
+        ("history_view.rs", include_str!("history_view.rs")),
     ];
 
     /// コメントを除いたコードの行。

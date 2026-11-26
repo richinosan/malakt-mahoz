@@ -640,27 +640,6 @@ pub fn format_bytes(bytes: u64) -> String {
     format!("{value:.1} {}", UNITS[unit])
 }
 
-/// 変更履歴の項目名。
-pub fn field_label(field: &str) -> &str {
-    match field {
-        "title" => "タイトル",
-        "description" => "説明",
-        "status" => "状態",
-        "priority" => "優先度",
-        "start" => "開始日",
-        "due" => "期限",
-        "percent" => "進捗",
-        "parent" => "親タスク",
-        "assignees" => "担当",
-        "assignee_roles" => "担当者の役",
-        "assignee_done" => "担当者ごとの完了",
-        "categories" => "カテゴリ",
-        "workspace" => "ワークスペース",
-        "link" => "表示するワークスペース",
-        other => other,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -686,6 +665,8 @@ mod tests {
             updated_at: 0,
             linked_workspace_ids: Vec::new(),
             completed_at: None,
+            created_by: crate::Actor::Unknown,
+            updated_by: crate::Actor::Unknown,
         }
     }
 
@@ -1249,12 +1230,5 @@ mod tests {
         assert_eq!(format_bytes(1_572_864), "1.5 MB");
         assert_eq!(format_bytes(3 * 1024 * 1024 * 1024), "3.0 GB");
         assert_eq!(format_bytes(u64::MAX), "16777216.0 TB");
-    }
-
-    #[test]
-    fn field_labels() {
-        assert_eq!(field_label("due"), "期限");
-        assert_eq!(field_label("assignees"), "担当");
-        assert_eq!(field_label("unknown"), "unknown");
     }
 }

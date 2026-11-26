@@ -19,7 +19,7 @@ use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use malakt_core::bulk::{BulkOp, ListMode};
 use malakt_core::view::{self, AssigneeFilter, DueState, ListRow, Priority as Prio, Sort, Tab};
-use malakt_core::{Comment, DueRule, Role as Raci, Roles, Status, Task as Todo, WORKSPACE_COLORS};
+use malakt_core::{Comment, DueRule, Role as Raci, Status, Task as Todo, WORKSPACE_COLORS};
 
 use crate::ai::ShellPlace;
 use crate::ai_view::{docked_width, TASKS_MIN};
@@ -34,7 +34,7 @@ use crate::{Dismiss, LockNow, NewWindow, PanePrefix, ToggleAi};
 use malakt_core::{Id, Person};
 
 /// 参照する寸法（CSS の px）を、画面全体の拡大率に合わせる。
-const fn px(value: f32) -> Pixels {
+pub(crate) const fn px(value: f32) -> Pixels {
     gpui_kit::px(value * crate::UI_SCALE)
 }
 
@@ -372,11 +372,11 @@ fn scene_thumbnail(scene: &crate::theme::Scene, dark: bool) -> Option<Arc<Image>
     made[at + usize::from(dark)].clone()
 }
 
-fn row() -> Div {
+pub(crate) fn row() -> Div {
     div().flex().flex_row().items_center()
 }
 
-fn col() -> Div {
+pub(crate) fn col() -> Div {
     div().flex().flex_col()
 }
 
@@ -681,7 +681,7 @@ fn priority_label(priority: Prio, cx: &App) -> Div {
 }
 
 /// 名前の頭文字の丸。
-fn avatar(name: &str, cx: &App) -> Div {
+pub(crate) fn avatar(name: &str, cx: &App) -> Div {
     let theme = cx.theme();
     div()
         .size_6()
@@ -3852,6 +3852,13 @@ impl MainView {
                     .text_xs()
                     .text_color(theme.muted_foreground)
                     .child(author)
+                    // AI や外のエージェントが書いたものは、それが分かる印を付ける
+                    .children(
+                        c.actor
+                            .machine_name()
+                            .or_else(|| c.actor.badge())
+                            .map(|text| crate::history_view::badge(text, cx)),
+                    )
                     .child(view::format_relative(c.created_at, now))
                     .when(c.is_edited(), |d| d.child("（編集済み）"))
                     .child(div().flex_1())
@@ -4797,9 +4804,15 @@ impl MainView {
             .filter(|c| c.is_thread_root() && c.resolved_at.is_none())
             .count();
         let mut comments = col().gap_2();
+        // 変更の出来事を、コメントと時刻の順に挟む（同じ時刻なら出来事が先）
+        let events = self.timeline_events(detail, cx);
+        let mut events = events.iter().enumerate().peekable();
         for (ix, c) in detail.comments.iter().enumerate() {
             if c.reply_to.is_some() || c.is_completion_report() {
                 continue;
+            }
+            while let Some((n, event)) = events.next_if(|(_, e)| e.at <= c.created_at) {
+                comments = comments.child(self.render_event(n, event, now, cx));
             }
             if !c.is_thread_root() {
                 comments = comments.child(self.render_comment(ix, c, now, cx));
@@ -4899,6 +4912,9 @@ impl MainView {
                 );
             }
             comments = comments.child(thread);
+        }
+        for (n, event) in events {
+            comments = comments.child(self.render_event(n, event, now, cx));
         }
         let report_items: Vec<Div> = detail
             .comments
@@ -5007,12 +5023,9 @@ impl MainView {
                                     cx.notify();
                                 })),
                         ))
-                        .child(format!(
-                            "{}　作成 {}　更新 {}",
-                            self.workspace_name(task.workspace_id.as_deref()),
-                            view::format_datetime(task.created_at),
-                            view::format_relative(task.updated_at, now)
-                        )),
+                        .child(self.workspace_name(task.workspace_id.as_deref()))
+                        // 作った人・最後に変えた人（AI や外のエージェントなら、その名前と印）
+                        .child(self.render_authorship(task, now, cx)),
                 )
                 .child(
                     card(cx)
@@ -7057,77 +7070,8 @@ impl MainView {
                 self.dialog("担当者", body, cx)
             }
             Modal::History => {
-                let changes = self
-                    .detail
-                    .as_ref()
-                    .map(|d| d.changes.as_slice())
-                    .unwrap_or(&[]);
-                let mut list = col().gap_2();
-                for c in changes.iter().rev() {
-                    let show = |value: &str| -> String {
-                        match c.field.as_str() {
-                            "status" => Status::parse(value)
-                                .map_or_else(|| value.to_owned(), |s| s.label().to_owned()),
-                            "priority" => Prio::of(value.parse().unwrap_or(0)).label().to_owned(),
-                            "assignees" => value
-                                .split(',')
-                                .filter(|v| !v.is_empty())
-                                .map(|v| self.person_name(v))
-                                .collect::<Vec<_>>()
-                                .join("、"),
-                            // 「人=R,A」の形
-                            "assignee_roles" => match value.split_once('=') {
-                                Some((person, roles)) => format!(
-                                    "{}（{}）",
-                                    self.person_name(person),
-                                    Roles::parse(roles).labels()
-                                ),
-                                None => value.to_owned(),
-                            },
-                            "assignee_done" if !value.is_empty() => {
-                                format!("{} が完了", self.person_name(value))
-                            }
-                            "assignee_done" => "未完了".to_owned(),
-                            "workspace" => self
-                                .workspace_name((!value.is_empty()).then_some(value))
-                                .to_string(),
-                            "link" if !value.is_empty() => {
-                                self.workspace_name(Some(value)).to_string()
-                            }
-                            "parent" if !value.is_empty() => "（タスク）".to_owned(),
-                            _ => value.to_owned(),
-                        }
-                    };
-                    let (old, new) = (show(&c.old_value), show(&c.new_value));
-                    let or_none = |s: String| if s.is_empty() { "なし".to_owned() } else { s };
-                    list = list.child(
-                        col()
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(theme.muted_foreground)
-                                    .child(view::format_datetime(c.created_at)),
-                            )
-                            .child(div().text_sm().child(format!(
-                                "{}: {} → {}",
-                                view::field_label(&c.field),
-                                or_none(old),
-                                or_none(new)
-                            ))),
-                    );
-                }
-                let body = div().child(
-                    div()
-                        .id("history-list")
-                        .max_h(px(360.))
-                        .overflow_y_scrollbar()
-                        .child(if changes.is_empty() {
-                            muted("変更はまだありません。".to_owned())
-                        } else {
-                            list
-                        }),
-                );
-                self.dialog("変更履歴", body, cx)
+                let body = self.render_history(cx);
+                self.dialog_as("dialog", px(600.), "変更履歴", body, cx)
             }
             Modal::Status(id, next) => {
                 let (id, next) = (id.clone(), *next);

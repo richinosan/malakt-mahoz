@@ -285,7 +285,7 @@ mod tests {
         let back = s.task(&a.id).unwrap();
         assert_eq!(back.title, "a");
         assert!(back.categories.is_empty());
-        assert!(s.changes(&a.id).unwrap().is_empty());
+        assert!(s.edits(&a.id).unwrap().is_empty());
         assert!(s.undo().unwrap());
         assert!(titles(&s).is_empty());
         assert!(s.redo().unwrap());

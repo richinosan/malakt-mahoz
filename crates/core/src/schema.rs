@@ -1,7 +1,7 @@
 use rusqlite::Connection;
 
 /// 順番に適用するマイグレーション。追記のみで、既存の要素は書き換えない。
-const MIGRATIONS: &[&str] = &[
+pub(crate) const MIGRATIONS: &[&str] = &[
     r#"
     CREATE TABLE workspaces (
         id TEXT PRIMARY KEY NOT NULL,
@@ -247,6 +247,13 @@ const MIGRATIONS: &[&str] = &[
         FROM settings s JOIN workspaces w ON s.key = 'ai.context.ws.' || w.id
         WHERE trim(s.value) <> '';
     DELETE FROM settings WHERE key = 'ai.context' OR key GLOB 'ai.context.ws.*';
+    "#,
+    // 15: 誰が変えたか（`actor::Actor` の文字列）。前の版の行は空（分からない）
+    r#"
+    ALTER TABLE tasks ADD COLUMN created_by TEXT NOT NULL DEFAULT '';
+    ALTER TABLE tasks ADD COLUMN updated_by TEXT NOT NULL DEFAULT '';
+    ALTER TABLE changes ADD COLUMN actor TEXT NOT NULL DEFAULT '';
+    ALTER TABLE comments ADD COLUMN actor TEXT NOT NULL DEFAULT '';
     "#,
 ];
 

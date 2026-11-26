@@ -5,6 +5,7 @@ use std::path::Path;
 
 use rusqlite::{params, Connection, OptionalExtension, Row};
 
+use crate::actor::Actor;
 use crate::model::*;
 use crate::text::{normalize, normalize_line};
 use crate::{schema, Error, Result};
@@ -16,6 +17,8 @@ pub struct Store {
     pub(crate) conn: Connection,
     /// 元に戻す・やり直しの段（`undo`）。
     pub(crate) history: crate::undo::History,
+    /// これからの変更を誰がするか。作成者・最終更新者・変更履歴・コメントに残す。
+    pub(crate) actor: Actor,
 }
 
 /// ディスクの使用量（バイト）。
@@ -41,7 +44,8 @@ impl Drop for Store {
 }
 
 const TASK_COLUMNS: &str = "t.id, t.workspace_id, t.title, t.description, t.status, t.priority, \
-     t.due, t.position, t.created_at, t.updated_at, t.completed_at, t.start, t.percent, t.parent_id";
+     t.due, t.position, t.created_at, t.updated_at, t.completed_at, t.start, t.percent, t.parent_id, \
+     t.created_by, t.updated_by";
 
 /// 自動で作る「自分」の名前。あとから変えられる。
 const SELF_NAME: &str = "自分";
@@ -114,9 +118,29 @@ impl Store {
         let mut store = Self {
             conn,
             history: Default::default(),
+            actor: Actor::Me,
         };
         store.purge_custom_icons()?;
         Ok(store)
+    }
+
+    // ---- 誰が変えるか ----
+
+    /// これからの変更を誰がするか。最初は自分。前の値を返す。
+    pub fn set_actor(&mut self, actor: Actor) -> Actor {
+        std::mem::replace(&mut self.actor, actor)
+    }
+
+    pub fn actor(&self) -> &Actor {
+        &self.actor
+    }
+
+    /// `f` の間だけ、変更を `actor` がしたものとして残す。
+    pub fn acting<R>(&mut self, actor: Actor, f: impl FnOnce(&mut Self) -> R) -> R {
+        let before = self.set_actor(actor);
+        let result = f(self);
+        self.actor = before;
+        result
     }
 
     // ---- ワークスペース ----
@@ -528,8 +552,11 @@ impl Store {
             created_at: now,
             updated_at: now,
             completed_at: (draft.status == Status::Completed).then_some(now),
+            created_by: self.actor.clone(),
+            updated_by: self.actor.clone(),
         };
         insert_task(&tx, &task)?;
+        record_created(&tx, &task, &self.actor)?;
         tx.commit()?;
         Ok(task)
     }
@@ -752,12 +779,13 @@ impl Store {
             (Status::Completed, _) => old.completed_at,
             _ => Some(now),
         };
+        let actor = self.actor.clone();
         let tx = self.conn.transaction()?;
         let mut changed = false;
         let mut record = |field: &str, a: String, b: String| -> Result<()> {
             if a != b {
                 changed = true;
-                insert_change(&tx, id, field, &a, &b, now)?;
+                insert_change(&tx, id, field, &a, &b, now, &actor)?;
             }
             Ok(())
         };
@@ -814,7 +842,7 @@ impl Store {
         tx.execute(
             "UPDATE tasks SET title = ?2, description = ?3, status = ?4, priority = ?5, \
              due = ?6, updated_at = ?7, completed_at = ?8, start = ?9, percent = ?10, \
-             parent_id = ?11 WHERE id = ?1",
+             parent_id = ?11, updated_by = ?12 WHERE id = ?1",
             params![
                 id,
                 draft.title,
@@ -826,7 +854,8 @@ impl Store {
                 completed_at,
                 draft.start,
                 draft.percent,
-                draft.parent_id
+                draft.parent_id,
+                actor
             ],
         )?;
         if old.assignee_ids != draft.assignee_ids {
@@ -865,6 +894,7 @@ impl Store {
             )?;
             insert_categories(&tx, id, &draft.categories)?;
         }
+        trim_changes(&tx, id)?;
         tx.commit()?;
         self.task(id)
     }
@@ -916,6 +946,7 @@ impl Store {
             return Ok(old);
         }
         let now = now_ms();
+        let actor = self.actor.clone();
         let tx = self.conn.transaction()?;
         let write = |person: &str, before: Roles, after: Roles| -> Result<()> {
             tx.prepare_cached(
@@ -929,6 +960,7 @@ impl Store {
                 &format!("{person}={before}"),
                 &format!("{person}={after}"),
                 now,
+                &actor,
             )?;
             Ok(())
         };
@@ -946,10 +978,8 @@ impl Store {
             }
         }
         write(person_id, current, roles)?;
-        tx.execute(
-            "UPDATE tasks SET updated_at = ?2 WHERE id = ?1",
-            params![id, now],
-        )?;
+        touch(&tx, id, now, &actor)?;
+        trim_changes(&tx, id)?;
         tx.commit()?;
         self.task(id)
     }
@@ -991,7 +1021,15 @@ impl Store {
                     params![id, person, at],
                 )?;
             }
-            insert_change(&tx, id, "assignee_done", person_id, "", now_ms())?;
+            insert_change(
+                &tx,
+                id,
+                "assignee_done",
+                person_id,
+                "",
+                now_ms(),
+                &self.actor,
+            )?;
             tx.commit()?;
             return self.task(id);
         }
@@ -1006,11 +1044,9 @@ impl Store {
         } else {
             (person_id, "")
         };
-        insert_change(&tx, id, "assignee_done", before, after, now)?;
-        tx.execute(
-            "UPDATE tasks SET updated_at = ?2 WHERE id = ?1",
-            params![id, now],
-        )?;
+        insert_change(&tx, id, "assignee_done", before, after, now, &self.actor)?;
+        touch(&tx, id, now, &self.actor)?;
+        trim_changes(&tx, id)?;
         tx.commit()?;
         self.task(id)
     }
@@ -1045,8 +1081,9 @@ impl Store {
             |r| r.get(0),
         )?;
         tx.execute(
-            "UPDATE tasks SET workspace_id = ?2, position = ?3, updated_at = ?4 WHERE id = ?1",
-            params![id, workspace_id, position, now],
+            "UPDATE tasks SET workspace_id = ?2, position = ?3, updated_at = ?4, updated_by = ?5 \
+             WHERE id = ?1",
+            params![id, workspace_id, position, now, self.actor],
         )?;
         // 移した先にすでに表示していたなら、二重にならないよう表示のほうを外す。
         // どこにも入れない状態に戻すなら、表示先もすべて外す
@@ -1061,7 +1098,9 @@ impl Store {
             old.workspace_id.as_deref().unwrap_or_default(),
             workspace_id.unwrap_or_default(),
             now,
+            &self.actor,
         )?;
+        trim_changes(&tx, id)?;
         tx.commit()?;
         Ok(())
     }
@@ -1073,13 +1112,22 @@ impl Store {
         found(n, "タスク", id)
     }
 
+    /// 変更履歴。古い順（同じ時刻なら残した順）。
     pub fn changes(&self, task_id: &str) -> Result<Vec<Change>> {
         let mut stmt = self.conn.prepare_cached(
-            "SELECT id, task_id, field, old_value, new_value, created_at \
-             FROM changes WHERE task_id = ?1 ORDER BY created_at, id",
+            "SELECT id, task_id, field, old_value, new_value, created_at, actor \
+             FROM changes WHERE task_id = ?1 ORDER BY created_at, rowid",
         )?;
         let rows = stmt.query_map(params![task_id], change_from_row)?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// 作成の記録を除いた変更履歴（テスト用）。
+    #[cfg(test)]
+    pub(crate) fn edits(&self, task_id: &str) -> Result<Vec<Change>> {
+        let mut changes = self.changes(task_id)?;
+        changes.retain(|c| c.field != CREATED_FIELD);
+        Ok(changes)
     }
 
     // ---- コメント ----
@@ -1165,6 +1213,7 @@ impl Store {
             anchor,
             reply_to: new.reply_to.clone(),
             resolved_at: None,
+            actor: self.actor.clone(),
         };
         let tx = self.conn.transaction()?;
         insert_comment(&tx, &comment)?;
@@ -1335,8 +1384,8 @@ impl Store {
         let changes = self
             .conn
             .prepare(
-                "SELECT id, task_id, field, old_value, new_value, created_at \
-                 FROM changes ORDER BY id",
+                "SELECT id, task_id, field, old_value, new_value, created_at, actor \
+                 FROM changes ORDER BY created_at, rowid",
             )?
             .query_map([], change_from_row)?
             .collect::<rusqlite::Result<_>>()?;
@@ -1434,7 +1483,7 @@ impl Store {
         for c in &data.changes {
             tx.prepare_cached(
                 "INSERT OR REPLACE INTO changes(id, task_id, field, old_value, new_value, \
-                 created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                 created_at, actor) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             )?
             .execute(params![
                 c.id,
@@ -1442,7 +1491,8 @@ impl Store {
                 c.field,
                 c.old_value,
                 c.new_value,
-                c.created_at
+                c.created_at,
+                c.actor
             ])?;
         }
         for d in &data.task_defaults {
@@ -1614,13 +1664,15 @@ fn put_person_workspaces(conn: &Connection, p: &Person) -> rusqlite::Result<()> 
 fn insert_task(conn: &Connection, t: &Task) -> rusqlite::Result<()> {
     conn.prepare_cached(
         "INSERT INTO tasks(id, workspace_id, title, description, status, priority, due, \
-         position, created_at, updated_at, completed_at, start, percent, parent_id) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14) \
+         position, created_at, updated_at, completed_at, start, percent, parent_id, \
+         created_by, updated_by) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16) \
          ON CONFLICT(id) DO UPDATE SET workspace_id = excluded.workspace_id, \
          title = excluded.title, description = excluded.description, status = excluded.status, \
          priority = excluded.priority, due = excluded.due, position = excluded.position, \
          updated_at = excluded.updated_at, completed_at = excluded.completed_at, \
-         start = excluded.start, percent = excluded.percent, parent_id = excluded.parent_id",
+         start = excluded.start, percent = excluded.percent, parent_id = excluded.parent_id, \
+         created_by = excluded.created_by, updated_by = excluded.updated_by",
     )?
     .execute(params![
         t.id,
@@ -1636,7 +1688,9 @@ fn insert_task(conn: &Connection, t: &Task) -> rusqlite::Result<()> {
         t.completed_at,
         t.start,
         t.percent,
-        t.parent_id
+        t.parent_id,
+        t.created_by,
+        t.updated_by
     ])?;
     insert_assignees(
         conn,
@@ -1694,13 +1748,13 @@ fn insert_assignees(
 fn insert_comment(conn: &Connection, c: &Comment) -> rusqlite::Result<usize> {
     conn.prepare_cached(
         "INSERT INTO comments(id, task_id, author_id, body, pinned, created_at, updated_at, \
-         status, review, anchor, reply_to, resolved_at, mentions) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13) \
+         status, review, anchor, reply_to, resolved_at, mentions, actor) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14) \
          ON CONFLICT(id) DO UPDATE SET body = excluded.body, pinned = excluded.pinned, \
          author_id = excluded.author_id, updated_at = excluded.updated_at, \
          status = excluded.status, review = excluded.review, anchor = excluded.anchor, \
          reply_to = excluded.reply_to, resolved_at = excluded.resolved_at, \
-         mentions = excluded.mentions",
+         mentions = excluded.mentions, actor = excluded.actor",
     )?
     .execute(params![
         c.id,
@@ -1717,7 +1771,8 @@ fn insert_comment(conn: &Connection, c: &Comment) -> rusqlite::Result<usize> {
             .map(|a| serde_json::to_string(a).expect("文字列だけの構造体")),
         c.reply_to,
         c.resolved_at,
-        c.mentions.join(",")
+        c.mentions.join(","),
+        c.actor
     ])
 }
 
@@ -1728,12 +1783,89 @@ pub(crate) fn insert_change(
     old: &str,
     new: &str,
     now: i64,
+    actor: &Actor,
 ) -> rusqlite::Result<usize> {
     conn.prepare_cached(
-        "INSERT INTO changes(id, task_id, field, old_value, new_value, created_at) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        "INSERT INTO changes(id, task_id, field, old_value, new_value, created_at, actor) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
     )?
-    .execute(params![new_id(), task_id, field, old, new, now])
+    .execute(params![new_id(), task_id, field, old, new, now, actor])
+}
+
+/// 中身を変えた時刻と人を残す。
+pub(crate) fn touch(
+    conn: &Connection,
+    task_id: &str,
+    now: i64,
+    actor: &Actor,
+) -> rusqlite::Result<usize> {
+    conn.prepare_cached("UPDATE tasks SET updated_at = ?2, updated_by = ?3 WHERE id = ?1")?
+        .execute(params![task_id, now, actor])
+}
+
+/// 作ったことを変更履歴に残す。作ったときの値（空でないもの）は、項目の名前と値の JSON にして
+/// 同じ行に入れる（[`crate::history::created_values`] で読む）。
+fn record_created(conn: &Connection, t: &Task, actor: &Actor) -> rusqlite::Result<()> {
+    let number = |n: u8| if n == 0 { String::new() } else { n.to_string() };
+    let fields = [
+        ("title", t.title.clone()),
+        ("description", t.description.clone()),
+        ("status", t.status.as_str().to_owned()),
+        ("priority", number(t.priority)),
+        ("start", t.start.clone().unwrap_or_default()),
+        ("due", t.due.clone().unwrap_or_default()),
+        ("percent", number(t.percent)),
+        ("parent", t.parent_id.clone().unwrap_or_default()),
+        ("assignees", t.assignee_ids.join(",")),
+        ("categories", t.categories.join(",")),
+        ("workspace", t.workspace_id.clone().unwrap_or_default()),
+    ];
+    let values: serde_json::Map<String, serde_json::Value> = fields
+        .into_iter()
+        .filter(|(_, v)| !v.is_empty())
+        .map(|(k, v)| (k.to_owned(), serde_json::Value::String(v)))
+        .collect();
+    let json = serde_json::Value::Object(values).to_string();
+    insert_change(conn, &t.id, CREATED_FIELD, "", &json, t.created_at, actor)?;
+    Ok(())
+}
+
+/// 変更履歴が [`MAX_CHANGES_PER_TASK`] 件か [`MAX_CHANGE_BYTES_PER_TASK`] を超えたら、
+/// 古いものから消す。作成の記録（誰がいつ作ったか）は残す。
+pub(crate) fn trim_changes(conn: &Connection, task_id: &str) -> rusqlite::Result<()> {
+    let (count, bytes): (i64, i64) = conn
+        .prepare_cached(
+            "SELECT COUNT(*), COALESCE(SUM(LENGTH(CAST(old_value AS BLOB)) \
+             + LENGTH(CAST(new_value AS BLOB))), 0) FROM changes WHERE task_id = ?1",
+        )?
+        .query_row(params![task_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    if count as usize <= MAX_CHANGES_PER_TASK && bytes <= MAX_CHANGE_BYTES_PER_TASK {
+        return Ok(());
+    }
+    // 新しいものから数えて、件数と大きさの両方に収まるところまで残す
+    let rows: Vec<(String, i64)> = conn
+        .prepare_cached(
+            "SELECT id, LENGTH(CAST(old_value AS BLOB)) + LENGTH(CAST(new_value AS BLOB)) \
+             FROM changes WHERE task_id = ?1 AND field <> ?2 \
+             ORDER BY created_at DESC, rowid DESC",
+        )?
+        .query_map(params![task_id, CREATED_FIELD], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    let (mut kept, mut size) = (0usize, 0i64);
+    let mut stmt = conn.prepare_cached("DELETE FROM changes WHERE id = ?1")?;
+    for (id, len) in rows {
+        // 作成の記録の分も、上限に数える。いちばん新しい変更は、大きくても残す
+        if kept == 0 || (kept + 1 < MAX_CHANGES_PER_TASK && size + len <= MAX_CHANGE_BYTES_PER_TASK)
+        {
+            kept += 1;
+            size += len;
+        } else {
+            stmt.execute(params![id])?;
+        }
+    }
+    Ok(())
 }
 
 fn workspace_from_row(r: &Row<'_>) -> rusqlite::Result<Workspace> {
@@ -1784,6 +1916,8 @@ fn task_from_row(r: &Row<'_>) -> rusqlite::Result<Task> {
         created_at: r.get(8)?,
         updated_at: r.get(9)?,
         completed_at: r.get(10)?,
+        created_by: r.get(14)?,
+        updated_by: r.get(15)?,
     })
 }
 
@@ -1811,11 +1945,12 @@ fn comment_from_row(r: &Row<'_>) -> rusqlite::Result<Comment> {
             .filter(|id| !id.is_empty())
             .map(str::to_owned)
             .collect(),
+        actor: r.get(13)?,
     })
 }
 
 const COMMENT_COLUMNS: &str = "id, task_id, author_id, body, pinned, created_at, updated_at, \
-     status, review, anchor, reply_to, resolved_at, mentions";
+     status, review, anchor, reply_to, resolved_at, mentions, actor";
 
 fn change_from_row(r: &Row<'_>) -> rusqlite::Result<Change> {
     Ok(Change {
@@ -1825,6 +1960,7 @@ fn change_from_row(r: &Row<'_>) -> rusqlite::Result<Change> {
         old_value: r.get(3)?,
         new_value: r.get(4)?,
         created_at: r.get(5)?,
+        actor: r.get(6)?,
     })
 }
 
@@ -2241,7 +2377,7 @@ mod tests {
         // 何も変えなければ履歴も更新時刻も変わらない
         let same = s.update_task(&t.id, &TaskDraft::from(&t)).unwrap();
         assert_eq!(same, t);
-        assert!(s.changes(&t.id).unwrap().is_empty());
+        assert!(s.edits(&t.id).unwrap().is_empty());
 
         let d = TaskDraft {
             title: "new".into(),
@@ -2258,7 +2394,7 @@ mod tests {
         assert!(u.completed_at.is_some());
         assert_eq!(u.created_at, t.created_at);
         let mut fields: Vec<String> = s
-            .changes(&t.id)
+            .edits(&t.id)
             .unwrap()
             .into_iter()
             .map(|c| c.field)
@@ -2276,7 +2412,7 @@ mod tests {
                 "title"
             ]
         );
-        let ch = s.changes(&t.id).unwrap();
+        let ch = s.edits(&t.id).unwrap();
         let title = ch.iter().find(|c| c.field == "title").unwrap();
         assert_eq!(
             (title.old_value.as_str(), title.new_value.as_str()),
@@ -2317,7 +2453,7 @@ mod tests {
         s.create_task(Some(&b.id), &draft("first")).unwrap();
         let t = s.create_task(Some(&a.id), &draft("t")).unwrap();
         s.move_task(&t.id, Some(&a.id)).unwrap();
-        assert!(s.changes(&t.id).unwrap().is_empty());
+        assert!(s.edits(&t.id).unwrap().is_empty());
         assert!(matches!(
             s.move_task(&t.id, Some("nope")),
             Err(Error::NotFound(_))
@@ -2326,7 +2462,7 @@ mod tests {
         let moved = s.task(&t.id).unwrap();
         assert_eq!(moved.workspace_id.as_deref(), Some(b.id.as_str()));
         assert_eq!(moved.position, 1);
-        let ch = s.changes(&t.id).unwrap();
+        let ch = s.edits(&t.id).unwrap();
         assert_eq!(ch.len(), 1);
         assert_eq!(ch[0].field, "workspace");
         assert_eq!(
@@ -2335,7 +2471,7 @@ mod tests {
         );
         s.delete_task(&t.id).unwrap();
         assert!(matches!(s.delete_task(&t.id), Err(Error::NotFound(_))));
-        assert!(s.changes(&t.id).unwrap().is_empty());
+        assert!(s.edits(&t.id).unwrap().is_empty());
     }
 
     #[test]
@@ -2479,7 +2615,7 @@ mod extra_tests {
         d.parent_id = Some(parent.id.clone());
         s.update_task(&grand.id, &d).unwrap();
         assert_eq!(s.subtasks(&parent.id).unwrap().len(), 2);
-        assert_eq!(s.changes(&grand.id).unwrap()[0].field, "parent");
+        assert_eq!(s.edits(&grand.id).unwrap()[0].field, "parent");
         // 空文字の親は「なし」
         d.parent_id = Some(String::new());
         assert_eq!(s.update_task(&grand.id, &d).unwrap().parent_id, None);
@@ -2533,7 +2669,7 @@ mod extra_tests {
         assert_eq!((u.start.clone(), u.percent), (None, 0));
         assert_eq!(s.categories().unwrap(), ["会計"]);
         let fields: Vec<String> = s
-            .changes(&t.id)
+            .edits(&t.id)
             .unwrap()
             .into_iter()
             .map(|c| c.field)
@@ -2654,7 +2790,7 @@ mod unfiled_tests {
         s.move_task(&t.id, None).unwrap();
         assert_eq!(s.task(&t.id).unwrap().workspace_id, None);
         assert_eq!(s.task(&t.id).unwrap().position, 2);
-        let ch = s.changes(&t.id).unwrap();
+        let ch = s.edits(&t.id).unwrap();
         let last = ch.iter().rfind(|c| c.field == "workspace").unwrap();
         assert_eq!(
             (last.old_value.as_str(), last.new_value.as_str()),
@@ -2764,7 +2900,7 @@ mod raci_tests {
         s.set_assignee_roles(&task.id, &ids[1], Roles::of(&[Role::A, Role::C]))
             .unwrap();
         let changes: Vec<(String, String)> = s
-            .changes(&task.id)
+            .edits(&task.id)
             .unwrap()
             .into_iter()
             .filter(|c| c.field == "assignee_roles")
@@ -2874,7 +3010,7 @@ mod raci_tests {
         s.set_assignee_done(&task.id, &ids[0], true).unwrap();
         s.set_assignee_done(&task.id, &ids[0], false).unwrap();
         let changes: Vec<(String, String)> = s
-            .changes(&task.id)
+            .edits(&task.id)
             .unwrap()
             .into_iter()
             .filter(|c| c.field == "assignee_done")
@@ -3367,5 +3503,199 @@ mod disk_tests {
         let me = store.create_person("田中", true).unwrap();
         store.ensure_self().unwrap();
         assert_eq!(store.people().unwrap(), [me]);
+    }
+}
+
+#[cfg(test)]
+mod actor_tests {
+    use super::*;
+    use crate::history;
+
+    fn draft(title: &str) -> TaskDraft {
+        TaskDraft {
+            title: title.into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn creation_and_updates_remember_who() {
+        let mut s = Store::open_in_memory().unwrap();
+        let w = s.create_workspace(None, "W").unwrap();
+        let t = s.create_task(Some(&w.id), &draft("下見")).unwrap();
+        assert_eq!((&t.created_by, &t.updated_by), (&Actor::Me, &Actor::Me));
+        // 作成の記録が 1 行、作ったときの値つきで残る
+        let ch = s.changes(&t.id).unwrap();
+        assert_eq!(ch.len(), 1);
+        assert_eq!(ch[0].field, CREATED_FIELD);
+        let entries = history::entries(&ch);
+        assert!(entries[0].created);
+        let fields: Vec<&str> = entries[0]
+            .changes
+            .iter()
+            .map(|c| c.field.as_str())
+            .collect();
+        assert!(fields.contains(&"title") && fields.contains(&"workspace"));
+
+        let ai = Actor::ai("Claude", Some("GitHub の定期チェック"));
+        let mut d = TaskDraft::from(&t);
+        d.title = "会場の下見".into();
+        let u = s.acting(ai.clone(), |s| s.update_task(&t.id, &d)).unwrap();
+        assert_eq!((&u.created_by, &u.updated_by), (&Actor::Me, &ai));
+        assert_eq!(s.actor(), &Actor::Me, "終わったら自分に戻る");
+        let last = s.changes(&t.id).unwrap().pop().unwrap();
+        assert_eq!((last.field.as_str(), &last.actor), ("title", &ai));
+
+        // 何も変えなければ、最後に変えた人もそのまま
+        let agent = Actor::agent("claude-code");
+        s.set_actor(agent.clone());
+        let same = s.update_task(&t.id, &d).unwrap();
+        assert_eq!(same.updated_by, ai);
+        // 移す・表示する・役を変える・担当の分を完了にするのも、変えた人が残る
+        let p = s.create_person("佐藤", false).unwrap();
+        let q = s.create_person("鈴木", false).unwrap();
+        d.assignee_ids = vec![p.id.clone(), q.id.clone()];
+        s.update_task(&t.id, &d).unwrap();
+        let other = s.create_workspace(None, "X").unwrap();
+        s.link_task(&t.id, &other.id).unwrap();
+        s.set_assignee_roles(&t.id, &p.id, Roles::parse("A"))
+            .unwrap();
+        s.set_assignee_done(&t.id, &p.id, true).unwrap();
+        s.move_task(&t.id, Some(&other.id)).unwrap();
+        let task = s.task(&t.id).unwrap();
+        assert_eq!(task.updated_by, agent);
+        let fields: Vec<(String, Actor)> = s
+            .changes(&t.id)
+            .unwrap()
+            .into_iter()
+            .skip(2)
+            .map(|c| (c.field, c.actor))
+            .collect();
+        assert_eq!(
+            fields,
+            [
+                "assignees",
+                "link",
+                "assignee_roles",
+                "assignee_done",
+                "workspace"
+            ]
+            .map(|f| (f.to_owned(), agent.clone()))
+        );
+        // コメントにも、書いた操作をしたものが残る
+        let c = s.add_comment(&t.id, None, "メモ").unwrap();
+        assert_eq!(c.actor, agent);
+        assert_eq!(s.comment(&c.id).unwrap().actor, agent);
+    }
+
+    #[test]
+    fn a_ticket_report_is_by_the_reporter() {
+        let mut s = Store::open_in_memory().unwrap();
+        let p = s.create_person("佐藤", false).unwrap();
+        let q = s.create_person("鈴木", false).unwrap();
+        let mut d = draft("告知");
+        d.assignee_ids = vec![p.id.clone(), q.id.clone()];
+        let t = s.create_task(None, &d).unwrap();
+        let issued = s.issue_ticket(&t.id, Some(&p.id)).unwrap();
+        let comment = s.redeem_ticket(&issued.secret, "公開しました").unwrap();
+        let reporter = Actor::Ticket(Some(p.id.clone()));
+        assert_eq!(comment.actor, reporter);
+        let last = s.changes(&t.id).unwrap().pop().unwrap();
+        assert_eq!(
+            (last.field.as_str(), &last.actor),
+            ("assignee_done", &reporter)
+        );
+        assert_eq!(s.task(&t.id).unwrap().updated_by, reporter);
+        assert_eq!(s.actor(), &Actor::Me);
+    }
+
+    #[test]
+    fn history_is_trimmed_per_task_but_keeps_the_creation() {
+        let mut s = Store::open_in_memory().unwrap();
+        let t = s.create_task(None, &draft("t")).unwrap();
+        let mut d = TaskDraft::from(&t);
+        for n in 0..MAX_CHANGES_PER_TASK + 20 {
+            d.title = format!("t{n}");
+            s.update_task(&t.id, &d).unwrap();
+        }
+        let ch = s.changes(&t.id).unwrap();
+        assert_eq!(ch.len(), MAX_CHANGES_PER_TASK);
+        assert_eq!(ch[0].field, CREATED_FIELD, "作成の記録は残る");
+        assert_eq!(
+            ch.last().unwrap().new_value,
+            format!("t{}", MAX_CHANGES_PER_TASK + 19)
+        );
+        assert_eq!(ch[1].old_value, "t20", "古いものから消える");
+
+        // 大きな説明を何度も書き換えても、大きさの上限で収まる
+        let big = "あ".repeat(100_000);
+        for n in 0..10 {
+            d.description = format!("{n}{big}");
+            s.update_task(&t.id, &d).unwrap();
+        }
+        let bytes: i64 = s
+            .changes(&t.id)
+            .unwrap()
+            .iter()
+            .map(|c| (c.old_value.len() + c.new_value.len()) as i64)
+            .sum();
+        assert!(bytes <= MAX_CHANGE_BYTES_PER_TASK, "{bytes}");
+        assert_eq!(s.changes(&t.id).unwrap()[0].field, CREATED_FIELD);
+    }
+
+    #[test]
+    fn who_survives_export_and_import() {
+        let mut s = Store::open_in_memory().unwrap();
+        let ai = Actor::ai("Claude", None);
+        let t = s
+            .acting(ai.clone(), |s| s.create_task(None, &draft("t")))
+            .unwrap();
+        let mut d = TaskDraft::from(&t);
+        d.title = "u".into();
+        s.acting(Actor::Reminders, |s| s.update_task(&t.id, &d))
+            .unwrap();
+        s.acting(Actor::agent("codex"), |s| s.add_comment(&t.id, None, "x"))
+            .unwrap();
+        let mut zip = std::io::Cursor::new(Vec::new());
+        crate::archive::export(&s, &mut zip).unwrap();
+        let mut other = Store::open_in_memory().unwrap();
+        zip.set_position(0);
+        crate::archive::import(&mut other, zip).unwrap();
+        let back = other.task(&t.id).unwrap();
+        assert_eq!((back.created_by, back.updated_by), (ai, Actor::Reminders));
+        assert_eq!(other.changes(&t.id).unwrap(), s.changes(&t.id).unwrap());
+        assert_eq!(
+            other.comments(&t.id).unwrap()[0].actor,
+            Actor::agent("codex")
+        );
+    }
+
+    /// 前の版のデータベースの行は、誰がしたか分からないものとして読める。
+    #[test]
+    fn rows_before_the_upgrade_are_unknown() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+        let tx = conn.transaction().unwrap();
+        for sql in &crate::schema::MIGRATIONS[..14] {
+            tx.execute_batch(sql).unwrap();
+        }
+        tx.pragma_update(None, "user_version", 14).unwrap();
+        tx.execute_batch(
+            "INSERT INTO tasks(id, title, description, status, priority, position, created_at, updated_at)
+             VALUES ('t', '下見', '', 'needs_action', 0, 0, 0, 0);
+             INSERT INTO changes(id, task_id, field, old_value, new_value, created_at)
+             VALUES ('c', 't', 'title', 'a', '下見', 1);",
+        )
+        .unwrap();
+        tx.commit().unwrap();
+        let s = Store::init(conn).unwrap();
+        let t = s.task("t").unwrap();
+        assert_eq!(
+            (t.created_by, t.updated_by),
+            (Actor::Unknown, Actor::Unknown)
+        );
+        let ch = s.changes("t").unwrap();
+        assert_eq!(ch[0].actor, Actor::Unknown);
+        assert!(history::misses_older(&history::entries(&ch)));
     }
 }

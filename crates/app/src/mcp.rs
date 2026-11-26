@@ -275,6 +275,8 @@ pub struct Server<F> {
     open: Option<F>,
     store: Option<Store>,
     now: fn() -> i64,
+    /// つないできた相手。`initialize` で名乗った名前で、変更履歴に残す。
+    actor: malakt_core::Actor,
 }
 
 impl<F: FnOnce() -> malakt_core::Result<Store>> Server<F> {
@@ -284,6 +286,7 @@ impl<F: FnOnce() -> malakt_core::Result<Store>> Server<F> {
             open: Some(open),
             store: None,
             now: unix_now,
+            actor: malakt_core::Actor::agent(""),
         }
     }
 
@@ -314,7 +317,10 @@ impl<F: FnOnce() -> malakt_core::Result<Store>> Server<F> {
             Some(args) => args,
         };
         let now = (self.now)();
-        call_tool(self.store()?, now, name, args)
+        let actor = self.actor.clone();
+        let store = self.store()?;
+        store.set_actor(actor);
+        call_tool(store, now, name, args)
     }
 
     /// 受け取った 1 行に答える。通知には何も返さない。
@@ -339,6 +345,9 @@ impl<F: FnOnce() -> malakt_core::Result<Store>> Server<F> {
         let params = message.get("params").unwrap_or(&null);
         let result = match method {
             "initialize" => {
+                if let Some(name) = params.pointer("/clientInfo/name").and_then(Value::as_str) {
+                    self.actor = malakt_core::Actor::agent(name);
+                }
                 // 相手の版に対応していればその版で、していなければこちらの最新で答える
                 let asked = params.get("protocolVersion").and_then(Value::as_str);
                 let version = asked
@@ -515,6 +524,42 @@ mod tests {
         assert_eq!(reply["error"]["code"], -32601);
         let broken: Value = serde_json::from_str(&s.handle("{oops").unwrap()).unwrap();
         assert_eq!(broken["error"]["code"], -32700);
+    }
+
+    /// つないできた相手の名前が、作った人・変えた人として残る。名乗らなければ「外部エージェント」。
+    #[test]
+    fn changes_are_by_the_connected_agent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("data.sqlite3");
+        drop(Store::open(&path).unwrap());
+        let mut s = server(&path);
+        ask(
+            &mut s,
+            "initialize",
+            json!({"protocolVersion": "2025-03-26", "capabilities": {},
+                   "clientInfo": {"name": "claude-code", "version": "2"}}),
+        );
+        let made = tool(&mut s, "create_task", json!({"title": "告知を出す"}));
+        let id = made["id"].as_str().unwrap().to_owned();
+        drop(s);
+        let store = Store::open(&path).unwrap();
+        let task = store.task(&id).unwrap();
+        assert_eq!(task.created_by, malakt_core::Actor::agent("claude-code"));
+        assert_eq!(
+            store.changes(&id).unwrap()[0].actor,
+            malakt_core::Actor::agent("claude-code")
+        );
+        drop(store);
+
+        let mut s = server(&path);
+        tool(
+            &mut s,
+            "update_task",
+            json!({"id": id, "status": "in_process"}),
+        );
+        drop(s);
+        let task = Store::open(&path).unwrap().task(&id).unwrap();
+        assert_eq!(task.updated_by, malakt_core::Actor::agent(""));
     }
 
     #[test]
