@@ -17,12 +17,14 @@ pub struct Db {
     open_mark: Option<i64>,
     /// どれかのウィンドウで最後にキーやマウスを使った時刻（UNIX 秒）。自動でロックするときに見る。
     pub last_input: i64,
+    /// 次に期限を知らせる時刻（UNIX 秒）。この時刻が来たら、全ウィンドウを読み直させて通知を作る。
+    pub next_alert: Option<i64>,
 }
 
 /// 解除の印を書き直す間隔（秒）。[`lock::OPEN_FOR`] より十分短くする。
 const OPEN_MARK_EVERY: i64 = 60;
 
-fn unix_now() -> i64 {
+pub fn unix_now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -58,6 +60,7 @@ impl Db {
             data_version,
             open_mark: None,
             last_input: unix_now(),
+            next_alert: None,
         }
     }
 
@@ -98,11 +101,13 @@ impl Db {
         }
     }
 
-    /// 期限が今日のタスクの通知を作り、まだ OS に出していない通知を取り出す。
+    /// 知らせる時刻が来た期限の通知を作り、まだ OS に出していない通知を取り出す。
     /// 取り出したものは「出した」と記録するので、どのウィンドウから呼んでも 1 回しか出ない。
     /// 戻り値は、出す通知と、ほかのウィンドウに知らせる変更があったか。
-    pub fn take_notices(&mut self, today: &str) -> (Vec<malakt_core::notice::Notice>, bool) {
-        let made = self.store.sweep_due_today(today).unwrap_or(0);
+    pub fn take_notices(&mut self, now: i64) -> (Vec<malakt_core::notice::Notice>, bool) {
+        let sweep = self.store.sweep_due_alerts(now).unwrap_or_default();
+        self.next_alert = sweep.next;
+        let made = sweep.made;
         let pending = self.store.undelivered_notices().unwrap_or_default();
         if !pending.is_empty() {
             let ids: Vec<_> = pending.iter().map(|n| n.id.clone()).collect();
@@ -228,8 +233,9 @@ pub fn close_open_mark(cx: &mut App) {
 /// 外からの変更を見張る間隔。MCP サーバーやコマンドからの変更を、すぐ画面に出す。
 const WATCH_EVERY: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// 外からの変更と日付の変わり目を見張る。2 秒ごとに確かめ、変わっていたら全ウィンドウを読み直させる
-/// （読み直しのときに、期限が今日の通知も作られる）。操作がないまま決めた時間が過ぎたら、ロックする。
+/// 外からの変更と日付の変わり目、期限を知らせる時刻を見張る。2 秒ごとに確かめ、変わっていたら
+/// 全ウィンドウを読み直させる（読み直しのときに、期限の通知も作られる）。
+/// 操作がないまま決めた時間が過ぎたら、ロックする。
 pub fn watch(cx: &mut App) {
     cx.spawn(async move |cx| {
         let mut day = malakt_core::view::today();
@@ -241,7 +247,8 @@ pub fn watch(cx: &mut App) {
                 lock_if_idle(unix_now(), cx);
                 shared(cx).update(cx, |db, cx| {
                     db.sync_open_mark(unix_now());
-                    if db.changed_outside() || new_day {
+                    let alert_due = db.next_alert.is_some_and(|at| unix_now() >= at);
+                    if db.changed_outside() || new_day || alert_due {
                         cx.notify();
                     }
                 })

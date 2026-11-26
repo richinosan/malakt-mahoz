@@ -76,6 +76,7 @@ Windows のアプリは、起動のときに黒い窓を出さないように作
 | `get_workspace_settings` / `update_workspace_settings` | ワークスペースの基準日、タスクを追加したときに入る値、AI に伝えること、ターミナルのフォルダー |
 | `create_person` / `update_person` / `delete_person` | 担当者を作る、名前・メモ・使うワークスペースを変える、削除する。`create_person` に `workspace_id` を渡すと、そのワークスペースの担当者になる |
 | `list_categories` / `list_notices` / `mark_notices_read` | カテゴリの一覧、通知の一覧、通知を既読にする |
+| `get_due_alerts` / `set_due_alerts` | 期限をいつ知らせるか（全体の標準と、タスクごとの上書き） |
 | `undo` / `redo` | このサーバーからの変更を 1 つ元に戻す、やり直す |
 
 - 担当者は ID でも名前でも指定できます。登録されていない名前は、タスクのワークスペースの担当者としてその場で登録します（どこにも入っていないタスクでは、すべてのワークスペースの担当者）

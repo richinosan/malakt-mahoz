@@ -10,6 +10,7 @@ use gpui_kit::component::slider::{SliderEvent, SliderState};
 use gpui_kit::component::text::TextViewState;
 use gpui_kit::component::WindowExt;
 use gpui_kit::*;
+use malakt_core::alert;
 use malakt_core::bulk::{self, BulkOp, ListMode};
 use malakt_core::notice::Notice;
 use malakt_core::ticket::IssuedTicket;
@@ -3413,6 +3414,104 @@ impl MainView {
         saved
     }
 
+    // ---- 期限の通知 ----
+
+    /// 期限をいつ知らせるかの、全体の標準。
+    pub fn due_alert_standard(&self, cx: &App) -> alert::Standard {
+        self.db
+            .read(cx)
+            .store
+            .due_alert_standard()
+            .unwrap_or_default()
+    }
+
+    /// 時刻つきの期限の標準で、`minutes` 分前を入れる・外す。
+    pub fn toggle_due_alert_timed(&mut self, minutes: u32, cx: &mut Context<Self>) -> bool {
+        let mut values = self.due_alert_standard(cx).timed;
+        toggle_value(&mut values, minutes);
+        self.set_due_alert_timed(&values, cx)
+    }
+
+    pub fn set_due_alert_timed(&mut self, values: &[u32], cx: &mut Context<Self>) -> bool {
+        let saved = self.write(cx, |s| s.set_due_alert_timed(values)).is_some();
+        cx.notify();
+        saved
+    }
+
+    /// 日付だけの期限の標準で、`days` 日前を入れる・外す。
+    pub fn toggle_due_alert_date(&mut self, days: u32, cx: &mut Context<Self>) -> bool {
+        let mut values = self.due_alert_standard(cx).date;
+        toggle_value(&mut values, days);
+        self.set_due_alert_date(&values, cx)
+    }
+
+    pub fn set_due_alert_date(&mut self, values: &[u32], cx: &mut Context<Self>) -> bool {
+        let saved = self.write(cx, |s| s.set_due_alert_date(values)).is_some();
+        cx.notify();
+        saved
+    }
+
+    /// 日付だけの期限を知らせる時刻（時）を変える。
+    pub fn set_due_alert_hour(&mut self, hour: u32, cx: &mut Context<Self>) -> bool {
+        let saved = self.write(cx, |s| s.set_due_alert_hour(hour)).is_some();
+        cx.notify();
+        saved
+    }
+
+    /// タスクごとの上書き。
+    pub fn task_alerts(&self, task_id: &str, cx: &App) -> alert::TaskAlerts {
+        self.db
+            .read(cx)
+            .store
+            .task_alerts(task_id)
+            .unwrap_or_else(|_| alert::TaskAlerts {
+                task_id: task_id.to_owned(),
+                ..Default::default()
+            })
+    }
+
+    /// タスクの期限の通知で、1 つを入れる・外す。期限が時刻つきなら何分前、日付だけなら何日前。
+    /// 標準のままなら、標準から始めて上書きにする。
+    pub fn toggle_task_alert(
+        &mut self,
+        task_id: &str,
+        timed: bool,
+        value: u32,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let standard = self.due_alert_standard(cx);
+        let mut own = self.task_alerts(task_id, cx);
+        let slot = if timed { &mut own.timed } else { &mut own.date };
+        let mut values = slot
+            .take()
+            .unwrap_or(if timed { standard.timed } else { standard.date });
+        toggle_value(&mut values, value);
+        *slot = Some(values);
+        self.set_task_alerts(&own, cx)
+    }
+
+    /// タスクの期限の通知を、時刻つき（`timed`）か日付だけの側で、標準に戻す。
+    pub fn reset_task_alerts(
+        &mut self,
+        task_id: &str,
+        timed: bool,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let mut own = self.task_alerts(task_id, cx);
+        if timed {
+            own.timed = None;
+        } else {
+            own.date = None;
+        }
+        self.set_task_alerts(&own, cx)
+    }
+
+    pub fn set_task_alerts(&mut self, alerts: &alert::TaskAlerts, cx: &mut Context<Self>) -> bool {
+        let saved = self.write(cx, |s| s.set_task_alerts(alerts)).is_some();
+        cx.notify();
+        saved
+    }
+
     /// ロック中の OS の通知に何を出すかを変える。
     pub fn set_locked_notices(
         &mut self,
@@ -3595,7 +3694,7 @@ impl MainView {
 
     // ---- 通知 ----
 
-    /// 期限が今日のタスクの通知を作り、まだ出していない通知を OS の通知に出す。
+    /// 知らせる時刻が来た期限の通知を作り、まだ出していない通知を OS の通知に出す。
     /// ロック中も出す。そのときはコメントの本文を出さず、タイトルも設定によっては出さない
     /// （[`lock::LockedNotices`]）。ロック中に押された通知は、解除してから開く。
     pub fn deliver_notices(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -3610,9 +3709,9 @@ impl MainView {
         } else {
             Some(lock::locked_notices(&self.db.read(cx).store).unwrap_or_default())
         };
-        let today = view::today();
+        let now = crate::db::unix_now();
         let (pending, changed) = self.db.update(cx, |db, cx| {
-            let (pending, made) = db.take_notices(&today);
+            let (pending, made) = db.take_notices(now);
             // 通知が増えたときだけ、ほかのウィンドウにも読み直させる
             if made {
                 cx.notify();
@@ -4801,6 +4900,16 @@ impl AssetSource for Assets {
 
     fn list(&self, path: &str) -> Result<Vec<SharedString>> {
         gpui_kit::assets::Assets.list(path)
+    }
+}
+
+/// 並びに `value` がなければ入れ、あれば外す。
+fn toggle_value(values: &mut Vec<u32>, value: u32) {
+    if let Some(ix) = values.iter().position(|v| *v == value) {
+        values.remove(ix);
+    } else {
+        values.push(value);
+        values.sort_unstable();
     }
 }
 

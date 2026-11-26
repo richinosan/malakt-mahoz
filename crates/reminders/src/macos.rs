@@ -171,7 +171,7 @@ impl Os for Reminders {
             let notes = (!item.notes.is_empty()).then(|| NSString::from_str(&item.notes));
             reminder.setNotes(notes.as_deref());
             reminder.setPriority(usize::from(item.priority));
-            // 期限。時刻があるときだけ、その時刻に知らせる
+            // 期限と、アプリの設定で決めた知らせる時刻
             reminder.setAlarms(None);
             match item.due_parts() {
                 Some((year, month, day, time)) => {
@@ -182,12 +182,12 @@ impl Os for Reminders {
                     if let Some((hour, minute)) = time {
                         due.setHour(hour as isize);
                         due.setMinute(minute as isize);
-                        if let Some(at) = item.fire_at {
-                            let at = NSDate::dateWithTimeIntervalSince1970(at as f64);
-                            reminder.addAlarm(&EKAlarm::alarmWithAbsoluteDate(&at));
-                        }
                     }
                     reminder.setDueDateComponents(Some(&due));
+                    for at in &item.alarms {
+                        let at = NSDate::dateWithTimeIntervalSince1970(*at as f64);
+                        reminder.addAlarm(&EKAlarm::alarmWithAbsoluteDate(&at));
+                    }
                 }
                 None => reminder.setDueDateComponents(None),
             }

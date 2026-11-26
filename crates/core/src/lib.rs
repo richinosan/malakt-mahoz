@@ -1,12 +1,13 @@
 //! malakt-mahoz のデータとロジック。UI には依存しない。
 //!
 //! - `Store`: SQLite への保存と読み出し
+//! - `alert`: 期限の通知のタイミング（何分前・何日前に知らせるか）
 //! - `archive`: zip へのエクスポート / インポート
 //! - `attachment`: 添付ファイル（重複なし・圧縮つきで保存）
 //! - `bulk`: 複数のタスクをまとめて変える操作と、一覧での選択
 //! - `defaults`: ワークスペースごとのタスク追加時の既定値と基準日
 //! - `links`: 1 つのタスクを複数のワークスペースに表示する
-//! - `notice`: 通知（期限が今日、ほかの人からの変更）
+//! - `notice`: 通知（期限が近い、ほかの人からの変更）
 //! - `remind`: OS のリマインダーとの連携（何を作り・直し・消すかの判断）
 //! - `ticket`: 完了チケット（画面で発行し、コマンドで完了報告する）
 //! - `undo`: 元に戻す・やり直し（上限つきの記録）
@@ -17,6 +18,7 @@
 
 #![cfg_attr(test, allow(clippy::cloned_ref_to_slice_refs))]
 
+pub mod alert;
 pub mod archive;
 pub mod attachment;
 pub mod bulk;

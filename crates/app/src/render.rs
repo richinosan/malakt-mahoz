@@ -234,6 +234,16 @@ const APPEARANCE_HEIGHT: Pixels = px(620.);
 const CONTROL_WIDTH: Pixels = px(220.);
 const PRESET_WIDTH: Pixels = px(124.);
 
+/// 期限の通知で選べるものと、その名前。`timed` は時刻つきの期限（何分前）、ほかは日付だけの期限（何日前）。
+fn alert_kind(timed: bool) -> (&'static [u32], fn(u32) -> String) {
+    use malakt_core::alert;
+    if timed {
+        (&alert::TIMED_CHOICES, alert::timed_label)
+    } else {
+        (&alert::DATE_CHOICES, alert::date_label)
+    }
+}
+
 /// 「カスタマイズ」の設定 1 つ。
 struct Setting {
     section: crate::state::CustomizeSection,
@@ -265,6 +275,9 @@ enum SettingKey {
     AutoUpdate,
     Export,
     Import,
+    AlertTimed,
+    AlertDate,
+    AlertHour,
 }
 
 impl Setting {
@@ -837,6 +850,77 @@ impl MainView {
             );
         }
         line
+    }
+
+    /// 詳細の「通知」。押すと、期限をいつ知らせるかのメニューが開く。期限がなければ出さない。
+    fn task_alert_menu(
+        &self,
+        task_id: &str,
+        due: Option<&str>,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        use malakt_core::alert;
+        let due = due?;
+        let timed = malakt_core::time_of(due).is_some();
+        let standard = self.due_alert_standard(cx);
+        let own = self.task_alerts(task_id, cx);
+        let (choices, label) = alert_kind(timed);
+        let (own, base) = if timed {
+            (own.timed, standard.timed)
+        } else {
+            (own.date, standard.date)
+        };
+        let shown = match &own {
+            Some(values) => alert::summary(values, label),
+            None => format!("標準（{}）", alert::summary(&base, label)),
+        };
+        let muted = cx.theme().muted_foreground;
+        let view = cx.entity().downgrade();
+        let task_id = task_id.to_owned();
+        let chosen = own.clone().unwrap_or_else(|| base.clone());
+        let standard_label = format!("標準に合わせる（{}）", alert::summary(&base, label));
+        let menu = Button::new("task-alerts")
+            .outline()
+            .small()
+            .child(
+                row()
+                    .min_w_0()
+                    .gap_2()
+                    .child(div().min_w_0().truncate().child(shown))
+                    .child(app_icon("chevron-down").small().text_color(muted)),
+            )
+            .dropdown_menu(move |mut menu, _, _| {
+                let reset_view = view.clone();
+                let reset_task = task_id.clone();
+                menu = menu
+                    .item(
+                        PopupMenuItem::new(standard_label.clone())
+                            .checked(own.is_none())
+                            .on_click(move |_, _, cx| {
+                                // ウィンドウを閉じたあとなら、反映する先がない
+                                let _ = reset_view.update(cx, |this, cx| {
+                                    this.reset_task_alerts(&reset_task, timed, cx);
+                                });
+                            }),
+                    )
+                    .separator();
+                for value in choices.iter().copied() {
+                    let view = view.clone();
+                    let task_id = task_id.clone();
+                    menu = menu.item(
+                        PopupMenuItem::new(label(value))
+                            .checked(chosen.contains(&value))
+                            .on_click(move |_, _, cx| {
+                                // ウィンドウを閉じたあとなら、反映する先がない
+                                let _ = view.update(cx, |this, cx| {
+                                    this.toggle_task_alert(&task_id, timed, value, cx);
+                                });
+                            }),
+                    );
+                }
+                menu
+            });
+        Some(div().flex().child(menu).into_any_element())
     }
 
     fn due_label(&self, task: &Todo, cx: &App) -> Div {
@@ -4896,6 +4980,10 @@ impl MainView {
                         .child(self.property("担当", cx).child(people))
                         .child(self.property("開始日", cx).child(start))
                         .child(self.property("期限", cx).child(due))
+                        .when_some(
+                            self.task_alert_menu(&task.id, task.due.as_deref(), cx),
+                            |d, menu| d.child(self.property("通知", cx).child(menu)),
+                        )
                         .child(self.property("進捗", cx).child(percent))
                         .child(self.property("カテゴリ", cx).child(categories))
                         .child(self.property("親タスク", cx).child(parent))
@@ -5538,6 +5626,29 @@ impl MainView {
                 list(&["時間"]),
             ));
         }
+        all.extend([
+            Setting::new(
+                Section::Notices,
+                SettingKey::AlertTimed,
+                "時刻つきの期限",
+                None,
+                list(&["期限", "通知", "リマインダー", "分前", "時間前"]),
+            ),
+            Setting::new(
+                Section::Notices,
+                SettingKey::AlertDate,
+                "日付だけの期限",
+                None,
+                list(&["期限", "通知", "リマインダー", "当日", "前日"]),
+            ),
+            Setting::new(
+                Section::Notices,
+                SettingKey::AlertHour,
+                "日付だけの期限の時刻",
+                None,
+                list(&["期限", "通知", "時刻"]),
+            ),
+        ]);
         if let Some(name) = crate::reminders::setting_label(cx) {
             all.push(Setting::new(
                 Section::Notices,
@@ -5616,6 +5727,11 @@ impl MainView {
                     &theme,
                 );
             }
+            SettingKey::AlertTimed | SettingKey::AlertDate => {
+                return edge(div())
+                    .child(self.due_alert_row(item, item.key == SettingKey::AlertTimed, cx))
+                    .into_any_element();
+            }
             _ => {}
         }
         let look = crate::theme::look(cx);
@@ -5658,7 +5774,45 @@ impl MainView {
                 .test_support()
         };
         let control: AnyElement = match item.key {
-            SettingKey::Themes | SettingKey::Layouts | SettingKey::Ai(_) => unreachable!(),
+            SettingKey::Themes
+            | SettingKey::Layouts
+            | SettingKey::Ai(_)
+            | SettingKey::AlertTimed
+            | SettingKey::AlertDate => unreachable!(),
+            SettingKey::AlertHour => {
+                let hour = self.due_alert_standard(cx).hour;
+                row()
+                    .gap_1()
+                    .flex_wrap()
+                    .justify_end()
+                    .children(
+                        malakt_core::alert::HOUR_CHOICES
+                            .into_iter()
+                            .enumerate()
+                            .map(|(ix, h)| {
+                                chip(
+                                    ("alert-hour", ix),
+                                    malakt_core::alert::hour_label(h),
+                                    hour == h,
+                                    cx,
+                                )
+                                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                    this.set_due_alert_hour(h, cx);
+                                }))
+                                .test_support()
+                            }),
+                    )
+                    .child(
+                        reset(
+                            "alert-hour-reset",
+                            hour != malakt_core::alert::STANDARD_HOUR,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.set_due_alert_hour(malakt_core::alert::STANDARD_HOUR, cx);
+                        })),
+                    )
+                    .into_any_element()
+            }
             SettingKey::Scene => {
                 let scene = crate::theme::scene(cx);
                 let has_scene = scene != crate::theme::Scene::None;
@@ -5865,6 +6019,67 @@ impl MainView {
             .into_any_element(),
         };
         setting_line(item.name, item.note, control, false, first, &theme)
+    }
+
+    /// 期限をいつ知らせるかの行。上に名前、下に選べるものを並べ、押すたびに入れる・外す。
+    fn due_alert_row(&self, item: &Setting, timed: bool, cx: &mut Context<Self>) -> Div {
+        use malakt_core::alert;
+        let standard = self.due_alert_standard(cx);
+        let (choices, label) = alert_kind(timed);
+        let (chosen, base, prefix, reset_id) = if timed {
+            (
+                standard.timed,
+                alert::STANDARD_TIMED,
+                "alert-timed",
+                "alert-timed-reset",
+            )
+        } else {
+            (
+                standard.date,
+                alert::STANDARD_DATE,
+                "alert-date",
+                "alert-date-reset",
+            )
+        };
+        let changed = chosen != base;
+        let chips = row()
+            .gap_1()
+            .flex_wrap()
+            .children(choices.iter().copied().enumerate().map(|(ix, value)| {
+                chip((prefix, ix), label(value), chosen.contains(&value), cx)
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        if timed {
+                            this.toggle_due_alert_timed(value, cx);
+                        } else {
+                            this.toggle_due_alert_date(value, cx);
+                        }
+                    }))
+                    .test_support()
+            }));
+        col()
+            .py_3()
+            .gap_2()
+            .child(
+                row()
+                    .gap_4()
+                    .child(div().flex_1().min_w_0().text_sm().child(item.name))
+                    .child(
+                        Button::new(reset_id)
+                            .icon(app_icon("rotate-ccw"))
+                            .ghost()
+                            .small()
+                            .tooltip("標準に戻す")
+                            .when(!changed, |b| b.invisible().disabled(true))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if timed {
+                                    this.set_due_alert_timed(base, cx);
+                                } else {
+                                    this.set_due_alert_date(base, cx);
+                                }
+                            })),
+                    ),
+            )
+            .child(chips)
     }
 
     /// テーマの見本。おすすめ、自分で保存したもの、今のテーマを保存するボタンの順に並べる。

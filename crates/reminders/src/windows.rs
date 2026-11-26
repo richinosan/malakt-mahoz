@@ -13,7 +13,7 @@ use windows::UI::Notifications::{
     ScheduledToastNotification, ToastNotificationManager, ToastNotifier,
 };
 
-use crate::{toast_id, Item, List, Os, Seen};
+use crate::{toast_alarm_id, toast_id, Item, List, Os, Seen, MAX_TOASTS};
 
 /// 1601 年から 1970 年までの秒数。
 const EPOCH_GAP: i64 = 11_644_473_600;
@@ -73,9 +73,10 @@ fn escape(text: &str) -> String {
 }
 
 impl Toasts {
+    /// `id` で始まる予約をすべて消す（1 つのタスクの通知は、みな同じ id で始まる）。
     fn unschedule(&self, id: &str) -> windows::core::Result<()> {
         for toast in self.notifier.GetScheduledToastNotifications()? {
-            if toast.Id()?.to_string_lossy() == id {
+            if toast.Id()?.to_string_lossy().starts_with(id) {
                 self.notifier.RemoveFromSchedule(&toast)?;
             }
         }
@@ -134,12 +135,13 @@ impl Os for Toasts {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| d.as_secs() as i64);
-        // 過ぎた時刻には予約できない
-        match item.fire_at {
-            Some(at) if !item.done && at > now + 5 => {
-                self.schedule(&id, list_external, item, at).map_err(os)?;
+        if !item.done {
+            // 過ぎた時刻には予約できない
+            let ahead = item.alarms.iter().filter(|at| **at > now + 5);
+            for (n, at) in ahead.take(MAX_TOASTS).enumerate() {
+                self.schedule(&toast_alarm_id(&id, n), list_external, item, *at)
+                    .map_err(os)?;
             }
-            _ => {}
         }
         Ok(id)
     }
