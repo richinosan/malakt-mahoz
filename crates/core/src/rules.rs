@@ -146,9 +146,14 @@ pub(crate) fn clean(rule: &AiRule) -> Result<AiRule> {
 }
 
 /// ID が同じものは上書きし、なければ足す（インポート用）。
+/// 上書きは UPDATE にして、元に戻すで前の中身に戻るようにする（REPLACE は削除のトリガーを通らない）。
 pub(crate) fn save(conn: &Connection, rule: &AiRule) -> Result<()> {
     conn.prepare_cached(&format!(
-        "INSERT OR REPLACE INTO ai_rules({COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)"
+        "INSERT INTO ai_rules({COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) \
+         ON CONFLICT(id) DO UPDATE SET workspace_id = excluded.workspace_id, \
+         name = excluded.name, body = excluded.body, enabled = excluded.enabled, \
+         apply = excluded.apply, position = excluded.position, \
+         created_at = excluded.created_at, updated_at = excluded.updated_at"
     ))?
     .execute(params![
         rule.id,
@@ -294,6 +299,26 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn undoing_an_import_brings_back_the_rule_it_overwrote() {
+        let mut store = Store::open_in_memory().unwrap();
+        let rule = store.create_ai_rule(None, "口調", "敬語で答える").unwrap();
+        let mut zip = std::io::Cursor::new(Vec::new());
+        crate::archive::export(&store, &mut zip).unwrap();
+        let patch = RulePatch {
+            body: Some("短く答える".into()),
+            ..Default::default()
+        };
+        store.update_ai_rule(&rule.id, &patch).unwrap();
+        store.undo_mark().unwrap();
+        zip.set_position(0);
+        crate::archive::import(&mut store, zip).unwrap();
+        assert_eq!(store.ai_rule(&rule.id).unwrap().body, "敬語で答える");
+        store.undo_mark().unwrap();
+        assert!(store.undo().unwrap());
+        assert_eq!(store.ai_rule(&rule.id).unwrap().body, "短く答える");
+    }
 
     #[test]
     fn rules_are_added_changed_and_removed_per_place() {
