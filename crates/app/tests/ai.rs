@@ -5,7 +5,7 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use gpui_kit::test::TestWindowExt;
+use gpui_kit::test::{TestQueryExt, TestWindowExt};
 use gpui_kit::{
     point, px, size, AnyWindowHandle, AppContext, Bounds, Entity, Pixels, Point, ScrollDelta, Size,
     TestAppContext, WindowBounds, WindowOptions,
@@ -872,6 +872,9 @@ fn provider_model_and_effort_are_chosen_in_settings(cx: &mut TestAppContext) {
     });
     ui(cx, window, |window, cx| {
         assert!(window.try_find("ai-model-list").is_none());
+        // 選んだモデルは、一覧と同じ名前で出る（ID のままにしない）
+        assert!(window.try_find_by_label("Claude Sonnet 5.5").is_some());
+        assert!(window.try_find_by_label("claude-sonnet-5-5").is_none());
         window.click(("ai-effort", Effort::High as usize), cx);
     });
     assert_eq!(
@@ -890,14 +893,27 @@ fn provider_model_and_effort_are_chosen_in_settings(cx: &mut TestAppContext) {
     ui(cx, window, |window, cx| window.click("ai-model-open", cx));
     ui(cx, window, |window, cx| {
         window.click("ai-model-input", cx);
-        window.input("haiku", cx);
+        window.input("haiku 5.5", cx);
     });
-    // 検索の言葉に合うものだけが残る
+    // 検索の言葉に合うものだけが残る。画面に出す名前でも探せる
     ui(cx, window, |window, cx| {
         assert!(window.try_find(("ai-model", 1usize)).is_none());
         window.press("enter", cx);
     });
     assert_eq!(read(cx, |s| s.model().to_owned()), "claude-haiku-5-5");
+
+    // 考える深さはモデルごとに覚える。Haiku はまだ選んでいないので「標準」、Sonnet に戻すと high
+    assert_eq!(read(cx, |s| s.effort), Effort::Default);
+    let shared = session(cx);
+    cx.update(|cx| {
+        shared.update(cx, |s, cx| {
+            s.set_effort(Effort::Low, cx);
+            s.set_model("claude-sonnet-5-5", cx);
+        })
+    });
+    assert_eq!(read(cx, |s| s.effort), Effort::High);
+    cx.update(|cx| shared.update(cx, |s, cx| s.set_model("claude-haiku-5-5", cx)));
+    assert_eq!(read(cx, |s| s.effort), Effort::Low);
 
     // OpenCode Go に切り替える。送り先はモデルの一覧から決まる
     open_settings(cx, window, &pane);
@@ -909,6 +925,12 @@ fn provider_model_and_effort_are_chosen_in_settings(cx: &mut TestAppContext) {
         read(cx, |s| s.key.clone()),
         KeyState::Present { .. }
     ));
+    // サービスが違えば別のモデル。glm-5.3 はまだ選んでいないので「標準」
+    assert_eq!(read(cx, |s| s.effort), Effort::Default);
+    ui(cx, window, |window, cx| {
+        window.click(("ai-effort", Effort::High as usize), cx)
+    });
+    assert_eq!(read(cx, |s| s.effort), Effort::High);
     world.reply(json!({"choices": [{"finish_reason": "stop", "message": {"content": "やあ"}}]}));
     ui(cx, window, |window, cx| {
         window.click("ai-settings-toggle", cx)
@@ -965,7 +987,7 @@ fn provider_model_and_effort_are_chosen_in_settings(cx: &mut TestAppContext) {
         let store = &db::shared(cx).read(cx).store;
         (
             store.setting("ai.provider").unwrap(),
-            store.setting("ai.effort").unwrap(),
+            store.setting("ai.efforts").unwrap(),
             store.setting("ai.model.claude").unwrap(),
         )
     });
@@ -973,10 +995,44 @@ fn provider_model_and_effort_are_chosen_in_settings(cx: &mut TestAppContext) {
         saved,
         (
             Some("opencode-go".into()),
-            Some("medium".into()),
+            Some(
+                r#"{"claude:claude-haiku-5-5":"low","claude:claude-sonnet-5-5":"high","opencode-go:glm-5.3":"medium"}"#
+                    .into()
+            ),
             Some("claude-haiku-5-5".into())
         )
     );
+
+    // Claude に戻すと、Haiku で選んだ low に戻る
+    cx.update(|cx| shared.update(cx, |s, cx| s.set_provider(Provider::Claude, cx)));
+    assert_eq!(read(cx, |s| s.effort), Effort::Low);
+}
+
+/// 前の版の、すべてのモデルで共通の考える深さは、起動したときのモデルのものとして移す。
+#[gpui_kit::test]
+fn shared_effort_from_older_version_moves_to_current_model(cx: &mut TestAppContext) {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .set_setting("ai.model.claude", Some("claude-fable-5-2"))
+        .unwrap();
+    store.set_setting("ai.effort", Some("low")).unwrap();
+    let _world = start_with(cx, store);
+    assert_eq!(read(cx, |s| s.effort), Effort::Low);
+    let saved = cx.update(|cx| {
+        let store = &db::shared(cx).read(cx).store;
+        (
+            store.setting("ai.efforts").unwrap(),
+            store.setting("ai.effort").unwrap(),
+        )
+    });
+    assert_eq!(
+        saved,
+        (Some(r#"{"claude:claude-fable-5-2":"low"}"#.into()), None)
+    );
+    // ほかのモデルは「標準」から
+    let shared = session(cx);
+    cx.update(|cx| shared.update(cx, |s, cx| s.set_model("claude-opus-5-5", cx)));
+    assert_eq!(read(cx, |s| s.effort), Effort::Default);
 }
 
 /// チャットとシェルは、別のウィンドウに出して、また戻せる。会話はそのまま続く。
