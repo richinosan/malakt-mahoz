@@ -2461,7 +2461,12 @@ impl AiPane {
         col()
             .id("ai-shell")
             .key_context("AiShell")
-            .on_action(cx.listener(|this, _: &StopAi, _, cx| this.stop(cx)))
+            // macOS では Ctrl+C がコピーの割り当てにならず、ここに届く。選んでいればコピーにする
+            .on_action(cx.listener(|this, _: &StopAi, _, cx| {
+                if !this.copy_selection(cx) {
+                    this.stop(cx);
+                }
+            }))
             // タブの列のキー。AI のタブ・ターミナル・ブラウザのどこでも
             .on_action(|_: &shell_keys::NextTab, _, cx| {
                 term::shared(cx).update(cx, |terms, cx| terms.step_tab(true, cx))
