@@ -16,7 +16,7 @@ use malakt_ai::shell::Spec;
 use malakt_ai::Provider;
 use malakt_core::{Store, TaskDraft};
 use malakt_mahoz::ai::{self, ShellPlace};
-use malakt_mahoz::browser::{self, Engine, Event, Factory, Setup};
+use malakt_mahoz::browser::{self, Engine, Event, Factory, Setup, Zoom};
 use malakt_mahoz::term::{self, Terms};
 use malakt_mahoz::{AiConfig, AiPane, MainView, Modal, Nav};
 use serde_json::{json, Value};
@@ -96,6 +96,10 @@ impl Engine for FakeEngine {
     }
     fn clear_data(&self) -> Result<(), String> {
         self.0.calls.borrow_mut().push("clear".into());
+        Ok(())
+    }
+    fn zoom(&self, factor: f64) -> Result<(), String> {
+        self.0.calls.borrow_mut().push(format!("zoom {factor}"));
         Ok(())
     }
 }
@@ -577,4 +581,91 @@ fn the_ai_opens_and_reads_a_page(cx: &mut TestAppContext) {
     );
     say(cx, window, &pane, "閉じて");
     assert!(terms(cx, |t| t.pages.is_empty()));
+}
+
+/// ページの上で Ctrl+ホイールや Ctrl++ / Ctrl+- を押すと、拡大率が 1 段ずつ変わり、
+/// 場所の欄の右に今の拡大率が出る。押すと 100% に戻り、少したつと消える。
+#[gpui_kit::test]
+fn zooming_the_page_shows_the_zoom_level(cx: &mut TestAppContext) {
+    let world = start(cx, Store::open_in_memory().unwrap());
+    let (window, _view) = open(cx);
+    ui(cx, window, |window, cx| window.click("ai-toggle", cx));
+    cx.update_window(window, |_, window, cx| {
+        browser::open("https://example.com/", window, cx)
+    })
+    .unwrap();
+    ui(cx, window, |_, _| {});
+    let tab = terms(cx, |t| t.active_page().map(|p| p.id)).expect("タブが開く");
+    let fake = world.fake(tab);
+    // 100% のあいだは出さない
+    ui(cx, window, |window, _| {
+        assert!(window.try_find("browser-zoom").is_none())
+    });
+    world.send(tab, Event::Zoom(Zoom::In));
+    world.send(tab, Event::Zoom(Zoom::In));
+    ui(cx, window, |_, _| {});
+    assert_eq!(terms(cx, |t| t.page(tab).unwrap().zoom), 1.25);
+    assert!(fake
+        .calls
+        .borrow()
+        .ends_with(&["zoom 1.1".to_owned(), "zoom 1.25".to_owned()]));
+    ui(cx, window, |window, _| {
+        assert!(window.find("browser-zoom").visible())
+    });
+    assert_eq!(browser::zoom_label(1.25), "125%");
+    // 時間がたっても、100% でなければ出したまま
+    cx.executor()
+        .advance_clock(browser::ZOOM_SHOWN + std::time::Duration::from_secs(1));
+    ui(cx, window, |window, _| {
+        assert!(window.find("browser-zoom").visible())
+    });
+    assert!(!terms(cx, |t| t.page(tab).unwrap().zoom_recent));
+    // 押すと 100% に戻り、100% を少し出してから消える
+    ui(cx, window, |window, cx| window.click("browser-zoom", cx));
+    assert_eq!(terms(cx, |t| t.page(tab).unwrap().zoom), 1.0);
+    assert_eq!(fake.calls.borrow().last().unwrap(), "zoom 1");
+    ui(cx, window, |window, _| {
+        assert!(window.find("browser-zoom").visible())
+    });
+    cx.executor()
+        .advance_clock(browser::ZOOM_SHOWN + std::time::Duration::from_secs(1));
+    ui(cx, window, |window, _| {
+        assert!(window.try_find("browser-zoom").is_none())
+    });
+    // 縮めるときも 1 段ずつ。端より先へは動かない
+    world.send(tab, Event::Zoom(Zoom::Out));
+    ui(cx, window, |_, _| {});
+    assert_eq!(terms(cx, |t| t.page(tab).unwrap().zoom), 0.9);
+    for _ in 0..20 {
+        world.send(tab, Event::Zoom(Zoom::Out));
+    }
+    ui(cx, window, |_, _| {});
+    assert_eq!(terms(cx, |t| t.page(tab).unwrap().zoom), 0.25);
+    world.send(tab, Event::Zoom(Zoom::Reset));
+    ui(cx, window, |_, _| {});
+    assert_eq!(terms(cx, |t| t.page(tab).unwrap().zoom), 1.0);
+}
+
+/// AI もページの拡大率を変えられる。
+#[gpui_kit::test]
+fn the_ai_zooms_the_page(cx: &mut TestAppContext) {
+    let world = start(cx, Store::open_in_memory().unwrap());
+    let (window, view) = open(cx);
+    let pane = open_chat(cx, window, &view);
+    world.call(
+        "browser",
+        json!({"action": "open", "url": "https://example.com/doc"}),
+        "開きました",
+    );
+    say(cx, window, &pane, "資料を開いて");
+    let tab = terms(cx, |t| t.active_page().map(|p| p.id)).expect("タブが開く");
+    world.call("browser", json!({"action": "zoom_in"}), "大きくしました");
+    say(cx, window, &pane, "文字を大きくして");
+    let (result, failed) = world.last_result();
+    assert!(!failed, "{result}");
+    assert!(result.contains("110%"), "{result}");
+    assert_eq!(terms(cx, |t| t.page(tab).unwrap().zoom), 1.1);
+    world.call("browser", json!({"action": "zoom_reset"}), "戻しました");
+    say(cx, window, &pane, "元の大きさに");
+    assert_eq!(terms(cx, |t| t.page(tab).unwrap().zoom), 1.0);
 }

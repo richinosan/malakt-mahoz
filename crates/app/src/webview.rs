@@ -10,7 +10,7 @@ use gpui_kit::{Bounds, Pixels, Window};
 use raw_window_handle::{HandleError, HasWindowHandle, RawWindowHandle, WindowHandle};
 use wry::{dpi, NewWindowResponse, PageLoadEvent, Rect, WebContext, WebView, WebViewBuilder};
 
-use crate::browser::{Engine, Event, Setup};
+use crate::browser::{Engine, Event, Setup, Zoom};
 
 thread_local! {
     /// ログインの情報（Cookie）とキャッシュを置く場所。すべてのタブで 1 つを使う。
@@ -27,6 +27,48 @@ const FOCUS_SCRIPT: &str = r#"(() => {
   const tell = () => { try { window.ipc.postMessage("focus"); } catch (_) {} };
   window.addEventListener("mousedown", tell, true);
   window.addEventListener("focusin", tell, true);
+})();"#;
+
+/// ページの上の Ctrl+ホイールと Ctrl++ / Ctrl+- / Ctrl+0 を、アプリに知らせる。
+/// 拡大率はアプリが変えて、場所の欄の右に出す（OS の部品に任せると、今の拡大率が分からない）。
+/// 中の枠（iframe）からは、いちばん外のページを通して知らせる。
+/// 地図など、自分で Ctrl+ホイールを使うページ（`preventDefault` したもの）はそのまま渡す。
+const ZOOM_SCRIPT: &str = r#"(() => {
+  const top = window.top === window;
+  const send = (step) => {
+    try {
+      if (top) window.ipc.postMessage("zoom:" + step);
+      else window.top.postMessage({ malaktZoom: step }, "*");
+    } catch (_) {}
+  };
+  if (top) {
+    window.addEventListener("message", (e) => {
+      const step = e.data && e.data.malaktZoom;
+      if (step === "in" || step === "out" || step === "reset") send(step);
+    });
+  }
+  let sum = 0, last = 0;
+  window.addEventListener("wheel", (e) => {
+    if (!e.ctrlKey || e.defaultPrevented) return;
+    e.preventDefault();
+    const now = Date.now();
+    if (now - last > 400) sum = 0;
+    last = now;
+    sum += e.deltaMode === 0 ? e.deltaY : e.deltaY * 40;
+    if (Math.abs(sum) < 40) return;
+    send(sum < 0 ? "in" : "out");
+    sum = 0;
+  }, { passive: false });
+  window.addEventListener("keydown", (e) => {
+    if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
+    let step = null;
+    if (e.key === "+" || e.key === "=" || e.key === ";" || e.code === "NumpadAdd") step = "in";
+    else if (e.key === "-" || e.code === "NumpadSubtract") step = "out";
+    else if (e.key === "0" || e.code === "Numpad0") step = "reset";
+    if (!step) return;
+    e.preventDefault();
+    send(step);
+  }, true);
 })();"#;
 
 /// ページの文字を読むスクリプト。AI に渡す。
@@ -152,6 +194,10 @@ impl Engine for Wry {
     fn clear_data(&self) -> Result<(), String> {
         self.view.clear_all_browsing_data().map_err(text)
     }
+
+    fn zoom(&self, factor: f64) -> Result<(), String> {
+        self.view.zoom(factor).map_err(text)
+    }
 }
 
 /// ページを作って、ウィンドウの中に置く。最初は隠しておき、描いたときに見せる。
@@ -180,13 +226,18 @@ pub fn create(window: &mut Window, setup: Setup) -> Result<Rc<dyn Engine>, Strin
             .with_visible(false)
             .with_accept_first_mouse(true)
             .with_clipboard(true)
-            .with_hotkeys_zoom(true)
+            // 拡大縮小は ZOOM_SCRIPT で受けて、アプリが変える
+            .with_hotkeys_zoom(false)
             .with_initialization_script(FOCUS_SCRIPT)
+            .with_initialization_script_for_main_only(ZOOM_SCRIPT, false)
             .with_ipc_handler({
                 let send = send.clone();
                 move |request| {
-                    if request.body() == "focus" {
+                    let body = request.body();
+                    if body == "focus" {
                         send(Event::Focused);
+                    } else if let Some(step) = Zoom::parse(body) {
+                        send(Event::Zoom(step));
                     }
                 }
             })

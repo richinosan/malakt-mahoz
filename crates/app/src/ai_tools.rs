@@ -272,10 +272,10 @@ pub fn definitions() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "browser",
-            description: "アプリ内ブラウザ（シェルの場所のタブ）を操作する。open（url を新しいタブで開いて見せる。同じ場所のタブがあればそれを見せる）、list（開いているタブの一覧）、show（tab を見せる）、navigate（tab で url を開く）、back、forward、reload、close（tab を閉じる）、open_external（url か tab のページを OS のブラウザで開く）。tab を省くと、見ているタブ。ページの文字は read_browser で読む。",
+            description: "アプリ内ブラウザ（シェルの場所のタブ）を操作する。open（url を新しいタブで開いて見せる。同じ場所のタブがあればそれを見せる）、list（開いているタブの一覧）、show（tab を見せる）、navigate（tab で url を開く）、back、forward、reload、close（tab を閉じる）、open_external（url か tab のページを OS のブラウザで開く）、zoom_in / zoom_out（ページの拡大率を 1 段変える）、zoom_reset（100% に戻す）。tab を省くと、見ているタブ。ページの文字は read_browser で読む。",
             schema: object(
                 json!({
-                    "action": {"type": "string", "enum": ["open", "list", "show", "navigate", "back", "forward", "reload", "close", "open_external"]},
+                    "action": {"type": "string", "enum": ["open", "list", "show", "navigate", "back", "forward", "reload", "close", "open_external", "zoom_in", "zoom_out", "zoom_reset"]},
                     "url": {"type": "string"},
                     "tab": {"type": "integer"},
                 }),
@@ -504,6 +504,7 @@ pub fn summary(name: &str, args: &Value) -> Option<String> {
             "open" => format!("ブラウザで開く: {}", arg("url")),
             "navigate" => format!("ブラウザで移動: {}", arg("url")),
             "open_external" => "OS のブラウザで開く".into(),
+            "zoom_in" | "zoom_out" | "zoom_reset" => "ブラウザの拡大率を変更".into(),
             _ => "ブラウザを操作".into(),
         },
         "read_browser" => "ブラウザのページを読む".into(),

@@ -4938,6 +4938,8 @@ bundled_icons! {
         "external-link",
         "rotate-cw",
         "app-window",
+        "zoom-in",
+        "zoom-out",
     ],
 }
 
