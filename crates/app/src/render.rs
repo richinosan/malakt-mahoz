@@ -229,8 +229,10 @@ fn glass(color: Hsla, cx: &App) -> Hsla {
 }
 
 /// 「カスタマイズ」のダイアログの大きさと、テーマの見本の幅。見本は 1 行に 5 つ並ぶ。
-const APPEARANCE_WIDTH: Pixels = px(980.);
-const APPEARANCE_HEIGHT: Pixels = px(620.);
+const APPEARANCE_WIDTH: Pixels = px(1280.);
+const APPEARANCE_HEIGHT: Pixels = px(700.);
+/// 「設定」の右に出すプレビューの幅。
+const PREVIEW_WIDTH: Pixels = px(300.);
 /// 「カスタマイズ」の行の右に置く、一覧を開くボタンやスライダーの幅。
 const CONTROL_WIDTH: Pixels = px(220.);
 const PRESET_WIDTH: Pixels = px(124.);
@@ -280,6 +282,10 @@ enum SettingKey {
     AlertTimed,
     AlertDate,
     AlertHour,
+    LockNow,
+    People,
+    Keys,
+    NewWindow,
 }
 
 impl Setting {
@@ -1838,9 +1844,7 @@ impl MainView {
             None => self.header_title(cx),
         };
         let unread = self.unread_notices;
-        let lock_enabled = self.lock_enabled(cx);
         let update_ready = crate::update::ready_version(cx);
-        let view = cx.entity().downgrade();
         let controls = window_controls(HEADER_HEIGHT, floating, window, cx);
         bar.child(
             row()
@@ -1958,49 +1962,16 @@ impl MainView {
                             )
                         }),
                 )
-                .child(
-                    Button::new("open-menu")
+                .child(feel::gloss(
+                    Button::new("open-settings")
                         .icon(app_icon("settings"))
                         .ghost()
                         .small()
                         .tooltip("設定")
-                        .pop_menu(move |menu, _, _| {
-                            let item = |label: &'static str,
-                                        run: fn(
-                                &mut MainView,
-                                &mut Window,
-                                &mut Context<MainView>,
-                            )| {
-                                let view = view.clone();
-                                PopupMenuItem::new(label).on_click(move |_, window, cx| {
-                                    let _ = view.update(cx, |this, cx| run(this, window, cx));
-                                })
-                            };
-                            let menu = menu
-                                .item(item("設定", |this, window, cx| {
-                                    this.open_appearance(window, cx)
-                                }))
-                                .item(item("担当者", |this, window, cx| {
-                                    this.open_people(window, cx)
-                                }));
-                            let menu = if lock_enabled {
-                                menu.separator()
-                                    .item(item("今すぐロック", |_, window, cx| {
-                                        window.dispatch_action(Box::new(LockNow), cx)
-                                    }))
-                            } else {
-                                menu
-                            };
-                            menu.separator()
-                                .item(item("キー操作", |this, _, cx| this.toggle_keys(cx)))
-                                .item(item("新しいウィンドウ", |_, window, cx| {
-                                    window.dispatch_action(Box::new(NewWindow), cx)
-                                }))
-                                // 今動いている版
-                                .separator()
-                                .label(concat!("v", env!("CARGO_PKG_VERSION")))
-                        }),
-                )
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.open_appearance(window, cx)),
+                        ),
+                ))
                 .children(controls),
         )
     }
@@ -5308,6 +5279,8 @@ impl MainView {
         } else {
             "dialog-under-backdrop"
         };
+        // 出てくるときと消えるときは、全体を薄くして、ダイアログを少し下から浮かび上がらせる
+        let t = self.dialog_t.get();
         let dialog = div()
             .id(backdrop)
             .size_full()
@@ -5315,6 +5288,7 @@ impl MainView {
             .items_center()
             .justify_center()
             .bg(theme.overlay)
+            .when(t < 1., |d| d.opacity(t))
             .occlude()
             .child(self.drops.mark(cx.entity().downgrade(), None, false))
             // 名前を書いている途中で外を押したら、その 1 回は名前を確定するだけにする
@@ -5326,6 +5300,7 @@ impl MainView {
                 col()
                     .id(id)
                     .occlude()
+                    .when(t < 1., |d| d.relative().top(px(12.) * (1. - t)))
                     .w(width)
                     .when_some(height, |d, height| d.h(height))
                     .max_w(relative(0.94))
@@ -5364,7 +5339,121 @@ impl MainView {
         div().absolute().inset_0().child(dialog)
     }
 
-    /// 「カスタマイズ」。左に検索とカテゴリ、右にそのカテゴリの設定をカードにまとめて出す。
+    /// 担当者の一覧。名前はその場で書き換え、使うワークスペースを選び、足し、消す。
+    fn people_editor(&self, cx: &mut Context<Self>) -> Div {
+        let theme = cx.theme().clone();
+        let mut list = col().gap_1();
+        let view = cx.entity().downgrade();
+        let roots: Vec<(Id, SharedString)> = self
+            .workspaces
+            .iter()
+            .filter(|w| w.parent_id.is_none())
+            .map(|w| (w.id.clone(), w.name.clone().into()))
+            .collect();
+        for (ix, p) in self.people.iter().enumerate() {
+            let id = p.id.clone();
+            // 使うワークスペース。「自分」は、すべてのワークスペースで使う
+            let scope = (!p.is_self).then(|| {
+                let (view, person, roots) = (view.clone(), p.id.clone(), roots.clone());
+                // いちばん上の親に直して、メニューの印と合わせる
+                let current: Vec<Id> = p
+                    .workspace_ids
+                    .iter()
+                    .map(|w| self.root_of(w).to_owned())
+                    .collect();
+                let label: SharedString = match current.as_slice() {
+                    [] => "すべてのワークスペース".into(),
+                    [one] => self.workspace_name(Some(one)),
+                    many => format!(
+                        "{} ほか {}",
+                        self.workspace_name(Some(&many[0])),
+                        many.len() - 1
+                    )
+                    .into(),
+                };
+                Button::new(("person-scope", ix))
+                    .icon(app_icon(if p.is_global() { "globe" } else { "folder" }))
+                    .ghost()
+                    .xsmall()
+                    .tooltip(label)
+                    .pop_menu(move |menu, _, _| {
+                        person_workspace_items(menu, &view, &person, &current, &roots)
+                    })
+            });
+            let name = if self.person_naming.as_ref() == Some(&p.id) {
+                // その場で名前を書く。Enter かほかの場所を押すと保存、Esc で取り消し
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .on_mouse_down_out(
+                        cx.listener(|this, _, window, cx| this.save_person_name(window, cx)),
+                    )
+                    .child(
+                        Input::new(&self.inputs.name)
+                            .id("person-input")
+                            .aria_label("名前")
+                            .text_base()
+                            .bg(theme.background)
+                            .border_color(theme.ring)
+                            .px_2(),
+                    )
+                    .into_any_element()
+            } else {
+                let id = id.clone();
+                div()
+                    .id(("person", ix))
+                    .flex_1()
+                    .min_w_0()
+                    .h(PERSON_ROW_HEIGHT)
+                    .flex()
+                    .items_center()
+                    .px_2()
+                    .rounded(feel::md())
+                    .border_1()
+                    .border_color(gpui_kit::transparent_black())
+                    .cursor_pointer()
+                    .lit(theme.muted, cx)
+                    .child(div().truncate().child(p.name.clone()))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        this.rename_person(id.clone(), window, cx)
+                    }))
+                    .test_support()
+                    .into_any_element()
+            };
+            list = list.child(
+                row()
+                    .gap_2()
+                    .child(name)
+                    .when(p.is_self, |d| {
+                        d.child(div().text_xs().text_color(theme.primary).child("自分"))
+                    })
+                    .children(scope)
+                    .child(feel::gloss(
+                        Button::new(("del-person", ix))
+                            .label("削除")
+                            .ghost()
+                            .xsmall()
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.write(cx, |s| s.delete_person(&id));
+                            })),
+                    )),
+            );
+        }
+        let body = col().gap_3().child(list).child(
+            row().child(feel::gloss(
+                Button::new("person-add")
+                    .icon(app_icon("plus"))
+                    .framed(cx)
+                    .tooltip("担当者を追加")
+                    .on_click(cx.listener(|this, _, window, cx| this.add_person(window, cx))),
+            )),
+        );
+        body
+    }
+
+    /// 「設定」。左に検索と目次、まん中にすべての設定を見出しごとに 1 本の縦スクロールで並べ、
+    /// 右に見た目のプレビューを出す。左を押すとその見出しへスクロールし、
+    /// スクロールすると、いちばん上に見えている見出しを左で光らせる。
     /// 書体と背景の画像の一覧は、この上にもう 1 枚重ねて出す。
     fn render_appearance(&self, cx: &mut Context<Self>) -> Div {
         use crate::state::CustomizeSection as Section;
@@ -5386,8 +5475,17 @@ impl MainView {
             .into_iter()
             .filter(|section| items.iter().any(|item| item.section == *section))
             .collect();
+        // 左を押した直後はその見出し、スクロールしたら、いちばん上に見えている見出し
+        let active = if self.appearance_pinned {
+            self.appearance_section
+        } else {
+            shown
+                .get(self.appearance_scroll.top_item())
+                .copied()
+                .unwrap_or(Section::Theme)
+        };
 
-        // 左: 検索と、見出しでまとめたカテゴリ
+        // 左: 検索と、見出しでまとめた目次
         let mut nav = col().gap_0p5().child(
             div().pb_2().child(
                 Input::new(&self.inputs.customize_search)
@@ -5407,23 +5505,24 @@ impl MainView {
                 nav = nav.child(
                     div()
                         .px_3()
-                        .pt_3()
-                        .pb_1()
+                        .pt_2()
+                        .pb_0p5()
                         .text_xs()
                         .text_color(theme.muted_foreground)
                         .child(group),
                 );
             }
-            let active = !searching && self.appearance_section == section;
             nav = nav.child(
                 row().child(
                     self.nav_link(
                         ("customize-nav", ix),
                         app_icon(section.icon()).small(),
                         section.label(),
-                        active,
+                        active == section,
                         cx,
                     )
+                    // 見出しが多いので、左のメニューより詰めて並べる
+                    .py_1()
                     .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                         this.show_appearance_section(section, window, cx)
                     }))
@@ -5431,7 +5530,7 @@ impl MainView {
                 ),
             );
         }
-        // 低いウィンドウで入りきらないときは、カテゴリの列だけスクロールする
+        // 低いウィンドウで入りきらないときは、目次の列だけスクロールする。版はいちばん下
         let nav = col()
             .w(px(208.))
             .flex_none()
@@ -5441,36 +5540,64 @@ impl MainView {
             .child(
                 div()
                     .id("customize-nav-list")
-                    .size_full()
+                    .flex_1()
+                    .min_h_0()
                     // 右の端はスクロールバーの場所
                     .pr_3()
                     .child(nav)
                     .overflow_y_scrollbar(),
+            )
+            .child(
+                div()
+                    .px_3()
+                    .pt_2()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(concat!("v", env!("CARGO_PKG_VERSION"))),
             );
 
-        // 右: カテゴリごとに見出しとカード。検索中は、合う設定のあるカテゴリをすべて並べる
-        let sections: Vec<Section> = if searching {
-            shown.clone()
-        } else {
-            vec![self.appearance_section]
-        };
-        let mut pages = col().gap_5();
-        for section in sections {
+        // まん中: 見出しとカード。1 つの見出しが、スクロールする所の子 1 つ
+        let mut list = div()
+            .id("appearance-scroll")
+            .size_full()
+            .pl_5()
+            // 右の端はスクロールバーの場所
+            .pr_4()
+            .pb_2()
+            .track_scroll(&self.appearance_scroll)
+            .overflow_y_scroll()
+            .on_scroll(cx.listener(|this, _, _, cx| {
+                if this.appearance_pinned {
+                    this.appearance_pinned = false;
+                    cx.notify();
+                }
+            }));
+        let mut group = "";
+        for section in &shown {
+            let mut block = col().gap_2().pb_6();
+            if section.group() != group {
+                group = section.group();
+                block = block.child(div().px_1().text_xl().child(group));
+            }
             let mut card = setting_card(cx);
             let mut first = true;
-            for item in items.iter().filter(|item| item.section == section) {
+            for item in items.iter().filter(|item| item.section == *section) {
                 card = card.child(self.setting_row(item, first, cx));
                 first = false;
             }
-            pages = pages.child(
-                col()
-                    .gap_2()
-                    .child(div().px_1().text_lg().child(section.label()))
+            list = list.child(
+                block
+                    .child(
+                        div()
+                            .px_1()
+                            .text_color(theme.muted_foreground)
+                            .child(section.label()),
+                    )
                     .child(card),
             );
         }
         if searching && shown.is_empty() {
-            pages = pages.child(
+            list = list.child(
                 div()
                     .px_1()
                     .text_sm()
@@ -5478,23 +5605,6 @@ impl MainView {
                     .child("見つかりません。"),
             );
         }
-        let page_key = if searching {
-            Section::ALL.len()
-        } else {
-            Section::ALL
-                .iter()
-                .position(|s| *s == self.appearance_section)
-                .unwrap_or(0)
-        };
-        let pages = if self.motion {
-            pages
-                .with_animation(("customize-page", page_key), appear(160), |d, t| {
-                    d.opacity(t)
-                })
-                .into_any_element()
-        } else {
-            pages.into_any_element()
-        };
         let content = col()
             .flex_1()
             .min_w_0()
@@ -5505,18 +5615,7 @@ impl MainView {
                     .relative()
                     .flex_1()
                     .min_h_0()
-                    .child(
-                        div()
-                            .id("appearance-scroll")
-                            .size_full()
-                            .pl_5()
-                            // 右の端はスクロールバーの場所
-                            .pr_4()
-                            .pb_2()
-                            .track_scroll(&self.appearance_scroll)
-                            .overflow_y_scroll()
-                            .child(pages),
-                    )
+                    .child(list.test_support())
                     .vertical_scrollbar(&self.appearance_scroll),
             )
             // 失敗の理由は、どこまでスクロールしていても見える所に出す
@@ -5528,7 +5627,8 @@ impl MainView {
             .min_h_0()
             .items_stretch()
             .child(nav)
-            .child(content);
+            .child(content)
+            .child(self.appearance_preview(cx));
         let sized = |id: &'static str, body: Div, cx: &mut Context<Self>| {
             self.dialog_sized(
                 id,
@@ -5558,7 +5658,224 @@ impl MainView {
             .child(over)
     }
 
-    /// 「カスタマイズ」に並ぶ設定。名前・補足・カテゴリの名前と、検索で使う言葉を持つ。
+    /// 「設定」の右のプレビュー。今の見た目（選択肢にマウスを乗せている間は、その選択肢）で、
+    /// 左のメニュー・一覧・詳細を小さく描く。一覧の 2 行目は、マウスを乗せたときの見え方。
+    fn appearance_preview(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        use crate::state::PreviewPick as Pick;
+        let theme = cx.theme().clone();
+        let mut density = crate::theme::density(cx);
+        let mut due = crate::theme::due_format(cx);
+        let mut feel_now = crate::theme::feel(cx);
+        let mut cards = crate::theme::cards(cx);
+        let mut floating = crate::theme::floating(cx);
+        let mut overlay = crate::theme::overlay(cx);
+        let mut chat = self.ai_docked(cx);
+        match self.preview_pick {
+            Some(Pick::Density(pick)) => density = pick,
+            Some(Pick::Due(pick)) => due = pick,
+            Some(Pick::Feel(pick)) => feel_now = pick,
+            Some(Pick::Cards(pick)) => cards = pick,
+            Some(Pick::Float(pick)) => floating = pick,
+            Some(Pick::Layout(ix)) => {
+                let layout = crate::theme::Layout::PATTERNS[ix];
+                (overlay, cards, floating) = (layout.overlay, layout.cards, layout.floating);
+                chat = layout.chat.unwrap_or(chat);
+            }
+            None => {}
+        }
+        let image = scene_thumbnail(&crate::theme::scene(cx), theme.is_dark());
+        let panel_bg = glass(theme.background, cx);
+        let ink = theme.muted_foreground.opacity(0.45);
+        let line = |width: f32, color: Hsla| {
+            div()
+                .w(relative(width))
+                .h(px(4.))
+                .flex_none()
+                .rounded_full()
+                .bg(color)
+        };
+        let radius = if floating { px(8.) } else { px(0.) };
+        let panel = || {
+            col()
+                .min_h_0()
+                .gap(px(6.))
+                .p(px(8.))
+                .bg(panel_bg)
+                .rounded(radius)
+                .when(floating, |d| d.border_1().border_color(theme.border))
+        };
+        // 左のメニュー
+        let side = panel()
+            .w(px(46.))
+            .flex_none()
+            .when(!floating, |d| d.border_r_1().border_color(theme.border))
+            .child(line(0.8, theme.primary))
+            .child(line(1., ink))
+            .child(line(0.7, ink))
+            .child(line(0.85, ink));
+        // 一覧。期限は今日から数えた見本
+        let today = view::today();
+        let due_label =
+            |days: i64| view::format_due(None, &view::add_days(&today, days), &today, due);
+        let row_height = px(26. * density.rows());
+        let mut rows = col().gap(px(if cards { 5. } else { 0. }));
+        for (ix, (title, days)) in [
+            ("Lorem ipsum", 0),
+            ("Dolor sit amet", 1),
+            ("Consectetur", 3),
+            ("Adipiscing elit", -2),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let hovered = ix == 1;
+            rows = rows.child(
+                row()
+                    .relative()
+                    .h(row_height)
+                    .flex_none()
+                    .px(px(6.))
+                    .gap(px(6.))
+                    .text_xs()
+                    .when(cards, |d| {
+                        d.rounded(px(6.))
+                            .border_1()
+                            .border_color(theme.border)
+                            .bg(theme.background)
+                    })
+                    .when(!cards && ix > 0, |d| {
+                        d.border_t_1().border_color(theme.border.opacity(0.6))
+                    })
+                    .when(hovered, |d| {
+                        d.child(feel::hover_sample(
+                            feel_now,
+                            theme.secondary_hover,
+                            if cards { px(6.) } else { px(0.) },
+                        ))
+                    })
+                    .child(
+                        div()
+                            .size(px(9.))
+                            .flex_none()
+                            .rounded_full()
+                            .border_1()
+                            .border_color(theme.muted_foreground),
+                    )
+                    .child(div().flex_1().min_w_0().truncate().child(title))
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_color(if days < 0 {
+                                theme.danger
+                            } else {
+                                theme.muted_foreground
+                            })
+                            .child(due_label(days)),
+                    )
+                    .when(hovered, |d| {
+                        d.child(
+                            div().absolute().right(px(18.)).bottom(px(-6.)).child(
+                                app_icon("mouse-pointer-2")
+                                    .xsmall()
+                                    .text_color(theme.foreground),
+                            ),
+                        )
+                    }),
+            );
+        }
+        let list = panel()
+            .flex_1()
+            .min_w_0()
+            .when(cards, |d| {
+                d.bg(theme.transparent).border_color(theme.transparent)
+            })
+            .child(div().text_xs().child("すべてのタスク"))
+            .child(rows);
+        // 詳細
+        let detail = panel()
+            .w(px(66.))
+            .flex_none()
+            .when(!floating && !overlay, |d| {
+                d.border_l_1().border_color(theme.border)
+            })
+            .child(line(0.6, theme.primary))
+            .child(line(1., ink))
+            .child(line(0.8, ink))
+            .child(line(0.9, ink));
+        let detail = if overlay {
+            detail
+                .absolute()
+                .top(px(14.))
+                .bottom(px(14.))
+                .right(px(10.))
+                .rounded(px(8.))
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.background)
+                .elevate(Elevation::High, cx)
+        } else {
+            detail
+        };
+        // AI チャット
+        let chat_panel = chat.then(|| {
+            panel()
+                .w(px(46.))
+                .flex_none()
+                .when(!floating, |d| d.border_l_1().border_color(theme.border))
+                .child(line(0.9, ink))
+                .child(line(0.6, ink))
+        });
+        let frame = row()
+            .relative()
+            .h(px(236.))
+            .items_stretch()
+            .rounded(feel::lg())
+            .overflow_hidden()
+            .border_1()
+            .border_color(theme.border)
+            .bg(if image.is_some() || floating {
+                theme.muted
+            } else {
+                theme.background
+            })
+            .children(image.map(|image| {
+                img(image)
+                    .absolute()
+                    .inset_0()
+                    .size_full()
+                    .object_fit(ObjectFit::Cover)
+            }))
+            .when(floating, |d| d.p(px(6.)).gap(px(6.)))
+            .child(side)
+            .child(list)
+            .child(detail)
+            .children(chat_panel);
+        col()
+            .w(PREVIEW_WIDTH)
+            .flex_none()
+            .pl_4()
+            .gap_2()
+            .border_l_1()
+            .border_color(theme.border)
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child("プレビュー"),
+            )
+            .child(frame)
+    }
+
+    /// 「設定」に出す見出し。今出せる設定があるものだけ、並ぶ順に。
+    pub(crate) fn customize_sections(&self, cx: &App) -> Vec<crate::state::CustomizeSection> {
+        let items = self.customize_settings(cx);
+        crate::state::CustomizeSection::ALL
+            .into_iter()
+            .filter(|section| items.iter().any(|item| item.section == *section))
+            .collect()
+    }
+
+    /// 「設定」に並ぶ設定。名前・補足・カテゴリの名前と、検索で使う言葉を持つ。
     fn customize_settings(&self, cx: &App) -> Vec<Setting> {
         use crate::state::CustomizeSection as Section;
         let mut themes = String::from("プリセット 見本 保存");
@@ -5697,6 +6014,13 @@ impl MainView {
                 Some("操作がないままこの時間がたつとロックする"),
                 list(&["時間"]),
             ));
+            all.push(Setting::new(
+                Section::Lock,
+                SettingKey::LockNow,
+                "今すぐロック",
+                Some(crate::shortcuts::LOCK_KEY),
+                list(&["ロック"]),
+            ));
         }
         all.extend([
             Setting::new(
@@ -5748,7 +6072,28 @@ impl MainView {
                 list(&["更新", "バージョン"]),
             ));
         }
+        let mut people = String::from("人 名前 追加 削除 自分 ワークスペース");
+        for person in &self.people {
+            people.push(' ');
+            people.push_str(&person.name);
+        }
+        let mut keys = String::from("キー ショートカット ペイン");
+        for (key, about) in crate::shortcuts::help() {
+            keys.push(' ');
+            keys.push_str(key);
+            keys.push(' ');
+            keys.push_str(about);
+        }
         all.extend([
+            Setting::new(Section::People, SettingKey::People, "担当者", None, people),
+            Setting::new(Section::Keys, SettingKey::Keys, "キー操作", None, keys),
+            Setting::new(
+                Section::Window,
+                SettingKey::NewWindow,
+                "新しいウィンドウ",
+                Some(crate::shortcuts::NEW_WINDOW_KEY),
+                list(&["ウィンドウ", "開く"]),
+            ),
             Setting::new(
                 Section::Data,
                 SettingKey::Export,
@@ -5804,8 +6149,19 @@ impl MainView {
                     .child(self.due_alert_row(item, item.key == SettingKey::AlertTimed, cx))
                     .into_any_element();
             }
+            SettingKey::People => {
+                return edge(div().py_3())
+                    .child(self.people_editor(cx))
+                    .into_any_element();
+            }
+            SettingKey::Keys => {
+                return edge(div().py_3())
+                    .child(self.keys_help(cx))
+                    .into_any_element();
+            }
             _ => {}
         }
+        use crate::state::PreviewPick as Pick;
         let look = crate::theme::look(cx);
         let reset = |id: &'static str, shown: bool| {
             Button::new(id)
@@ -5845,272 +6201,315 @@ impl MainView {
                 .child(Slider::new(state).accessibility_label(name))
                 .test_support()
         };
-        let control: AnyElement = match item.key {
-            SettingKey::Themes
-            | SettingKey::Layouts
-            | SettingKey::Ai(_)
-            | SettingKey::AlertTimed
-            | SettingKey::AlertDate => unreachable!(),
-            SettingKey::AlertHour => {
-                let hour = self.due_alert_standard(cx).hour;
-                row()
+        let control: AnyElement =
+            match item.key {
+                SettingKey::Themes
+                | SettingKey::Layouts
+                | SettingKey::Ai(_)
+                | SettingKey::AlertTimed
+                | SettingKey::AlertDate
+                | SettingKey::People
+                | SettingKey::Keys => unreachable!(),
+                SettingKey::LockNow => feel::gloss(
+                    Button::new("lock-now")
+                        .icon(app_icon("lock"))
+                        .label("ロック")
+                        .outline()
+                        .small()
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.close_top_dialog(window, cx);
+                            window.dispatch_action(Box::new(LockNow), cx)
+                        })),
+                )
+                .into_any_element(),
+                SettingKey::NewWindow => feel::gloss(
+                    Button::new("new-window")
+                        .icon(app_icon("app-window"))
+                        .label("開く")
+                        .outline()
+                        .small()
+                        .on_click(|_, window, cx| window.dispatch_action(Box::new(NewWindow), cx)),
+                )
+                .into_any_element(),
+                SettingKey::AlertHour => {
+                    let hour = self.due_alert_standard(cx).hour;
+                    row()
+                        .gap_1()
+                        .flex_wrap()
+                        .justify_end()
+                        .children(
+                            malakt_core::alert::HOUR_CHOICES
+                                .into_iter()
+                                .enumerate()
+                                .map(|(ix, h)| {
+                                    chip(
+                                        ("alert-hour", ix),
+                                        malakt_core::alert::hour_label(h),
+                                        hour == h,
+                                        cx,
+                                    )
+                                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                        this.set_due_alert_hour(h, cx);
+                                    }))
+                                    .test_support()
+                                }),
+                        )
+                        .child(
+                            reset(
+                                "alert-hour-reset",
+                                hour != malakt_core::alert::STANDARD_HOUR,
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.set_due_alert_hour(malakt_core::alert::STANDARD_HOUR, cx);
+                            })),
+                        )
+                        .into_any_element()
+                }
+                SettingKey::Scene => {
+                    let scene = crate::theme::scene(cx);
+                    let has_scene = scene != crate::theme::Scene::None;
+                    row()
+                        .gap_1()
+                        .child(
+                            opener("scene-open", scene.label(), cx)
+                                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                    this.open_scene_picker(cx)
+                                }))
+                                .test_support(),
+                        )
+                        .child(reset("scene-reset", has_scene).on_click(cx.listener(
+                            |this, _, window, cx| {
+                                this.set_scene(crate::theme::Scene::None, window, cx)
+                            },
+                        )))
+                        .into_any_element()
+                }
+                SettingKey::Clear => row()
                     .gap_1()
-                    .flex_wrap()
-                    .justify_end()
-                    .children(
-                        malakt_core::alert::HOUR_CHOICES
-                            .into_iter()
-                            .enumerate()
-                            .map(|(ix, h)| {
+                    .child(slider("clear-slider", &self.clear_slider, "透明度"))
+                    .child(reset("clear-reset", false))
+                    .into_any_element(),
+                SettingKey::Blur => row()
+                    .gap_1()
+                    .child(slider("blur-slider", &self.blur_slider, "ぼかし"))
+                    .child(reset("blur-reset", false))
+                    .into_any_element(),
+                SettingKey::Font => row()
+                    .gap_1()
+                    .child(
+                        opener("font-open", self.current_font(cx), cx)
+                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                this.open_font_picker(window, cx)
+                            }))
+                            .test_support(),
+                    )
+                    .child(
+                        reset("font-reset", look.font.is_some())
+                            .on_click(cx.listener(|this, _, _, cx| this.set_font(None, cx))),
+                    )
+                    .into_any_element(),
+                SettingKey::Color(slot) => {
+                    let ix = crate::theme::Slot::ALL
+                        .iter()
+                        .position(|s| *s == slot)
+                        .unwrap_or(0);
+                    let id = ["accent-reset", "light-reset", "dark-reset"][ix];
+                    row()
+                        .gap_1()
+                        .child(
+                            div()
+                                .id(("color-open", ix))
+                                .child(
+                                    ColorPicker::new(&self.color_pickers[ix])
+                                        .accessibility_label(slot.label())
+                                        .small(),
+                                )
+                                .test_support(),
+                        )
+                        .child(reset(id, look.color(slot).is_some()).on_click(cx.listener(
+                            move |this, _, window, cx| this.set_color(slot, None, window, cx),
+                        )))
+                        .into_any_element()
+                }
+                SettingKey::Density => row()
+                    .gap_1()
+                    .children(crate::theme::Density::ALL.into_iter().enumerate().map(
+                        |(ix, density)| {
+                            chip(
+                                ("density", ix),
+                                density.label(),
+                                crate::theme::density(cx) == density,
+                                cx,
+                            )
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                this.set_density(density, cx)
+                            }))
+                            .on_hover(cx.listener(move |this, on: &bool, _, cx| {
+                                this.preview_hover(Pick::Density(density), *on, cx)
+                            }))
+                            .test_support()
+                        },
+                    ))
+                    .child(reset("density-reset", false))
+                    .into_any_element(),
+                SettingKey::DueFormat => {
+                    row()
+                        .gap_1()
+                        .children(view::DueFormat::ALL.into_iter().enumerate().map(
+                            |(ix, format)| {
                                 chip(
-                                    ("alert-hour", ix),
-                                    malakt_core::alert::hour_label(h),
-                                    hour == h,
+                                    ("due-format", ix),
+                                    format.label(),
+                                    crate::theme::due_format(cx) == format,
                                     cx,
                                 )
                                 .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                    this.set_due_alert_hour(h, cx);
+                                    this.set_due_format(format, cx)
+                                }))
+                                .on_hover(cx.listener(move |this, on: &bool, _, cx| {
+                                    this.preview_hover(Pick::Due(format), *on, cx)
                                 }))
                                 .test_support()
-                            }),
-                    )
-                    .child(
-                        reset(
-                            "alert-hour-reset",
-                            hour != malakt_core::alert::STANDARD_HOUR,
-                        )
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.set_due_alert_hour(malakt_core::alert::STANDARD_HOUR, cx);
-                        })),
-                    )
-                    .into_any_element()
-            }
-            SettingKey::Scene => {
-                let scene = crate::theme::scene(cx);
-                let has_scene = scene != crate::theme::Scene::None;
-                row()
+                            },
+                        ))
+                        .child(reset("due-format-reset", false))
+                        .into_any_element()
+                }
+                SettingKey::Feel => {
+                    row()
+                        .gap_1()
+                        .children(crate::theme::Feel::ALL.into_iter().enumerate().map(
+                            |(ix, feel)| {
+                                chip(
+                                    ("feel", ix),
+                                    feel.label(),
+                                    crate::theme::feel(cx) == feel,
+                                    cx,
+                                )
+                                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                    this.set_feel(feel, cx)
+                                }))
+                                .on_hover(cx.listener(move |this, on: &bool, _, cx| {
+                                    this.preview_hover(Pick::Feel(feel), *on, cx)
+                                }))
+                                .test_support()
+                            },
+                        ))
+                        .child(reset("feel-reset", false))
+                        .into_any_element()
+                }
+                SettingKey::Cards => row()
                     .gap_1()
-                    .child(
-                        opener("scene-open", scene.label(), cx)
-                            .on_click(
-                                cx.listener(|this, _: &ClickEvent, _, cx| {
-                                    this.open_scene_picker(cx)
-                                }),
-                            )
-                            .test_support(),
-                    )
-                    .child(reset("scene-reset", has_scene).on_click(cx.listener(
-                        |this, _, window, cx| this.set_scene(crate::theme::Scene::None, window, cx),
-                    )))
-                    .into_any_element()
-            }
-            SettingKey::Clear => row()
-                .gap_1()
-                .child(slider("clear-slider", &self.clear_slider, "透明度"))
-                .child(reset("clear-reset", false))
-                .into_any_element(),
-            SettingKey::Blur => row()
-                .gap_1()
-                .child(slider("blur-slider", &self.blur_slider, "ぼかし"))
-                .child(reset("blur-reset", false))
-                .into_any_element(),
-            SettingKey::Font => row()
-                .gap_1()
-                .child(
-                    opener("font-open", self.current_font(cx), cx)
-                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                            this.open_font_picker(window, cx)
-                        }))
-                        .test_support(),
-                )
-                .child(
-                    reset("font-reset", look.font.is_some())
-                        .on_click(cx.listener(|this, _, _, cx| this.set_font(None, cx))),
-                )
-                .into_any_element(),
-            SettingKey::Color(slot) => {
-                let ix = crate::theme::Slot::ALL
-                    .iter()
-                    .position(|s| *s == slot)
-                    .unwrap_or(0);
-                let id = ["accent-reset", "light-reset", "dark-reset"][ix];
-                row()
-                    .gap_1()
-                    .child(
+                    .child({
+                        let on = crate::theme::cards(cx);
                         div()
-                            .id(("color-open", ix))
-                            .child(
-                                ColorPicker::new(&self.color_pickers[ix])
-                                    .accessibility_label(slot.label())
-                                    .small(),
-                            )
-                            .test_support(),
-                    )
-                    .child(reset(id, look.color(slot).is_some()).on_click(cx.listener(
-                        move |this, _, window, cx| this.set_color(slot, None, window, cx),
-                    )))
-                    .into_any_element()
-            }
-            SettingKey::Density => row()
-                .gap_1()
-                .children(crate::theme::Density::ALL.into_iter().enumerate().map(
-                    |(ix, density)| {
-                        chip(
-                            ("density", ix),
-                            density.label(),
-                            crate::theme::density(cx) == density,
-                            cx,
-                        )
-                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                            this.set_density(density, cx)
-                        }))
-                        .test_support()
-                    },
-                ))
-                .child(reset("density-reset", false))
-                .into_any_element(),
-            SettingKey::DueFormat => row()
-                .gap_1()
-                .children(
-                    view::DueFormat::ALL
-                        .into_iter()
-                        .enumerate()
-                        .map(|(ix, format)| {
-                            chip(
-                                ("due-format", ix),
-                                format.label(),
-                                crate::theme::due_format(cx) == format,
-                                cx,
-                            )
-                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                this.set_due_format(format, cx)
+                            .id("cards-preview")
+                            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                                this.preview_hover(Pick::Cards(!on), *hovered, cx)
                             }))
-                            .test_support()
-                        }),
-                )
-                .child(reset("due-format-reset", false))
-                .into_any_element(),
-            SettingKey::Feel => row()
-                .gap_1()
-                .children(
-                    crate::theme::Feel::ALL
-                        .into_iter()
-                        .enumerate()
-                        .map(|(ix, feel)| {
-                            chip(
-                                ("feel", ix),
-                                feel.label(),
-                                crate::theme::feel(cx) == feel,
-                                cx,
-                            )
-                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                this.set_feel(feel, cx)
+                            .child(Switch::new("cards-switch").checked(on).on_click(
+                                cx.listener(|this, on: &bool, _, cx| this.set_cards(*on, cx)),
+                            ))
+                    })
+                    .child(reset("cards-reset", false))
+                    .into_any_element(),
+                SettingKey::Float => row()
+                    .gap_1()
+                    .child({
+                        let on = crate::theme::floating(cx);
+                        div()
+                            .id("float-preview")
+                            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                                this.preview_hover(Pick::Float(!on), *hovered, cx)
                             }))
-                            .test_support()
-                        }),
-                )
-                .child(reset("feel-reset", false))
-                .into_any_element(),
-            SettingKey::Cards => row()
-                .gap_1()
-                .child(
-                    Switch::new("cards-switch")
-                        .checked(crate::theme::cards(cx))
-                        .on_click(cx.listener(|this, on: &bool, _, cx| this.set_cards(*on, cx))),
-                )
-                .child(reset("cards-reset", false))
-                .into_any_element(),
-            SettingKey::Float => row()
-                .gap_1()
-                .child(
-                    Switch::new("float-switch")
-                        .checked(crate::theme::floating(cx))
-                        .on_click(cx.listener(|this, on: &bool, _, cx| this.set_floating(*on, cx))),
-                )
-                .child(reset("float-reset", false))
-                .into_any_element(),
-            SettingKey::LockOn => Switch::new("lock-switch")
-                .checked(self.lock_enabled(cx))
-                .disabled(self.verifying(cx))
-                .on_click(cx.listener(|this, on: &bool, window, cx| {
-                    if *on {
-                        this.enable_lock(window, cx)
-                    } else {
-                        this.disable_lock(window, cx)
-                    }
-                }))
-                .into_any_element(),
-            SettingKey::AutoLock => {
-                let view = cx.entity().downgrade();
-                let auto = self.auto_lock(cx);
-                menu_choice("auto-lock", auto_lock_label(auto).into(), &theme)
-                    .pop_menu(move |mut menu, _, _| {
-                        let options = std::iter::once(None)
-                            .chain(malakt_core::lock::AUTO_CHOICES.into_iter().map(Some));
-                        for minutes in options {
-                            let view = view.clone();
-                            menu = menu.item(
-                                PopupMenuItem::new(auto_lock_label(minutes))
-                                    .checked(auto == minutes)
-                                    .on_click(move |_, _, cx| {
-                                        // ウィンドウを閉じたあとなら、反映する先がない
-                                        let _ = view.update(cx, |this, cx| {
-                                            this.set_auto_lock(minutes, cx);
-                                        });
-                                    }),
-                            );
-                        }
-                        menu
+                            .child(Switch::new("float-switch").checked(on).on_click(
+                                cx.listener(|this, on: &bool, _, cx| this.set_floating(*on, cx)),
+                            ))
                     })
-                    .into_any_element()
-            }
-            SettingKey::LockedNotices => {
-                let view = cx.entity().downgrade();
-                let notices = self.locked_notices(cx);
-                menu_choice("locked-notices", notices.label().into(), &theme)
-                    .pop_menu(move |mut menu, _, _| {
-                        for option in malakt_core::lock::LockedNotices::ALL {
-                            let view = view.clone();
-                            menu = menu.item(
-                                PopupMenuItem::new(option.label())
-                                    .checked(notices == option)
-                                    .on_click(move |_, _, cx| {
-                                        // ウィンドウを閉じたあとなら、反映する先がない
-                                        let _ = view.update(cx, |this, cx| {
-                                            this.set_locked_notices(option, cx);
-                                        });
-                                    }),
-                            );
+                    .child(reset("float-reset", false))
+                    .into_any_element(),
+                SettingKey::LockOn => Switch::new("lock-switch")
+                    .checked(self.lock_enabled(cx))
+                    .disabled(self.verifying(cx))
+                    .on_click(cx.listener(|this, on: &bool, window, cx| {
+                        if *on {
+                            this.enable_lock(window, cx)
+                        } else {
+                            this.disable_lock(window, cx)
                         }
-                        menu
-                    })
-                    .into_any_element()
-            }
-            SettingKey::Reminders => Switch::new("reminders-switch")
-                .checked(crate::reminders::enabled(cx))
-                .on_click(cx.listener(|this, _: &bool, _, cx| this.toggle_reminders(cx)))
+                    }))
+                    .into_any_element(),
+                SettingKey::AutoLock => {
+                    let view = cx.entity().downgrade();
+                    let auto = self.auto_lock(cx);
+                    menu_choice("auto-lock", auto_lock_label(auto).into(), &theme)
+                        .pop_menu(move |mut menu, _, _| {
+                            let options = std::iter::once(None)
+                                .chain(malakt_core::lock::AUTO_CHOICES.into_iter().map(Some));
+                            for minutes in options {
+                                let view = view.clone();
+                                menu = menu.item(
+                                    PopupMenuItem::new(auto_lock_label(minutes))
+                                        .checked(auto == minutes)
+                                        .on_click(move |_, _, cx| {
+                                            // ウィンドウを閉じたあとなら、反映する先がない
+                                            let _ = view.update(cx, |this, cx| {
+                                                this.set_auto_lock(minutes, cx);
+                                            });
+                                        }),
+                                );
+                            }
+                            menu
+                        })
+                        .into_any_element()
+                }
+                SettingKey::LockedNotices => {
+                    let view = cx.entity().downgrade();
+                    let notices = self.locked_notices(cx);
+                    menu_choice("locked-notices", notices.label().into(), &theme)
+                        .pop_menu(move |mut menu, _, _| {
+                            for option in malakt_core::lock::LockedNotices::ALL {
+                                let view = view.clone();
+                                menu = menu.item(
+                                    PopupMenuItem::new(option.label())
+                                        .checked(notices == option)
+                                        .on_click(move |_, _, cx| {
+                                            // ウィンドウを閉じたあとなら、反映する先がない
+                                            let _ = view.update(cx, |this, cx| {
+                                                this.set_locked_notices(option, cx);
+                                            });
+                                        }),
+                                );
+                            }
+                            menu
+                        })
+                        .into_any_element()
+                }
+                SettingKey::Reminders => Switch::new("reminders-switch")
+                    .checked(crate::reminders::enabled(cx))
+                    .on_click(cx.listener(|this, _: &bool, _, cx| this.toggle_reminders(cx)))
+                    .into_any_element(),
+                SettingKey::AutoUpdate => Switch::new("auto-update-switch")
+                    .checked(crate::update::enabled(cx))
+                    .on_click(cx.listener(|this, _: &bool, _, cx| this.toggle_auto_update(cx)))
+                    .into_any_element(),
+                SettingKey::Export => feel::gloss(
+                    Button::new("export-all")
+                        .label("エクスポート")
+                        .outline()
+                        .small()
+                        .on_click(cx.listener(|this, _, window, cx| this.export(window, cx))),
+                )
                 .into_any_element(),
-            SettingKey::AutoUpdate => Switch::new("auto-update-switch")
-                .checked(crate::update::enabled(cx))
-                .on_click(cx.listener(|this, _: &bool, _, cx| this.toggle_auto_update(cx)))
+                SettingKey::Import => feel::gloss(
+                    Button::new("import-all")
+                        .label("インポート")
+                        .outline()
+                        .small()
+                        .on_click(cx.listener(|this, _, window, cx| this.import(window, cx))),
+                )
                 .into_any_element(),
-            SettingKey::Export => feel::gloss(
-                Button::new("export-all")
-                    .label("エクスポート")
-                    .outline()
-                    .small()
-                    .on_click(cx.listener(|this, _, window, cx| this.export(window, cx))),
-            )
-            .into_any_element(),
-            SettingKey::Import => feel::gloss(
-                Button::new("import-all")
-                    .label("インポート")
-                    .outline()
-                    .small()
-                    .on_click(cx.listener(|this, _, window, cx| this.import(window, cx))),
-            )
-            .into_any_element(),
-        };
+            };
         setting_line(item.name, item.note, control, false, first, &theme)
     }
 
@@ -6483,6 +6882,9 @@ impl MainView {
                     .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                         this.apply_layout(&layout, window, cx)
                     }))
+                    .on_hover(cx.listener(move |this, on: &bool, _, cx| {
+                        this.preview_hover(crate::state::PreviewPick::Layout(ix), *on, cx)
+                    }))
                     .test_support(),
             );
         }
@@ -6683,6 +7085,78 @@ impl MainView {
     }
 
     fn render_modal(&self, cx: &mut Context<Self>) -> Option<Div> {
+        let modal = self.modal.clone();
+        self.render_modal_of(&modal, cx)
+    }
+
+    /// ダイアログが出てくる動きと消える動きを、今の時刻まで進める。
+    /// 出てきたら 200ms でふわっと浮かび上がり、閉じたら 150ms で薄くなって消える。
+    fn tick_dialog_motion(&mut self, window: &mut Window) {
+        use std::time::{Duration, Instant};
+        const OPEN: Duration = Duration::from_millis(200);
+        const CLOSE: Duration = Duration::from_millis(150);
+        let shown = (self.modal != Modal::None || self.pane_overlay.is_some())
+            .then(|| (self.modal.clone(), self.pane_overlay));
+        let now = Instant::now();
+        match (self.modal_seen.take(), &shown) {
+            (None, Some(_)) => {
+                self.modal_opened = Some(now);
+                self.modal_closing = None;
+            }
+            (Some((modal, overlay)), None) => {
+                self.modal_opened = None;
+                self.modal_closing = Some((now, modal, overlay));
+            }
+            _ => {}
+        }
+        self.modal_seen = shown;
+        self.dialog_t.set(1.);
+        if !self.motion {
+            self.modal_closing = None;
+            return;
+        }
+        if let Some(at) = self.modal_opened {
+            let progress = now.duration_since(at).as_secs_f32() / OPEN.as_secs_f32();
+            if progress < 1. {
+                self.dialog_t.set(ease_out_quint()(progress));
+                window.request_animation_frame();
+            }
+        }
+        if let Some((at, ..)) = &self.modal_closing {
+            if now.duration_since(*at) >= CLOSE {
+                self.modal_closing = None;
+            } else {
+                window.request_animation_frame();
+            }
+        }
+    }
+
+    /// 閉じたばかりのダイアログ。薄くしながら描き、上を覆って押せないようにする。
+    fn render_closing_dialog(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        const CLOSE: f32 = 0.15;
+        let (at, modal, overlay) = self.modal_closing.clone()?;
+        let progress = (at.elapsed().as_secs_f32() / CLOSE).min(1.);
+        let open = self.dialog_t.replace(1. - ease_out_quint()(progress));
+        let dialog = match overlay {
+            Some(overlay) => Some(self.pane_overlay_dialog(overlay, cx)),
+            None => self
+                .render_modal_of(&modal, cx)
+                .map(IntoElement::into_any_element),
+        };
+        self.dialog_t.set(open);
+        Some(
+            div()
+                .id("dialog-closing")
+                .absolute()
+                .inset_0()
+                .child(dialog?)
+                .child(div().absolute().inset_0().occlude())
+                .test_support()
+                .into_any_element(),
+        )
+    }
+
+    fn render_modal_of(&self, modal: &Modal, cx: &mut Context<Self>) -> Option<Div> {
         let theme = cx.theme().clone();
         let muted = |text: String| {
             div()
@@ -6701,7 +7175,7 @@ impl MainView {
                     })),
             )
         };
-        Some(match &self.modal {
+        Some(match modal {
             Modal::None => return None,
             Modal::WorkspaceIcon(id) => {
                 let theme = cx.theme().clone();
@@ -6956,118 +7430,6 @@ impl MainView {
             Modal::MoveTasks(_) => {
                 let body = col().gap_3().child(self.workspace_options(cx));
                 self.dialog("タスクを移動", body, cx)
-            }
-            Modal::People => {
-                let mut list = col().gap_1();
-                let view = cx.entity().downgrade();
-                let roots: Vec<(Id, SharedString)> = self
-                    .workspaces
-                    .iter()
-                    .filter(|w| w.parent_id.is_none())
-                    .map(|w| (w.id.clone(), w.name.clone().into()))
-                    .collect();
-                for (ix, p) in self.people.iter().enumerate() {
-                    let id = p.id.clone();
-                    // 使うワークスペース。「自分」は、すべてのワークスペースで使う
-                    let scope = (!p.is_self).then(|| {
-                        let (view, person, roots) = (view.clone(), p.id.clone(), roots.clone());
-                        // いちばん上の親に直して、メニューの印と合わせる
-                        let current: Vec<Id> = p
-                            .workspace_ids
-                            .iter()
-                            .map(|w| self.root_of(w).to_owned())
-                            .collect();
-                        let label: SharedString = match current.as_slice() {
-                            [] => "すべてのワークスペース".into(),
-                            [one] => self.workspace_name(Some(one)),
-                            many => format!(
-                                "{} ほか {}",
-                                self.workspace_name(Some(&many[0])),
-                                many.len() - 1
-                            )
-                            .into(),
-                        };
-                        Button::new(("person-scope", ix))
-                            .icon(app_icon(if p.is_global() { "globe" } else { "folder" }))
-                            .ghost()
-                            .xsmall()
-                            .tooltip(label)
-                            .pop_menu(move |menu, _, _| {
-                                person_workspace_items(menu, &view, &person, &current, &roots)
-                            })
-                    });
-                    let name =
-                        if self.person_naming.as_ref() == Some(&p.id) {
-                            // その場で名前を書く。Enter かほかの場所を押すと保存、Esc で取り消し
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .on_mouse_down_out(cx.listener(|this, _, window, cx| {
-                                    this.save_person_name(window, cx)
-                                }))
-                                .child(
-                                    Input::new(&self.inputs.name)
-                                        .id("person-input")
-                                        .aria_label("名前")
-                                        .text_base()
-                                        .bg(theme.background)
-                                        .border_color(theme.ring)
-                                        .px_2(),
-                                )
-                                .into_any_element()
-                        } else {
-                            let id = id.clone();
-                            div()
-                                .id(("person", ix))
-                                .flex_1()
-                                .min_w_0()
-                                .h(PERSON_ROW_HEIGHT)
-                                .flex()
-                                .items_center()
-                                .px_2()
-                                .rounded(feel::md())
-                                .border_1()
-                                .border_color(gpui_kit::transparent_black())
-                                .cursor_pointer()
-                                .lit(theme.muted, cx)
-                                .child(div().truncate().child(p.name.clone()))
-                                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                                    this.rename_person(id.clone(), window, cx)
-                                }))
-                                .test_support()
-                                .into_any_element()
-                        };
-                    list = list.child(
-                        row()
-                            .gap_2()
-                            .child(name)
-                            .when(p.is_self, |d| {
-                                d.child(div().text_xs().text_color(theme.primary).child("自分"))
-                            })
-                            .children(scope)
-                            .child(feel::gloss(
-                                Button::new(("del-person", ix))
-                                    .label("削除")
-                                    .ghost()
-                                    .xsmall()
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.write(cx, |s| s.delete_person(&id));
-                                    })),
-                            )),
-                    );
-                }
-                let body = col().gap_3().child(list).child(
-                    row().child(feel::gloss(
-                        Button::new("person-add")
-                            .icon(app_icon("plus"))
-                            .framed(cx)
-                            .tooltip("担当者を追加")
-                            .on_click(
-                                cx.listener(|this, _, window, cx| this.add_person(window, cx)),
-                            ),
-                    )),
-                );
-                self.dialog("担当者", body, cx)
             }
             Modal::History => {
                 let body = self.render_history(cx);
@@ -7949,6 +8311,7 @@ impl MainView {
             .children(self.panel_drag_layer(cx))
             .children(self.task_drag_listener(cx))
             .children(self.render_modal(cx))
+            .children(self.render_closing_dialog(cx))
             .when_some(
                 self.error
                     .clone()
@@ -8005,6 +8368,7 @@ impl MainView {
 
 impl Render for MainView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.tick_dialog_motion(window);
         if self.embedded {
             return self.render_embedded(cx);
         }
@@ -8233,14 +8597,8 @@ impl Render for MainView {
             .children(self.task_drag_ghost(cx))
             .children(self.panel_drag_layer(cx))
             .children(self.render_pane_overlay(cx))
-            .children(self.render_modal(cx).map(|modal| {
-                if !self.motion {
-                    return modal.into_any_element();
-                }
-                modal
-                    .with_animation("modal-in", appear(140), |modal, t| modal.opacity(t))
-                    .into_any_element()
-            }))
+            .children(self.render_modal(cx))
+            .children(self.render_closing_dialog(cx))
             .when_some(
                 self.error
                     .clone()
