@@ -1649,7 +1649,7 @@ impl AiPane {
         if provider.supports_effort() {
             let allowed = Effort::ALL.map(|e| session.effort_allowed(e));
             pills.push(
-                pill("ai-pick-effort", effort.label().into(), "effort".into())
+                pill("ai-pick-effort", effort.label().into(), "考える深さ".into())
                     .pop_menu_at(Anchor::BottomLeft, move |mut menu, _, _| {
                         for (e, allowed) in Effort::ALL.into_iter().zip(allowed) {
                             let pane = pane.clone();

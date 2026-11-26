@@ -119,7 +119,7 @@ impl AiRow {
         match self {
             AiRow::Service => "サービス",
             AiRow::Model => "モデル",
-            AiRow::Effort => "effort",
+            AiRow::Effort => "考える深さ",
             AiRow::Coordinator => "振り分けのモデル",
             AiRow::Key => "API キー",
             AiRow::AutoRun => "オート実行",
@@ -325,7 +325,12 @@ impl AiSettings {
     fn model_groups(&self, cx: &App) -> Vec<(SharedString, Vec<SharedString>)> {
         let session = self.session.read(cx);
         let query = self.model_input.read(cx).value().trim().to_lowercase();
-        let matches = |m: &str| query.is_empty() || m.to_lowercase().contains(&query);
+        // ID でも、画面に出す名前（「haiku 5.5」など）でも探せる
+        let matches = |m: &str| {
+            query.is_empty()
+                || m.to_lowercase().contains(&query)
+                || session.model_label(m).to_lowercase().contains(&query)
+        };
         let presets: Vec<SharedString> = session
             .provider
             .models()
@@ -392,11 +397,13 @@ impl AiSettings {
                         .small()
                         .w_full()
                         .justify_between()
+                        // 一覧と同じ名前を出し、ID はホバーで出す
                         .label(if model.is_empty() {
                             SharedString::from("標準のモデル")
                         } else {
-                            SharedString::from(model.clone())
+                            session.model_label(&model)
                         })
+                        .when(!model.is_empty(), |b| b.tooltip(model.clone()))
                         .dropdown_caret(true)
                         .selected(model_open)
                         .on_click(

@@ -116,6 +116,10 @@ struct SavedUi {
 /// 会話の一覧。今の会話の ID も入れる。
 /// サービスの一覧にあった、モデルの表示名（ID ごと）。
 const MODEL_NAMES_SETTING: &str = "ai.model_names";
+/// モデルごとに選んだ考える深さ。`{"claude:claude-fable-5-2": "low"}` の形。「標準」は入れない
+const EFFORTS_SETTING: &str = "ai.efforts";
+/// 前の版の、すべてのモデルで共通の考える深さ。読んだら今のモデルのものとして移す
+const LEGACY_EFFORT_SETTING: &str = "ai.effort";
 const MAX_MODEL_NAMES: usize = 300;
 const CHATS_SETTING: &str = "ai.chats";
 /// アプリが自動で始めた AI の実行の記録。
@@ -606,7 +610,10 @@ pub struct Session {
     config: AiConfig,
     pub provider: Provider,
     models: HashMap<Provider, String>,
+    /// 今のモデルの考える深さ。モデルを変えると、そのモデルで最後に選んだものになる
     pub effort: Effort,
+    /// モデルごとに選んだ考える深さ。キーは `effort_key`
+    efforts: HashMap<String, Effort>,
     pub key: KeyState,
     github: GithubAccount,
     /// アカウントを読みに行った回数。古い結果を使わないために数える。
@@ -750,6 +757,11 @@ fn setting_key(provider: Provider) -> String {
     format!("ai.model.{}", provider.as_str())
 }
 
+/// モデルごとの考える深さのキー。同じ ID のモデルでも、サービスが違えば別に覚える。
+fn effort_key(provider: Provider, model: &str) -> String {
+    format!("{}:{model}", provider.as_str())
+}
+
 impl Session {
     fn new(db: Entity<Db>, config: AiConfig, cx: &mut Context<Self>) -> Self {
         Self::create(db, config, false, cx)
@@ -768,7 +780,9 @@ impl Session {
         let mut runs = Vec::new();
         let arrange;
         let track;
-        let (provider, effort, models, coordinators) = {
+        let mut migrate_effort = false;
+        let mut efforts_error = None;
+        let (provider, effort, efforts, models, coordinators) = {
             let store = &db.read(cx).store;
             let mut read = |key: &str| match store.setting(key) {
                 Ok(value) => value,
@@ -780,13 +794,42 @@ impl Session {
             let provider = read("ai.provider")
                 .and_then(|v| Provider::parse(&v))
                 .unwrap_or(Provider::Claude);
-            let effort = read("ai.effort")
-                .and_then(|v| Effort::parse(&v))
-                .unwrap_or(Effort::Default);
-            let models = Provider::ALL
+            let models: HashMap<Provider, String> = Provider::ALL
                 .into_iter()
                 .filter_map(|p| read(&setting_key(p)).map(|m| (p, m)))
                 .collect();
+            let model = models
+                .get(&provider)
+                .map(String::as_str)
+                .unwrap_or_else(|| provider.default_model());
+            let mut efforts: HashMap<String, Effort> = HashMap::new();
+            match read(EFFORTS_SETTING) {
+                Some(v) => match serde_json::from_str::<HashMap<String, String>>(&v) {
+                    Ok(saved) => {
+                        efforts = saved
+                            .into_iter()
+                            .filter_map(|(k, e)| Effort::parse(&e).map(|e| (k, e)))
+                            .collect();
+                    }
+                    Err(e) => {
+                        efforts_error =
+                            Some(format!("モデルごとの考える深さを読めませんでした: {e}").into())
+                    }
+                },
+                // 前の版で選んでいた深さは、今のモデルのものにする
+                None => {
+                    if let Some(e) = read(LEGACY_EFFORT_SETTING).and_then(|v| Effort::parse(&v)) {
+                        if e != Effort::Default && provider.supports_effort() {
+                            efforts.insert(effort_key(provider, model), e);
+                        }
+                        migrate_effort = true;
+                    }
+                }
+            }
+            let effort = efforts
+                .get(&effort_key(provider, model))
+                .copied()
+                .unwrap_or(Effort::Default);
             let coordinators = Provider::ALL
                 .into_iter()
                 .filter_map(|p| {
@@ -889,14 +932,18 @@ impl Session {
                     .filter(|v| !v.trim().is_empty())
                     .unwrap_or(defaults.instruction),
             };
-            (provider, effort, models, coordinators)
+            (provider, effort, efforts, models, coordinators)
         };
+        if efforts_error.is_some() {
+            error = efforts_error;
+        }
         let mut this = Self {
             db,
             config,
             provider,
             models,
             effort,
+            efforts,
             key: KeyState::Unknown,
             github: GithubAccount::Unknown,
             github_read: 0,
@@ -985,6 +1032,9 @@ impl Session {
         };
         if worker {
             return this;
+        }
+        if migrate_effort {
+            this.migrate_effort(cx);
         }
         this._subscriptions = vec![
             cx.observe(&this.db.clone(), |this, _, cx| {
@@ -1337,6 +1387,7 @@ impl Session {
             self.provider,
             self.models.clone(),
             self.effort,
+            self.efforts.clone(),
             self.key.clone(),
             self.github.clone(),
             self.workspace.clone(),
@@ -1349,6 +1400,7 @@ impl Session {
                 w.provider,
                 w.models,
                 w.effort,
+                w.efforts,
                 w.key,
                 w.github,
                 w.workspace,
@@ -2681,9 +2733,7 @@ impl Session {
         }
         self.provider = provider;
         self.listed.clear();
-        if !provider.supports_effort() {
-            self.effort = Effort::Default;
-        }
+        self.effort = self.saved_effort();
         self.refresh_key(cx);
         cx.notify();
     }
@@ -2694,7 +2744,43 @@ impl Session {
             return;
         }
         self.models.insert(self.provider, model.to_owned());
+        self.effort = self.saved_effort();
         cx.notify();
+    }
+
+    /// 前の版の共通の考える深さを、モデルごとの形で保存し直す。
+    fn migrate_effort(&mut self, cx: &mut Context<Self>) {
+        let efforts = self.efforts.clone();
+        let error = self.error.clone();
+        if self.save_efforts(&efforts, cx) {
+            self.error = error;
+            if let Err(e) = self.db.update(cx, |db, _| {
+                db.store.set_setting(LEGACY_EFFORT_SETTING, None)
+            }) {
+                self.error = Some(format!("AI の設定を保存できませんでした: {e}").into());
+            }
+        }
+    }
+
+    /// 今のモデルで最後に選んだ考える深さ。選んでいなければ「標準」。
+    fn saved_effort(&self) -> Effort {
+        if !self.provider.supports_effort() {
+            return Effort::Default;
+        }
+        self.efforts
+            .get(&effort_key(self.provider, self.model()))
+            .copied()
+            .unwrap_or(Effort::Default)
+    }
+
+    /// モデルごとの考える深さを保存する。保存できなければ `false`（エラーは画面に出る）。
+    fn save_efforts(&mut self, efforts: &HashMap<String, Effort>, cx: &mut Context<Self>) -> bool {
+        let saved: std::collections::BTreeMap<&str, &str> = efforts
+            .iter()
+            .map(|(k, e)| (k.as_str(), e.as_str()))
+            .collect();
+        let json = serde_json::to_string(&saved).expect("文字列だけの表は JSON にできる");
+        self.save_setting(EFFORTS_SETTING, &json, cx)
     }
 
     /// OpenCode のモデルの一覧を読んでおく。モデルごとに選べる effort を、選ぶ前に出すため。
@@ -2749,10 +2835,22 @@ impl Session {
         }
     }
 
+    /// 今のモデルの考える深さを選ぶ。モデルごとに覚え、そのモデルに戻すとこの深さになる。
     pub fn set_effort(&mut self, effort: Effort, cx: &mut Context<Self>) {
-        if self.effort == effort || !self.save_setting("ai.effort", effort.as_str(), cx) {
+        if self.effort == effort {
             return;
         }
+        let mut efforts = self.efforts.clone();
+        let key = effort_key(self.provider, self.model());
+        if effort == Effort::Default {
+            efforts.remove(&key);
+        } else {
+            efforts.insert(key, effort);
+        }
+        if !self.save_efforts(&efforts, cx) {
+            return;
+        }
+        self.efforts = efforts;
         self.effort = effort;
         cx.notify();
     }
