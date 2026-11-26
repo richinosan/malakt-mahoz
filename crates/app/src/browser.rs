@@ -33,6 +33,8 @@ pub const MAX_PAGES: usize = 12;
 /// ホイールで押したリンクを小さなウィンドウで開いたあと、同じリンクの「新しいタブで開く」を捨てる時間。
 /// ホイールでの押下を止められない部品では、両方が届く。
 const POPUP_ECHO: Duration = Duration::from_secs(1);
+/// 閉じたタブを開き直せる数（Ctrl+Shift+T）。
+const MAX_CLOSED: usize = 20;
 /// 何も開いていないページ。
 pub const BLANK: &str = "about:blank";
 /// 開いているページの場所を残す設定。次に起動したときに、同じタブを並べる。
@@ -136,6 +138,10 @@ pub enum Event {
     Zoom(Zoom),
     /// ページの上でロックのキー（Ctrl+Shift+L / ⇧⌘L）を押した。
     Lock,
+    /// ページの中でブラウザやアプリのキー（`ctrl-r` など、[`crate::shell_keys::page_keys`]）を押した。
+    Key(String),
+    /// ページの中を探し終わった。`turn` は探し始めたときの [`Page`] の探した回。
+    Found { turn: u64, found: bool },
 }
 
 /// 開いているページを動かす口。本物は [`crate::webview`]、テストでは差し替える。
@@ -162,6 +168,17 @@ pub trait Engine {
     fn snapshot(&self, done: Shot) -> Result<(), String>;
     /// ページの拡大率を変える（`1.0` が 100%）。
     fn zoom(&self, factor: f64) -> Result<(), String>;
+    /// 印刷のダイアログを出す。
+    fn print(&self) -> Result<(), String>;
+    /// ページの中で `query` を探して選ぶ。`again` なら今選んでいる所の次から、でなければ頭から。
+    /// `done` には見つかったかが届く。
+    fn find(
+        &self,
+        query: &str,
+        backwards: bool,
+        again: bool,
+        done: Box<dyn Fn(bool) + Send + 'static>,
+    ) -> Result<(), String>;
 }
 
 /// ページを作るときに渡すもの。
@@ -232,6 +249,10 @@ pub struct Page {
     pub zoom_recent: bool,
     /// 100% に戻した表示が、消えていく途中。
     pub(crate) zoom_leaving: bool,
+    /// ページの中を探した回。古い結果を捨てる。
+    pub(crate) find_turn: u64,
+    /// 最後に探した言葉が、ページの中になかった。
+    pub find_missing: bool,
 }
 
 impl Page {
@@ -263,6 +284,8 @@ impl Page {
             zoom_entered: 0,
             zoom_recent: false,
             zoom_leaving: false,
+            find_turn: 0,
+            find_missing: false,
         }
     }
 
@@ -608,13 +631,136 @@ impl Terms {
         .detach();
     }
 
+    /// ページの中で押したキーを、そのページを置いているウィンドウのブラウザの画面で押したものとして扱う。
+    /// アプリのキー（F11、Ctrl+J など）も、ここからいつもどおりに働く。
+    fn page_key(&mut self, id: u64, key: &str, cx: &mut Context<Self>) {
+        // ページのスクリプトは、どんな文字でも送れる。知らせると決めたキーだけを受ける
+        if !crate::shell_keys::is_page_key(key) {
+            return;
+        }
+        let Some(keystroke) = crate::shell_keys::keystroke(key) else {
+            return;
+        };
+        let Some(here) = self.page(id).and_then(|p| p.window) else {
+            return;
+        };
+        self.browser_focus
+            .retain(|(_, focus)| focus.upgrade().is_some());
+        let focus = self
+            .browser_focus
+            .iter()
+            .find(|(window, _)| *window == here)
+            .and_then(|(_, focus)| focus.upgrade());
+        let Some(window) = cx.windows().into_iter().find(|w| w.window_id() == here) else {
+            return;
+        };
+        // 押したキーの働きは、この一覧（Terms）を書き換えることがあるので、書き換え終わってから動かす
+        cx.defer(move |cx| {
+            // ウィンドウを閉じたばかりなら、押した先がない
+            let _ = window.update(cx, |_, window, cx| {
+                if let Some(focus) = &focus {
+                    if !focus.contains_focused(window, cx) {
+                        window.focus(focus, cx);
+                    }
+                }
+                window.dispatch_keystroke(keystroke, cx);
+            });
+        });
+    }
+
+    /// ブラウザの画面のキーの入力先を覚える。ページの中で押したキーを、ここに届ける。
+    pub(crate) fn note_browser_focus(&mut self, window: WindowId, focus: &FocusHandle) {
+        self.browser_focus
+            .retain(|(w, f)| *w != window && f.upgrade().is_some());
+        self.browser_focus.push((window, focus.downgrade()));
+    }
+
+    /// ページにあるキーの入力先を、アプリの画面へ戻す（URL の欄や検索の欄に書くとき）。
+    pub(crate) fn release_page(&mut self, id: u64, cx: &mut Context<Self>) {
+        let Some(page) = self.page_mut(id) else {
+            return;
+        };
+        if !std::mem::take(&mut page.focused) {
+            return;
+        }
+        if let Some(engine) = page.engine.clone() {
+            if let Err(e) = engine.focus_parent() {
+                self.fail(format!("キーの入力先を戻せませんでした: {e}"), cx);
+            }
+        }
+    }
+
+    /// キーの入力先をページに移す。まだ見せていなければ、見せたときに移す。
+    pub(crate) fn focus_page(&mut self, id: u64, cx: &mut Context<Self>) {
+        self.focus_page = Some(id);
+        cx.notify();
+    }
+
+    /// 最後に閉じたブラウザのタブを開き直す。
+    pub fn reopen_page(&mut self, cx: &mut Context<Self>) -> Option<u64> {
+        let url = self.closed_pages.pop()?;
+        let opened = self.open_page(&url, cx);
+        match opened {
+            // 閉じる前と同じく、ページの中でキーを使える
+            Some(id) => self.focus_page = Some(id),
+            // 開けなかったら（タブが多すぎるなど）、次にまた開き直せるように戻す
+            None => self.closed_pages.push(url),
+        }
+        opened
+    }
+
+    /// ページの中で `query` を探す。見つからなければ、検索の欄に出す。
+    pub fn find_in_page(
+        &mut self,
+        id: u64,
+        query: &str,
+        backwards: bool,
+        again: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let events = self.page_events.clone();
+        let Some(page) = self.page_mut(id) else {
+            return;
+        };
+        page.find_turn += 1;
+        page.find_missing = false;
+        let Some(engine) = page.engine.clone().filter(|_| !query.is_empty()) else {
+            cx.notify();
+            return;
+        };
+        let turn = page.find_turn;
+        let done = Box::new(move |found| {
+            // アプリを閉じている途中なら、受け取る先がない
+            let _ = events.try_send((id, Event::Found { turn, found }));
+        });
+        if let Err(e) = engine.find(query, backwards, again, done) {
+            self.fail(format!("ページの中を検索できませんでした: {e}"), cx);
+        }
+        cx.notify();
+    }
+
+    /// ページを印刷する。
+    pub fn print_page(&mut self, id: u64, cx: &mut Context<Self>) {
+        let Some(engine) = self.page(id).and_then(|p| p.engine.clone()) else {
+            return;
+        };
+        if let Err(e) = engine.print() {
+            self.fail(format!("ページを印刷できませんでした: {e}"), cx);
+        }
+    }
+
     /// ページを閉じる（[`Terms::close`] から呼ぶ）。
     pub(crate) fn remove_page(&mut self, id: u64, cx: &mut Context<Self>) -> bool {
         let Some(at) = self.pages.iter().position(|page| page.id == id) else {
             return false;
         };
         // 部品を捨てると、ウィンドウからも消える
-        self.pages.remove(at);
+        let page = self.pages.remove(at);
+        if is_web(&page.url) {
+            self.closed_pages.push(page.url);
+            let over = self.closed_pages.len().saturating_sub(MAX_CLOSED);
+            self.closed_pages.drain(..over);
+        }
         self.save_pages(cx);
         true
     }
@@ -705,6 +851,17 @@ impl Terms {
                 cx.defer(crate::lock_now_or_settings);
                 return;
             }
+            Event::Key(key) => {
+                self.page_key(id, &key, cx);
+                return;
+            }
+            Event::Found { turn, found } => {
+                if let Some(page) = self.page_mut(id).filter(|p| p.find_turn == turn) {
+                    page.find_missing = !found;
+                    cx.notify();
+                }
+                return;
+            }
             _ => {}
         }
         let events = self.page_events.clone();
@@ -775,6 +932,8 @@ impl Terms {
             | Event::External(_)
             | Event::Zoom(_)
             | Event::Lock
+            | Event::Key(_)
+            | Event::Found { .. }
             | Event::Pointer(_)
             | Event::Snapshot { .. } => {}
         }
@@ -916,6 +1075,8 @@ impl Terms {
         let events = self.page_events.clone();
         let mut waiting = false;
         let mut failed: Vec<String> = Vec::new();
+        let focus_page = self.focus_page;
+        let mut focused_page = false;
         for page in &mut self.pages {
             if page.window != Some(here) {
                 continue;
@@ -937,6 +1098,14 @@ impl Terms {
                     .is_some_and(|started| started.elapsed() < SHOT_WAIT);
             }
             waiting |= wanted && covered;
+            if visible && page.shown && focus_page == Some(page.id) {
+                // もう見せているページ
+                focused_page = true;
+                match engine.focus() {
+                    Ok(()) => page.focused = true,
+                    Err(e) => failed.push(format!("ページにキーの入力先を移せませんでした: {e}")),
+                }
+            }
             if visible == page.shown {
                 continue;
             }
@@ -956,12 +1125,23 @@ impl Terms {
                 }
                 Err(e) => failed.push(format!("ページを切り替えられませんでした: {e}")),
             }
+            if page.shown && focus_page == Some(page.id) {
+                // タブを切り替えたら、続けてページの中でキーを使えるようにする
+                focused_page = true;
+                match engine.focus() {
+                    Ok(()) => page.focused = true,
+                    Err(e) => failed.push(format!("ページにキーの入力先を移せませんでした: {e}")),
+                }
+            }
             // 隠している間に動かした場所は、OS によっては見せたときに戻る。見せたら置き直す
             if let (true, Some(bounds)) = (page.shown, page.bounds) {
                 if let Err(e) = engine.place(bounds) {
                     failed.push(format!("ページを置けませんでした: {e}"));
                 }
             }
+        }
+        if focused_page {
+            self.focus_page = None;
         }
         if let Some(error) = failed.into_iter().next() {
             self.error = Some(error.into());
@@ -1179,7 +1359,13 @@ pub fn open(url: &str, window: &mut Window, cx: &mut App) {
 /// ブラウザのタブの中身。上に戻る・進む・場所の欄、下にページ。
 pub struct BrowserPane {
     terms: Entity<Terms>,
+    /// ブラウザの画面のキーの入力先。ページの中で押したキーも、ここで受ける。
+    focus: FocusHandle,
     bar: Entity<InputState>,
+    /// ページの中を探す欄。
+    find: Entity<InputState>,
+    /// ページの中を探す欄を出している。
+    finding: bool,
     /// 場所の欄に出しているページと場所。
     shown: Option<(u64, String)>,
     _subscriptions: Vec<Subscription>,
@@ -1189,6 +1375,10 @@ impl BrowserPane {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let terms = term::shared(cx);
         let bar = cx.new(|cx| InputState::new(window, cx).placeholder("URL を入力、または検索"));
+        let find = cx.new(|cx| InputState::new(window, cx).placeholder("ページ内を検索"));
+        let focus = cx.focus_handle();
+        let here = window.window_handle().window_id();
+        terms.update(cx, |terms, _| terms.note_browser_focus(here, &focus));
         let subscriptions = vec![
             cx.observe(&terms, |_, _, cx| cx.notify()),
             cx.subscribe_in(&bar, window, |this, _, event: &InputEvent, window, cx| {
@@ -1196,13 +1386,139 @@ impl BrowserPane {
                     this.go(window, cx);
                 }
             }),
+            cx.subscribe_in(&find, window, |this, _, event: &InputEvent, _, cx| {
+                match event {
+                    // 書き換えたら、ページの頭から探し直す
+                    InputEvent::Change => this.search(false, false, cx),
+                    InputEvent::PressEnter { shift, .. } => this.search(*shift, true, cx),
+                    _ => {}
+                }
+            }),
         ];
         Self {
             terms,
+            focus,
             bar,
+            find,
+            finding: false,
             shown: None,
             _subscriptions: subscriptions,
         }
+    }
+
+    /// 見ているページ。
+    fn page_id(&self, cx: &App) -> Option<u64> {
+        self.terms.read(cx).active_page().map(|p| p.id)
+    }
+
+    /// URL の欄に移って、書いてある場所をすべて選ぶ（Ctrl+L）。
+    fn focus_address(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(id) = self.page_id(cx) {
+            self.terms
+                .update(cx, |terms, cx| terms.release_page(id, cx));
+        }
+        self.bar.update(cx, |bar, cx| {
+            bar.focus(window, cx);
+            bar.select_all(window, cx);
+        });
+        cx.notify();
+    }
+
+    /// ページの中を探す欄を出して、そこに移る（Ctrl+F）。前に探した言葉は選んだまま残す。
+    fn open_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = self.page_id(cx) else {
+            return;
+        };
+        self.terms
+            .update(cx, |terms, cx| terms.release_page(id, cx));
+        self.finding = true;
+        self.find.update(cx, |find, cx| {
+            find.focus(window, cx);
+            find.select_all(window, cx);
+        });
+        cx.notify();
+    }
+
+    /// ページの中を探す欄を閉じて、ページに戻る（Esc）。
+    fn close_find(&mut self, cx: &mut Context<Self>) {
+        if !self.finding {
+            cx.propagate();
+            return;
+        }
+        self.finding = false;
+        if let Some(id) = self.page_id(cx) {
+            self.terms.update(cx, |terms, cx| terms.focus_page(id, cx));
+        }
+        cx.notify();
+    }
+
+    /// 探す欄の言葉を、ページの中で探す。欄を出していなければ、出す（F3 / Ctrl+G）。
+    fn search(&mut self, backwards: bool, again: bool, cx: &mut Context<Self>) {
+        let Some(id) = self.page_id(cx) else {
+            return;
+        };
+        let query = self.find.read(cx).value().to_string();
+        self.terms.update(cx, |terms, cx| {
+            terms.find_in_page(id, &query, backwards, again, cx)
+        });
+    }
+
+    fn find_step(&mut self, backwards: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.finding || self.find.read(cx).value().is_empty() {
+            self.open_find(window, cx);
+            return;
+        }
+        self.search(backwards, true, cx);
+    }
+
+    /// ブラウザのキー（[`crate::shell_keys`]）を受ける。
+    fn with_keys(&self, d: Stateful<Div>, cx: &mut Context<Self>) -> Stateful<Div> {
+        use crate::shell_keys::*;
+        let page_step = |this: &mut Self, step: Step, cx: &mut Context<Self>| {
+            if let Some(id) = this.page_id(cx) {
+                this.step(id, step, cx);
+            }
+        };
+        let zoom = |this: &mut Self, zoom: Zoom, cx: &mut Context<Self>| {
+            if let Some(id) = this.page_id(cx) {
+                this.terms
+                    .update(cx, |terms, cx| terms.zoom_page(id, zoom, cx));
+            }
+        };
+        d.on_action(
+            cx.listener(move |this, _: &BrowserReload, _, cx| page_step(this, Step::Reload, cx)),
+        )
+        .on_action(cx.listener(move |this, _: &BrowserBack, _, cx| page_step(this, Step::Back, cx)))
+        .on_action(
+            cx.listener(move |this, _: &BrowserForward, _, cx| page_step(this, Step::Forward, cx)),
+        )
+        .on_action(cx.listener(|this, _: &FocusAddress, window, cx| this.focus_address(window, cx)))
+        .on_action(cx.listener(|this, _: &NewBrowserTab, _, cx| {
+            this.terms.update(cx, |terms, cx| {
+                terms.open_page(BLANK, cx);
+            })
+        }))
+        .on_action(cx.listener(|this, _: &ReopenTab, _, cx| {
+            this.terms.update(cx, |terms, cx| {
+                terms.reopen_page(cx);
+            })
+        }))
+        .on_action(cx.listener(|this, _: &FindInPage, window, cx| this.open_find(window, cx)))
+        .on_action(cx.listener(|this, _: &FindNext, window, cx| this.find_step(false, window, cx)))
+        .on_action(
+            cx.listener(|this, _: &FindPrevious, window, cx| this.find_step(true, window, cx)),
+        )
+        .on_action(cx.listener(|this, _: &CloseFind, _, cx| this.close_find(cx)))
+        .on_action(cx.listener(|this, _: &PrintPage, _, cx| {
+            if let Some(id) = this.page_id(cx) {
+                this.terms.update(cx, |terms, cx| terms.print_page(id, cx));
+            }
+        }))
+        .on_action(cx.listener(move |this, _: &BrowserZoomIn, _, cx| zoom(this, Zoom::In, cx)))
+        .on_action(cx.listener(move |this, _: &BrowserZoomOut, _, cx| zoom(this, Zoom::Out, cx)))
+        .on_action(
+            cx.listener(move |this, _: &BrowserZoomReset, _, cx| zoom(this, Zoom::Reset, cx)),
+        )
     }
 
     /// 場所の欄に書いた所を開く。
@@ -1213,9 +1529,10 @@ impl BrowserPane {
         let text = self.bar.read(cx).value().to_string();
         self.terms
             .update(cx, |terms, cx| terms.navigate(id, &text, cx));
-        // 開いた場所を、欄に出し直す
+        // 開いた場所を、欄に出し直す。続けてページの中でキーを使えるように、ページに移る
         self.shown = None;
-        window.blur(cx);
+        window.focus(&self.focus, cx);
+        self.terms.update(cx, |terms, cx| terms.focus_page(id, cx));
         cx.notify();
     }
 
@@ -1398,15 +1715,31 @@ impl Render for BrowserPane {
                     elsewhere,
                     p.shot.clone(),
                     ZoomBadge::of(p),
+                    (p.focused, p.find_missing),
                 )
             });
             (page, terms.focus_bar)
         };
-        let Some((id, url, title, loading, (can_back, can_forward), error, elsewhere, shot, zoom)) =
-            page
+        let Some((
+            id,
+            url,
+            title,
+            loading,
+            (can_back, can_forward),
+            error,
+            elsewhere,
+            shot,
+            zoom,
+            (page_focused, find_missing),
+        )) = page
         else {
             return div().into_any_element();
         };
+        // ページの中にキーの入力先があるときも、アプリではブラウザの画面にいることにする。
+        // ページの中で押したキー（Ctrl+R など）は、ここで受ける
+        if page_focused && !elsewhere && !self.focus.contains_focused(window, cx) {
+            window.focus(&self.focus, cx);
+        }
         // 場所の欄は、書いている間は書き換えない
         let bar_focused = self.bar.read(cx).focus_handle(cx).is_focused(window);
         if self.shown.as_ref() != Some(&(id, url.clone())) && !bar_focused {
@@ -1549,8 +1882,74 @@ impl Render for BrowserPane {
         } else {
             page_view(id, shot, theme.background)
         };
-        div()
+        let find_bar = self.finding.then(|| {
+            let query_empty = self.find.read(cx).value().is_empty();
+            div()
+                .id("browser-find")
+                .key_context(crate::shell_keys::FIND)
+                .flex()
+                .flex_row()
+                .items_center()
+                .flex_none()
+                .h_9()
+                .px_2()
+                .gap_0p5()
+                .border_t_1()
+                .border_color(theme.border)
+                .child(
+                    div()
+                        .id("browser-find-input")
+                        .flex_1()
+                        .min_w_0()
+                        .mx_1()
+                        .child(
+                            Input::new(&self.find)
+                                .small()
+                                .prefix(app_icon("search").size_3p5())
+                                .aria_label("ページ内を検索"),
+                        )
+                        .test_support(),
+                )
+                .when(find_missing && !query_empty, |d| {
+                    d.child(
+                        div()
+                            .id("browser-find-missing")
+                            .flex_none()
+                            .px_1()
+                            .text_xs()
+                            .text_color(theme.danger)
+                            .child("見つかりません")
+                            .test_support(),
+                    )
+                })
+                .child(feel::gloss(
+                    tool(
+                        "browser-find-previous",
+                        "chevron-up",
+                        if cfg!(target_os = "macos") {
+                            "前を検索（⇧Enter）"
+                        } else {
+                            "前を検索（Shift+Enter）"
+                        },
+                    )
+                    .on_click(cx.listener(|this, _, window, cx| this.find_step(true, window, cx))),
+                ))
+                .child(feel::gloss(
+                    tool("browser-find-next", "chevron-down", "次を検索（Enter）").on_click(
+                        cx.listener(|this, _, window, cx| this.find_step(false, window, cx)),
+                    ),
+                ))
+                .child(feel::gloss(
+                    tool("browser-find-close", "x", "閉じる（Esc）")
+                        .on_click(cx.listener(|this, _, _, cx| this.close_find(cx))),
+                ))
+                .test_support()
+        });
+        let root = div()
             .id("browser")
+            .key_context(crate::shell_keys::BROWSER)
+            .track_focus(&self.focus);
+        self.with_keys(root, cx)
             .flex()
             .flex_col()
             .flex_1()
@@ -1558,6 +1957,7 @@ impl Render for BrowserPane {
             .min_w_0()
             .bg(theme.background)
             .child(toolbar)
+            .children(find_bar)
             .child(
                 div()
                     .flex_none()

@@ -99,7 +99,7 @@ pub fn bind(cx: &mut App) {
         keys.push(KeyBinding::new("ctrl-y", Redo, at));
     }
     cx.bind_keys(keys);
-    // 全画面は、AI チャットのウィンドウでも同じキーで切り替える
+    // 全画面は、AI チャットのウィンドウでも同じキーで切り替える。画面の中で受けなかったときは、前に出ているウィンドウ
     cx.on_action(|_: &ToggleFullscreen, cx| {
         if let Some(window) = cx.active_window() {
             // 閉じたばかりのウィンドウなら、切り替える先がない
@@ -228,6 +228,8 @@ impl MainView {
             this.open_appearance(window, cx)
         }))
         .on_action(cx.listener(|this, _: &ShowKeys, _, cx| this.toggle_keys(cx)))
+        // 押したウィンドウを全画面にする（ブラウザのページの中で押したときも、そのウィンドウ）
+        .on_action(|_: &ToggleFullscreen, window, _| window.toggle_fullscreen())
     }
 
     /// キーの一覧を出す。出ていれば閉じる。

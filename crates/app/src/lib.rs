@@ -22,6 +22,7 @@ mod render;
 pub mod scroll;
 pub mod session;
 pub mod shadow;
+pub mod shell_keys;
 pub mod shortcuts;
 pub mod state;
 pub mod term;
@@ -166,6 +167,8 @@ pub fn init_with(store: malakt_core::Store, ai: AiConfig, cx: &mut App) {
         KeyBinding::new("ctrl-b", PanePrefix, Some("MainView")),
     ]);
     shortcuts::bind(cx);
+    // 場所を決めていない割り当て（ロックなど）より後に割り当てる
+    shell_keys::bind(cx);
     caret::init(cx);
     cx.on_action(|_: &NewWindow, cx| {
         let _ = open_main_window(cx);

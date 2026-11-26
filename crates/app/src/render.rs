@@ -6213,8 +6213,12 @@ impl MainView {
             people.push(' ');
             people.push_str(&person.name);
         }
-        let mut keys = String::from("キー ショートカット ペイン");
-        for (key, about) in crate::shortcuts::help() {
+        let mut keys = String::from("キー ショートカット ペイン ブラウザ ターミナル");
+        for (key, about) in crate::shortcuts::help()
+            .into_iter()
+            .chain(crate::shell_keys::browser_help())
+            .chain(crate::shell_keys::terminal_help())
+        {
             keys.push(' ');
             keys.push_str(key);
             keys.push(' ');

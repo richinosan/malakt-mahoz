@@ -560,7 +560,8 @@ impl MainView {
         root.into_any_element()
     }
 
-    /// キー操作の一覧。アプリのキーと、Ctrl+B のあとに押すペインのキーを 2 列に並べる。
+    /// キー操作の一覧。アプリのキー、ブラウザとターミナルのタブにいるときのキー、
+    /// Ctrl+B のあとに押すペインのキーを並べる。
     pub(crate) fn keys_help(&self, cx: &mut Context<Self>) -> Div {
         let theme = cx.theme().clone();
         let line = |key: SharedString, about: SharedString| {
@@ -571,7 +572,7 @@ impl MainView {
                 .text_sm()
                 .child(
                     div()
-                        .w(px(112.) * crate::UI_SCALE)
+                        .w(px(150.) * crate::UI_SCALE)
                         .flex_none()
                         .text_color(theme.primary)
                         .child(key),
@@ -589,6 +590,22 @@ impl MainView {
         let mut app = column().id("app-keys");
         for (key, about) in crate::shortcuts::help() {
             app = app.child(line(key.into(), about.into()));
+        }
+        let caption = |text: &'static str| {
+            div()
+                .text_xs()
+                .text_color(theme.muted_foreground)
+                .child(text)
+        };
+        let mut browser = column().id("browser-keys").child(caption("ブラウザのタブ"));
+        for (key, about) in crate::shell_keys::browser_help() {
+            browser = browser.child(line(key.into(), about.into()));
+        }
+        let mut terminal = column()
+            .id("terminal-keys")
+            .child(caption("ターミナルのタブ"));
+        for (key, about) in crate::shell_keys::terminal_help() {
+            terminal = terminal.child(line(key.into(), about.into()));
         }
         let mut keys = div().flex().flex_row().gap_1();
         for scheme in Keys::ALL {
@@ -617,6 +634,8 @@ impl MainView {
             .gap_x_6()
             .gap_y_3()
             .child(app.test_support())
+            .child(browser.test_support())
+            .child(terminal.test_support())
             .child(panes)
     }
 

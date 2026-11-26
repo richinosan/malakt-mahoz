@@ -5002,6 +5002,7 @@ bundled_icons! {
         "app-window",
         "zoom-in",
         "zoom-out",
+        "chevron-up",
     ],
 }
 

@@ -180,6 +180,14 @@ pub struct Terms {
     pub(crate) popup_sent: Option<(String, std::time::Instant)>,
     /// ブラウザのデータの大きさ。数えていなければ `None`。
     pub usage: Option<u64>,
+    /// 閉じたブラウザのタブの場所。新しいものが後ろ。Ctrl+Shift+T で開き直す。
+    pub closed_pages: Vec<String>,
+    /// ウィンドウごとの、ブラウザの画面のキーの入力先。ページの中で押したキーを届ける。
+    pub(crate) browser_focus: Vec<(WindowId, WeakFocusHandle)>,
+    /// 次に見せたときにキーの入力先を移すページ。
+    pub(crate) focus_page: Option<u64>,
+    /// AI のタブの入力行に、キーの入力先を移す。
+    pub focus_ai: bool,
 }
 
 pub struct SharedTerms(pub Entity<Terms>);
@@ -263,6 +271,10 @@ impl Terms {
             saved_pages: None,
             popup_sent: None,
             usage: None,
+            closed_pages: Vec::new(),
+            browser_focus: Vec::new(),
+            focus_page: None,
+            focus_ai: false,
         };
         terms.restore_pages(cx);
         terms
@@ -374,10 +386,13 @@ impl Terms {
         if id.is_none_or(shown_here) {
             self.active = id;
             self.focus_wanted = id.is_some_and(|id| self.tab(id).is_some());
-            // 何も開いていないタブは、すぐに場所を書けるようにする
-            self.focus_bar = id
+            // 何も開いていないタブは、すぐに場所を書けるようにする。開いているページは、ページの中でキーを使える
+            let blank = id
                 .and_then(|id| self.page(id))
-                .is_some_and(|page| page.url == crate::browser::BLANK);
+                .map(|page| page.url == crate::browser::BLANK);
+            self.focus_bar = blank == Some(true);
+            self.focus_page = id.filter(|_| blank == Some(false));
+            self.focus_ai = id.is_none();
             cx.notify();
         }
     }
@@ -397,6 +412,46 @@ impl Terms {
             .collect();
         ids.sort_unstable();
         ids
+    }
+
+    /// タブの列（AI のタブ、ターミナル、ブラウザ）。AI のタブは `None`。
+    fn strip(&self) -> Vec<Option<u64>> {
+        std::iter::once(None)
+            .chain(self.order().into_iter().map(Some))
+            .collect()
+    }
+
+    /// となりのタブを見せる（Ctrl+Tab / Ctrl+Shift+Tab）。端からは反対の端へ回る。
+    pub fn step_tab(&mut self, forward: bool, cx: &mut Context<Self>) {
+        let strip = self.strip();
+        let at = strip.iter().position(|id| *id == self.active).unwrap_or(0);
+        let len = strip.len();
+        let next = if forward {
+            (at + 1) % len
+        } else {
+            (at + len - 1) % len
+        };
+        self.activate(strip[next], cx);
+    }
+
+    /// `n` 番目（1 から）のタブを見せる。`9` は最後のタブ。
+    pub fn select_tab(&mut self, n: usize, cx: &mut Context<Self>) {
+        let strip = self.strip();
+        let at = if n >= 9 {
+            strip.len() - 1
+        } else {
+            n.max(1) - 1
+        };
+        if let Some(id) = strip.get(at) {
+            self.activate(*id, cx);
+        }
+    }
+
+    /// 見ているターミナルかブラウザのタブを閉じる。AI のタブは閉じない。
+    pub fn close_active(&mut self, cx: &mut Context<Self>) {
+        if let Some(id) = self.active {
+            self.close(id, cx);
+        }
     }
 
     /// ターミナルを開く。`profile` を選んだときは、次の「＋」でも同じシェルを開く。
@@ -861,6 +916,25 @@ pub struct TermPane {
     _subscriptions: Vec<Subscription>,
 }
 
+/// ターミナルの中でも、プログラムに渡さずにアプリが受けるキー（Windows Terminal と同じ）。
+/// タブの切り替え（Ctrl+Tab、Ctrl+Alt+数字）と全画面（F11）。Ctrl+Shift+T / W は、コピーと同じ組み合わせで先に分ける。
+fn passes_to_app(keystroke: &Keystroke) -> bool {
+    let mods = keystroke.modifiers;
+    let name = keystroke.key.as_str();
+    if mods.control && !mods.alt && name == "tab" {
+        return true;
+    }
+    if cfg!(target_os = "macos") {
+        return false;
+    }
+    let plain = !mods.control && !mods.alt && !mods.shift;
+    (plain && name == "f11")
+        || (mods.control
+            && mods.alt
+            && !mods.shift
+            && matches!(name, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9"))
+}
+
 impl TermPane {
     pub fn new(cx: &mut Context<Self>) -> Self {
         let terms = shared(cx);
@@ -937,6 +1011,9 @@ impl TermPane {
             };
         }
         if mods.platform {
+            return false;
+        }
+        if passes_to_app(keystroke) {
             return false;
         }
         if name == "insert" && mods.shift {
