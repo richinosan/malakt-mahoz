@@ -209,6 +209,8 @@ pub struct Page {
     pub(crate) shooting: Option<Instant>,
     /// 画像を撮れなかった。このページでは、もう撮らずに画像なしで隠す。
     pub(crate) shot_failed: bool,
+    /// 隠している間にページが変わった。今の画像は、ページを見せたら捨てる。
+    pub(crate) shot_stale: bool,
     /// 拡大率（`1.0` が 100%）。
     pub zoom: f64,
     /// 拡大率を変えた回数。表示の動きを、変えるたびに始め直す。
@@ -242,6 +244,7 @@ impl Page {
             shot_gen: 0,
             shooting: None,
             shot_failed: false,
+            shot_stale: false,
             zoom: 1.0,
             zoom_turn: 0,
             zoom_entered: 0,
@@ -251,8 +254,13 @@ impl Page {
     }
 
     /// ページが変わった（マウスが入った、読み込んだ、場所や大きさが変わった）。撮った画像を捨てる。
+    /// 隠している間（メニューやダイアログの間）は、出している画像を見せたときまで残す。
     fn forget_shot(&mut self) {
-        self.shot = None;
+        if self.shown {
+            self.shot = None;
+        } else {
+            self.shot_stale = true;
+        }
         self.shot_gen += 1;
         self.shooting = None;
     }
@@ -836,7 +844,12 @@ impl Terms {
                 }
             }
             match engine.show(visible) {
-                Ok(()) => page.shown = visible,
+                Ok(()) => {
+                    page.shown = visible;
+                    if visible && std::mem::take(&mut page.shot_stale) {
+                        page.shot = None;
+                    }
+                }
                 Err(e) => failed.push(format!("ページを切り替えられませんでした: {e}")),
             }
             // 隠している間に動かした場所は、OS によっては見せたときに戻る。見せたら置き直す

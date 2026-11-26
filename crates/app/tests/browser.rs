@@ -527,6 +527,24 @@ fn the_page_stays_on_screen_behind_a_menu(cx: &mut TestAppContext) {
     );
     cx.run_until_parked();
     assert!(terms(cx, |t| t.page(tab).is_some_and(|p| p.shot.is_none())));
+    // メニューの間に読み込みが終わっても、出している画像は閉じるまで残す
+    ui(cx, window, |window, cx| window.click("term-shells", cx));
+    assert_eq!(fake.shots.get(), 3);
+    assert!(!fake.visible.get());
+    world.send(
+        tab,
+        Event::Load {
+            done: true,
+            url: "https://example.com/last".into(),
+        },
+    );
+    ui(cx, window, |_, _| {});
+    assert!(!fake.visible.get());
+    assert!(terms(cx, |t| t.page(tab).is_some_and(|p| p.shot.is_some())));
+    // 閉じてページを見せたら、古い画像を捨てる
+    ui(cx, window, |window, cx| window.press("escape", cx));
+    assert!(fake.visible.get());
+    assert!(terms(cx, |t| t.page(tab).is_some_and(|p| p.shot.is_none())));
 }
 
 /// 開いていたタブの場所は残り、次に起動したときに並ぶ。ページは見せるときに作る。
