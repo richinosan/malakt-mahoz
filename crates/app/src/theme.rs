@@ -1512,6 +1512,9 @@ fn repaint(mode: ThemeMode, cx: &mut App) {
         theme.font_size *= crate::TEXT_SCALE;
         // スクロールできる場所が分かるように、スクロールバーはいつも出す
         theme.scrollbar_mode = gpui_kit::component::scroll::ScrollbarMode::Always;
+        // フォーカスの印は枠の外に足す輪ではなく、入力欄の枠の色にする。
+        // 輪は角の丸みが枠とずれて二重に見え、スクロールする所では端が切れる
+        theme.focus_ring = false;
     });
     sync_corners(cx);
 }

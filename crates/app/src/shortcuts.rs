@@ -109,11 +109,16 @@ pub fn bind(cx: &mut App) {
 }
 
 /// キーの一覧に出す、キーと説明。
+/// 「今すぐロック」のキー。
+pub const LOCK_KEY: &str = if MAC { "⌘L" } else { "Ctrl+L" };
+/// 「新しいウィンドウ」のキー。
+pub const NEW_WINDOW_KEY: &str = if MAC { "⇧⌘N" } else { "Ctrl+Shift+N" };
+
 pub fn help() -> Vec<(&'static str, &'static str)> {
     let pick = |windows: &'static str, mac: &'static str| if MAC { mac } else { windows };
     vec![
         (pick("Ctrl+N", "⌘N"), "新しいタスク"),
-        (pick("Ctrl+Shift+N", "⇧⌘N"), "新しいウィンドウ"),
+        (NEW_WINDOW_KEY, "新しいウィンドウ"),
         (pick("Ctrl+F", "⌘F"), "検索"),
         ("↑ ↓", "タスクを選ぶ"),
         ("Home / End", "最初 / 最後のタスク"),
@@ -130,8 +135,8 @@ pub fn help() -> Vec<(&'static str, &'static str)> {
         (pick("Ctrl+Y / Ctrl+Shift+Z", "⇧⌘Z"), "やり直す"),
         ("Esc", "閉じる"),
         (pick("Ctrl+J", "⌘J"), "AI チャット"),
-        (pick("Ctrl+,", "⌘,"), "フォントとカラー"),
-        (pick("Ctrl+L", "⌘L"), "今すぐロック"),
+        (pick("Ctrl+,", "⌘,"), "設定"),
+        (LOCK_KEY, "今すぐロック"),
         (pick("F11", "⌃⌘F"), "全画面"),
         (pick("F5", "⌘R"), "読み込み直す"),
         (pick("F1", "F1 / ⌘/"), "キー操作"),

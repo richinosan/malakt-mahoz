@@ -64,9 +64,14 @@ impl Look {
     /// 乗せたとき。`on_top` は、中身の上に重ねて描く部品（ライブラリのボタン）。
     /// `square` は角の丸みがない部品（一覧の行）。
     fn hover(color: Hsla, on_top: bool, square: bool, cx: &App) -> Self {
+        Look::hover_as(crate::theme::feel(cx), color, on_top, square, cx)
+    }
+
+    /// `feel` で描くときの、乗せたときの面。
+    fn hover_as(feel: Feel, color: Hsla, on_top: bool, square: bool, cx: &App) -> Self {
         let theme = cx.theme();
         let dark = theme.mode.is_dark();
-        match crate::theme::feel(cx) {
+        match feel {
             Feel::Standard => Look::flat(color),
             // 端から端まである行は、面を明るくするだけ。縁の線を引くと帯に見える
             Feel::Glass if square => Look::flat(white(if dark { 0.07 } else { 0.3 })),
@@ -281,6 +286,21 @@ fn wash(
                     }
                 });
             }
+        },
+    )
+    .absolute()
+    .inset_0()
+}
+
+/// `feel` で乗せたときの面を、乗せたままの濃さで描く（「設定」のプレビュー）。
+/// 親の部品いっぱいに敷く。`radius` は親の角の丸みで、0 なら一覧の行の描き方になる。
+pub(crate) fn hover_sample(feel: Feel, color: Hsla, radius: Pixels) -> impl IntoElement {
+    canvas(
+        |_, _, _| {},
+        move |bounds, _, window, cx| {
+            let radii = Corners::all(radius).clamp_radii_for_quad_size(bounds.size);
+            Look::hover_as(feel, color, false, radius == px(0.), cx)
+                .paint(bounds, radii, 1., window);
         },
     )
     .absolute()
