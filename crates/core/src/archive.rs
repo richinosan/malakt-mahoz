@@ -59,6 +59,8 @@ pub struct Data {
     pub task_defaults: Vec<TaskDefaults>,
     /// タスクごとの、期限をいつ知らせるかの上書き。
     pub task_alerts: Vec<crate::alert::TaskAlerts>,
+    /// AI のルール（グローバルとワークスペースごと）。
+    pub ai_rules: Vec<crate::rules::AiRule>,
 }
 
 impl Data {
@@ -135,6 +137,16 @@ impl Data {
                 return bad("タスク");
             }
         }
+        if let Some(r) = self.ai_rules.iter().find(|r| {
+            r.workspace_id
+                .as_ref()
+                .is_some_and(|w| !self.workspaces.iter().any(|x| &x.id == w))
+        }) {
+            return Err(Error::Invalid(format!(
+                "AI のルール「{}」のワークスペースがありません",
+                r.name
+            )));
+        }
         if let Some(a) = self
             .task_alerts
             .iter()
@@ -209,6 +221,7 @@ pub fn export<W: Write + Seek>(store: &Store, out: W) -> Result<Manifest> {
         "data/attachments.json",
         serde_json::to_vec(&data.attachments)?,
     )?;
+    put("data/ai_rules.json", serde_json::to_vec(&data.ai_rules)?)?;
     for (name, png) in &data.icons {
         put(&icon_entry(name), png.clone())?;
     }
@@ -289,6 +302,11 @@ fn read_zip<R: Read + Seek>(zip: &mut ZipArchive<R>) -> Result<(Manifest, Data)>
         .iter()
         .map(crate::alert::clean_task)
         .collect::<Result<_>>()?;
+    let ai_rules: Vec<crate::rules::AiRule> = read_optional(zip, "data/ai_rules.json")?;
+    let ai_rules = ai_rules
+        .iter()
+        .map(crate::rules::clean)
+        .collect::<Result<_>>()?;
     let workspaces: Vec<Workspace> = read_json(zip, "data/workspaces.json")?;
     let mut icons: Vec<(String, Vec<u8>)> = Vec::new();
     for w in &workspaces {
@@ -318,6 +336,7 @@ fn read_zip<R: Read + Seek>(zip: &mut ZipArchive<R>) -> Result<(Manifest, Data)>
         attachments,
         task_defaults,
         task_alerts,
+        ai_rules,
     };
     data.normalize();
     data.validate()?;

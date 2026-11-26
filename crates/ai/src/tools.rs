@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 
+use malakt_core::rules::{AiRule, Apply, RulePatch};
 use malakt_core::view::Priority;
 use malakt_core::{
     when, Comment, DueRule, Person, Role, Roles, Scope, Status, Store, Task, TaskDraft, TaskFilter,
@@ -22,22 +23,6 @@ pub const RUN_SHELL: &str = "run_shell";
 const LIST_LIMIT: usize = 200;
 /// `get_task` で返す変更履歴の数。
 const CHANGES_LIMIT: usize = 30;
-
-/// ワークスペースごとの「AI に伝えること」の長さの上限。
-pub const MAX_WORKSPACE_CONTEXT_CHARS: usize = 2000;
-
-/// ワークスペースごとの「AI に伝えること」の保存先。
-pub fn workspace_context_key(workspace: &str) -> String {
-    format!("ai.context.ws.{workspace}")
-}
-
-/// 長すぎる「AI に伝えること」を断る文。
-pub fn workspace_context_error(text: &str) -> Option<String> {
-    let count = text.trim().chars().count();
-    (count > MAX_WORKSPACE_CONTEXT_CHARS).then(|| {
-        format!("AI に伝えることは {MAX_WORKSPACE_CONTEXT_CHARS} 文字までです（今は {count} 文字）")
-    })
-}
 
 /// ワークスペースごとの、ターミナルを始めるフォルダーの保存先。
 pub fn workspace_dir_key(workspace: &str) -> String {
@@ -105,6 +90,20 @@ fn roles_schema(extra: &str) -> Value {
         "items": {"type": "string", "enum": ["R", "A", "C", "I"]},
         "description": format!("役。{RACI}。{extra}"),
     })
+}
+
+/// AI のルールの項目。
+fn rule_fields(extra: Value) -> Value {
+    with(
+        json!({
+            "name": {"type": "string", "description": format!("名前（{} 文字まで）", malakt_core::rules::MAX_NAME_CHARS)},
+            "body": {"type": "string", "description": format!("AI への指示（{} 文字まで）", malakt_core::rules::MAX_RULE_CHARS)},
+            "enabled": {"type": "boolean", "description": "false で使わない"},
+            "apply": {"type": "string", "enum": ["always", "chat", "auto"],
+                      "description": "使う場面。いつも / ユーザーとのチャットだけ / 自動の処理（新しいタスクを整える、コメントから更新、GitHub の定期チェック）だけ"},
+        }),
+        extra,
+    )
 }
 
 fn with(mut base: Value, extra: Value) -> Value {
@@ -356,11 +355,30 @@ pub fn definitions() -> Vec<ToolDef> {
                     "description": {"type": "string", "description": "説明の雛形"},
                     "link_workspace_ids": {"type": "array", "items": {"type": "string"},
                                            "description": "追加したタスクを一緒に表示するワークスペース"},
-                    "ai_context": {"type": "string", "description": "このワークスペースを開いている間、AI に伝えること（2000 文字まで）。空で消す"},
                     "terminal_dir": {"type": "string", "description": "このワークスペースのタスクでターミナルを開くフォルダー。空で消す"},
                 }),
                 &["id"],
             ),
+        },
+        ToolDef {
+            name: "list_ai_rules",
+            description: "AI のルール（ユーザーが決めた、AI がいつも従う指示）の一覧を返す。workspace_id を省くと、すべてのワークスペースで使うグローバルのルールと、ワークスペースごとのルールをすべて返す。ワークスペースのルールは、そのワークスペースとサブワークスペースで使う。",
+            schema: object(json!({"workspace_id": {"type": "string"}}), &[]),
+        },
+        ToolDef {
+            name: "create_ai_rule",
+            description: "AI のルールを足す。workspace_id を省くとグローバル（すべてのワークスペース）、渡すとそのワークスペースとサブワークスペースで使う。",
+            schema: object(rule_fields(json!({"workspace_id": {"type": "string"}})), &[]),
+        },
+        ToolDef {
+            name: "update_ai_rule",
+            description: "AI のルールを変える。渡した項目だけが変わる。",
+            schema: object(rule_fields(json!({"id": {"type": "string"}})), &["id"]),
+        },
+        ToolDef {
+            name: "delete_ai_rule",
+            description: "AI のルールを削除する。使わないだけなら update_ai_rule で enabled を false にする。",
+            schema: object(json!({"id": {"type": "string"}}), &["id"]),
         },
         ToolDef {
             name: "get_due_alerts",
@@ -436,6 +454,9 @@ pub const WRITES: &[&str] = &[
     "revoke_tickets",
     "mark_notices_read",
     "update_workspace_settings",
+    "create_ai_rule",
+    "update_ai_rule",
+    "delete_ai_rule",
 ];
 
 /// 確認に出す文。`shell` は、[`RUN_SHELL`] のコマンドが動くシェル。
@@ -560,6 +581,38 @@ fn person_json(p: &Person) -> Value {
 
 fn workspace_json(w: &Workspace) -> Value {
     json!({"id": w.id, "name": w.name, "parent_id": w.parent_id, "icon": w.icon, "color": w.color, "date": w.date})
+}
+
+fn rule_json(r: &AiRule) -> Value {
+    json!({
+        "id": r.id,
+        "workspace_id": r.workspace_id,
+        "name": r.name,
+        "body": r.body,
+        "enabled": r.enabled,
+        "apply": r.apply.as_str(),
+    })
+}
+
+/// ルールの書き換え。渡された項目だけを持つ。
+fn rule_patch(args: &Value) -> Result<RulePatch, String> {
+    let apply = match optional(args, "apply") {
+        None => None,
+        Some(text) => {
+            Some(Apply::parse(text).ok_or_else(|| format!("apply が正しくありません: {text}"))?)
+        }
+    };
+    let enabled = match args.get("enabled") {
+        None => None,
+        Some(Value::Bool(on)) => Some(*on),
+        Some(other) => return Err(format!("enabled が正しくありません: {other}")),
+    };
+    Ok(RulePatch {
+        name: optional(args, "name").map(str::to_owned),
+        body: optional(args, "body").map(str::to_owned),
+        enabled,
+        apply,
+    })
 }
 
 fn comment_json(c: &Comment) -> Value {
@@ -1369,9 +1422,70 @@ pub fn execute(
                 "categories": defaults.categories,
                 "description": defaults.description,
                 "link_workspace_ids": defaults.link_workspace_ids,
-                "ai_context": store.setting(&workspace_context_key(id)).map_err(core)?.unwrap_or_default(),
                 "terminal_dir": store.setting(&workspace_dir_key(id)).map_err(core)?.unwrap_or_default(),
             })
+        }
+        "list_ai_rules" => match optional(args, "workspace_id").filter(|w| !w.is_empty()) {
+            Some(id) => {
+                store.workspace(id).map_err(core)?;
+                store
+                    .ai_rules(Some(id))
+                    .map_err(core)?
+                    .iter()
+                    .map(rule_json)
+                    .collect()
+            }
+            None => {
+                let mut workspaces = Vec::new();
+                for w in store.workspaces().map_err(core)? {
+                    let rules = store.ai_rules(Some(&w.id)).map_err(core)?;
+                    if !rules.is_empty() {
+                        workspaces.push(json!({
+                            "id": w.id,
+                            "name": w.name,
+                            "rules": rules.iter().map(rule_json).collect::<Vec<_>>(),
+                        }));
+                    }
+                }
+                let global: Vec<Value> = store
+                    .ai_rules(None)
+                    .map_err(core)?
+                    .iter()
+                    .map(rule_json)
+                    .collect();
+                json!({"global": global, "workspaces": workspaces})
+            }
+        },
+        "create_ai_rule" => {
+            let workspace = optional(args, "workspace_id").filter(|w| !w.is_empty());
+            let patch = rule_patch(args)?;
+            let rule = store
+                .create_ai_rule(
+                    workspace,
+                    patch.name.as_deref().unwrap_or_default(),
+                    patch.body.as_deref().unwrap_or_default(),
+                )
+                .map_err(core)?;
+            // 有効・無効と使う場面は、足したあとに変える
+            let rule = store
+                .update_ai_rule(
+                    &rule.id,
+                    &RulePatch {
+                        name: None,
+                        body: None,
+                        ..patch
+                    },
+                )
+                .map_err(core)?;
+            rule_json(&rule)
+        }
+        "update_ai_rule" => {
+            let id = required(args, "id")?;
+            rule_json(&store.update_ai_rule(id, &rule_patch(args)?).map_err(core)?)
+        }
+        "delete_ai_rule" => {
+            store.delete_ai_rule(required(args, "id")?).map_err(core)?;
+            json!({"deleted": true})
         }
         "update_workspace_settings" => {
             let id = required(args, "id")?;
@@ -1443,10 +1557,6 @@ pub fn execute(
                 Some(Value::String(s)) => Some(Some(when::resolve(s, &now, None))),
                 Some(other) => return Err(format!("date が正しくありません: {other}")),
             };
-            let context = optional(args, "ai_context").map(str::trim);
-            if let Some(error) = context.and_then(workspace_context_error) {
-                return Err(error);
-            }
             let dir = optional(args, "terminal_dir").map(str::trim);
             if let Some(dir) = dir.filter(|d| !d.is_empty()) {
                 if !expand_dir(dir).is_dir() {
@@ -1466,14 +1576,6 @@ pub fn execute(
                     .map_err(core)?;
             }
             store.set_task_defaults(&defaults).map_err(core)?;
-            if let Some(context) = context {
-                store
-                    .set_setting(
-                        &workspace_context_key(id),
-                        (!context.is_empty()).then_some(context),
-                    )
-                    .map_err(core)?;
-            }
             if let Some(dir) = dir {
                 store
                     .set_setting(&workspace_dir_key(id), (!dir.is_empty()).then_some(dir))
@@ -1540,6 +1642,10 @@ pub fn summary(name: &str, args: &Value) -> String {
         "get_due_alerts" => "期限の通知のタイミングを取得".into(),
         "set_due_alerts" => "期限の通知のタイミングを変更".into(),
         "update_workspace_settings" => "ワークスペースの設定を変更".into(),
+        "list_ai_rules" => "AI のルールを取得".into(),
+        "create_ai_rule" => format!("AI のルールを追加: {}", arg("name")),
+        "update_ai_rule" => "AI のルールを変更".into(),
+        "delete_ai_rule" => "AI のルールを削除".into(),
         GITHUB_FETCH => format!("GitHub から取得: {}", arg("url")),
         SLACK_FETCH => format!("Slack から取得: {}", arg("url")),
         RUN_SHELL => format!("コマンドを実行: {}", arg("command")),
@@ -1548,7 +1654,7 @@ pub fn summary(name: &str, args: &Value) -> String {
 }
 
 /// ユーザーのメッセージの最後に添える、今日の日付と今の画面。
-/// `extra` は、今開いているワークスペースについての前提と指示。
+/// `extra` は、今のワークスペースのルールなど、この実行についての補足。
 pub fn turn_note(today: &str, place: &str, extra: &str) -> String {
     let mut note = format!("\n\n（アプリからの補足）\n今は {today} です。");
     for part in [place, extra] {
@@ -1575,7 +1681,57 @@ pub fn shell_note(shell: &Shell, in_tab: bool) -> String {
     )
 }
 
-/// AI への最初の指示。`context` は、ユーザーが設定に書いた、いつも伝える前提と指示。
+/// ルールを AI に渡す文にする。1 つずつ名前を見出しにする。
+fn rules_text<'a>(rules: impl IntoIterator<Item = &'a AiRule>) -> String {
+    rules
+        .into_iter()
+        .map(|r| format!("## {}\n{}", r.name, r.body))
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// グローバルのルールのうち、今の実行で使うもの（[`system_prompt`] に渡す）。
+/// `auto` は、アプリが始めた実行（新しいタスクを整える、コメントから更新、定期チェック）。
+pub fn global_rules(store: &Store, auto: bool) -> malakt_core::Result<String> {
+    let rules = store.ai_rules(None)?;
+    Ok(rules_text(rules.iter().filter(|r| {
+        r.enabled && !r.body.is_empty() && r.apply.applies(auto)
+    })))
+}
+
+/// ワークスペースのルールのうち、今の実行で使うもの（メッセージに添える）。
+/// 親のワークスペースのルールも使う。同じルールは 1 回だけ入れる。
+pub fn workspace_rules(
+    store: &Store,
+    workspaces: &[&str],
+    auto: bool,
+) -> malakt_core::Result<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut groups: Vec<(String, Vec<AiRule>)> = Vec::new();
+    for id in workspaces {
+        for (name, rule) in store.ai_rules_in(id)? {
+            if !rule.apply.applies(auto) || !seen.insert(rule.id.clone()) {
+                continue;
+            }
+            match groups.iter_mut().find(|(n, _)| *n == name) {
+                Some((_, rules)) => rules.push(rule),
+                None => groups.push((name, vec![rule])),
+            }
+        }
+    }
+    Ok(groups
+        .iter()
+        .map(|(name, rules)| {
+            format!(
+                "ワークスペース「{name}」のルールです。いつも従ってください。\n{}",
+                rules_text(rules)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n"))
+}
+
+/// AI への最初の指示。`rules` は、ユーザーが決めたグローバルのルール（[`global_rules`]）。
 /// 会話の途中で変わると、それまでの考えのブロックを送り返せなくなるので、
 /// 日付や今の画面のように変わるものは入れない（[`turn_note`] でメッセージに添える）。
 /// コメントに書いてよいこと。アプリの中の AI にも、MCP でつなぐ外のエージェントにも同じ文を渡す。
@@ -1583,13 +1739,13 @@ pub const COMMENT_RULE: &str = "コメントは、あとでタスクを読む人
 
 const COMMENT_TOOL: &str = "タスクにコメントを書く。書くのは、あとでタスクを読む人に要る事実だけ（決まったこと、分かったこと、変わった状態、次にすること）。「確認しました」「レビューしました」のように作業をしたことだけを伝える文と、「まだ〜していません」のようにしていないことは書かない。書く事実がなければ呼ばない。";
 
-pub fn system_prompt(context: &str) -> String {
-    let context = if context.trim().is_empty() {
+pub fn system_prompt(rules: &str) -> String {
+    let rules = if rules.trim().is_empty() {
         String::new()
     } else {
         format!(
-            "\n\nユーザーが設定に書いた前提と指示です。いつも従ってください。\n{}",
-            context.trim()
+            "\n\nユーザーが決めたルールです。いつも従ってください。\n{}",
+            rules.trim()
         )
     };
     let prompt = format!(
@@ -1609,9 +1765,10 @@ pub fn system_prompt(context: &str) -> String {
          - タスクの追加、書き換え、整理のように元に戻せる操作は、「〜しましょうか」と聞き返さずに実行し、結果だけを伝えてください。聞き返すのは、頼まれたことが 2 通り以上に読めて、どちらかで結果が大きく変わるときだけです。\n\
          - ツールが失敗したら、やり方を変えてやり直してください。返事には最後の結果だけを書き、途中の失敗、その原因、ツールやシェルの事情は書かないでください。どうしてもできなかったときだけ、できなかったことと、ユーザーにしてほしいことを 1 文で書いてください。\n\
          - {COMMENT_RULE}ユーザーが文面を決めてコメントを頼んだときは、その文面のまま書いてください。\n\
+         - ユーザーに「これからはこうして」「いつも〜して」のように、これから先も続けてほしいことを頼まれたら、list_ai_rules で今のルールを読み、create_ai_rule か update_ai_rule でルールにしてください。あるワークスペースだけのことなら、そのワークスペースのルールにしてください。\n\
          - 返事は短く、ユーザーの言葉（ふつうは日本語）で書いてください。記法は使わず、ふつうの文章で書いてください。"
     );
-    prompt + &context
+    prompt + &rules
 }
 
 #[cfg(test)]
@@ -1892,14 +2049,13 @@ mod tests {
                 "id": ws["id"], "date": "2026-12-20", "due": "relative", "due_days": -7,
                 "due_time": "18:00", "priority": "high", "assignee_ids": [p["id"]],
                 "categories": ["準備"], "description": "やること:", "link_workspace_ids": [other["id"]],
-                "ai_context": "優先度は高にする", "terminal_dir": dir.path().display().to_string(),
+                "terminal_dir": dir.path().display().to_string(),
             }),
         );
         assert_eq!(saved["date"], "2026-12-20");
         assert_eq!(saved["due"], "relative");
         assert_eq!(saved["due_days"], -7);
         assert_eq!(saved["priority"], "high");
-        assert_eq!(saved["ai_context"], "優先度は高にする");
         // 決め方を変えずに日数だけ変える
         let days = run(
             &mut store,
@@ -1920,7 +2076,6 @@ mod tests {
         for bad in [
             json!({"id": ws["id"], "date": "あさって以降", "categories": ["x"]}),
             json!({"id": ws["id"], "categories": ["x"], "terminal_dir": "/no/such/folder/here"}),
-            json!({"id": ws["id"], "categories": ["x"], "ai_context": "あ".repeat(MAX_WORKSPACE_CONTEXT_CHARS + 1)}),
             json!({"id": ws["id"], "categories": ["x"], "due": "fixed"}),
         ] {
             assert!(
@@ -1938,12 +2093,83 @@ mod tests {
         let cleared = run(
             &mut store,
             "update_workspace_settings",
-            json!({"id": ws["id"], "date": null, "due": "none", "ai_context": "", "terminal_dir": ""}),
+            json!({"id": ws["id"], "date": null, "due": "none", "terminal_dir": ""}),
         );
         assert_eq!(cleared["date"], Value::Null);
         assert_eq!(cleared["due"], "none");
-        assert_eq!(cleared["ai_context"], "");
         assert_eq!(cleared["terminal_dir"], "");
+    }
+
+    #[test]
+    fn ai_rules_are_listed_added_changed_and_removed() {
+        let mut store = Store::open_in_memory().unwrap();
+        let work = run(&mut store, "create_workspace", json!({"name": "仕事"}));
+        let team = run(
+            &mut store,
+            "create_workspace",
+            json!({"name": "チーム", "parent_id": work["id"]}),
+        );
+        let global = run(
+            &mut store,
+            "create_ai_rule",
+            json!({"name": "言葉づかい", "body": "敬語で答える"}),
+        );
+        assert_eq!(global["workspace_id"], Value::Null);
+        assert_eq!(global["enabled"], true);
+        assert_eq!(global["apply"], "always");
+        let local = run(
+            &mut store,
+            "create_ai_rule",
+            json!({"workspace_id": work["id"], "body": "PR は優先度を高", "apply": "auto"}),
+        );
+        assert_eq!(local["name"], malakt_core::rules::NEW_RULE_NAME);
+        assert_eq!(local["apply"], "auto");
+        let all = run(&mut store, "list_ai_rules", json!({}));
+        assert_eq!(all["global"][0]["body"], "敬語で答える");
+        assert_eq!(all["workspaces"][0]["name"], "仕事");
+        assert_eq!(all["workspaces"][0]["rules"][0]["id"], local["id"]);
+        let own = run(
+            &mut store,
+            "list_ai_rules",
+            json!({"workspace_id": team["id"]}),
+        );
+        assert_eq!(own, json!([]));
+
+        // チャットではグローバルのルールだけ、自動の処理では親のワークスペースのルールも使う
+        let team_id = team["id"].as_str().unwrap();
+        assert_eq!(
+            global_rules(&store, false).unwrap(),
+            "## 言葉づかい\n敬語で答える"
+        );
+        assert_eq!(workspace_rules(&store, &[team_id], false).unwrap(), "");
+        assert_eq!(
+            workspace_rules(&store, &[team_id, team_id], true).unwrap(),
+            "ワークスペース「仕事」のルールです。いつも従ってください。\n## 新規ルール\nPR は優先度を高"
+        );
+        let off = run(
+            &mut store,
+            "update_ai_rule",
+            json!({"id": global["id"], "enabled": false, "name": "敬語"}),
+        );
+        assert_eq!(off["name"], "敬語");
+        assert_eq!(global_rules(&store, false).unwrap(), "");
+        for bad in [
+            json!({"id": global["id"], "apply": "sometimes"}),
+            json!({"id": global["id"], "name": " "}),
+            json!({"id": "nope"}),
+        ] {
+            assert!(
+                execute(&mut store, None, "update_ai_rule", &bad).is_err(),
+                "{bad}"
+            );
+        }
+        // 消したルールは元に戻せるので、確認は出さない
+        assert!(!needs_confirmation("delete_ai_rule"));
+        run(&mut store, "delete_ai_rule", json!({"id": global["id"]}));
+        assert_eq!(
+            run(&mut store, "list_ai_rules", json!({}))["global"],
+            json!([])
+        );
     }
 
     #[test]
@@ -2437,6 +2663,7 @@ mod tests {
         assert!(!prompt.contains("前提と指示"));
         let prompt = system_prompt(" PR は必ずレビューする \n");
         assert!(prompt.ends_with("いつも従ってください。\nPR は必ずレビューする"));
+        assert!(prompt.contains("create_ai_rule"));
 
         // 日付と今の画面は、メッセージに添える
         let note = turn_note("2026-11-24", "ユーザーは「家」を開いています。", "");
