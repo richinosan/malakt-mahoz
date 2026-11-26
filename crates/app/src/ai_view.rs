@@ -1317,6 +1317,34 @@ impl AiPane {
                 ),
             )
             .child(
+                section().child(
+                    row()
+                        .gap_2()
+                        .child(
+                            app_icon("github")
+                                .size_4()
+                                .text_color(theme.muted_foreground),
+                        )
+                        .child(
+                            div()
+                                .id("ai-github-account")
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_sm()
+                                .when(!signed_in, |d| d.text_color(theme.muted_foreground))
+                                .child(account)
+                                .test_support(),
+                        )
+                        .child(feel::gloss(
+                            icon_button("ai-github-read", "refresh-cw", "gh から読み直す")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.session.update(cx, |s, cx| s.read_github(cx));
+                                })),
+                        )),
+                ),
+            )
+            .child(
                 section()
                     .child(
                         row()
@@ -1327,7 +1355,7 @@ impl AiPane {
                                         .checked(watch.enabled)
                                         .label("GitHub の定期チェック")
                                         .tooltip(
-                                            "未完了タスクの issue・プルリクエストを定期的にチェック",
+                                            "タスクの issue・プルリクエストに進展があれば、AI がタスクにコメントする",
                                         )
                                         .on_click(cx.listener(|this, on: &bool, _, cx| {
                                             let on = *on;
@@ -1379,34 +1407,6 @@ impl AiPane {
                                     ),
                             )
                     }),
-            )
-            .child(
-                section().child(
-                    row()
-                        .gap_2()
-                        .child(
-                            app_icon("github")
-                                .size_4()
-                                .text_color(theme.muted_foreground),
-                        )
-                        .child(
-                            div()
-                                .id("ai-github-account")
-                                .flex_1()
-                                .min_w_0()
-                                .truncate()
-                                .text_sm()
-                                .when(!signed_in, |d| d.text_color(theme.muted_foreground))
-                                .child(account)
-                                .test_support(),
-                        )
-                        .child(feel::gloss(
-                            icon_button("ai-github-read", "refresh-cw", "gh から読み直す")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.session.update(cx, |s, cx| s.read_github(cx));
-                                })),
-                        )),
-                ),
             )
             .overflow_y_scroll()
             .flex_1()

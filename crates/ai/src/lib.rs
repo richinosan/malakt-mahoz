@@ -6,6 +6,7 @@
 //! - `wire`: 各 API の形式への変換（リクエストの組み立てと、返事の読み取り）
 //! - `tools`: AI がタスクを読み書きするためのツール
 //! - `github`: GitHub のリンクの検出と、取得のためのコマンド
+//! - `watch`: GitHub の定期チェックで、issue とプルリクエストの進展を読む
 //! - `slack`: Slack のリンクの検出と、取得のためのコマンド
 //! - `shell`: コマンドの実行と強制終了
 //! - `keys`: API キーの保存（OS のキーチェーン）
@@ -19,6 +20,7 @@ pub mod provider;
 pub mod shell;
 pub mod slack;
 pub mod tools;
+pub mod watch;
 pub mod wire;
 
 pub use provider::{Effort, Provider};

@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{
-    px, size, AnyWindowHandle, AppContext, Bounds, Entity, Pixels, Point, Size, TestAppContext,
-    WindowBounds, WindowOptions,
+    point, px, size, AnyWindowHandle, AppContext, Bounds, Entity, Pixels, Point, ScrollDelta, Size,
+    TestAppContext, WindowBounds, WindowOptions,
 };
 use malakt_ai::keys::{KeyStore, MemoryKeys, Source};
 use malakt_ai::shell::{Shell, Spec};
@@ -34,8 +34,12 @@ type Sent = Arc<Mutex<Vec<Request>>>;
 struct World {
     keys: Arc<MemoryKeys>,
     sent: Sent,
-    /// gh が返す中身に付け足す文字。変えると「GitHub 側で変化があった」ことになる。
+    /// gh が返す中身に付け足す文字。
     github: Arc<Mutex<String>>,
+    /// 定期チェックで gh が返す issue・プルリクエストの JSON。null は gh の失敗、"missing" は gh がない。
+    progress: Arc<Mutex<Value>>,
+    /// 定期チェックで gh が返す、コードへのコメントの JSON。
+    inline: Arc<Mutex<Value>>,
     /// Slack CLI の様子。"missing" は入っていない、"not_authed" は断られた。ほかは本文に付け足す文字。
     slack: Arc<Mutex<String>>,
     /// gh にログインしているアカウント。`None` はログインしていない。
@@ -76,6 +80,8 @@ fn start_with(cx: &mut TestAppContext, store: Store) -> World {
         keys: Arc::new(MemoryKeys::default()),
         sent: Sent::default(),
         github: Arc::default(),
+        progress: Arc::default(),
+        inline: Arc::new(Mutex::new(json!([]))),
         slack: Arc::default(),
         account: Arc::default(),
         replies: Arc::default(),
@@ -90,6 +96,7 @@ fn start_with(cx: &mut TestAppContext, store: Store) -> World {
         world.fetched.clone(),
     );
     let github = world.github.clone();
+    let (progress, inline) = (world.progress.clone(), world.inline.clone());
     let slack = world.slack.clone();
     let account = world.account.clone();
     let config = AiConfig {
@@ -160,6 +167,35 @@ fn start_with(cx: &mut TestAppContext, store: Store) -> World {
         whoami: Arc::new(move |_| match &*account.lock().unwrap() {
             Some(login) => vec![Spec::shell("exit 1"), Spec::shell(&format!("echo {login}"))],
             None => vec![Spec::shell("exit 1")],
+        }),
+        gh_progress: Arc::new(move |link| {
+            let print = |value: &Value| {
+                // JSON の中の \n を、シェルの echo に読み替えさせない
+                let json = value.to_string();
+                Spec::shell(&if cfg!(windows) {
+                    format!("Write-Output '{json}'")
+                } else {
+                    format!("printf '%s\\n' '{json}'")
+                })
+            };
+            let mut specs = malakt_ai::watch::commands(link);
+            let value = progress.lock().unwrap().clone();
+            match value {
+                Value::Null => vec![Spec::shell("exit 1")],
+                Value::String(s) if s == "missing" => {
+                    vec![Spec::direct("malakt-mahoz-no-such-program", Vec::new())]
+                }
+                value => {
+                    // 表示はそのままにして、本物の gh の代わりに用意した JSON を出す
+                    let outputs = [value, inline.lock().unwrap().clone()];
+                    for (spec, output) in specs.iter_mut().zip(outputs.iter()) {
+                        let display = spec.display.clone();
+                        *spec = print(output);
+                        spec.display = display;
+                    }
+                    specs
+                }
+            }
         }),
     };
     cx.update(|cx| malakt_mahoz::init_with(store, config, cx));
@@ -1029,7 +1065,7 @@ fn a_locked_app_does_not_talk_to_the_ai(cx: &mut TestAppContext) {
     let _ = Status::Completed;
 }
 
-/// リンク付きのタスクを 1 つ作り、定期チェックをオンにする。
+/// リンク付きのタスクを 1 つ作り、定期チェックの間隔を決める（標準でオン）。
 fn watched_task(cx: &mut TestAppContext, minutes: u32) -> String {
     // 定期チェックだけを見るので、新しいタスクを整えるほうは切る
     let arrange = session(cx);
@@ -1037,8 +1073,8 @@ fn watched_task(cx: &mut TestAppContext, minutes: u32) -> String {
     let id = cx.update(|cx| {
         db::shared(cx).update(cx, |db, cx| {
             let draft = TaskDraft {
-                title: "ログインの不具合".into(),
-                description: "https://github.com/o/r/issues/3 を直す".into(),
+                title: "ログインの修正".into(),
+                description: "https://github.com/o/r/pull/7 をレビューする".into(),
                 ..Default::default()
             };
             let task = db.store.create_task(None, &draft).unwrap();
@@ -1066,88 +1102,195 @@ fn tick(cx: &mut TestAppContext, minutes: u64) {
     wait(cx, "定期チェックが終わる", |s| !s.busy);
 }
 
-/// 定期チェックは、標準ではオフ。オンにするまで、GitHub にも AI にも何も送らない。
-#[gpui_kit::test]
-fn github_is_not_polled_until_turned_on(cx: &mut TestAppContext) {
-    let world = start(cx);
-    world.keys.set(Provider::Claude, "k").unwrap();
-    assert!(!read(cx, |s| s.watch.enabled));
-    tick(cx, 600);
-    assert!(read(cx, |s| s.shell.is_empty() && s.watch_status.is_none()));
-    assert!(world.sent().is_empty());
+/// gh が返すプルリクエストの様子。
+fn pull(state: &str, comments: Value, reviews: Value) -> Value {
+    json!({
+        "title": "ログインを直す",
+        "state": state,
+        "isDraft": false,
+        "reviewDecision": "",
+        "comments": comments,
+        "reviews": reviews,
+        "commits": [],
+    })
 }
 
-/// オンにすると、選んだ間隔でタスクのリンクを見に行く。変化があったときだけ AI を呼び、
-/// AI がタスクを更新する。
+fn set_pull(world: &World, value: Value) {
+    *world.progress.lock().unwrap() = value;
+}
+
+fn comments_of(cx: &mut TestAppContext, task: &str) -> Vec<String> {
+    cx.update(|cx| {
+        db::shared(cx)
+            .read(cx)
+            .store
+            .comments(task)
+            .unwrap()
+            .into_iter()
+            .map(|c| c.body)
+            .collect()
+    })
+}
+
+fn gh_runs(cx: &mut TestAppContext) -> usize {
+    read(cx, |s| {
+        s.shell
+            .iter()
+            .filter(|l| l.text.contains("pr view 7"))
+            .count()
+    })
+}
+
+/// 定期チェックは標準でオンで、24 時間に 1 回。起動して少ししたら比べる元を覚え、そのあとは 1 日ごとに見る。
 #[gpui_kit::test]
-fn changes_on_github_are_reflected_into_tasks(cx: &mut TestAppContext) {
+fn github_is_checked_once_a_day_by_default(cx: &mut TestAppContext) {
     let world = start(cx);
     world.keys.set(Provider::Claude, "k").unwrap();
-    let task = watched_task(cx, 15);
-
-    // 間隔より前には動かない
-    tick(cx, 14);
-    assert!(read(cx, |s| s.shell.is_empty()));
-
-    // 1 回目は、比べる元を覚えるだけ
-    tick(cx, 1);
-    let lines = read(cx, |s| s.shell.clone());
     assert_eq!(
-        lines[0].text,
-        cmd_line("echo fetched https://github.com/o/r/issues/3")
+        read(cx, |s| s.watch.clone()),
+        Watch {
+            enabled: true,
+            minutes: 1440,
+            instruction: DEFAULT_WATCH_INSTRUCTION.into(),
+        }
     );
+    set_pull(&world, pull("OPEN", json!([]), json!([])));
+    let arrange = session(cx);
+    cx.update(|cx| arrange.update(cx, |s, cx| s.set_arrange(false, cx)));
+    cx.update(|cx| {
+        db::shared(cx).update(cx, |db, cx| {
+            let draft = TaskDraft {
+                title: "レビュー".into(),
+                description: "https://github.com/o/r/pull/7".into(),
+                ..Default::default()
+            };
+            db.store.create_task(None, &draft).unwrap();
+            cx.notify();
+        })
+    });
+
+    // 1 回目は、比べる元を覚えるだけ。AI は呼ばない
+    tick(cx, 1);
+    assert_eq!(gh_runs(cx), 1);
     assert!(world.sent().is_empty());
     let status = read(cx, |s| s.watch_status.clone()).unwrap();
-    assert!(status.contains("リンク 1 件中、更新 0 件"), "{status}");
+    assert!(status.contains("リンク 1 件中、進展 0 件"), "{status}");
 
-    // 変化がなければ、AI は呼ばない
-    tick(cx, 15);
+    // 24 時間たつまでは見に行かない
+    tick(cx, 1438);
+    assert_eq!(gh_runs(cx), 1);
+    tick(cx, 2);
+    assert_eq!(gh_runs(cx), 2);
+    // 進展がなければ、AI も呼ばず、何も書かない
     assert!(world.sent().is_empty());
-    assert!(read(cx, |s| s.items.is_empty()));
+    assert!(read(cx, |s| s.items.is_empty() && s.runs.is_empty()));
+}
 
-    // GitHub 側で変わると、AI に渡して、タスクが更新される
-    *world.github.lock().unwrap() = " state: CLOSED".into();
+/// 間隔は、最後にチェックした時刻から数える。起動し直しても、数え直しにはならない。
+#[gpui_kit::test]
+fn the_interval_continues_across_restarts(cx: &mut TestAppContext) {
+    let mut store = Store::open_in_memory().unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    // 23 時間前にチェックしていた
+    store
+        .set_setting("ai.watch.last", Some(&(now - 23 * 3600).to_string()))
+        .unwrap();
+    let world = start_with(cx, store);
+    world.keys.set(Provider::Claude, "k").unwrap();
+    set_pull(&world, pull("OPEN", json!([]), json!([])));
+    watched_task(cx, 1440);
+    tick(cx, 58);
+    assert_eq!(gh_runs(cx), 0);
+    tick(cx, 2);
+    assert_eq!(gh_runs(cx), 1);
+}
+
+/// 前回のチェックからの進展（自分のレビュー、ほかの人の返信、状態の変化）を AI に渡し、
+/// AI が要約をタスクにコメントする。自分の動きは gh のアカウントで見分ける。
+#[gpui_kit::test]
+fn progress_on_github_is_summarized_into_a_task_comment(cx: &mut TestAppContext) {
+    let world = start(cx);
+    world.keys.set(Provider::Claude, "k").unwrap();
+    *world.account.lock().unwrap() = Some("kanade".into());
+    let session = session(cx);
+    cx.update(|cx| session.update(cx, |s, cx| s.read_github(cx)));
+    wait(cx, "アカウントを読み終わる", |s| {
+        *s.github() == GithubAccount::Login("kanade".into())
+    });
+    let task = watched_task(cx, 1440);
+    let old = json!([{"author": {"login": "alice"}, "body": "前からあるコメント", "createdAt": "2026-11-24T00:00:00Z"}]);
+    set_pull(&world, pull("OPEN", old.clone(), json!([])));
+    tick(cx, 1);
+    assert!(world.sent().is_empty());
+
+    // 自分がレビューで修正を頼み、相手が返信した
+    let comments = json!([
+        old[0],
+        {"author": {"login": "alice"}, "body": "直しました", "createdAt": "2026-11-25T03:00:00Z"},
+    ]);
+    let reviews = json!([{"author": {"login": "kanade"}, "state": "CHANGES_REQUESTED", "body": "テストを足してください", "submittedAt": "2026-11-25T01:00:00Z"}]);
+    set_pull(&world, pull("OPEN", comments.clone(), reviews.clone()));
+    *world.inline.lock().unwrap() = json!([{"user": {"login": "kanade"}, "body": "None のとき落ちます", "created_at": "2026-11-25T01:00:10Z", "path": "src/login.rs", "line": 12}]);
+    let summary = "kanade がテストの追加を依頼し、alice が修正を push した。次は再レビュー。";
     world.reply(tool_reply(
         "t1",
-        "update_task",
-        json!({"id": task, "status": "completed"}),
+        "add_comment",
+        json!({"task_id": task, "body": summary}),
     ));
-    world.reply(text_reply("issue が閉じられたので、完了にしました。"));
-    tick(cx, 15);
+    world.reply(text_reply("進展をコメントしました。"));
+    tick(cx, 1440);
     let sent = world.sent();
     assert_eq!(sent.len(), 2);
     let message = sent[0].2["messages"][0]["content"].as_str().unwrap();
-    assert!(message.contains("## https://github.com/o/r/issues/3"));
-    assert!(message.contains(&format!("- ログインの不具合（id: {task}）")));
-    assert!(message.contains("state: CLOSED"));
+    assert!(
+        message.contains("## https://github.com/o/r/pull/7"),
+        "{message}"
+    );
+    assert!(message.contains(&format!("- ログインの修正（id: {task}）")));
+    assert!(message.contains("「自分」はユーザー本人（GitHub の @kanade）です"));
+    assert!(message.contains("自分（@kanade）のレビュー（修正の依頼）: テストを足してください"));
+    assert!(message
+        .contains("自分（@kanade）のコードへのコメント（src/login.rs:12）: None のとき落ちます"));
+    assert!(message.contains("@alice のコメント: 直しました"));
+    // 前のチェックで見た動きは渡さない
+    assert!(!message.contains("前からあるコメント"), "{message}");
     assert!(message.contains(DEFAULT_WATCH_INSTRUCTION));
-    assert_eq!(all_tasks(cx)[0].status, Status::Completed);
+    assert_eq!(comments_of(cx, &task), vec![summary.to_owned()]);
     // 会話には混ぜず、実行の記録に残す
     assert!(read(cx, |s| s.items.is_empty()));
     let run = read(cx, |s| s.runs.last().cloned().unwrap());
     assert_eq!(run.kind, RunKind::Watch);
-    assert_eq!(run.tasks, vec![(task.clone(), "ログインの不具合".into())]);
+    assert_eq!(run.tasks, vec![(task.clone(), "ログインの修正".into())]);
     assert_eq!(run.error, None);
-    assert_eq!(
-        run.items.last(),
-        Some(&Item::Assistant(
-            "issue が閉じられたので、完了にしました。".into()
-        ))
-    );
 
-    // 完了したタスクのリンクは、もう見に行かない。覚えていた値も消える
-    let before = read(cx, |s| s.shell.len());
-    tick(cx, 15);
-    assert_eq!(read(cx, |s| s.shell.len()), before);
+    // 次の日に何も起きていなければ、AI も呼ばず、コメントも増えない
+    tick(cx, 1440);
     assert_eq!(world.sent().len(), 2);
-    let seen = cx.update(|cx| {
-        db::shared(cx)
-            .read(cx)
-            .store
-            .setting("ai.watch.seen")
-            .unwrap()
+    assert_eq!(comments_of(cx, &task).len(), 1);
+
+    // 完了にしたタスクのリンクも見る。マージされると、状態の変化として渡す
+    cx.update(|cx| {
+        db::shared(cx).update(cx, |db, cx| {
+            db.store.set_task_status(&task, Status::Completed).unwrap();
+            cx.notify();
+        })
     });
-    assert_eq!(seen.as_deref(), Some("{}"));
+    let mut merged = pull("MERGED", comments, reviews);
+    merged["mergedAt"] = json!("2026-11-27T00:00:00Z");
+    set_pull(&world, merged);
+    world.reply(text_reply("マージをコメントしました。"));
+    tick(cx, 1440);
+    let sent = world.sent();
+    assert_eq!(sent.len(), 3);
+    let message = sent[2].2["messages"][0]["content"].as_str().unwrap();
+    assert!(
+        message.contains("状態: マージ済み（前回のチェックでは オープン）"),
+        "{message}"
+    );
+    assert!(!message.contains("直しました"), "{message}");
 }
 
 /// 定期チェックからは、タスクの削除もコマンドの実行もしない（確認に答える人がいない）。
@@ -1155,9 +1298,10 @@ fn changes_on_github_are_reflected_into_tasks(cx: &mut TestAppContext) {
 fn the_periodic_check_never_deletes_or_runs_commands(cx: &mut TestAppContext) {
     let world = start(cx);
     world.keys.set(Provider::Claude, "k").unwrap();
-    let task = watched_task(cx, 30);
-    tick(cx, 30);
-    *world.github.lock().unwrap() = " state: CLOSED".into();
+    let task = watched_task(cx, 60);
+    set_pull(&world, pull("OPEN", json!([]), json!([])));
+    tick(cx, 1);
+    set_pull(&world, pull("CLOSED", json!([]), json!([])));
     world.reply(tool_reply("t1", "delete_task", json!({"id": task})));
     world.reply(tool_reply(
         "t2",
@@ -1165,7 +1309,7 @@ fn the_periodic_check_never_deletes_or_runs_commands(cx: &mut TestAppContext) {
         json!({"command": "echo never"}),
     ));
     world.reply(text_reply("できませんでした。"));
-    tick(cx, 30);
+    tick(cx, 60);
     assert_eq!(all_tasks(cx).len(), 1, "タスクは消えていない");
     assert!(read(cx, |s| s.pending.is_none()));
     let lines = read(cx, |s| s.shell.clone());
@@ -1186,12 +1330,12 @@ fn the_periodic_check_never_deletes_or_runs_commands(cx: &mut TestAppContext) {
     assert!(read(cx, |s| s.pending.is_some()));
 }
 
-/// キーがなければ、オンにしていても GitHub を見に行かない。
+/// キーがなければ、オンでも GitHub を見に行かない。
 #[gpui_kit::test]
 fn the_periodic_check_stays_offline_without_a_key(cx: &mut TestAppContext) {
     let world = start(cx);
-    watched_task(cx, 15);
-    tick(cx, 15);
+    watched_task(cx, 60);
+    tick(cx, 1);
     assert!(read(cx, |s| s.shell.is_empty()));
     assert!(world.sent().is_empty());
     let status = read(cx, |s| s.watch_status.clone()).unwrap();
@@ -1199,7 +1343,24 @@ fn the_periodic_check_stays_offline_without_a_key(cx: &mut TestAppContext) {
     assert!(read(cx, |s| s.items.is_empty()), "チャットには何も足さない");
 }
 
-/// 定期チェックは設定の画面でオンにでき、間隔と指示を変えられる。起動し直しても残る。
+/// gh がなければ、チェックの失敗として記録に出す。
+#[gpui_kit::test]
+fn a_missing_gh_is_reported(cx: &mut TestAppContext) {
+    let world = start(cx);
+    world.keys.set(Provider::Claude, "k").unwrap();
+    watched_task(cx, 60);
+    set_pull(&world, json!("missing"));
+    tick(cx, 1);
+    let run = read(cx, |s| s.runs.last().cloned().unwrap());
+    assert_eq!(run.kind, RunKind::Watch);
+    assert!(run
+        .error
+        .as_deref()
+        .is_some_and(|e| e.contains("gh コマンドが見つかりませんでした")));
+    assert!(world.sent().is_empty());
+}
+
+/// 定期チェックは設定の画面で、間隔と指示を変えられ、オフにもできる。
 #[gpui_kit::test]
 fn the_periodic_check_is_set_up_in_settings(cx: &mut TestAppContext) {
     let world = start(cx);
@@ -1207,9 +1368,16 @@ fn the_periodic_check_is_set_up_in_settings(cx: &mut TestAppContext) {
     let (window, view) = open(cx, wide());
     open_chat(cx, window, &view);
     menu(cx, window, 0);
-    ui(cx, window, |window, cx| window.click("ai-watch", cx));
+    // 定期チェックの欄は設定の下のほうにあるので、下までスクロールする
     ui(cx, window, |window, cx| {
-        window.click(("ai-watch-minutes", 60usize), cx)
+        window.scroll(
+            "ai-github-account",
+            ScrollDelta::Pixels(point(px(0.), px(-3000.))),
+            cx,
+        )
+    });
+    ui(cx, window, |window, cx| {
+        window.click(("ai-watch-minutes", 720usize), cx)
     });
     ui(cx, window, |window, cx| {
         window.click("ai-watch-instruction", cx);
@@ -1221,7 +1389,7 @@ fn the_periodic_check_is_set_up_in_settings(cx: &mut TestAppContext) {
         read(cx, |s| s.watch.clone()),
         Watch {
             enabled: true,
-            minutes: 60,
+            minutes: 720,
             instruction: "閉じられていたら完了にする".into()
         }
     );
@@ -1237,28 +1405,36 @@ fn the_periodic_check_is_set_up_in_settings(cx: &mut TestAppContext) {
         saved,
         (
             Some("1".into()),
-            Some("60".into()),
+            Some("720".into()),
             Some("閉じられていたら完了にする".into())
         )
     );
 
-    // 「今すぐ確認」で、間隔を待たずに見に行く。結果が設定に出る
-    watched_task(cx, 60);
+    // 「今すぐチェック」で、間隔を待たずに見に行く。結果が設定に出る
+    set_pull(&world, pull("OPEN", json!([]), json!([])));
+    watched_task(cx, 720);
     ui(cx, window, |window, cx| window.click("ai-watch-now", cx));
     wait(cx, "確認が終わる", |s| !s.busy);
     ui(cx, window, |window, _| {
         assert!(window.find("ai-watch-status").visible());
     });
-    assert_eq!(read(cx, |s| s.shell.len()), 2);
+    assert_eq!(gh_runs(cx), 1);
 
-    // オフに戻すと、もう見に行かない
+    // オフにすると、もう見に行かない
     ui(cx, window, |window, cx| window.click("ai-watch", cx));
     assert!(!read(cx, |s| s.watch.enabled));
+    assert_eq!(
+        cx.update(|cx| db::shared(cx)
+            .read(cx)
+            .store
+            .setting("ai.watch.enabled")
+            .unwrap()),
+        Some("0".into())
+    );
     // カーソルの点滅で時間がかかるので、ウィンドウは閉じてから時計を進める
     ui(cx, window, |window, _| window.remove_window());
-    tick(cx, 600);
-    assert_eq!(read(cx, |s| s.shell.len()), 2);
-    assert!(world.sent().is_empty());
+    tick(cx, 3000);
+    assert_eq!(gh_runs(cx), 1);
 }
 
 /// オート実行は標準ではオフ。設定でオンにすると、コマンドの実行もタスクの削除も確認なしで進み、
@@ -1347,11 +1523,12 @@ fn auto_run_skips_the_confirmations(cx: &mut TestAppContext) {
 fn auto_run_does_not_reach_the_periodic_check(cx: &mut TestAppContext) {
     let world = start(cx);
     world.keys.set(Provider::Claude, "k").unwrap();
-    let task = watched_task(cx, 30);
+    let task = watched_task(cx, 60);
     let session = session(cx);
     cx.update(|cx| session.update(cx, |s, cx| s.set_auto_run(true, cx)));
-    tick(cx, 30);
-    *world.github.lock().unwrap() = " state: CLOSED".into();
+    set_pull(&world, pull("OPEN", json!([]), json!([])));
+    tick(cx, 1);
+    set_pull(&world, pull("CLOSED", json!([]), json!([])));
     world.reply(tool_reply("t1", "delete_task", json!({"id": task})));
     world.reply(tool_reply(
         "t2",
@@ -1359,7 +1536,8 @@ fn auto_run_does_not_reach_the_periodic_check(cx: &mut TestAppContext) {
         json!({"command": "echo never"}),
     ));
     world.reply(text_reply("できませんでした。"));
-    tick(cx, 30);
+    tick(cx, 60);
+    assert_eq!(world.sent().len(), 3);
     assert_eq!(all_tasks(cx).len(), 1);
     assert!(read(cx, |s| s
         .shell

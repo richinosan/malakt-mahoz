@@ -163,7 +163,7 @@ pub fn account_note(login: &str) -> String {
 }
 
 /// 入力を待って止まらないようにする。
-fn quiet_env() -> Vec<(String, String)> {
+pub(crate) fn quiet_env() -> Vec<(String, String)> {
     vec![
         ("GH_PROMPT_DISABLED".into(), "1".into()),
         ("NO_COLOR".into(), "1".into()),
