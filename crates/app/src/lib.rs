@@ -5,6 +5,7 @@ pub mod ai_settings;
 pub mod ai_tools;
 pub mod ai_view;
 pub mod browser;
+pub mod browser_popup;
 mod caret;
 pub mod cli;
 pub mod db;

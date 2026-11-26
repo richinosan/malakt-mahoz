@@ -209,7 +209,11 @@ pub(crate) fn window_controls(
                         match area {
                             WindowControlArea::Min => window.minimize_window(),
                             WindowControlArea::Max => window.zoom_window(),
-                            _ => window.remove_window(),
+                            _ => {
+                                // ページの部品は、ウィンドウより先に捨てる
+                                crate::browser::window_closing(window, cx);
+                                window.remove_window()
+                            }
                         }
                     })
                 })

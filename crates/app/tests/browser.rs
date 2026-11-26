@@ -748,3 +748,149 @@ fn the_ai_zooms_the_page(cx: &mut TestAppContext) {
     say(cx, window, &pane, "元の大きさに");
     assert_eq!(terms(cx, |t| t.page(tab).unwrap().zoom), 1.0);
 }
+
+/// ページの中のリンクをホイールで押すと、小さなウィンドウで開く。タブの並びには出ない。
+/// 「タブで開く」で、ブラウザのタブに移ってウィンドウは閉じる。ウィンドウを閉じると、ページも閉じる。
+#[gpui_kit::test]
+fn a_middle_click_opens_the_link_in_a_small_window(cx: &mut TestAppContext) {
+    let world = start(cx, Store::open_in_memory().unwrap());
+    let (window, _view) = open(cx);
+    ui(cx, window, |window, cx| window.click("ai-toggle", cx));
+    cx.update_window(window, |_, window, cx| {
+        browser::open("https://example.com/", window, cx)
+    })
+    .unwrap();
+    ui(cx, window, |_, _| {});
+    let tab = terms(cx, |t| t.active_page().map(|p| p.id)).expect("タブが開く");
+    world.send(tab, Event::Popup("https://example.com/b".into()));
+    // ホイールの押下を止められない部品から届く「新しいタブで開く」は、捨てる
+    world.send(tab, Event::NewTab("https://example.com/b".into()));
+    cx.run_until_parked();
+    let small = terms(cx, |t| t.pages.iter().find(|p| p.popup).map(|p| p.id))
+        .expect("小さなウィンドウのページがある");
+    assert_eq!(terms(cx, |t| t.pages.len()), 2);
+    assert_eq!(terms(cx, |t| t.order()), vec![tab]);
+    assert_eq!(terms(cx, |t| t.active), Some(tab));
+    let popup = cx
+        .update(|cx| cx.windows())
+        .into_iter()
+        .find(|w| *w != window)
+        .expect("小さなウィンドウが開く");
+    ui(cx, popup, |window, _| {
+        assert!(window.find("popup-dock").visible());
+        assert!(window.find("popup-title").visible());
+        assert!(window.find("browser-page").visible());
+    });
+    let fake = world.fake(small);
+    assert!(fake.visible.get(), "小さなウィンドウにページが見えている");
+    assert!(
+        world.fake(tab).visible.get(),
+        "タブのページもそのまま見えている"
+    );
+    // 小さなウィンドウの中でも、戻る・拡大縮小ができる
+    fake.history.set((true, false));
+    *fake.url.borrow_mut() = "https://example.com/b2".into();
+    world.send(
+        small,
+        Event::Load {
+            done: true,
+            url: "https://example.com/b2".into(),
+        },
+    );
+    world.send(small, Event::Zoom(Zoom::In));
+    cx.run_until_parked();
+    ui(cx, popup, |window, cx| window.click("popup-back", cx));
+    assert!(fake.calls.borrow().contains(&"back".to_owned()));
+    ui(cx, popup, |window, _| {
+        assert!(window.find("browser-zoom").visible())
+    });
+    // タブで開くと、ブラウザのタブに移り、ウィンドウは閉じる
+    cx.update_window(popup, |_, window, cx| window.click("popup-dock", cx))
+        .unwrap();
+    cx.run_until_parked();
+    assert!(
+        fake.dropped.get(),
+        "閉じる前に小さなウィンドウの部品を捨てる"
+    );
+    assert_eq!(cx.update(|cx| cx.windows().len()), 1);
+    assert_eq!(terms(cx, |t| t.order()), vec![tab, small]);
+    assert_eq!(terms(cx, |t| t.active), Some(small));
+    ui(cx, window, |window, _| {
+        assert!(window.find(("browser-tab", small as usize)).visible())
+    });
+    let docked = world.fake(small);
+    assert!(docked.visible.get(), "タブで同じページが見える");
+    assert_eq!(docked.url.borrow().as_str(), "https://example.com/b2");
+    assert_eq!(terms(cx, |t| t.page(small).unwrap().zoom), 1.1);
+    // 小さなウィンドウは、場所を残さない。タブに移したものは残す
+    world.send(tab, Event::Popup("https://example.com/c".into()));
+    cx.run_until_parked();
+    let other =
+        terms(cx, |t| t.pages.iter().find(|p| p.popup).map(|p| p.id)).expect("もう一度開ける");
+    let saved = cx.update(|cx| {
+        malakt_mahoz::db::shared(cx)
+            .read(cx)
+            .store
+            .setting("browser.tabs")
+            .unwrap()
+    });
+    assert_eq!(
+        saved.as_deref(),
+        Some(r#"["https://example.com/","https://example.com/b2"]"#)
+    );
+    // ウィンドウを閉じると、ページも閉じる
+    let popup = cx
+        .update(|cx| cx.windows())
+        .into_iter()
+        .find(|w| *w != window)
+        .expect("小さなウィンドウが開く");
+    ui(cx, popup, |_, _| {});
+    let closing = world.fake(other);
+    cx.update_window(popup, |_, window, cx| {
+        browser::window_closing(window, cx);
+        window.remove_window();
+    })
+    .unwrap();
+    cx.run_until_parked();
+    assert!(closing.dropped.get());
+    assert!(terms(cx, |t| t.page(other).is_none()));
+    assert_eq!(terms(cx, |t| t.pages.len()), 2);
+}
+
+/// AI は小さなウィンドウのページも一覧で見られ、閉じるとウィンドウも閉じる。
+#[gpui_kit::test]
+fn the_ai_sees_and_closes_a_small_window(cx: &mut TestAppContext) {
+    let world = start(cx, Store::open_in_memory().unwrap());
+    let (window, view) = open(cx);
+    let pane = open_chat(cx, window, &view);
+    cx.update_window(window, |_, window, cx| {
+        browser::open("https://example.com/", window, cx)
+    })
+    .unwrap();
+    ui(cx, window, |_, _| {});
+    let tab = terms(cx, |t| t.active_page().map(|p| p.id)).expect("タブが開く");
+    world.send(tab, Event::Popup("https://example.com/b".into()));
+    cx.run_until_parked();
+    let small = terms(cx, |t| t.pages.iter().find(|p| p.popup).map(|p| p.id))
+        .expect("小さなウィンドウのページがある");
+    world.call("browser", json!({"action": "list"}), "一覧です");
+    say(cx, window, &pane, "タブは？");
+    let (result, _) = world.last_result();
+    let list: Value = serde_json::from_str(&result).unwrap();
+    let found = list["tabs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["tab"] == small)
+        .cloned()
+        .expect("一覧にある");
+    assert_eq!(found["window"], true);
+    world.call(
+        "browser",
+        json!({"action": "close", "tab": small}),
+        "閉じました",
+    );
+    say(cx, window, &pane, "閉じて");
+    assert!(terms(cx, |t| t.page(small).is_none()));
+    assert_eq!(cx.update(|cx| cx.windows().len()), 1);
+}

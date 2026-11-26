@@ -176,6 +176,8 @@ pub struct Terms {
     pub(crate) pumping: bool,
     /// 最後に保存した、ブラウザのタブの場所。
     pub(crate) saved_pages: Option<String>,
+    /// 最後に小さなウィンドウで開いたリンクと、その時刻。
+    pub(crate) popup_sent: Option<(String, std::time::Instant)>,
     /// ブラウザのデータの大きさ。数えていなければ `None`。
     pub usage: Option<u64>,
 }
@@ -259,6 +261,7 @@ impl Terms {
             rechecking: Vec::new(),
             pumping: false,
             saved_pages: None,
+            popup_sent: None,
             usage: None,
         };
         terms.restore_pages(cx);
@@ -366,7 +369,9 @@ impl Terms {
     }
 
     pub fn activate(&mut self, id: Option<u64>, cx: &mut Context<Self>) {
-        if id.is_none_or(|id| self.tab(id).is_some() || self.page(id).is_some()) {
+        let shown_here =
+            |id: u64| self.tab(id).is_some() || self.page(id).is_some_and(|page| !page.popup);
+        if id.is_none_or(shown_here) {
             self.active = id;
             self.focus_wanted = id.is_some_and(|id| self.tab(id).is_some());
             // 何も開いていないタブは、すぐに場所を書けるようにする
@@ -383,7 +388,12 @@ impl Terms {
             .tabs
             .iter()
             .map(|tab| tab.id)
-            .chain(self.pages.iter().map(|page| page.id))
+            .chain(
+                self.pages
+                    .iter()
+                    .filter(|page| !page.popup)
+                    .map(|page| page.id),
+            )
             .collect();
         ids.sort_unstable();
         ids
@@ -544,6 +554,21 @@ impl Terms {
 
     /// ターミナルを閉じる。動いているシェルも終わる。
     pub fn close(&mut self, id: u64, cx: &mut Context<Self>) {
+        if let Some(page) = self.page(id).filter(|page| page.popup) {
+            // 小さなウィンドウのページは、ウィンドウごと閉じる
+            let window = page.popup_window;
+            self.remove_page(id, cx);
+            if let Some(window) = window {
+                cx.defer(move |cx| {
+                    // 捨てたページの後片付けを、ウィンドウを閉じる前に済ませる
+                    crate::webview::settle();
+                    // もう閉じたウィンドウは、そのままでよい
+                    let _ = window.update(cx, |_, window, _| window.remove_window());
+                });
+            }
+            cx.notify();
+            return;
+        }
         let order = self.order();
         let Some(at) = order.iter().position(|have| *have == id) else {
             return;
