@@ -2684,6 +2684,17 @@ impl MainView {
         cx.notify();
     }
 
+    /// 一覧での期限の見せ方（日付・相対）を変える。
+    pub fn set_due_format(&mut self, format: malakt_core::view::DueFormat, cx: &mut Context<Self>) {
+        match crate::theme::set_due_format(format, cx) {
+            Ok(()) => self.error = None,
+            Err(error) => {
+                self.error = Some(format!("期限の表示を保存できませんでした。{error}").into())
+            }
+        }
+        cx.notify();
+    }
+
     /// 乗せたとき・押したときの描き方を変える。
     pub fn set_feel(&mut self, feel: crate::theme::Feel, cx: &mut Context<Self>) {
         match crate::theme::set_feel(feel, cx) {
@@ -3226,6 +3237,7 @@ impl MainView {
         let current = self.column_sorted(column);
         let columns: Vec<(Column, bool)> =
             self.columns.iter().map(|c| (c.column, c.hidden)).collect();
+        let due_format = crate::theme::due_format(cx);
         let view = cx.entity().downgrade();
         let menu = PopupMenu::build(window, cx, move |mut menu, _, _| {
             for (text, descending) in [("昇順で並べ替え", false), ("降順で並べ替え", true)]
@@ -3242,6 +3254,9 @@ impl MainView {
                 );
             }
             menu = menu.separator();
+            if column == Some(Column::Due) {
+                menu = due_format_items(menu, &view, due_format).separator();
+            }
             if let Some(column) = column {
                 let view = view.clone();
                 menu = menu
@@ -4465,6 +4480,30 @@ impl TableColumn {
             hidden: false,
         }
     }
+}
+
+/// 期限の見せ方を選ぶメニューの項目（「日付で表示」「相対で表示」）。選ぶとすぐ変わる。
+pub(crate) fn due_format_items(
+    mut menu: PopupMenu,
+    view: &gpui_kit::WeakEntity<MainView>,
+    current: view::DueFormat,
+) -> PopupMenu {
+    for format in view::DueFormat::ALL {
+        let view = view.clone();
+        let label = match format {
+            view::DueFormat::Date => "日付で表示",
+            view::DueFormat::Relative => "相対で表示",
+        };
+        menu = menu.item(
+            PopupMenuItem::new(label)
+                .checked(current == format)
+                .on_click(move |_, _, cx| {
+                    // ウィンドウを閉じたあとなら、反映する先がない
+                    let _ = view.update(cx, |this, cx| this.set_due_format(format, cx));
+                }),
+        );
+    }
+    menu
 }
 
 /// 見出しの列で並べ替えるときの並び順。`None` はタイトル。

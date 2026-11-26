@@ -6072,3 +6072,96 @@ fn up_goes_to_the_start_in_quick_add(cx: &mut TestAppContext) {
     ui(cx, window, |window, cx| window.press("down", cx));
     assert_eq!(cursor(cx), len..len, "↓ で末尾へ");
 }
+
+/// 期限は開始日からの範囲で出る。見せ方（日付・相対）は、期限のセルと見出しの右クリックと、
+/// 設定の「表示」で選べ、どのウィンドウの一覧にも同じように出る。
+#[gpui_kit::test]
+fn due_format_is_picked_from_the_due_column_and_settings(cx: &mut TestAppContext) {
+    use malakt_core::view::{self, DueFormat};
+    use malakt_mahoz::state::Column;
+    start(cx);
+    let today = view::today();
+    cx.update(|cx| {
+        db::shared(cx).update(cx, |db, _| {
+            let draft = malakt_core::TaskDraft {
+                title: "会場を押さえる".into(),
+                start: Some(view::add_days(&today, -2)),
+                due: Some(view::add_days(&today, 3)),
+                ..Default::default()
+            };
+            db.store.create_task(None, &draft).unwrap()
+        })
+    });
+    let (window, view) = open(cx, win(1600., 900.));
+    let (_second, _) = open(cx, wide());
+    ui(cx, window, |window, cx| window.click("nav-all", cx));
+    let format = |cx: &mut TestAppContext| cx.update(|cx| malakt_mahoz::theme::due_format(cx));
+    let saved = |cx: &mut TestAppContext| store(cx, |s| s.setting("due.format").unwrap());
+    assert_eq!(format(cx), DueFormat::Date);
+    let right_click = |cx: &mut TestAppContext, id: gpui_kit::ElementId| {
+        let mut at = None;
+        ui(cx, window, |window, _| {
+            at = Some(window.try_find(id).unwrap().bounds().center());
+        });
+        let mut v = gpui_kit::VisualTestContext::from_window(window, cx);
+        v.simulate_mouse_down(at.unwrap(), MouseButton::Right, Modifiers::default());
+        v.simulate_mouse_up(at.unwrap(), MouseButton::Right, Modifiers::default());
+        v.run_until_parked();
+    };
+
+    // 期限のセルを右クリックすると、見せ方のメニューが開く（行のメニューは開かない）
+    right_click(cx, ("due-cell", 0usize).into());
+    ui(cx, window, |window, _| {
+        assert!(window.try_find_by_label("日付で表示").is_some());
+        assert!(window.try_find_by_label("削除").is_none());
+    });
+    pick(cx, window, "相対で表示");
+    assert_eq!(format(cx), DueFormat::Relative);
+    assert_eq!(saved(cx).as_deref(), Some("relative"));
+
+    // 見出しの右クリックのメニューにも同じ項目がある。日付に戻すと、保存した値は消える
+    right_click(cx, ("col-menu", Column::Due as usize).into());
+    cx.update(|cx| {
+        assert_eq!(
+            view.read(cx).column_menu.as_ref().map(|m| m.column),
+            Some(Some(Column::Due))
+        )
+    });
+    pick(cx, window, "日付で表示");
+    assert_eq!(format(cx), DueFormat::Date);
+    assert_eq!(saved(cx), None);
+    // ほかの見出しのメニューには出さない
+    right_click(cx, ("col-menu", Column::Status as usize).into());
+    ui(cx, window, |window, _| {
+        assert!(window.try_find_by_label("昇順で並べ替え").is_some());
+        assert!(window.try_find_by_label("相対で表示").is_none());
+    });
+    right_click(cx, ("col-menu", Column::Status as usize).into());
+
+    // 設定の「表示」にも同じ項目がある
+    ui(cx, window, |window, cx| {
+        view.update(cx, |v, cx| v.open_appearance(window, cx))
+    });
+    ui(cx, window, |window, cx| {
+        window.click(("customize-nav", 4usize), cx)
+    });
+    ui(cx, window, |window, cx| {
+        window.click(("due-format", 1usize), cx)
+    });
+    assert_eq!(format(cx), DueFormat::Relative);
+    ui(cx, window, |window, cx| {
+        window.click(("due-format", 0usize), cx)
+    });
+    assert_eq!(format(cx), DueFormat::Date);
+    // 設定の検索でも見つかる
+    ui(cx, window, |window, cx| {
+        view.update(cx, |v, cx| {
+            v.inputs
+                .customize_search
+                .update(cx, |s, cx| s.set_value("相対", window, cx))
+        })
+    });
+    ui(cx, window, |window, _| {
+        assert!(window.try_find(("due-format", 1usize)).is_some())
+    });
+}

@@ -7,7 +7,7 @@
 
 use gpui_kit::*;
 use malakt_ai::wire::ToolDef;
-use malakt_core::view::{self, AssigneeFilter, Priority, Sort, Tab};
+use malakt_core::view::{self, AssigneeFilter, DueFormat, Priority, Sort, Tab};
 use malakt_core::{archive, Status};
 use serde_json::{json, Value};
 
@@ -112,6 +112,9 @@ const FEELS: [(&str, Feel); 4] = [
     ("crisp", Feel::Crisp),
     ("tint", Feel::Tint),
 ];
+
+const DUE_FORMATS: [(&str, DueFormat); 2] =
+    [("date", DueFormat::Date), ("relative", DueFormat::Relative)];
 
 const SCENES: [(&str, Scene); 4] = [
     ("none", Scene::None),
@@ -375,7 +378,7 @@ pub fn definitions() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "set_appearance",
-            description: "見た目を 1 つずつ変える。渡した項目だけが変わる。mode はライト・ダーク、scene は背景の画像（none / sky / forest / dusk か、画像ファイルの絶対パス）、clear は面の透明度 0〜70、blur は背景のぼかし 0〜100、cards は一覧をカードで出す、floating はパネルを浮かせる、overlay は詳細を一覧の上に重ねる、density は行の詰め方、feel はホバーと押したときの描き方、font は書体の名前（null で標準の LINE Seed JP）、accent / light_background / dark_background は #rrggbb の色（null で標準の色）。",
+            description: "見た目を 1 つずつ変える。渡した項目だけが変わる。mode はライト・ダーク、scene は背景の画像（none / sky / forest / dusk か、画像ファイルの絶対パス）、clear は面の透明度 0〜70、blur は背景のぼかし 0〜100、cards は一覧をカードで出す、floating はパネルを浮かせる、overlay は詳細を一覧の上に重ねる、density は行の詰め方、feel はホバーと押したときの描き方、due_format は一覧の期限の出し方（date は「11/24～11/27」、relative は「明日」「あと 3 日」「2 日前」）、font は書体の名前（null で標準の LINE Seed JP）、accent / light_background / dark_background は #rrggbb の色（null で標準の色）。",
             schema: object(
                 json!({
                     "mode": {"type": "string", "enum": names(&MODES)},
@@ -387,6 +390,7 @@ pub fn definitions() -> Vec<ToolDef> {
                     "overlay": {"type": "boolean"},
                     "density": {"type": "string", "enum": names(&DENSITIES), "description": "ゆったり / 標準 / 詰める"},
                     "feel": {"type": "string", "enum": names(&FEELS), "description": "標準 / ガラス / くっきり / 色づく"},
+                    "due_format": {"type": "string", "enum": names(&DUE_FORMATS), "description": "日付 / 相対"},
                     "font": {"type": ["string", "null"]},
                     "accent": {"type": ["string", "null"]},
                     "light_background": {"type": ["string", "null"]},
@@ -1539,6 +1543,7 @@ impl MainView {
             "overlay": theme::overlay(cx),
             "density": key_of(&DENSITIES, theme::density(cx)),
             "feel": key_of(&FEELS, theme::feel(cx)),
+            "due_format": key_of(&DUE_FORMATS, theme::due_format(cx)),
             "font": look.font.clone().unwrap_or_else(|| theme::DEFAULT_FONT.to_owned()),
             "accent": color(Slot::Accent),
             "light_background": color(Slot::Light),
@@ -1552,6 +1557,7 @@ impl MainView {
             "modes": names(&MODES),
             "densities": names(&DENSITIES),
             "feels": names(&FEELS),
+            "due_formats": names(&DUE_FORMATS),
         })
     }
 
@@ -1600,6 +1606,9 @@ impl MainView {
             .transpose()?;
         let feel = str_arg(args, "feel")
             .map(|f| parse_in(&FEELS, f, "feel"))
+            .transpose()?;
+        let due_format = str_arg(args, "due_format")
+            .map(|f| parse_in(&DUE_FORMATS, f, "due_format"))
             .transpose()?;
         let font = match args.get("font") {
             None => None,
@@ -1666,6 +1675,9 @@ impl MainView {
         }
         if let Some(feel) = feel {
             theme::set_feel(feel, cx).map_err(core)?;
+        }
+        if let Some(format) = due_format {
+            theme::set_due_format(format, cx).map_err(core)?;
         }
         if let Some(font) = font {
             theme::set_font(font.as_deref(), cx).map_err(core)?;
@@ -1833,8 +1845,8 @@ impl Session {
 mod tests {
     use super::{
         confirmation_text, definitions, is_app_tool, key_of, needs_confirmation, parse_in, summary,
-        Choice, Column, Density, Feel, Scene, Sort, COLUMNS, DENSITIES, FEELS, MODES, SCENES,
-        SESSION_TOOLS, SORTS, VIEW_TOOLS,
+        Choice, Column, Density, DueFormat, Feel, Scene, Sort, COLUMNS, DENSITIES, DUE_FORMATS,
+        FEELS, MODES, SCENES, SESSION_TOOLS, SORTS, VIEW_TOOLS,
     };
     use serde_json::json;
 
@@ -1904,6 +1916,10 @@ mod tests {
         assert_eq!(Column::ALL.len(), COLUMNS.len());
         assert_eq!(Density::ALL.len(), DENSITIES.len());
         assert_eq!(Feel::ALL.len(), FEELS.len());
+        assert_eq!(DueFormat::ALL.len(), DUE_FORMATS.len());
+        for (key, format) in DUE_FORMATS {
+            assert_eq!(key, format.key());
+        }
         assert_eq!(Choice::ALL.len(), MODES.len());
         assert_eq!(Scene::BUNDLED.len(), SCENES.len());
     }

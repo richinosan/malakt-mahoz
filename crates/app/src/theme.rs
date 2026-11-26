@@ -26,6 +26,7 @@ const PRESETS: &str = "presets";
 const OVERLAY: &str = "panel.overlay";
 const DENSITY: &str = "density";
 const FEEL: &str = "feel";
+const DUE_FORMAT: &str = "due.format";
 /// 背景の画像を出したときの、面の透明度とぼかしの最初の値（0〜100）。
 pub const DEFAULT_CLEAR: u8 = 40;
 pub const DEFAULT_BLUR: u8 = 30;
@@ -340,6 +341,24 @@ pub fn density(cx: &App) -> Density {
 /// 一覧の行の詰め方を変える。
 pub fn set_density(density: Density, cx: &mut App) -> malakt_core::Result<()> {
     db::shared(cx).update(cx, |db, _| db.store.set_setting(DENSITY, density.key()))?;
+    cx.refresh_windows();
+    Ok(())
+}
+
+/// 保存してある、一覧での期限の見せ方。
+pub fn due_format(cx: &App) -> malakt_core::view::DueFormat {
+    let store = &db::shared(cx).read(cx).store;
+    malakt_core::view::DueFormat::from_key(store.setting(DUE_FORMAT).ok().flatten().as_deref())
+}
+
+/// 一覧での期限の見せ方を変える。すべてのウィンドウの一覧が変わる。
+pub fn set_due_format(
+    format: malakt_core::view::DueFormat,
+    cx: &mut App,
+) -> malakt_core::Result<()> {
+    // 標準（日付）は消しておく
+    let saved = (format != malakt_core::view::DueFormat::default()).then(|| format.key());
+    db::shared(cx).update(cx, |db, _| db.store.set_setting(DUE_FORMAT, saved))?;
     cx.refresh_windows();
     Ok(())
 }

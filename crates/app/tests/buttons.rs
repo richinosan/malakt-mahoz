@@ -105,6 +105,7 @@ const MUST: &[&str] = &[
     "cards-switch",
     "float-switch",
     "density",
+    "due-format",
     "feel",
     "shell-choice",
     "lock-switch",
@@ -213,6 +214,7 @@ const QUIET: &[(&str, &str)] = &[
     ("own-preset#0", "今選んでいるテーマ"),
     ("layout#0", "今選んでいるレイアウト"),
     ("density#1", "今選んでいる密度"),
+    ("due-format#0", "今選んでいる期限の表示"),
     ("feel#0", "今選んでいるホバー"),
     ("scene-file", "OS のファイル選択を開く"),
     // 入力が空のときは送らない
@@ -596,6 +598,7 @@ fn fingerprint(cx: &mut TestAppContext, world: &World) -> String {
             "presets",
             "panel.overlay",
             "density",
+            "due.format",
             "feel",
         ] {
             data.push_str(&format!("{:?}", store.setting(key).unwrap()));
