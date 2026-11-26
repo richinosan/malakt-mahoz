@@ -205,6 +205,8 @@ pub struct AiPane {
     pub shell_wide: bool,
     /// 別ウィンドウの上のバーを押している（動かすと、ウィンドウを動かし始める）。
     bar_pressed: bool,
+    /// OS に伝えた、別ウィンドウの名前。
+    window_title: SharedString,
     input: Entity<TextareaState>,
     /// 設定の行（サービス、モデル、API キーなど）。
     pub settings: Entity<crate::ai_settings::AiSettings>,
@@ -474,6 +476,7 @@ impl AiPane {
             run_open: None,
             resize: None,
             bar_pressed: false,
+            window_title: SharedString::default(),
             open_tools: std::collections::HashSet::new(),
             chat_scroll: ScrollHandle::new(),
             shell_scroll: UniformListScrollHandle::new(),
@@ -2155,9 +2158,10 @@ impl AiPane {
     /// 別ウィンドウの上の細いバー。ウィンドウの名前と、最小化・最大化・閉じるのボタンを出す。
     /// 空いているところを掴むと、ウィンドウを動かせる。右に置いているときは出さない。
     fn render_title_bar(&self, window: &Window, cx: &mut Context<Self>) -> Option<Div> {
-        let title = match self.mode {
-            PaneMode::ShellWindow => "AI のシェル",
-            PaneMode::ChatWindow => "AI チャット",
+        let title: SharedString = match self.mode {
+            // タブの場所だけのウィンドウは、見ているタブの名前
+            PaneMode::ShellWindow => term::shared(cx).read(cx).active_label(),
+            PaneMode::ChatWindow => "AI チャット".into(),
             PaneMode::Docked => return None,
         };
         // OS がタイトルバーを描いているときは、そちらに任せる
@@ -2245,7 +2249,7 @@ impl AiPane {
         let detached = self.mode == PaneMode::ShellWindow;
         let pane = cx.entity();
         let caret_of = self.shell_input.clone();
-        // 見ているのが AI のシェルか、ターミナルか、ブラウザか
+        // 見ているのが AI のタブか、ターミナルか、ブラウザか
         let (on_ai, on_term) = {
             let terms = term::shared(cx).read(cx);
             (terms.active.is_none(), terms.active_tab().is_some())
@@ -2632,7 +2636,7 @@ impl AiPane {
             .into_any_element()
     }
 
-    /// シェルの上に並べるタブ。AI のシェルと、開いているターミナル。
+    /// シェルの上に並べるタブ。AI のタブと、開いているターミナルとブラウザ。
     fn render_term_tabs(&self, cx: &mut Context<Self>) -> Div {
         let theme = cx.theme().clone();
         let shared = term::shared(cx);
@@ -2666,7 +2670,7 @@ impl AiPane {
                 "term-tab-ai".into(),
                 "sparkles",
                 // AI のタブで動くシェルを、名前に出す
-                format!("AI（{}）", terms.ai_shell().name()).into(),
+                terms.ai_label(),
                 active.is_none(),
             )
             .pr_2()
@@ -2698,6 +2702,14 @@ impl AiPane {
                 item.on_click({
                     let shared = shared.clone();
                     move |_, _, cx| shared.update(cx, |terms, cx| terms.activate(Some(id), cx))
+                })
+                // ホイールクリックで閉じる
+                .on_mouse_up(MouseButton::Middle, {
+                    let shared = shared.clone();
+                    move |_, _, cx| {
+                        cx.stop_propagation();
+                        shared.update(cx, |terms, cx| terms.close(id, cx));
+                    }
                 })
                 .child(
                     div()
@@ -2826,6 +2838,14 @@ impl AiPane {
 impl Render for AiPane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
+        if self.mode == PaneMode::ShellWindow {
+            // タスクバーや Alt+Tab に出る名前も、見ているタブに合わせる
+            let title = term::shared(cx).read(cx).active_label();
+            if title != self.window_title {
+                window.set_window_title(&crate::window_title(&title));
+                self.window_title = title;
+            }
+        }
         let title_bar = self.render_title_bar(window, cx);
         if !self.db.read(cx).unlocked {
             return div()

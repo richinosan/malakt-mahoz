@@ -5884,7 +5884,7 @@ fn notice_closes_after_three_minutes(cx: &mut TestAppContext) {
     cx.update(|cx| assert!(view.read(cx).error.is_some()));
 }
 
-/// 「カスタマイズ」の詳細に「AI のシェル」があり、押すとシェルを選ぶメニューが開く。
+/// 設定の「動作」に「AI のタブのシェル」があり、押すとシェルを選ぶメニューが開く。
 #[gpui_kit::test]
 fn the_ai_shell_is_chosen_in_customize(cx: &mut TestAppContext) {
     start(cx);

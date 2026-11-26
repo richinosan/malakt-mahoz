@@ -126,7 +126,7 @@ impl AiRow {
             AiRow::Rules => "ルール",
             AiRow::Arrange => "新しいタスクを整える",
             AiRow::Track => "コメントから進捗を更新する",
-            AiRow::Shell => "AI のシェル",
+            AiRow::Shell => "AI のタブのシェル",
             AiRow::Account => "アカウント",
             AiRow::Watch => "GitHub の定期チェック",
             AiRow::WatchMinutes => "間隔",
@@ -141,7 +141,7 @@ impl AiRow {
             AiRow::Rules => "AI がいつも従う指示",
             AiRow::Arrange => "タスクを作ると、AI がリンクを読んでタイトルと説明を整える",
             AiRow::Track => "タスクにコメントを書くと、AI が進捗・状態・期限を更新する",
-            AiRow::Shell => "AI のタブで動かすシェル",
+            AiRow::Shell => "AI のコマンドを動かすシェル",
             AiRow::Account => "gh でログインしているアカウント",
             AiRow::Watch => {
                 "タスクの issue・プルリクエストに進展があれば、AI がタスクにコメントする"
@@ -816,7 +816,7 @@ impl AiSettings {
             .into_any_element()
     }
 
-    /// 「AI のシェル」。AI のタブで動かすシェルを、ターミナルで開けるシェルから選ぶ。
+    /// 「AI のタブのシェル」。AI のタブで動かすシェルを、ターミナルで開けるシェルから選ぶ。
     fn shell_choice(&self, cx: &mut Context<Self>) -> Div {
         let terms = crate::term::shared(cx).read(cx);
         let chosen = terms.ai_profile.clone();

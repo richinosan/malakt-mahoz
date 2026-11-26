@@ -4,10 +4,11 @@
 
 use std::time::Duration;
 
-use gpui_kit::test::TestWindowExt;
+use gpui_kit::test::{ClickOptions, TestWindowExt};
 use gpui_kit::{
-    point, px, size, AnyWindowHandle, AppContext, Bounds, ClipboardItem, Entity, Modifiers, Pixels,
-    Point, ScrollDelta, Size, TestAppContext, WindowBounds, WindowOptions,
+    point, px, size, AnyWindowHandle, AppContext, Bounds, ClipboardItem, Entity, Modifiers,
+    MouseButton, Pixels, Point, ScrollDelta, Size, TestAppContext, VisualTestContext, WindowBounds,
+    WindowOptions,
 };
 use malakt_core::{Store, TaskDraft};
 use malakt_mahoz::ai::{self, ShellPlace};
@@ -151,10 +152,7 @@ fn a_terminal_opens_and_runs_what_is_typed(cx: &mut TestAppContext) {
     let (window, _view) = start(cx);
     ui(cx, window, |window, cx| window.click("ai-toggle", cx));
     ui(cx, window, |window, _| {
-        assert!(
-            window.find("ai-shell-prompt").visible(),
-            "最初は AI のシェル"
-        );
+        assert!(window.find("ai-shell-prompt").visible(), "最初は AI のタブ");
         assert!(window.try_find("term-screen").is_none());
     });
     ui(cx, window, |window, cx| window.click("term-new", cx));
@@ -206,7 +204,7 @@ fn keys_go_to_the_program_not_to_the_app(cx: &mut TestAppContext) {
     });
     // Ctrl+D で cat が終わり、シェルに戻る
     ui(cx, window, |window, cx| window.press("ctrl-d", cx));
-    // Ctrl+D でシェルが終わり、タブが閉じて AI のシェルに戻る
+    // Ctrl+D でシェルが終わり、タブが閉じて AI のタブに戻る
     run(cx, window, "echo ok-$((5+5))");
     wait_text(cx, "ok-10");
     ui(cx, window, |window, cx| window.press("ctrl-d", cx));
@@ -316,7 +314,7 @@ fn shells_are_chosen_and_tabs_switch_and_close(cx: &mut TestAppContext) {
     });
     assert_eq!(terms(cx, |t| t.active), Some(1));
     assert!(screen(cx).text().contains("one\n"));
-    // AI のシェルにも戻れる
+    // AI のタブにも戻れる
     ui(cx, window, |window, cx| window.click("term-tab-ai", cx));
     assert_eq!(terms(cx, |t| t.active), None);
     ui(cx, window, |window, _| {
@@ -683,7 +681,7 @@ fn dropped_files_are_typed_as_paths(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn the_mcp_button_types_the_command_and_registers_cursor(cx: &mut TestAppContext) {
     let (window, _view) = start(cx);
-    // AI のシェルを見ている間は、ボタンを出さない
+    // AI のタブを見ている間は、ボタンを出さない
     ui(cx, window, |window, cx| window.click("ai-toggle", cx));
     ui(cx, window, |window, _| {
         assert!(window.try_find("term-mcp").is_none());
@@ -826,6 +824,54 @@ fn the_terminal_keeps_running_in_its_own_window(cx: &mut TestAppContext) {
         assert!(window.find("term-screen").visible());
     });
     assert!(screen(cx).text().contains("window-7"));
+}
+
+/// シェルの場所を別ウィンドウにすると、ウィンドウの名前は見ているタブの名前になる。
+/// タブはホイールクリックで閉じられる。AI のタブは閉じない。
+#[gpui_kit::test]
+fn the_shell_window_is_named_after_its_tab_and_tabs_close_on_middle_click(cx: &mut TestAppContext) {
+    let (window, _view) = start(cx);
+    open_terminal(cx, window);
+    ui(cx, window, |window, cx| window.click("ai-shell-detach", cx));
+    let shell_window = match cx.update(|cx| ai::shared(cx).read(cx).shell_place) {
+        ShellPlace::Window(handle) => handle,
+        other => panic!("シェルが別ウィンドウに出る: {other:?}"),
+    };
+    let title = |cx: &mut TestAppContext| {
+        cx.run_until_parked();
+        VisualTestContext::from_window(shell_window, cx).window_title()
+    };
+    ui(cx, shell_window, |_, _| {});
+    assert_eq!(title(cx).as_deref(), Some("sh - Malakt Mahoz"));
+    // AI のタブを見ると、AI のタブの名前
+    ui(cx, shell_window, |window, cx| {
+        window.click("term-tab-ai", cx)
+    });
+    let ai_label = terms(cx, |t| t.ai_label().to_string());
+    assert!(ai_label.starts_with("AI（"), "{ai_label}");
+    assert_eq!(title(cx), Some(format!("{ai_label} - Malakt Mahoz")));
+    // ホイールクリックでターミナルのタブを閉じる。見ているタブは変わらない
+    ui(cx, shell_window, |window, cx| {
+        window.click_with_options(
+            ("term-tab", 1usize),
+            ClickOptions::new().with_button(MouseButton::Middle),
+            cx,
+        )
+    });
+    wait(cx, "タブが閉じる", |t| t.tabs.is_empty());
+    assert_eq!(terms(cx, |t| t.active), None);
+    // AI のタブは、ホイールクリックでも閉じない
+    ui(cx, shell_window, |window, cx| {
+        window.click_with_options(
+            "term-tab-ai",
+            ClickOptions::new().with_button(MouseButton::Middle),
+            cx,
+        )
+    });
+    ui(cx, shell_window, |window, _| {
+        assert!(window.find("term-tab-ai").visible());
+        assert!(window.find("ai-shell-prompt").visible());
+    });
 }
 
 /// ロックしている間は、ターミナルを開けない。
