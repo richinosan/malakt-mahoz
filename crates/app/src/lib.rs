@@ -9,6 +9,7 @@ pub mod cli;
 pub mod db;
 pub mod drops;
 mod feel;
+mod history_view;
 pub mod icons;
 pub mod mcp;
 pub mod mcp_register;

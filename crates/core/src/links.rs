@@ -6,7 +6,7 @@
 use rusqlite::{params, Connection};
 
 use crate::model::*;
-use crate::store::insert_change;
+use crate::store::{insert_change, touch, trim_changes};
 use crate::{Error, Result, Store};
 
 pub(crate) fn insert(
@@ -74,11 +74,9 @@ impl Store {
         let now = now_ms();
         let tx = self.conn.transaction()?;
         insert(&tx, id, workspace_id, now)?;
-        tx.execute(
-            "UPDATE tasks SET updated_at = ?2 WHERE id = ?1",
-            params![id, now],
-        )?;
-        insert_change(&tx, id, "link", "", workspace_id, now)?;
+        touch(&tx, id, now, &self.actor)?;
+        insert_change(&tx, id, "link", "", workspace_id, now, &self.actor)?;
+        trim_changes(&tx, id)?;
         tx.commit()?;
         self.task(id)
     }
@@ -112,11 +110,9 @@ impl Store {
                 params![id, workspace_id],
             )?;
         }
-        tx.execute(
-            "UPDATE tasks SET updated_at = ?2 WHERE id = ?1",
-            params![id, now],
-        )?;
-        insert_change(&tx, id, "link", workspace_id, "", now)?;
+        touch(&tx, id, now, &self.actor)?;
+        insert_change(&tx, id, "link", workspace_id, "", now, &self.actor)?;
+        trim_changes(&tx, id)?;
         tx.commit()?;
         self.task(id)
     }
@@ -243,7 +239,7 @@ mod tests {
         // 出ていない場所を外しても何も起きない
         assert_eq!(s.unlink_task(&task.id, &a.id).unwrap(), t);
         let fields: Vec<String> = s
-            .changes(&task.id)
+            .edits(&task.id)
             .unwrap()
             .into_iter()
             .map(|c| c.field)

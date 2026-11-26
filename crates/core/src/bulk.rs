@@ -208,8 +208,8 @@ mod tests {
         let op = BulkOp::Due(Some("2026-12-24".into()));
         assert_eq!(s.bulk_apply(&made, &op).unwrap(), 2);
         assert_eq!(s.bulk_apply(&made, &op).unwrap(), 0);
-        assert_eq!(s.changes(&made[0]).unwrap().len(), 0);
-        assert_eq!(s.changes(&made[1]).unwrap().len(), 1);
+        assert_eq!(s.edits(&made[0]).unwrap().len(), 0);
+        assert_eq!(s.edits(&made[1]).unwrap().len(), 1);
         let op = BulkOp::Assignees {
             mode: ListMode::Add,
             ids: vec![sato.id.clone()],

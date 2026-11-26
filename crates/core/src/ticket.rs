@@ -14,7 +14,7 @@ use rusqlite::{params, OptionalExtension};
 use crate::attachment::hash_of;
 use crate::model::*;
 use crate::notice::{self, NewNotice, NoticeKind};
-use crate::{Error, Result, Store};
+use crate::{Actor, Error, Result, Store};
 
 /// 1 つのタスクに持てる、引き換えていない有効なチケットの数。
 pub const MAX_ACTIVE_TICKETS_PER_TASK: usize = 1000;
@@ -231,7 +231,9 @@ impl Store {
         if won == 0 {
             return self.redeem_ticket(secret, body);
         }
-        let written = self.write_report(&row, body);
+        // 報告した人がしたこととして残す
+        let reporter = Actor::Ticket(row.person_id.clone());
+        let written = self.acting(reporter, |s| s.write_report(&row, body));
         match written {
             Ok(comment) => {
                 self.conn.execute(

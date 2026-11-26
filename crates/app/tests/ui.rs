@@ -6259,3 +6259,89 @@ fn due_format_is_picked_from_the_due_column_and_settings(cx: &mut TestAppContext
         assert!(window.try_find(("due-format", 1usize)).is_some())
     });
 }
+
+/// 誰がいつ作り、何をどう変えたかが、詳細の上・変更履歴・コメント欄の出来事に出る。
+/// 自分・AI（自動の実行）・外のエージェント・リマインダーを分けて残す。
+#[gpui_kit::test]
+fn history_shows_who_changed_what(cx: &mut TestAppContext) {
+    use malakt_core::history;
+    use malakt_core::{Actor, TaskDraft};
+    start(cx);
+    let (window, view) = open(cx, win(1280., 2400.));
+    let id = cx.update(|cx| {
+        view.update(cx, |v, cx| {
+            v.write(cx, |s| {
+                let draft = TaskDraft {
+                    title: "会場の下見".into(),
+                    ..Default::default()
+                };
+                Ok(s.create_task(None, &draft)?.id)
+            })
+            .unwrap()
+        })
+    });
+    let watch = Actor::ai("Claude", Some("GitHub の定期チェック"));
+    cx.update(|cx| {
+        db::shared(cx).update(cx, |db, cx| {
+            let s = &mut db.store;
+            let mut d = TaskDraft::from(&s.task(&id).unwrap());
+            d.due = Some("2099-01-05".into());
+            s.acting(watch.clone(), |s| s.update_task(&id, &d)).unwrap();
+            d.description = "下見の段取り".into();
+            s.acting(Actor::agent("claude-code"), |s| s.update_task(&id, &d))
+                .unwrap();
+            s.acting(Actor::Reminders, |s| {
+                s.set_task_status(&id, Status::Completed)
+            })
+            .unwrap();
+            cx.notify();
+        })
+    });
+    cx.update_window(window, |_, window, cx| {
+        view.update(cx, |v, cx| v.open_panel(&id, window, cx))
+    })
+    .unwrap();
+    ui(cx, window, |_, _| {});
+    let task = store(cx, |s| s.task(&id).unwrap());
+    assert_eq!(task.created_by, Actor::Me);
+    assert_eq!(task.updated_by, Actor::Reminders);
+
+    cx.update(|cx| {
+        let v = view.read(cx);
+        let detail = v.detail.as_ref().unwrap();
+        let lines: Vec<String> = v
+            .timeline_events(detail, cx)
+            .iter()
+            .map(|e| {
+                format!(
+                    "{}|{}|{}",
+                    v.actor_name(&e.actor).unwrap_or_default(),
+                    e.actor.badge().unwrap_or_default(),
+                    e.text
+                )
+            })
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                "自分||このタスクを作成しました",
+                "AI（Claude）|GitHub の定期チェック|期限を 2099/1/5 に設定しました",
+                "claude-code|外部エージェント|説明を追加しました",
+                "自分|リマインダー|完了にしました",
+            ]
+        );
+        // 変更履歴は 1 回の変更ごとにまとまり、作成から全部記録されている
+        let entries = history::entries(&detail.changes);
+        assert_eq!(entries.len(), 4);
+        assert!(!history::misses_older(&entries));
+    });
+
+    // 変更履歴を開く。説明の出来事からも開ける
+    ui(cx, window, |window, cx| window.click("history", cx));
+    cx.update(|cx| assert_eq!(view.read(cx).modal, Modal::History));
+    cx.update(|cx| view.update(cx, |v, cx| v.dismiss(cx)));
+    ui(cx, window, |window, cx| {
+        window.click(("event-history", 2usize), cx)
+    });
+    cx.update(|cx| assert_eq!(view.read(cx).modal, Modal::History));
+}

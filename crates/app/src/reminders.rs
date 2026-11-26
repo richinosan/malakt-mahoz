@@ -222,7 +222,9 @@ impl Mirror {
                 .chain(outcome.reopened.iter().map(|id| (id, Status::NeedsAction)));
             let mut changed = false;
             for (id, status) in turns {
-                match store.set_task_status(id, status) {
+                match store.acting(malakt_core::Actor::Reminders, |s| {
+                    s.set_task_status(id, status)
+                }) {
                     Ok(_) => changed = true,
                     // 合わせている間に消されたタスクは、次の回でリマインダーも消える
                     Err(malakt_core::Error::NotFound(_)) => {}

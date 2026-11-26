@@ -3788,6 +3788,11 @@ impl Session {
                             .then(|| args.get("id").and_then(Value::as_str))
                             .flatten()
                             .and_then(|id| s.db.read(cx).store.task(id).ok());
+                        // 変更履歴には、どの AI が、どの自動の実行でしたかを残す
+                        let actor = malakt_core::Actor::ai(
+                            s.provider.label(),
+                            s.auto.then(|| s.auto_kind.label()),
+                        );
                         let result = s.db.update(cx, |db, cx| {
                             // 自分が登録されていれば、コメントの書き手にする
                             let author = db
@@ -3804,7 +3809,9 @@ impl Session {
                                 Ok(())
                             };
                             let result = marked.and_then(|()| {
-                                tools::execute(&mut db.store, author.as_deref(), name, args)
+                                db.store.acting(actor, |store| {
+                                    tools::execute(store, author.as_deref(), name, args)
+                                })
                             });
                             if write {
                                 if let Err(e) = db.store.undo_mark() {

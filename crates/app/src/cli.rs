@@ -115,6 +115,7 @@ fn execute(
         "workspaces" | "people" | "tasks" | "task" | "call" => {
             let (tool, tool_args) = tool_call(command, rest)?;
             let mut store = open()?;
+            store.set_actor(malakt_core::Actor::Command);
             let text = crate::mcp::call_tool(&mut store, unix_now(), &tool, &tool_args)
                 .map_err(Failure::Failed)?;
             writeln!(out, "{text}")?;
@@ -294,6 +295,11 @@ mod tests {
         assert_eq!(comment["body"], "公開しました\n- 記事");
         let s = Store::open(&path).unwrap();
         assert_eq!(s.task(&task.id).unwrap().status, Status::Completed);
+        // 完了チケットで報告したことが、変えた人として残る
+        assert_eq!(
+            s.task(&task.id).unwrap().updated_by,
+            malakt_core::Actor::Ticket(None)
+        );
 
         // やり直しても同じ報告が返り、増えない
         let (code, again, _) = call(&path, &["redeem", &secret, "-m", "別の文"]);
@@ -375,6 +381,13 @@ mod tests {
         );
         assert_eq!(value(&["task", id])["title"], "告知を出す");
         assert_eq!(value(&["call", "list_people"]), serde_json::json!([]));
+        // コマンドで変えたことが、作った人・変えた人として残る
+        {
+            let s = Store::open(&path).unwrap();
+            let task = s.task(id).unwrap();
+            assert_eq!(task.created_by, malakt_core::Actor::Command);
+            assert_eq!(task.updated_by, malakt_core::Actor::Command);
+        }
 
         let (code, out, err) = call(&path, &["task", "nope"]);
         assert_eq!((code, out.as_str()), (1, ""));

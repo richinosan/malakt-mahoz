@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::actor::Actor;
+
 /// 小文字の ULID。
 pub type Id = String;
 
@@ -346,6 +348,12 @@ pub struct Task {
     pub created_at: i64,
     pub updated_at: i64,
     pub completed_at: Option<i64>,
+    /// 作った人。
+    #[serde(default = "crate::actor::unknown")]
+    pub created_by: Actor,
+    /// 最後に中身を変えた人。並べ替えだけでは変わらない。
+    #[serde(default = "crate::actor::unknown")]
+    pub updated_by: Actor,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -375,6 +383,9 @@ pub struct Comment {
     /// 本文で `@名前` と書かれた人。
     #[serde(default)]
     pub mentions: Vec<Id>,
+    /// 書いた操作をしたもの。AI や外のエージェントが自分の名前で書いたとき、それが分かる。
+    #[serde(default = "crate::actor::unknown")]
+    pub actor: Actor,
 }
 
 impl Comment {
@@ -460,7 +471,18 @@ pub struct Change {
     pub old_value: String,
     pub new_value: String,
     pub created_at: i64,
+    /// 変えた人。
+    #[serde(default = "crate::actor::unknown")]
+    pub actor: Actor,
 }
+
+/// タスクを作ったことを表す変更履歴の項目。作ったときの値は、別の項目として同時に残る。
+pub const CREATED_FIELD: &str = "created";
+
+/// 1 つのタスクに残す変更履歴の件数。超えたら古いものから消す（作成の記録は残す）。
+pub const MAX_CHANGES_PER_TASK: usize = 500;
+/// 1 つのタスクに残す変更履歴の大きさ（変更前と変更後の文字の合計、バイト）。
+pub const MAX_CHANGE_BYTES_PER_TASK: i64 = 1024 * 1024;
 
 impl Task {
     /// このタスクが出ているワークスペースすべて。入っている場所が先頭。
