@@ -169,6 +169,7 @@ mod tests {
     //! スクロールの書き方の決まりを、ソースで確かめる。スクロールできる所にバーを付け忘れないため。
 
     const SOURCES: &[(&str, &str)] = &[
+        ("ai_settings.rs", include_str!("ai_settings.rs")),
         ("ai_view.rs", include_str!("ai_view.rs")),
         ("panes.rs", include_str!("panes.rs")),
         ("render.rs", include_str!("render.rs")),

@@ -258,7 +258,14 @@ enum SettingKey {
     Feel,
     Cards,
     Float,
-    Shell,
+    Ai(crate::ai_settings::AiRow),
+    LockOn,
+    AutoLock,
+    LockedNotices,
+    Reminders,
+    AutoUpdate,
+    Export,
+    Import,
 }
 
 impl Setting {
@@ -359,6 +366,77 @@ fn col() -> Div {
     div().flex().flex_col()
 }
 
+/// 「設定」の、設定の行をまとめるカード。
+pub(crate) fn setting_card(cx: &App) -> Div {
+    let theme = cx.theme();
+    col()
+        .px_4()
+        .rounded(feel::lg())
+        .bg(theme.popover)
+        .border_1()
+        .border_color(theme.border.opacity(0.6))
+}
+
+/// 「設定」の 1 行。左に名前と補足、右に変えるもの。`wide` のときは、変えるものを名前の下に横いっぱいに出す。
+/// 狭いところでは、右に置くものが名前の下に回る。
+pub(crate) fn setting_line(
+    name: &'static str,
+    note: Option<&'static str>,
+    control: AnyElement,
+    wide: bool,
+    first: bool,
+    theme: &gpui_kit::component::Theme,
+) -> AnyElement {
+    let label = col()
+        .flex_1()
+        .min_w(px(160.))
+        .gap_0p5()
+        .child(div().text_sm().child(name))
+        .when_some(note, |d, note| {
+            d.child(
+                div()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(note),
+            )
+        });
+    let line = if wide {
+        col().py_3().gap_2().child(label).child(control)
+    } else {
+        row()
+            .flex_wrap()
+            .justify_end()
+            .py_3()
+            .gap_x_4()
+            .gap_y_2()
+            .child(label)
+            .child(control)
+    };
+    line.when(!first, |d| {
+        d.border_t_1().border_color(theme.border.opacity(0.6))
+    })
+    .into_any_element()
+}
+
+/// 押すと、選べる値のメニューが開くボタン。
+fn menu_choice(
+    id: &'static str,
+    shown: SharedString,
+    theme: &gpui_kit::component::Theme,
+) -> Button {
+    Button::new(id).outline().w(CONTROL_WIDTH).h_8().child(
+        row()
+            .min_w_0()
+            .gap_2()
+            .child(div().flex_1().min_w_0().truncate().child(shown))
+            .child(
+                app_icon("chevron-down")
+                    .small()
+                    .text_color(theme.muted_foreground),
+            ),
+    )
+}
+
 /// 押せる小さなラベル。選ばれているものは色を付ける。
 /// 進捗の棒。
 fn percent_bar(percent: u8, width: Pixels, cx: &App) -> Div {
@@ -445,6 +523,18 @@ fn status_badge(status: Status, cx: &App) -> Div {
                 .text_color(status_color(status, cx)),
         )
         .child(status.label())
+}
+
+/// 表の値のボタンの中身。ボタンは中身を真ん中に寄せるので、幅いっぱいの行に入れて左から並べる。
+/// 列に入らない文字は、末尾を「…」にする。
+fn value_shown(shown: Div) -> impl IntoElement {
+    row()
+        .id("value")
+        .flex_1()
+        .min_w_0()
+        .overflow_hidden()
+        .child(shown.min_w_0().truncate())
+        .test_support()
 }
 
 /// 知らせの中に出す「元に戻す」ボタン。
@@ -1644,8 +1734,6 @@ impl MainView {
         };
         let unread = self.unread_notices;
         let lock_enabled = self.lock_enabled(cx);
-        let reminders = crate::reminders::menu_label(cx);
-        let auto_update = crate::update::menu_label(cx);
         let update_ready = crate::update::ready_version(cx);
         let view = cx.entity().downgrade();
         let controls = window_controls(HEADER_HEIGHT, floating, window, cx);
@@ -1784,41 +1872,19 @@ impl MainView {
                                 })
                             };
                             let menu = menu
-                                .item(item("担当者", |this, window, cx| {
-                                    this.open_people(window, cx)
-                                }))
-                                .item(item("カスタマイズ", |this, window, cx| {
+                                .item(item("設定", |this, window, cx| {
                                     this.open_appearance(window, cx)
                                 }))
-                                .separator()
-                                .item(item("エクスポート", |this, window, cx| {
-                                    this.export(window, cx)
-                                }))
-                                .item(item("インポート", |this, window, cx| {
-                                    this.import(window, cx)
-                                }))
-                                .separator()
-                                .item(item("ロック", |this, window, cx| {
-                                    this.open_lock_settings(window, cx)
+                                .item(item("担当者", |this, window, cx| {
+                                    this.open_people(window, cx)
                                 }));
                             let menu = if lock_enabled {
-                                menu.item(item("今すぐロック", |_, window, cx| {
-                                    window.dispatch_action(Box::new(LockNow), cx)
-                                }))
+                                menu.separator()
+                                    .item(item("今すぐロック", |_, window, cx| {
+                                        window.dispatch_action(Box::new(LockNow), cx)
+                                    }))
                             } else {
                                 menu
-                            };
-                            let menu = match reminders {
-                                Some(label) => menu
-                                    .separator()
-                                    .item(item(label, |this, _, cx| this.toggle_reminders(cx))),
-                                None => menu,
-                            };
-                            let menu = match auto_update {
-                                Some(label) => menu
-                                    .separator()
-                                    .item(item(label, |this, _, cx| this.toggle_auto_update(cx))),
-                                None => menu,
                             };
                             menu.separator()
                                 .item(item("キー操作", |this, _, cx| this.toggle_keys(cx)))
@@ -2882,7 +2948,7 @@ impl MainView {
     fn assignee_cell(&self, ids: &[Id], table: bool, cx: &App) -> Div {
         let theme = cx.theme();
         if ids.is_empty() {
-            return row()
+            return div()
                 .text_sm()
                 .text_color(theme.muted_foreground)
                 .child("未割り当て");
@@ -2932,7 +2998,7 @@ impl MainView {
             .min_h_6()
             .py_0p5()
             .justify_start()
-            .child(shown)
+            .child(value_shown(shown))
             .pop_menu(move |mut menu, _, _| {
                 for (label, checked, value) in options.iter().cloned() {
                     let view = view.clone();
@@ -2962,7 +3028,7 @@ impl MainView {
             .ghost()
             .small()
             .justify_start()
-            .child(status_badge(current, cx))
+            .child(value_shown(status_badge(current, cx)))
             .pop_menu(move |menu, _, _| status_items(menu, &view, &task, current))
     }
 
@@ -5140,9 +5206,10 @@ impl MainView {
                             .child(div().flex_1().text_lg().child(title.into()))
                             .child(feel::gloss(
                                 Button::new("dialog-close")
-                                    .label("閉じる")
+                                    .icon(app_icon("x"))
+                                    .tooltip("閉じる")
                                     .ghost()
-                                    .xsmall()
+                                    .small()
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.close_top_dialog(window, cx)
                                     })),
@@ -5152,173 +5219,6 @@ impl MainView {
                     .test_support(),
             );
         div().absolute().inset_0().child(dialog)
-    }
-
-    /// 「AI のシェル」。AI のタブで動かすシェルを、ターミナルで開けるシェルから選ぶ。
-    fn ai_shell_choice(
-        &self,
-        reset: impl Fn(&'static str, bool) -> Button,
-        cx: &mut Context<Self>,
-    ) -> Div {
-        let terms = crate::term::shared(cx).read(cx);
-        let chosen = terms.ai_profile.clone();
-        let mut options: Vec<(SharedString, bool, Option<String>)> = vec![(
-            format!("標準（{}）", malakt_ai::shell::Shell::standard().name()).into(),
-            chosen.is_none(),
-            None,
-        )];
-        for profile in terms.profiles() {
-            options.push((
-                profile.name.clone().into(),
-                chosen.as_deref() == Some(profile.id.as_str()),
-                Some(profile.id.clone()),
-            ));
-        }
-        let shown = terms.ai_shell().name();
-        let muted = cx.theme().muted_foreground;
-        let view = cx.entity().downgrade();
-        // 押すと、選べるシェルのメニューが開く
-        let menu = Button::new("shell-choice")
-            .outline()
-            .w_full()
-            .h_8()
-            .child(
-                row()
-                    .min_w_0()
-                    .gap_2()
-                    .child(div().flex_1().min_w_0().truncate().child(shown))
-                    .child(app_icon("chevron-down").small().text_color(muted)),
-            )
-            .pop_menu(move |mut menu, _, _| {
-                for (label, checked, id) in options.iter().cloned() {
-                    let view = view.clone();
-                    menu = menu.item(PopupMenuItem::new(label).checked(checked).on_click(
-                        move |_, _, cx| {
-                            // ウィンドウを閉じたあとなら、反映する先がない
-                            let _ = view.update(cx, |_, cx| {
-                                crate::term::shared(cx)
-                                    .update(cx, |terms, cx| terms.set_ai_profile(id.as_deref(), cx))
-                            });
-                        },
-                    ));
-                }
-                menu
-            });
-        row()
-            .gap_1()
-            .child(div().w(CONTROL_WIDTH).flex().child(menu))
-            .child(
-                reset("shell-choice-reset", chosen.is_some()).on_click(cx.listener(
-                    |_, _, _, cx| {
-                        crate::term::shared(cx)
-                            .update(cx, |terms, cx| terms.set_ai_profile(None, cx))
-                    },
-                )),
-            )
-    }
-
-    /// ロックの設定。値はその場のメニューで選ぶ。
-    fn render_lock_settings(&self, cx: &mut Context<Self>) -> Div {
-        let theme = cx.theme().clone();
-        let enabled = self.lock_enabled(cx);
-        let verifying = self.verifying(cx);
-        let label = |text: &'static str| {
-            div()
-                .w(px(112.))
-                .flex_none()
-                .text_sm()
-                .text_color(theme.muted_foreground)
-                .child(text)
-        };
-        let view = cx.entity().downgrade();
-        let muted = theme.muted_foreground;
-        // 押すと、選べる値のメニューが開くボタン
-        let choice = |id: &'static str, shown: SharedString| {
-            Button::new(id).outline().h_8().child(
-                row()
-                    .min_w_0()
-                    .gap_2()
-                    .child(div().flex_1().min_w_0().truncate().child(shown))
-                    .child(app_icon("chevron-down").small().text_color(muted)),
-            )
-        };
-        let mut body = col().gap_2().child(
-            row().gap_2().child(label("ロック")).child(
-                div().flex_1().flex().child(
-                    Switch::new("lock-switch")
-                        .label("パスキーで開く")
-                        .checked(enabled)
-                        .disabled(verifying)
-                        .on_click(cx.listener(|this, on: &bool, window, cx| {
-                            if *on {
-                                this.enable_lock(window, cx)
-                            } else {
-                                this.disable_lock(window, cx)
-                            }
-                        })),
-                ),
-            ),
-        );
-        // 自動でロックする時間と通知は、ロックが有効なときだけ
-        if enabled {
-            let auto = self.auto_lock(cx);
-            let auto_view = view.clone();
-            let auto_menu = choice("auto-lock", auto_lock_label(auto).into()).pop_menu(
-                move |mut menu, _, _| {
-                    let options = std::iter::once(None)
-                        .chain(malakt_core::lock::AUTO_CHOICES.into_iter().map(Some));
-                    for minutes in options {
-                        let view = auto_view.clone();
-                        menu = menu.item(
-                            PopupMenuItem::new(auto_lock_label(minutes))
-                                .checked(auto == minutes)
-                                .on_click(move |_, _, cx| {
-                                    // ウィンドウを閉じたあとなら、反映する先がない
-                                    let _ = view.update(cx, |this, cx| {
-                                        this.set_auto_lock(minutes, cx);
-                                    });
-                                }),
-                        );
-                    }
-                    menu
-                },
-            );
-            let notices = self.locked_notices(cx);
-            let notice_menu =
-                choice("locked-notices", notices.label().into()).pop_menu(move |mut menu, _, _| {
-                    for option in malakt_core::lock::LockedNotices::ALL {
-                        let view = view.clone();
-                        menu = menu.item(
-                            PopupMenuItem::new(option.label())
-                                .checked(notices == option)
-                                .on_click(move |_, _, cx| {
-                                    // ウィンドウを閉じたあとなら、反映する先がない
-                                    let _ = view.update(cx, |this, cx| {
-                                        this.set_locked_notices(option, cx);
-                                    });
-                                }),
-                        );
-                    }
-                    menu
-                });
-            body = body
-                .child(
-                    row()
-                        .gap_2()
-                        .child(label("自動でロック"))
-                        .child(div().flex_1().min_w_0().flex().child(auto_menu)),
-                )
-                .child(
-                    row()
-                        .gap_2()
-                        .child(label("ロック中の通知"))
-                        .child(div().flex_1().min_w_0().flex().child(notice_menu)),
-                );
-        }
-        let body = body.when_some(self.error.clone(), |d, error| {
-            d.child(div().text_sm().text_color(theme.danger).child(error))
-        });
-        self.dialog("ロック", body, cx)
     }
 
     /// 「カスタマイズ」。左に検索とカテゴリ、右にそのカテゴリの設定をカードにまとめて出す。
@@ -5355,7 +5255,8 @@ impl MainView {
         );
         let mut group = "";
         for (ix, section) in Section::ALL.into_iter().enumerate() {
-            if searching && !shown.contains(&section) {
+            // 今出せる設定がないカテゴリ（この OS にない連携など）は出さない
+            if !shown.contains(&section) {
                 continue;
             }
             if section.group() != group {
@@ -5412,12 +5313,7 @@ impl MainView {
         };
         let mut pages = col().gap_5();
         for section in sections {
-            let mut card = col()
-                .px_4()
-                .rounded(feel::lg())
-                .bg(theme.popover)
-                .border_1()
-                .border_color(theme.border.opacity(0.6));
+            let mut card = setting_card(cx);
             let mut first = true;
             for item in items.iter().filter(|item| item.section == section) {
                 card = card.child(self.setting_row(item, first, cx));
@@ -5495,7 +5391,7 @@ impl MainView {
                 id,
                 APPEARANCE_WIDTH,
                 Some(APPEARANCE_HEIGHT),
-                "カスタマイズ",
+                "設定",
                 body,
                 cx,
             )
@@ -5615,12 +5511,83 @@ impl MainView {
                 Some("パネルを角丸のカードにする"),
                 list(&["カード", "パネル"]),
             ),
+        ]);
+        for row_kind in crate::ai_settings::AiRow::ALL {
+            if !row_kind.shown(cx) {
+                continue;
+            }
+            let section = match row_kind.group() {
+                crate::ai_settings::AiGroup::Model => Section::AiModel,
+                crate::ai_settings::AiGroup::Behavior => Section::AiBehavior,
+                crate::ai_settings::AiGroup::Github => Section::AiGithub,
+            };
+            all.push(Setting::new(
+                section,
+                SettingKey::Ai(row_kind),
+                row_kind.name(),
+                row_kind.note(),
+                row_kind.words().to_owned(),
+            ));
+        }
+        all.push(Setting::new(
+            Section::Lock,
+            SettingKey::LockOn,
+            "ロック",
+            Some("パスキーで開く"),
+            list(&["パスキー", "Windows Hello", "Touch ID"]),
+        ));
+        let locked = self.lock_enabled(cx);
+        // 自動でロックする時間と通知は、ロックが有効なときだけ
+        if locked {
+            all.push(Setting::new(
+                Section::Lock,
+                SettingKey::AutoLock,
+                "自動でロック",
+                Some("操作がないままこの時間がたつとロックする"),
+                list(&["時間"]),
+            ));
+        }
+        if let Some(name) = crate::reminders::setting_label(cx) {
+            all.push(Setting::new(
+                Section::Notices,
+                SettingKey::Reminders,
+                name,
+                None,
+                list(&["リマインダー", "期限", "通知"]),
+            ));
+        }
+        if locked {
+            all.push(Setting::new(
+                Section::Notices,
+                SettingKey::LockedNotices,
+                "ロック中の通知",
+                None,
+                list(&["ロック"]),
+            ));
+        }
+        if crate::update::menu_label(cx).is_some() {
+            all.push(Setting::new(
+                Section::Update,
+                SettingKey::AutoUpdate,
+                "自動アップデート",
+                Some("ウィンドウを閉じたときに新しい版にする"),
+                list(&["更新", "バージョン"]),
+            ));
+        }
+        all.extend([
             Setting::new(
-                Section::Ai,
-                SettingKey::Shell,
-                "AI のシェル",
-                Some("AI のタブで動かすシェル"),
-                list(&["ターミナル", "シェル"]),
+                Section::Data,
+                SettingKey::Export,
+                "エクスポート",
+                Some("すべてのワークスペースをファイルに書き出す"),
+                list(&["書き出し", "バックアップ", "保存"]),
+            ),
+            Setting::new(
+                Section::Data,
+                SettingKey::Import,
+                "インポート",
+                Some("書き出したファイルを読み込む"),
+                list(&["読み込み", "復元"]),
             ),
         ]);
         all
@@ -5644,6 +5611,19 @@ impl MainView {
                 return edge(div().py_3())
                     .child(self.layout_tiles(cx))
                     .into_any_element();
+            }
+            SettingKey::Ai(row_kind) => {
+                let control = self
+                    .ai_settings
+                    .update(cx, |settings, cx| settings.control(row_kind, cx));
+                return setting_line(
+                    item.name,
+                    item.note,
+                    control,
+                    row_kind.wide(),
+                    first,
+                    &theme,
+                );
             }
             _ => {}
         }
@@ -5687,7 +5667,7 @@ impl MainView {
                 .test_support()
         };
         let control: AnyElement = match item.key {
-            SettingKey::Themes | SettingKey::Layouts => unreachable!(),
+            SettingKey::Themes | SettingKey::Layouts | SettingKey::Ai(_) => unreachable!(),
             SettingKey::Scene => {
                 let scene = crate::theme::scene(cx);
                 let has_scene = scene != crate::theme::Scene::None;
@@ -5811,26 +5791,89 @@ impl MainView {
                 )
                 .child(reset("float-reset", false))
                 .into_any_element(),
-            SettingKey::Shell => self.ai_shell_choice(reset, cx).into_any_element(),
-        };
-        edge(row().py_3().gap_4())
-            .child(
-                col()
-                    .flex_1()
-                    .min_w_0()
-                    .gap_0p5()
-                    .child(div().text_sm().child(item.name))
-                    .when_some(item.note, |d, note| {
-                        d.child(
-                            div()
-                                .text_xs()
-                                .text_color(theme.muted_foreground)
-                                .child(note),
-                        )
-                    }),
+            SettingKey::LockOn => Switch::new("lock-switch")
+                .checked(self.lock_enabled(cx))
+                .disabled(self.verifying(cx))
+                .on_click(cx.listener(|this, on: &bool, window, cx| {
+                    if *on {
+                        this.enable_lock(window, cx)
+                    } else {
+                        this.disable_lock(window, cx)
+                    }
+                }))
+                .into_any_element(),
+            SettingKey::AutoLock => {
+                let view = cx.entity().downgrade();
+                let auto = self.auto_lock(cx);
+                menu_choice("auto-lock", auto_lock_label(auto).into(), &theme)
+                    .pop_menu(move |mut menu, _, _| {
+                        let options = std::iter::once(None)
+                            .chain(malakt_core::lock::AUTO_CHOICES.into_iter().map(Some));
+                        for minutes in options {
+                            let view = view.clone();
+                            menu = menu.item(
+                                PopupMenuItem::new(auto_lock_label(minutes))
+                                    .checked(auto == minutes)
+                                    .on_click(move |_, _, cx| {
+                                        // ウィンドウを閉じたあとなら、反映する先がない
+                                        let _ = view.update(cx, |this, cx| {
+                                            this.set_auto_lock(minutes, cx);
+                                        });
+                                    }),
+                            );
+                        }
+                        menu
+                    })
+                    .into_any_element()
+            }
+            SettingKey::LockedNotices => {
+                let view = cx.entity().downgrade();
+                let notices = self.locked_notices(cx);
+                menu_choice("locked-notices", notices.label().into(), &theme)
+                    .pop_menu(move |mut menu, _, _| {
+                        for option in malakt_core::lock::LockedNotices::ALL {
+                            let view = view.clone();
+                            menu = menu.item(
+                                PopupMenuItem::new(option.label())
+                                    .checked(notices == option)
+                                    .on_click(move |_, _, cx| {
+                                        // ウィンドウを閉じたあとなら、反映する先がない
+                                        let _ = view.update(cx, |this, cx| {
+                                            this.set_locked_notices(option, cx);
+                                        });
+                                    }),
+                            );
+                        }
+                        menu
+                    })
+                    .into_any_element()
+            }
+            SettingKey::Reminders => Switch::new("reminders-switch")
+                .checked(crate::reminders::enabled(cx))
+                .on_click(cx.listener(|this, _: &bool, _, cx| this.toggle_reminders(cx)))
+                .into_any_element(),
+            SettingKey::AutoUpdate => Switch::new("auto-update-switch")
+                .checked(crate::update::enabled(cx))
+                .on_click(cx.listener(|this, _: &bool, _, cx| this.toggle_auto_update(cx)))
+                .into_any_element(),
+            SettingKey::Export => feel::gloss(
+                Button::new("export-all")
+                    .label("エクスポート")
+                    .outline()
+                    .small()
+                    .on_click(cx.listener(|this, _, window, cx| this.export(window, cx))),
             )
-            .child(control)
-            .into_any_element()
+            .into_any_element(),
+            SettingKey::Import => feel::gloss(
+                Button::new("import-all")
+                    .label("インポート")
+                    .outline()
+                    .small()
+                    .on_click(cx.listener(|this, _, window, cx| this.import(window, cx))),
+            )
+            .into_any_element(),
+        };
+        setting_line(item.name, item.note, control, false, first, &theme)
     }
 
     /// テーマの見本。おすすめ、自分で保存したもの、今のテーマを保存するボタンの順に並べる。
@@ -6551,7 +6594,6 @@ impl MainView {
                 self.dialog(title, body, cx)
             }
             Modal::Appearance => self.render_appearance(cx),
-            Modal::Lock => self.render_lock_settings(cx),
             Modal::DeleteWorkspace(id) => {
                 let name = self.workspace_name(Some(id));
                 let body = col()
@@ -7805,6 +7847,7 @@ impl Render for MainView {
             .when(self.pane_prefix || self.pane_resize, |d| {
                 d.capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                     if this.pane_key(&event.keystroke, window, cx) {
+                        crate::caret::cancel(cx);
                         cx.stop_propagation();
                     }
                 }))

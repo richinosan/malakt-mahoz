@@ -66,8 +66,6 @@ pub enum Modal {
     Ticket(Id),
     /// 書体と色
     Appearance,
-    /// ロック（有効・無効、自動でロックするまでの時間、ロック中の通知）
-    Lock,
 }
 
 /// 左のメニューで、その場で名前を書いているワークスペース。
@@ -90,7 +88,7 @@ pub const NEW_WORKSPACE_NAME: &str = "新規ワークスペース";
 /// 保存したばかりのテーマの名前。同じ名前があれば、後ろの番号を増やす。
 pub const NEW_PRESET_NAME: &str = "マイテーマ";
 
-/// 「カスタマイズ」の左に並ぶカテゴリ。
+/// 「設定」の左に並ぶカテゴリ。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CustomizeSection {
     Theme,
@@ -98,17 +96,29 @@ pub enum CustomizeSection {
     Backdrop,
     Look,
     Display,
-    Ai,
+    AiModel,
+    AiBehavior,
+    AiGithub,
+    Lock,
+    Notices,
+    Update,
+    Data,
 }
 
 impl CustomizeSection {
-    pub const ALL: [CustomizeSection; 6] = [
+    pub const ALL: [CustomizeSection; 12] = [
         CustomizeSection::Theme,
         CustomizeSection::Layout,
         CustomizeSection::Backdrop,
         CustomizeSection::Look,
         CustomizeSection::Display,
-        CustomizeSection::Ai,
+        CustomizeSection::AiModel,
+        CustomizeSection::AiBehavior,
+        CustomizeSection::AiGithub,
+        CustomizeSection::Lock,
+        CustomizeSection::Notices,
+        CustomizeSection::Update,
+        CustomizeSection::Data,
     ];
 
     pub fn label(self) -> &'static str {
@@ -118,7 +128,13 @@ impl CustomizeSection {
             CustomizeSection::Backdrop => "背景",
             CustomizeSection::Look => "色と書体",
             CustomizeSection::Display => "表示",
-            CustomizeSection::Ai => "シェル",
+            CustomizeSection::AiModel => crate::ai_settings::AiGroup::Model.label(),
+            CustomizeSection::AiBehavior => crate::ai_settings::AiGroup::Behavior.label(),
+            CustomizeSection::AiGithub => crate::ai_settings::AiGroup::Github.label(),
+            CustomizeSection::Lock => "ロック",
+            CustomizeSection::Notices => "通知",
+            CustomizeSection::Update => "アップデート",
+            CustomizeSection::Data => "データ",
         }
     }
 
@@ -129,15 +145,38 @@ impl CustomizeSection {
             CustomizeSection::Backdrop => "image",
             CustomizeSection::Look => "type",
             CustomizeSection::Display => "rows-3",
-            CustomizeSection::Ai => "square-terminal",
+            CustomizeSection::AiModel => "sparkles",
+            CustomizeSection::AiBehavior => "bot",
+            CustomizeSection::AiGithub => "github",
+            CustomizeSection::Lock => "lock",
+            CustomizeSection::Notices => "bell",
+            CustomizeSection::Update => "refresh-cw",
+            CustomizeSection::Data => "database",
         }
     }
 
     /// 左に並べるときの見出し。
     pub fn group(self) -> &'static str {
         match self {
-            CustomizeSection::Ai => "AI",
+            CustomizeSection::AiModel
+            | CustomizeSection::AiBehavior
+            | CustomizeSection::AiGithub => "AI",
+            CustomizeSection::Lock
+            | CustomizeSection::Notices
+            | CustomizeSection::Update
+            | CustomizeSection::Data => "アプリ",
             _ => "見た目",
+        }
+    }
+
+    /// AI のカテゴリなら、その AI の設定のまとまり。
+    pub fn ai_group(self) -> Option<crate::ai_settings::AiGroup> {
+        use crate::ai_settings::AiGroup;
+        match self {
+            CustomizeSection::AiModel => Some(AiGroup::Model),
+            CustomizeSection::AiBehavior => Some(AiGroup::Behavior),
+            CustomizeSection::AiGithub => Some(AiGroup::Github),
+            _ => None,
         }
     }
 }
@@ -386,8 +425,10 @@ pub struct MainView {
     pub sub_modal: Option<SubModal>,
     /// ロック中に OS の通知を押したときの、その通知。解除したら開く。
     pub open_after_unlock: Option<Id>,
-    /// 「カスタマイズ」で開いているカテゴリ。
+    /// 「設定」で開いているカテゴリ。
     pub appearance_section: CustomizeSection,
+    /// 「設定」の AI のカテゴリに出す行。
+    pub ai_settings: Entity<crate::ai_settings::AiSettings>,
     pub appearance_scroll: gpui_kit::ScrollHandle,
     /// 自分で保存したテーマ。
     pub own_presets: Vec<crate::theme::Preset>,
@@ -462,7 +503,9 @@ impl MainView {
         };
 
         let ai_session = ai::shared(cx);
+        let ai_settings = cx.new(|cx| crate::ai_settings::AiSettings::new(window, cx));
         let mut subs = vec![
+            cx.observe(&ai_settings, |_, _, cx| cx.notify()),
             cx.observe(&db, |this, _, cx| this.reload(cx)),
             // チャットを別ウィンドウに出した・戻したときに、右の表示を合わせる
             cx.observe(&ai_session, |_, _, cx| cx.notify()),
@@ -805,6 +848,7 @@ impl MainView {
             sub_modal: None,
             open_after_unlock: None,
             appearance_section: CustomizeSection::Theme,
+            ai_settings,
             appearance_scroll: gpui_kit::ScrollHandle::new(),
             own_presets: Vec::new(),
             preset_naming: None,
@@ -3339,11 +3383,11 @@ impl MainView {
     }
 
     /// ロックの設定を開く。
+    /// 「設定」をロックのカテゴリで開く。
     pub fn open_lock_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // メニューから開くとフォーカスがなくなるので、Esc を受けられるように戻す
-        self.focus.focus(window, cx);
+        self.open_appearance(window, cx);
         self.error = None;
-        self.modal = Modal::Lock;
+        self.appearance_section = CustomizeSection::Lock;
         cx.notify();
     }
 

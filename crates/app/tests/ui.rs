@@ -1495,16 +1495,22 @@ fn locked_notices_hide_what_was_chosen(cx: &mut TestAppContext) {
     assert_eq!(shown[1].body.as_ref(), "");
 }
 
-/// 「ロック」のダイアログで、自動でロックするまでの時間と、ロック中の通知をメニューから選ぶ。
+/// 「設定」のロックと通知で、自動でロックするまでの時間と、ロック中の通知をメニューから選ぶ。
 /// 操作がないまま選んだ時間が過ぎるとロックし、操作すると数え直す。
 #[gpui_kit::test]
 fn auto_lock_after_the_chosen_minutes(cx: &mut TestAppContext) {
+    use malakt_mahoz::state::CustomizeSection;
     start(cx);
     let (window, view) = open(cx, wide());
     ui(cx, window, |window, cx| {
         view.update(cx, |v, cx| v.open_lock_settings(window, cx))
     });
-    cx.update(|cx| assert_eq!(view.read(cx).modal, Modal::Lock));
+    // 「設定」がロックのカテゴリで開く
+    cx.update(|cx| {
+        let v = view.read(cx);
+        assert_eq!(v.modal, Modal::Appearance);
+        assert_eq!(v.appearance_section, CustomizeSection::Lock);
+    });
     // ロックが無効なうちは、時間と通知の行は出ない
     ui(cx, window, |window, _| {
         assert!(window.try_find("auto-lock").is_none());
@@ -1528,6 +1534,10 @@ fn auto_lock_after_the_chosen_minutes(cx: &mut TestAppContext) {
     ui(cx, window, |window, cx| window.click("auto-lock", cx));
     pick(cx, window, "15 分");
     cx.update(|cx| assert_eq!(view.read(cx).auto_lock(cx), Some(15)));
+    // ロック中の通知は「通知」のカテゴリにある
+    ui(cx, window, |window, cx| {
+        window.click(("customize-nav", 9usize), cx)
+    });
     ui(cx, window, |window, cx| window.click("locked-notices", cx));
     pick(cx, window, "タイトルを出さない");
     cx.update(|cx| {
@@ -1567,6 +1577,9 @@ fn auto_lock_after_the_chosen_minutes(cx: &mut TestAppContext) {
     assert!(typed > 0, "キーの操作を数えていない");
 
     // 「しない」にすると、いくら待ってもロックしない
+    ui(cx, window, |window, cx| {
+        window.click(("customize-nav", 8usize), cx)
+    });
     ui(cx, window, |window, cx| window.click("auto-lock", cx));
     pick(cx, window, "しない");
     cx.update(|cx| {
@@ -2577,7 +2590,8 @@ fn customize_settings_are_searched(cx: &mut TestAppContext) {
     ui(cx, window, |window, _| {
         // 開いたときはテーマ。左にはカテゴリがすべて並ぶ
         assert!(window.try_find(("preset", 0usize)).is_some());
-        assert!((0..CustomizeSection::ALL.len()).all(|ix| nav(window, ix)));
+        // この OS にない連携（通知・アップデート）のほかは、カテゴリがすべて並ぶ
+        assert!((0..=8).all(|ix| nav(window, ix)));
     });
 
     // 書いた言葉に合う設定だけが出る。補足の言葉でも当たる
@@ -2628,16 +2642,17 @@ fn customize_settings_are_searched(cx: &mut TestAppContext) {
     });
     ui(cx, window, |window, cx| {
         assert!(!nav(window, 0));
-        window.click(("customize-nav", 5usize), cx)
+        window.click(("customize-nav", 6usize), cx)
     });
     assert!(cx.update(|cx| {
         let v = view.read(cx);
-        v.appearance_section == CustomizeSection::Ai
+        v.appearance_section == CustomizeSection::AiBehavior
             && v.inputs.customize_search.read(cx).value().is_empty()
     }));
     ui(cx, window, |window, _| {
         assert!(window.try_find("shell-choice").is_some());
-        assert!((0..CustomizeSection::ALL.len()).all(|ix| nav(window, ix)));
+        // この OS にない連携（通知・アップデート）のほかは、カテゴリがすべて並ぶ
+        assert!((0..=8).all(|ix| nav(window, ix)));
     });
 
     // 検索欄に書いている途中でも、Esc で閉じる
@@ -3061,6 +3076,51 @@ fn assignee_cell_wraps_without_cutting(cx: &mut TestAppContext) {
     assert!(cell >= line, "{cell:?}");
     assert!(cell < line * 2. + gap, "{cell:?}");
     assert!(cell <= row, "{cell:?} > {row:?}");
+}
+
+/// 表の値（状態・優先度・担当・期限）は、セルの左から並ぶ。列を狭めても、ボタンの左右の外へははみ出さない。
+#[gpui_kit::test]
+fn table_values_start_at_the_left_of_the_cell(cx: &mut TestAppContext) {
+    use malakt_mahoz::state::{Column, COLUMN_MIN};
+    start(cx);
+    let (window, view) = open(cx, wide());
+    ui(cx, window, |window, cx| {
+        window.click("nav-all", cx);
+        window.click("quick-add", cx);
+        window.input("会場を決める", cx);
+        window.press("enter", cx);
+    });
+    let scale = malakt_mahoz::UI_SCALE;
+    let check = |cx: &mut TestAppContext| {
+        ui(cx, window, |window, _| {
+            for id in ["status", "prio", "assignee", "due"] {
+                let button = window.find((id, 0usize)).bounds();
+                let value = window.within((id, 0usize)).find("value").bounds();
+                // ボタンの左の余白（px_2）だけ空けて、左から始まる
+                assert!(value.left() >= button.left(), "{id}: {value:?} {button:?}");
+                assert!(
+                    value.left() - button.left() <= px(12. * scale),
+                    "{id}: {value:?} {button:?}"
+                );
+                assert!(
+                    value.right() <= button.right(),
+                    "{id}: {value:?} {button:?}"
+                );
+            }
+        });
+    };
+    check(cx);
+    // 担当の列をいちばん狭くしても、「未割り当て」は真ん中から両側へはみ出さない
+    cx.update(|cx| {
+        view.update(cx, |v, cx| {
+            v.start_column_resize(Column::Assignee, 0., cx);
+            v.drag_column(9999., cx);
+            v.finish_column_resize(cx);
+            let width = v.columns.iter().find(|c| c.column == Column::Assignee);
+            assert_eq!(width.unwrap().width, COLUMN_MIN);
+        })
+    });
+    check(cx);
 }
 
 /// 左のメニューの矢印は、小さくても押しやすい大きさで押せる。
@@ -3934,7 +3994,23 @@ fn reminders(
     os
 }
 
-/// 設定のメニューを開いて、その文の項目を押す。
+/// 歯車の「設定」をそのカテゴリで開き、スイッチを押して閉じる。
+fn press_in_settings(
+    cx: &mut TestAppContext,
+    window: AnyWindowHandle,
+    view: &Entity<MainView>,
+    section: malakt_mahoz::state::CustomizeSection,
+    id: &'static str,
+) {
+    choose_in_menu(cx, window, "設定");
+    ui(cx, window, |window, cx| {
+        view.update(cx, |v, cx| v.show_appearance_section(section, window, cx))
+    });
+    ui(cx, window, |window, cx| window.click(id, cx));
+    ui(cx, window, |window, cx| window.click("dialog-close", cx));
+}
+
+/// 歯車のメニューを開いて、その文の項目を押す。
 fn choose_in_menu(cx: &mut TestAppContext, window: AnyWindowHandle, label: &str) {
     ui(cx, window, |window, cx| window.click("open-menu", cx));
     let id = cx
@@ -3981,7 +4057,13 @@ fn reminders_follow_tasks_once_chosen(cx: &mut TestAppContext) {
     // 標準では何も作らない
     assert!(os.lock().unwrap().items.is_empty());
 
-    choose_in_menu(cx, window, "リマインダーと連携する");
+    press_in_settings(
+        cx,
+        window,
+        &view,
+        malakt_mahoz::state::CustomizeSection::Notices,
+        "reminders-switch",
+    );
     cx.run_until_parked();
     {
         let os = os.lock().unwrap();
@@ -4020,7 +4102,13 @@ fn reminders_follow_tasks_once_chosen(cx: &mut TestAppContext) {
     assert_eq!(os.lock().unwrap().writes, writes);
 
     // 解除すると、作ったリマインダーとリストが消える。タスクは残る
-    choose_in_menu(cx, window, "リマインダーとの連携を解除する");
+    press_in_settings(
+        cx,
+        window,
+        &view,
+        malakt_mahoz::state::CustomizeSection::Notices,
+        "reminders-switch",
+    );
     cx.run_until_parked();
     {
         let os = os.lock().unwrap();
@@ -4051,7 +4139,13 @@ fn reminders_refused_by_the_os_turn_back_off(cx: &mut TestAppContext) {
     });
     let (window, view) = open(cx, wide());
     cx.run_until_parked();
-    choose_in_menu(cx, window, "リマインダーと連携する");
+    press_in_settings(
+        cx,
+        window,
+        &view,
+        malakt_mahoz::state::CustomizeSection::Notices,
+        "reminders-switch",
+    );
     cx.run_until_parked();
     assert!(!store(cx, |s| s.reminders_enabled().unwrap()));
     cx.update(|cx| {
@@ -4149,13 +4243,19 @@ fn a_new_version_is_installed_when_the_app_closes(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn auto_update_can_be_turned_off(cx: &mut TestAppContext) {
     start(cx);
-    let (window, _) = open(cx, wide());
+    let (window, view) = open(cx, wide());
     let root = tempfile::tempdir().unwrap();
     let staged = staged_update(root.path());
     let (checked, installed) = updater(cx, Ok(Some(staged.clone())), Ok(()));
     assert!(has(cx, window, "update-now"));
 
-    choose_in_menu(cx, window, "自動アップデートを無効にする");
+    press_in_settings(
+        cx,
+        window,
+        &view,
+        malakt_mahoz::state::CustomizeSection::Update,
+        "auto-update-switch",
+    );
     assert!(!has(cx, window, "update-now"));
     assert!(!staged.dir.exists());
     cx.update(malakt_mahoz::update::install_on_quit);
@@ -4165,7 +4265,13 @@ fn auto_update_can_be_turned_off(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert_eq!(checked.lock().unwrap().len(), 1);
 
-    choose_in_menu(cx, window, "自動アップデートを有効にする");
+    press_in_settings(
+        cx,
+        window,
+        &view,
+        malakt_mahoz::state::CustomizeSection::Update,
+        "auto-update-switch",
+    );
     cx.run_until_parked();
     assert_eq!(checked.lock().unwrap().len(), 2);
     assert!(has(cx, window, "update-now"));
@@ -4694,7 +4800,9 @@ fn standard_keys_work_on_the_list(cx: &mut TestAppContext) {
         assert_eq!(v.cursor, None);
         assert_eq!(v.modal, Modal::None);
     });
+    // ↓ は名前の末尾へ動く（選んでいた名前は選ばれていない）。選び直して打ち替える
     ui(cx, window, |window, cx| {
+        window.press("secondary-a", cx);
         window.input("しごと", cx);
         window.press("enter", cx);
     });
@@ -5685,7 +5793,7 @@ fn the_ai_shell_is_chosen_in_customize(cx: &mut TestAppContext) {
         view.update(cx, |v, cx| v.open_appearance(window, cx))
     });
     ui(cx, window, |window, cx| {
-        window.click(("customize-nav", 5usize), cx)
+        window.click(("customize-nav", 6usize), cx)
     });
     ui(cx, window, |window, cx| {
         assert!(window.find("shell-choice").visible());
@@ -5796,4 +5904,171 @@ fn each_filter_is_cleared_by_its_own_x(cx: &mut TestAppContext) {
     for id in ids {
         assert!(disabled(cx, id), "{id} は押せない");
     }
+}
+
+/// 入力欄を 2 つだけ置いた画面。↑↓ の動きを確かめる。
+struct Fields {
+    line: Entity<InputState>,
+    area: Entity<gpui_kit::component::input::TextareaState>,
+}
+
+impl gpui_kit::Render for Fields {
+    fn render(
+        &mut self,
+        _: &mut gpui_kit::Window,
+        _: &mut gpui_kit::Context<Self>,
+    ) -> impl gpui_kit::IntoElement {
+        use gpui_kit::component::input::{Input, Textarea};
+        use gpui_kit::{div, ParentElement, Styled};
+        div().size_full().child(Input::new(&self.line)).child(
+            div()
+                .w(px(160.))
+                .child(Textarea::new(&self.area).h(px(200.))),
+        )
+    }
+}
+
+fn open_fields(cx: &mut TestAppContext) -> (AnyWindowHandle, Entity<Fields>) {
+    start(cx);
+    cx.update(|cx| {
+        gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
+            cx.new(|cx| Fields {
+                line: cx.new(|cx| InputState::new(window, cx)),
+                area: cx.new(|cx| gpui_kit::component::input::TextareaState::new(window, cx)),
+            })
+        })
+        .expect("ウィンドウを開く")
+    })
+}
+
+/// 1 行の欄では、↑ で文の先頭へ、↓ で文の末尾へ動く。Shift を押せば、そこまで選ぶ。
+#[gpui_kit::test]
+fn up_and_down_go_to_the_ends_in_a_line(cx: &mut TestAppContext) {
+    let (window, view) = open_fields(cx);
+    let line = cx.update(|cx| view.read(cx).line.clone());
+    let at = |cx: &mut TestAppContext, range: std::ops::Range<usize>| {
+        cx.update_window(window, |_, window, cx| {
+            line.update(cx, |s, cx| {
+                s.focus(window, cx);
+                s.set_selected_range(range, cx);
+            })
+        })
+        .unwrap();
+    };
+    let selected = |cx: &mut TestAppContext| {
+        cx.update(|cx| {
+            let s = line.read(cx);
+            (s.selected_range(), s.is_selection_reversed())
+        })
+    };
+    ui(cx, window, |window, cx| {
+        line.update(cx, |s, cx| s.focus(window, cx));
+        window.input("牛乳を買う", cx);
+    });
+    let len = "牛乳を買う".len();
+
+    at(cx, 6..6);
+    ui(cx, window, |window, cx| window.press("up", cx));
+    assert_eq!(selected(cx), (0..0, false), "↑ で先頭へ");
+    ui(cx, window, |window, cx| window.press("down", cx));
+    assert_eq!(selected(cx), (len..len, false), "↓ で末尾へ");
+    // 押し続けても、そこにとどまる
+    ui(cx, window, |window, cx| window.press("down", cx));
+    assert_eq!(selected(cx), (len..len, false));
+
+    at(cx, 6..6);
+    ui(cx, window, |window, cx| window.press("shift-up", cx));
+    assert_eq!(selected(cx), (0..6, true), "Shift+↑ で先頭まで選ぶ");
+    ui(cx, window, |window, cx| window.press("shift-down", cx));
+    assert_eq!(
+        selected(cx),
+        (6..len, false),
+        "Shift+↓ で、選び始めた所から末尾まで選ぶ"
+    );
+
+    // 選んでいるときの ↑ も、選ぶのをやめて先頭へ
+    at(cx, 3..9);
+    ui(cx, window, |window, cx| window.press("up", cx));
+    assert_eq!(selected(cx), (0..0, false));
+}
+
+/// 複数行の欄では、↑↓ はまず行を動き、いちばん上の行の ↑ で文の先頭へ、いちばん下の行の ↓ で
+/// 文の末尾へ動く。折り返した行も、見た目の行で数える。
+#[gpui_kit::test]
+fn up_and_down_go_to_the_ends_in_a_textarea(cx: &mut TestAppContext) {
+    let (window, view) = open_fields(cx);
+    let area = cx.update(|cx| view.read(cx).area.clone());
+    let first = "一行目のメモ";
+    let text = format!("{first}\n二行目\n三行目のメモ");
+    ui(cx, window, |window, cx| {
+        area.update(cx, |s, cx| {
+            s.set_value(text.clone(), window, cx);
+            s.focus(window, cx);
+        });
+    });
+    let cursor = |cx: &mut TestAppContext| cx.update(|cx| area.read(cx).selected_range());
+    let second = first.len() + 1;
+    cx.update(|cx| area.update(cx, |s, cx| s.set_selected_range(second + 3..second + 3, cx)));
+
+    ui(cx, window, |window, cx| window.press("up", cx));
+    let range = cursor(cx);
+    assert!(
+        range.is_empty() && range.start > 0 && range.start < first.len(),
+        "↑ でまず 1 行目へ: {range:?}"
+    );
+    ui(cx, window, |window, cx| window.press("up", cx));
+    assert_eq!(cursor(cx), 0..0, "1 行目の ↑ で先頭へ");
+
+    ui(cx, window, |window, cx| {
+        window.press("down", cx);
+        window.press("down", cx);
+    });
+    let range = cursor(cx);
+    assert!(
+        range.start > second && range.start < text.len(),
+        "↓ で 3 行目へ: {range:?}"
+    );
+    ui(cx, window, |window, cx| window.press("down", cx));
+    assert_eq!(cursor(cx), text.len()..text.len(), "最後の行の ↓ で末尾へ");
+}
+
+/// 1 行の文が折り返していれば、上の見た目の行の ↑ で先頭へ動く前に、まず見た目の行を上がる。
+#[gpui_kit::test]
+fn up_moves_by_wrapped_rows_first(cx: &mut TestAppContext) {
+    let (window, view) = open_fields(cx);
+    let area = cx.update(|cx| view.read(cx).area.clone());
+    let text = "とても長い一行の文で、欄の幅に入りきらないので、いくつもの見た目の行に折り返す。";
+    ui(cx, window, |window, cx| {
+        area.update(cx, |s, cx| {
+            s.set_value(text, window, cx);
+            s.focus(window, cx);
+        });
+    });
+    cx.update(|cx| area.update(cx, |s, cx| s.set_selected_range(text.len()..text.len(), cx)));
+    ui(cx, window, |window, cx| window.press("up", cx));
+    let range = cx.update(|cx| area.read(cx).selected_range());
+    assert!(
+        range.start > 0 && range.start < text.len(),
+        "折り返した行では、まず 1 つ上の見た目の行へ: {range:?}"
+    );
+}
+
+/// アプリの入力欄（タスクを追加する欄）でも、↑ で先頭へ、↓ で末尾へ動く。
+#[gpui_kit::test]
+fn up_goes_to_the_start_in_quick_add(cx: &mut TestAppContext) {
+    start(cx);
+    let (window, view) = open(cx, wide());
+    ui(cx, window, |window, cx| {
+        window.click("nav-all", cx);
+        window.click("quick-add", cx);
+        window.input("牛乳を買う", cx);
+    });
+    let quick_add = cx.update(|cx| view.read(cx).inputs.quick_add.clone());
+    let cursor = |cx: &mut TestAppContext| cx.update(|cx| quick_add.read(cx).selected_range());
+    let len = "牛乳を買う".len();
+    assert_eq!(cursor(cx), len..len);
+    ui(cx, window, |window, cx| window.press("up", cx));
+    assert_eq!(cursor(cx), 0..0, "↑ で先頭へ");
+    ui(cx, window, |window, cx| window.press("down", cx));
+    assert_eq!(cursor(cx), len..len, "↓ で末尾へ");
 }

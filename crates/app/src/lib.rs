@@ -1,8 +1,10 @@
 //! malakt-mahoz の画面。gpui で描く。
 
 pub mod ai;
+pub mod ai_settings;
 pub mod ai_tools;
 pub mod ai_view;
+mod caret;
 pub mod cli;
 pub mod db;
 pub mod drops;
@@ -159,6 +161,7 @@ pub fn init_with(store: malakt_core::Store, ai: AiConfig, cx: &mut App) {
         KeyBinding::new("ctrl-b", PanePrefix, Some("MainView")),
     ]);
     shortcuts::bind(cx);
+    caret::init(cx);
     cx.on_action(|_: &NewWindow, cx| {
         let _ = open_main_window(cx);
     });
