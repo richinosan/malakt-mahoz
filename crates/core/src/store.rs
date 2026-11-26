@@ -1412,6 +1412,7 @@ impl Store {
             attachments: self.all_attachments()?,
             task_defaults: self.all_task_defaults()?,
             task_alerts: self.all_task_alerts()?,
+            ai_rules: self.all_ai_rules()?,
         })
     }
 
@@ -1499,6 +1500,9 @@ impl Store {
         }
         for a in &data.task_alerts {
             crate::alert::save(&tx, a)?;
+        }
+        for r in &data.ai_rules {
+            crate::rules::save(&tx, r)?;
         }
         for a in &data.attachments {
             let known: bool = tx
@@ -3672,10 +3676,10 @@ mod actor_tests {
         let mut conn = Connection::open_in_memory().unwrap();
         conn.pragma_update(None, "foreign_keys", "ON").unwrap();
         let tx = conn.transaction().unwrap();
-        for sql in &crate::schema::MIGRATIONS[..13] {
+        for sql in &crate::schema::MIGRATIONS[..14] {
             tx.execute_batch(sql).unwrap();
         }
-        tx.pragma_update(None, "user_version", 13).unwrap();
+        tx.pragma_update(None, "user_version", 14).unwrap();
         tx.execute_batch(
             "INSERT INTO tasks(id, title, description, status, priority, position, created_at, updated_at)
              VALUES ('t', '下見', '', 'needs_action', 0, 0, 0, 0);

@@ -32,6 +32,7 @@ const TABLES: &[&str] = &[
     "task_alerts",
     "task_links",
     "tickets",
+    "ai_rules",
 ];
 
 /// 1 回の操作の記録（`undo_log` の行の範囲）。

@@ -219,7 +219,36 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     ) STRICT, WITHOUT ROWID;
     ALTER TABLE notices ADD COLUMN due TEXT;
     "#,
-    // 14: 誰が変えたか（`actor::Actor` の文字列）。前の版の行は空（分からない）
+    // 14: AI のルール。ワークスペースのないルールはグローバル。
+    //     設定に 1 つずつ書いていた「いつも AI に伝えること」と、ワークスペースの「AI に伝えること」を
+    //     最初のルールに移す
+    r#"
+    CREATE TABLE ai_rules (
+        id TEXT PRIMARY KEY NOT NULL,
+        workspace_id TEXT REFERENCES workspaces(id) ON DELETE CASCADE,
+        name TEXT NOT NULL,
+        body TEXT NOT NULL DEFAULT '',
+        enabled INTEGER NOT NULL DEFAULT 1,
+        apply TEXT NOT NULL DEFAULT 'always',
+        position INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+    ) STRICT;
+    CREATE INDEX ai_rules_workspace ON ai_rules(workspace_id, position);
+    INSERT INTO ai_rules(id, workspace_id, name, body, created_at, updated_at)
+        SELECT lower(hex(randomblob(13))), NULL, 'いつも AI に伝えること', trim(value),
+               CAST(strftime('%s', 'now') AS INTEGER) * 1000,
+               CAST(strftime('%s', 'now') AS INTEGER) * 1000
+        FROM settings WHERE key = 'ai.context' AND trim(value) <> '';
+    INSERT INTO ai_rules(id, workspace_id, name, body, created_at, updated_at)
+        SELECT lower(hex(randomblob(13))), w.id, 'AI に伝えること', trim(s.value),
+               CAST(strftime('%s', 'now') AS INTEGER) * 1000,
+               CAST(strftime('%s', 'now') AS INTEGER) * 1000
+        FROM settings s JOIN workspaces w ON s.key = 'ai.context.ws.' || w.id
+        WHERE trim(s.value) <> '';
+    DELETE FROM settings WHERE key = 'ai.context' OR key GLOB 'ai.context.ws.*';
+    "#,
+    // 15: 誰が変えたか（`actor::Actor` の文字列）。前の版の行は空（分からない）
     r#"
     ALTER TABLE tasks ADD COLUMN created_by TEXT NOT NULL DEFAULT '';
     ALTER TABLE tasks ADD COLUMN updated_by TEXT NOT NULL DEFAULT '';
@@ -277,5 +306,60 @@ mod tests {
         assert_eq!((roles.as_str(), done), ("R", None));
         // もう一度開いても何もしない
         super::migrate(&mut conn).unwrap();
+    }
+
+    /// 設定に書いていた「AI に伝えること」は、ルールになって設定から消える。
+    #[test]
+    fn moves_the_ai_context_into_rules() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        for sql in &super::MIGRATIONS[..13] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 13).unwrap();
+        conn.execute_batch(
+            "INSERT INTO workspaces(id, name, created_at, updated_at) VALUES ('w', '仕事', 0, 0);
+             INSERT INTO settings(key, value) VALUES ('ai.context', ' 敬語で答える ');
+             INSERT INTO settings(key, value) VALUES ('ai.context.ws.w', 'PR は優先度を高');
+             INSERT INTO settings(key, value) VALUES ('ai.context.ws.gone', '消えたワークスペース');
+             INSERT INTO settings(key, value) VALUES ('ai.provider', 'claude');",
+        )
+        .unwrap();
+        super::migrate(&mut conn).unwrap();
+        let rules: Vec<(Option<String>, String, String, i64, String)> = conn
+            .prepare(
+                "SELECT workspace_id, name, body, enabled, apply FROM ai_rules ORDER BY workspace_id",
+            )
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(
+            rules,
+            vec![
+                (
+                    None,
+                    "いつも AI に伝えること".into(),
+                    "敬語で答える".into(),
+                    1,
+                    "always".into()
+                ),
+                (
+                    Some("w".into()),
+                    "AI に伝えること".into(),
+                    "PR は優先度を高".into(),
+                    1,
+                    "always".into()
+                ),
+            ]
+        );
+        let left: Vec<String> = conn
+            .prepare("SELECT key FROM settings ORDER BY key")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(left, vec!["ai.provider".to_owned()]);
     }
 }

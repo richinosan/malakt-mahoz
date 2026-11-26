@@ -401,12 +401,12 @@ pub fn definitions() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "get_ai_settings",
-            description: "AI チャットの設定（サービス、モデル、effort、振り分けのモデル、新しいタスクを整える、コメントから進捗を更新する、GitHub の定期チェック、いつも AI に伝えること、オート実行）を返す。",
+            description: "AI チャットの設定（サービス、モデル、effort、振り分けのモデル、新しいタスクを整える、コメントから進捗を更新する、GitHub の定期チェック、オート実行）を返す。AI のルールは list_ai_rules で読む。",
             schema: empty(),
         },
         ToolDef {
             name: "set_ai_settings",
-            description: "AI チャットの設定を変える。渡した項目だけが変わり、次のメッセージから使う。provider は claude / chatgpt / opencode / opencode_go / cursor。routing_model は空で今のモデルを使う。watch_minutes は 60 / 180 / 360 / 720 / 1440（分）。auto_run をオンにするときは、実行の前にユーザーに確認が出る。API キーはここでは変えられない（チャットの「設定」で入れる）。",
+            description: "AI チャットの設定を変える。渡した項目だけが変わり、次のメッセージから使う。provider は claude / chatgpt / opencode / opencode_go / cursor。routing_model は空で今のモデルを使う。watch_minutes は 60 / 180 / 360 / 720 / 1440（分）。auto_run をオンにするときは、実行の前にユーザーに確認が出る。API キーはここでは変えられない（チャットの「設定」で入れる）。AI のルールは create_ai_rule / update_ai_rule で変える。",
             schema: object(
                 json!({
                     "provider": {"type": "string"},
@@ -418,7 +418,6 @@ pub fn definitions() -> Vec<ToolDef> {
                     "watch_enabled": {"type": "boolean", "description": "GitHub の定期チェック"},
                     "watch_minutes": {"type": "integer"},
                     "watch_instruction": {"type": "string"},
-                    "context": {"type": "string", "description": "いつも AI に伝える前提と指示（4000 文字まで）"},
                     "auto_run": {"type": "boolean", "description": "コマンドの実行と削除を確認なしで行う"},
                 }),
                 &[],
@@ -1736,7 +1735,6 @@ impl Session {
             "watch_enabled": self.watch.enabled,
             "watch_minutes": self.watch.minutes,
             "watch_instruction": self.watch.instruction,
-            "context": self.context,
             "auto_run": self.auto_run,
         })
     }
@@ -1796,16 +1794,6 @@ impl Session {
             }
             watch.instruction = text.to_owned();
         }
-        let context = str_arg(args, "context");
-        if let Some(text) = context {
-            let count = text.trim().chars().count();
-            if count > crate::ai::MAX_CONTEXT_CHARS {
-                return Err(format!(
-                    "いつも AI に伝えることは {} 文字までです（今は {count} 文字）",
-                    crate::ai::MAX_CONTEXT_CHARS
-                ));
-            }
-        }
         self.error = None;
         if let Some(provider) = provider {
             self.set_provider(provider, cx);
@@ -1827,9 +1815,6 @@ impl Session {
         }
         if watch != self.watch {
             self.set_watch(Watch { ..watch }, cx);
-        }
-        if let Some(text) = context {
-            self.set_context(text, cx);
         }
         if let Some(on) = auto_run {
             self.set_auto_run(on, cx);

@@ -1327,13 +1327,7 @@ fn progress_on_github_is_summarized_into_a_task_comment(cx: &mut TestAppContext)
     assert_eq!(world.sent().len(), 2);
     assert_eq!(comments_of(cx, &task).len(), 1);
 
-    // 完了にしたタスクのリンクも見る。マージされると、状態の変化として渡す
-    cx.update(|cx| {
-        db::shared(cx).update(cx, |db, cx| {
-            db.store.set_task_status(&task, Status::Completed).unwrap();
-            cx.notify();
-        })
-    });
+    // マージされると、状態の変化として渡す
     let mut merged = pull("MERGED", comments, reviews);
     merged["mergedAt"] = json!("2026-11-27T00:00:00Z");
     set_pull(&world, merged);
@@ -1347,6 +1341,60 @@ fn progress_on_github_is_summarized_into_a_task_comment(cx: &mut TestAppContext)
         "{message}"
     );
     assert!(!message.contains("直しました"), "{message}");
+
+    // 完了したタスクのリンクは、もう見に行かない。覚えていた値も消える
+    cx.update(|cx| {
+        db::shared(cx).update(cx, |db, cx| {
+            db.store.set_task_status(&task, Status::Completed).unwrap();
+            cx.notify();
+        })
+    });
+    let before = gh_runs(cx);
+    tick(cx, 1440);
+    assert_eq!(gh_runs(cx), before);
+    assert_eq!(world.sent().len(), 3);
+    let seen = cx.update(|cx| {
+        db::shared(cx)
+            .read(cx)
+            .store
+            .setting("ai.watch.seen")
+            .unwrap()
+    });
+    assert_eq!(seen.as_deref(), Some("{}"));
+}
+
+/// ロックしている間も定期チェックは動き、進展があれば AI がタスクにコメントする。ロックはそのまま。
+#[gpui_kit::test]
+fn the_periodic_check_runs_while_locked(cx: &mut TestAppContext) {
+    let world = start(cx);
+    world.keys.set(Provider::Claude, "k").unwrap();
+    let task = watched_task(cx, 1440);
+    set_pull(&world, pull("OPEN", json!([]), json!([])));
+    tick(cx, 1);
+    cx.update(|cx| {
+        db::shared(cx).update(cx, |db, _| {
+            malakt_core::lock::enable(&mut db.store).unwrap()
+        });
+        db::lock_now(cx);
+    });
+    assert!(!cx.update(|cx| db::shared(cx).read(cx).unlocked));
+
+    let comments = json!([{"author": {"login": "alice"}, "body": "直しました", "createdAt": "2026-11-25T03:00:00Z"}]);
+    set_pull(&world, pull("OPEN", comments, json!([])));
+    let summary = "alice が修正を push した。次は再レビュー。";
+    world.reply(tool_reply(
+        "t1",
+        "add_comment",
+        json!({"task_id": task, "body": summary}),
+    ));
+    world.reply(text_reply("コメントしました。"));
+    tick(cx, 1440);
+    assert_eq!(world.sent().len(), 2);
+    assert_eq!(comments_of(cx, &task), vec![summary.to_owned()]);
+    assert!(
+        !cx.update(|cx| db::shared(cx).read(cx).unlocked),
+        "ロックしたまま"
+    );
 }
 
 /// 定期チェックからは、タスクの削除もコマンドの実行もしない（確認に答える人がいない）。
@@ -1790,92 +1838,231 @@ fn a_new_task_is_arranged_by_the_ai(cx: &mut TestAppContext) {
     let _ = view;
 }
 
-/// 設定に書いた「いつも AI に伝えること」は、毎回 AI に渡り、起動し直しても残る。
+fn rules_in(cx: &mut TestAppContext, workspace: Option<&str>) -> Vec<malakt_core::rules::AiRule> {
+    cx.update(|cx| db::shared(cx).read(cx).store.ai_rules(workspace).unwrap())
+}
+
+fn add_rule(cx: &mut TestAppContext, workspace: Option<&str>, name: &str, body: &str) -> String {
+    cx.update(|cx| {
+        db::shared(cx).update(cx, |db, cx| {
+            let rule = db.store.create_ai_rule(workspace, name, body).unwrap();
+            cx.notify();
+            rule.id
+        })
+    })
+}
+
+/// 設定の「ルール」で、「＋」から足して名前と本文をその場で書く。有効なルールが毎回 AI に渡る。
+/// 使わないようにしたルールと、自動の処理だけのルールは、チャットには渡らない。
 #[gpui_kit::test]
-fn the_custom_context_reaches_the_ai(cx: &mut TestAppContext) {
+fn rules_written_in_settings_reach_the_ai(cx: &mut TestAppContext) {
     let world = start(cx);
     world.keys.set(Provider::Claude, "k").unwrap();
     let (window, view) = open(cx, wide());
     let pane = open_chat(cx, window, &view);
-    open_settings(cx, window, &pane);
-    ui(cx, window, |window, cx| {
-        window.click("ai-context", cx);
-        window.input("PR のタスクは優先度を高にする", cx);
-        window.click("ai-context-save", cx);
+    let settings = |cx: &mut TestAppContext, open: bool| {
+        ui(cx, window, |window, cx| {
+            view.update(cx, |v, cx| {
+                if open {
+                    v.open_appearance(window, cx);
+                    v.show_appearance_section(
+                        malakt_mahoz::state::CustomizeSection::AiRules,
+                        window,
+                        cx,
+                    );
+                } else {
+                    v.close_top_dialog(window, cx);
+                }
+            })
+        })
+    };
+    settings(cx, true);
+    // 足すと「新規ルール」が開き、名前を全部選んでいるので、そのまま打ち替えられる
+    ui(cx, window, |window, cx| window.click("ai-rule-add", cx));
+    cx.run_until_parked();
+    let rules = rules_in(cx, None);
+    assert_eq!(rules.len(), 1);
+    assert_eq!(rules[0].name, "新規ルール");
+    write_rule(cx, window, 0, "優先度", "PR のタスクは優先度を高にする");
+    let rules = rules_in(cx, None);
+    assert_eq!(rules[0].name, "優先度");
+    assert_eq!(rules[0].body, "PR のタスクは優先度を高にする");
+    // 2 つ目は、自動の処理だけで使う
+    ui(cx, window, |window, cx| window.click("ai-rule-add", cx));
+    cx.run_until_parked();
+    write_rule(cx, window, 1, "整理", "説明は 3 行まで");
+    let second = rules_in(cx, None)[1].id.clone();
+    cx.update(|cx| {
+        db::shared(cx).update(cx, |db, _| {
+            db.store
+                .update_ai_rule(
+                    &second,
+                    &malakt_core::rules::RulePatch {
+                        apply: Some(malakt_core::rules::Apply::Auto),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+        })
     });
-    assert_eq!(
-        setting(cx, "ai.context").as_deref(),
-        Some("PR のタスクは優先度を高にする")
-    );
+    settings(cx, false);
+
     world.reply(text_reply("はい。"));
     say(cx, window, &pane, "こんにちは");
     wait(cx, "返事が来る", |s| !s.busy && s.items.len() >= 2);
     let system = world.sent()[0].2["system"].as_str().unwrap().to_owned();
     assert!(
-        system.ends_with("いつも従ってください。\nPR のタスクは優先度を高にする"),
+        system.ends_with("いつも従ってください。\n## 優先度\nPR のタスクは優先度を高にする"),
         "{system}"
     );
 
-    // 長すぎるものは保存しない
-    let long = "あ".repeat(malakt_mahoz::ai::MAX_CONTEXT_CHARS + 1);
-    let session = session(cx);
-    cx.update(|cx| session.update(cx, |s, cx| s.set_context(&long, cx)));
-    assert!(read(cx, |s| s.error.clone()).unwrap().contains("文字まで"));
-    assert_eq!(
-        read(cx, |s| s.context.clone()),
-        "PR のタスクは優先度を高にする"
-    );
+    // スイッチで使わないようにすると、渡らない
+    settings(cx, true);
+    ui(cx, window, |window, cx| {
+        window.click(("ai-rule-on", 0usize), cx)
+    });
+    assert!(!rules_in(cx, None)[0].enabled);
+    settings(cx, false);
+    world.reply(text_reply("はい。"));
+    say(cx, window, &pane, "もう一度");
+    wait(cx, "返事が来る", |s| !s.busy && s.items.len() >= 4);
+    let system = world.sent()[1].2["system"].as_str().unwrap().to_owned();
+    assert!(!system.contains("ユーザーが決めたルール"), "{system}");
+
+    // ごみ箱は、乗せたときと開いているときに出る
+    settings(cx, true);
+    ui(cx, window, |window, cx| {
+        window.click(("ai-rule-fold", 0usize), cx)
+    });
+    ui(cx, window, |window, cx| {
+        window.click(("ai-rule-delete", 0usize), cx)
+    });
+    let left = rules_in(cx, None);
+    assert_eq!(left.len(), 1);
+    assert_eq!(left[0].name, "整理");
 }
 
-/// ワークスペースの設定に書いた「AI に伝えること」は、そのワークスペースを開いている間だけ AI に渡る。
+/// 名前を書いている途中の Esc は、書きかけを捨ててルールを閉じる。設定のウィンドウは閉じない。
 #[gpui_kit::test]
-fn the_workspace_context_reaches_the_ai(cx: &mut TestAppContext) {
-    let world = start(cx);
-    world.keys.set(Provider::Claude, "k").unwrap();
-    let workspace = cx.update(|cx| {
-        db::shared(cx).update(cx, |db, cx| {
-            let workspace = db.store.create_workspace(None, "仕事").unwrap();
-            cx.notify();
-            workspace.id
+fn escape_while_naming_a_rule_keeps_the_settings_open(cx: &mut TestAppContext) {
+    let _world = start(cx);
+    add_rule(cx, None, "敬語", "敬語で答える");
+    let (window, view) = open(cx, wide());
+    ui(cx, window, |window, cx| {
+        view.update(cx, |v, cx| {
+            v.open_appearance(window, cx);
+            v.show_appearance_section(malakt_mahoz::state::CustomizeSection::AiRules, window, cx);
         })
     });
-    let (window, view) = open(cx, wide());
-    let session = session(cx);
-    cx.update(|cx| session.update(cx, |s, cx| s.set_context("敬語で答える", cx)));
+    ui(cx, window, |window, cx| {
+        window.click(("ai-rule", 0usize), cx)
+    });
+    ui(cx, window, |window, cx| {
+        window.click("ai-rule-name", cx);
+        window.input("ていねい", cx);
+        window.press("escape", cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(rules_in(cx, None)[0].name, "敬語");
+    cx.update(|cx| assert_eq!(view.read(cx).modal, malakt_mahoz::state::Modal::Appearance));
+    assert!(ui_find(cx, window, "ai-rule-name").is_none());
+    // もう一度の Esc で、設定のウィンドウを閉じる
+    ui(cx, window, |window, cx| window.press("escape", cx));
+    cx.update(|cx| assert_eq!(view.read(cx).modal, malakt_mahoz::state::Modal::None));
+}
 
-    // ワークスペースの設定で書いて保存する
+/// 開いたばかりの `ix` 番目のルールに、名前（全部選んであるので打ち替える）と本文を書き、行を押して閉じる。
+fn write_rule(cx: &mut TestAppContext, window: AnyWindowHandle, ix: usize, name: &str, body: &str) {
+    // ほかの場所を押したときの保存（Blur）は、手前のウィンドウでだけ起きる
+    ui(cx, window, |window, _| window.activate_window());
+    ui(cx, window, |window, cx| window.input(name, cx));
+    ui(cx, window, |window, cx| window.press("enter", cx));
+    ui(cx, window, |window, cx| window.click("ai-rule-body", cx));
+    ui(cx, window, |window, cx| window.input(body, cx));
+    // 開け閉めの印を押して閉じると保存する
+    ui(cx, window, |window, cx| {
+        window.click(("ai-rule-fold", ix), cx)
+    });
+}
+
+fn ui_find(cx: &mut TestAppContext, window: AnyWindowHandle, id: &'static str) -> Option<()> {
+    let mut found = None;
+    ui(cx, window, |window, _| {
+        found = window.find_all(id).first().map(|_| ());
+    });
+    found
+}
+
+/// ワークスペースのルールは、ワークスペースの設定に重ねて開く一覧で書く。
+/// そのワークスペースとサブワークスペースを開いている間だけ、メッセージに添えて AI に渡る。
+#[gpui_kit::test]
+fn workspace_rules_reach_the_ai_in_that_workspace(cx: &mut TestAppContext) {
+    let world = start(cx);
+    world.keys.set(Provider::Claude, "k").unwrap();
+    let (workspace, team) = cx.update(|cx| {
+        db::shared(cx).update(cx, |db, cx| {
+            let workspace = db.store.create_workspace(None, "仕事").unwrap();
+            let team = db
+                .store
+                .create_workspace(Some(&workspace.id), "チーム")
+                .unwrap();
+            cx.notify();
+            (workspace.id, team.id)
+        })
+    });
+    add_rule(cx, None, "敬語", "敬語で答える");
+    let (window, view) = open(cx, wide());
+
     ui(cx, window, |window, cx| {
         view.update(cx, |v, cx| {
             v.open_workspace_settings(&workspace, window, cx)
         });
     });
-    ui(cx, window, |window, cx| {
-        window.click("ws-context", cx);
-        window.input("PR のタスクは優先度を高にする", cx);
-        window.click("ws-settings-save", cx);
+    ui(cx, window, |window, cx| window.click("ws-rules", cx));
+    cx.update(|cx| {
+        assert_eq!(
+            view.read(cx).sub_modal,
+            Some(malakt_mahoz::state::SubModal::Rules)
+        )
     });
-    assert_eq!(
-        setting(cx, &malakt_mahoz::ai::workspace_context_key(&workspace)).as_deref(),
-        Some("PR のタスクは優先度を高にする")
-    );
+    ui(cx, window, |window, cx| window.click("ai-rule-add", cx));
+    cx.run_until_parked();
+    write_rule(cx, window, 0, "優先度", "PR のタスクは優先度を高にする");
+    let own = rules_in(cx, Some(&workspace));
+    assert_eq!(own.len(), 1);
+    assert_eq!(own[0].body, "PR のタスクは優先度を高にする");
+    assert!(rules_in(cx, None).iter().all(|r| r.name != "優先度"));
+    // Esc で重ねた一覧だけを閉じる
+    ui(cx, window, |window, cx| window.press("escape", cx));
+    cx.update(|cx| {
+        let v = view.read(cx);
+        assert_eq!(v.sub_modal, None);
+        assert!(matches!(
+            v.modal,
+            malakt_mahoz::state::Modal::WorkspaceSettings(_)
+        ));
+    });
+    ui(cx, window, |window, cx| {
+        window.click("ws-settings-save", cx)
+    });
 
-    // ほかの場所では、全体の分だけ
+    // ほかの場所では、グローバルのルールだけ
     let pane = open_chat(cx, window, &view);
     world.reply(text_reply("はい。"));
     say(cx, window, &pane, "こんにちは");
     wait(cx, "返事が来る", |s| !s.busy && s.items.len() >= 2);
     let system = world.sent()[0].2["system"].as_str().unwrap().to_owned();
-    assert!(system.ends_with("敬語で答える"), "{system}");
+    assert!(system.ends_with("## 敬語\n敬語で答える"), "{system}");
     let first = world.sent()[0].2["messages"][0]["content"]
         .as_str()
         .unwrap()
         .to_owned();
-    assert!(!first.contains("前提と指示"), "{first}");
+    assert!(!first.contains("ワークスペース「仕事」のルール"), "{first}");
 
-    // そのワークスペースを開くと、両方が渡る
+    // サブワークスペースを開くと、親のルールも渡る
     ui(cx, window, |_, cx| {
         view.update(cx, |v, cx| {
-            v.go(malakt_mahoz::state::Nav::Workspace(workspace.clone()), cx)
+            v.go(malakt_mahoz::state::Nav::Workspace(team.clone()), cx)
         });
     });
     world.reply(text_reply("はい。"));
@@ -1887,16 +2074,58 @@ fn the_workspace_context_reaches_the_ai(cx: &mut TestAppContext) {
     let message = second["messages"][2]["content"].as_str().unwrap();
     assert!(
         message.ends_with(
-            "ワークスペース「仕事」についての前提と指示:\nPR のタスクは優先度を高にする"
+            "ワークスペース「仕事」のルールです。いつも従ってください。\n## 優先度\nPR のタスクは優先度を高にする"
         ),
         "{message}"
     );
     // 前のメッセージは、送ったときのまま
     assert_eq!(second["messages"][0]["content"].as_str().unwrap(), first);
+}
 
-    // 長すぎるものは保存しない
-    let long = "あ".repeat(malakt_mahoz::ai::MAX_WORKSPACE_CONTEXT_CHARS + 1);
-    assert!(malakt_mahoz::ai::workspace_context_error(&long).is_some());
+/// ワークスペースのメニューの「AI のルール」は、設定のルールをそのワークスペースのものにして開く。
+#[gpui_kit::test]
+fn the_workspace_menu_opens_its_rules(cx: &mut TestAppContext) {
+    let _world = start(cx);
+    let workspace = cx.update(|cx| {
+        db::shared(cx).update(cx, |db, cx| {
+            let workspace = db.store.create_workspace(None, "仕事").unwrap();
+            cx.notify();
+            workspace.id
+        })
+    });
+    add_rule(cx, Some(&workspace), "優先度", "PR は高");
+    add_rule(cx, None, "敬語", "敬語で答える");
+    let (window, view) = open(cx, wide());
+    ui(cx, window, |window, cx| {
+        view.update(cx, |v, cx| v.open_workspace_rules(&workspace, window, cx))
+    });
+    cx.update(|cx| {
+        let v = view.read(cx);
+        assert_eq!(v.modal, malakt_mahoz::state::Modal::Appearance);
+        assert_eq!(
+            v.appearance_section,
+            malakt_mahoz::state::CustomizeSection::AiRules
+        );
+    });
+    let scope = |cx: &mut TestAppContext| {
+        cx.update(|cx| view.read(cx).ai_settings.read(cx).rules_scope.clone())
+    };
+    assert_eq!(scope(cx).as_deref(), Some(workspace.as_str()));
+    // 場所のメニューで「すべてのワークスペース」に切り替える
+    ui(cx, window, |window, cx| window.click("ai-rules-scope", cx));
+    ui(cx, window, |window, cx| {
+        window.press("down", cx);
+        window.press("enter", cx);
+    });
+    assert_eq!(scope(cx), None);
+    // 歯車から開き直すと、すべてのワークスペースのルールから
+    ui(cx, window, |window, cx| {
+        view.update(cx, |v, cx| v.open_workspace_rules(&workspace, window, cx))
+    });
+    ui(cx, window, |window, cx| {
+        view.update(cx, |v, cx| v.open_appearance(window, cx))
+    });
+    assert_eq!(scope(cx), None);
 }
 
 /// 設定を変えて最初の指示が変わると、前の考えのブロックをサーバーが断る。
@@ -1914,8 +2143,7 @@ fn a_rejected_thinking_block_is_dropped_and_retried(cx: &mut TestAppContext) {
     say(cx, window, &pane, "こんにちは");
     wait(cx, "返事が来る", |s| !s.busy && s.items.len() >= 2);
 
-    let session = session(cx);
-    cx.update(|cx| session.update(cx, |s, cx| s.set_context("敬語で答える", cx)));
+    add_rule(cx, None, "敬語", "敬語で答える");
     world.fail(
         "サーバーがエラーを返しました（400）。messages.1.content.0: Invalid `signature` in `thinking` block. The block is bound to a different conversation.",
     );

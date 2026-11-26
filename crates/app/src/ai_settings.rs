@@ -20,6 +20,8 @@ use crate::render::app_icon;
 use crate::scroll::Menus;
 use crate::shadow::{Elevate, Elevation};
 
+mod rules;
+
 /// 参照する寸法を、画面全体の拡大率に合わせる。
 const fn px(value: f32) -> Pixels {
     gpui_kit::px(value * crate::UI_SCALE)
@@ -41,16 +43,23 @@ fn col() -> Div {
 pub enum AiGroup {
     Model,
     Behavior,
+    Rules,
     Github,
 }
 
 impl AiGroup {
-    pub const ALL: [AiGroup; 3] = [AiGroup::Model, AiGroup::Behavior, AiGroup::Github];
+    pub const ALL: [AiGroup; 4] = [
+        AiGroup::Model,
+        AiGroup::Behavior,
+        AiGroup::Rules,
+        AiGroup::Github,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
             AiGroup::Model => "モデル",
             AiGroup::Behavior => "動作",
+            AiGroup::Rules => "ルール",
             AiGroup::Github => "GitHub",
         }
     }
@@ -65,7 +74,7 @@ pub enum AiRow {
     Coordinator,
     Key,
     AutoRun,
-    Context,
+    Rules,
     Arrange,
     Track,
     Shell,
@@ -83,10 +92,10 @@ impl AiRow {
         AiRow::Coordinator,
         AiRow::Key,
         AiRow::AutoRun,
-        AiRow::Context,
         AiRow::Arrange,
         AiRow::Track,
         AiRow::Shell,
+        AiRow::Rules,
         AiRow::Account,
         AiRow::Watch,
         AiRow::WatchMinutes,
@@ -98,9 +107,8 @@ impl AiRow {
             AiRow::Service | AiRow::Model | AiRow::Effort | AiRow::Coordinator | AiRow::Key => {
                 AiGroup::Model
             }
-            AiRow::AutoRun | AiRow::Context | AiRow::Arrange | AiRow::Track | AiRow::Shell => {
-                AiGroup::Behavior
-            }
+            AiRow::AutoRun | AiRow::Arrange | AiRow::Track | AiRow::Shell => AiGroup::Behavior,
+            AiRow::Rules => AiGroup::Rules,
             AiRow::Account | AiRow::Watch | AiRow::WatchMinutes | AiRow::WatchInstruction => {
                 AiGroup::Github
             }
@@ -115,7 +123,7 @@ impl AiRow {
             AiRow::Coordinator => "振り分けのモデル",
             AiRow::Key => "API キー",
             AiRow::AutoRun => "オート実行",
-            AiRow::Context => "いつも AI に伝えること",
+            AiRow::Rules => "ルール",
             AiRow::Arrange => "新しいタスクを整える",
             AiRow::Track => "コメントから進捗を更新する",
             AiRow::Shell => "AI のシェル",
@@ -130,6 +138,7 @@ impl AiRow {
         Some(match self {
             AiRow::Coordinator => "考え中に送ったメッセージを、続きか並列かに振り分ける",
             AiRow::AutoRun => "コマンド実行とタスク削除を確認なしで行う",
+            AiRow::Rules => "AI がいつも従う指示",
             AiRow::Arrange => "タスクを作ると、AI がリンクを読んでタイトルと説明を整える",
             AiRow::Track => "タスクにコメントを書くと、AI が進捗・状態・期限を更新する",
             AiRow::Shell => "AI のタブで動かすシェル",
@@ -150,6 +159,7 @@ impl AiRow {
             AiRow::Key => "AI キー 鍵",
             AiRow::Shell => "ターミナル シェル",
             AiRow::Account => "gh ログイン",
+            AiRow::Rules => "AI ルール 指示 前提 プロンプト ワークスペース",
             _ => "AI",
         }
     }
@@ -158,7 +168,7 @@ impl AiRow {
     pub fn wide(self) -> bool {
         matches!(
             self,
-            AiRow::Service | AiRow::Model | AiRow::Key | AiRow::Context | AiRow::WatchInstruction
+            AiRow::Service | AiRow::Model | AiRow::Key | AiRow::Rules | AiRow::WatchInstruction
         )
     }
 
@@ -181,7 +191,14 @@ pub struct AiSettings {
     model_input: Entity<InputState>,
     /// 定期チェックの指示。
     watch_input: Entity<TextareaState>,
-    context_input: Entity<TextareaState>,
+    /// ルールの一覧で見ている場所。`None` はグローバル（すべてのワークスペース）。
+    pub rules_scope: Option<String>,
+    /// 開いている（名前と本文を書いている）ルール。
+    rule_open: Option<String>,
+    rule_name: Entity<InputState>,
+    rule_body: Entity<TextareaState>,
+    /// ルールを保存できなかった理由。
+    rules_error: Option<SharedString>,
     /// モデルの一覧を開いている。
     pub model_open: bool,
     _subscriptions: Vec<Subscription>,
@@ -203,17 +220,26 @@ impl AiSettings {
             state.set_value(instruction, window, cx);
             state
         });
-        let context = session.read(cx).context.clone();
-        let context_input = cx.new(|cx| {
-            let mut state =
-                TextareaState::new(window, cx).placeholder("例: PR のタスクは優先度を高にする");
-            state.set_value(context, window, cx);
-            state
+        let rule_name = cx.new(|cx| InputState::new(window, cx));
+        let rule_body = cx.new(|cx| {
+            TextareaState::new(window, cx).placeholder("例: PR のタスクは優先度を高にする")
         });
         crate::term::shared(cx).update(cx, |terms, cx| terms.load_profiles(cx));
         let subscriptions = vec![
             cx.observe(&session, |_, _, cx| cx.notify()),
             cx.observe(&crate::term::shared(cx), |_, _, cx| cx.notify()),
+            // AI や外のエージェントがルールを変えたら、一覧を読み直す
+            cx.observe(&crate::db::shared(cx), |_, _, cx| cx.notify()),
+            cx.subscribe_in(&rule_name, window, |this, _, event: &InputEvent, _, cx| {
+                if matches!(event, InputEvent::PressEnter { .. } | InputEvent::Blur) {
+                    this.save_rule_name(cx);
+                }
+            }),
+            cx.subscribe_in(&rule_body, window, |this, _, event: &InputEvent, _, cx| {
+                if matches!(event, InputEvent::Blur) {
+                    this.save_rule_body(cx);
+                }
+            }),
             cx.subscribe_in(
                 &key_input,
                 window,
@@ -254,7 +280,11 @@ impl AiSettings {
             key_input,
             model_input,
             watch_input,
-            context_input,
+            rules_scope: None,
+            rule_open: None,
+            rule_name,
+            rule_body,
+            rules_error: None,
             model_open: false,
             _subscriptions: subscriptions,
         }
@@ -530,27 +560,7 @@ impl AiSettings {
                     this.session.update(cx, |s, cx| s.set_auto_run(on, cx));
                 }))
                 .into_any_element(),
-            AiRow::Context => row()
-                .w_full()
-                .gap_1()
-                .items_end()
-                .child(
-                    div()
-                        .id("ai-context")
-                        .flex_1()
-                        .min_w_0()
-                        .child(Textarea::new(&self.context_input).h(px(72.)))
-                        .test_support(),
-                )
-                .child(feel::gloss(
-                    icon_button("ai-context-save", "check", "保存").on_click(cx.listener(
-                        |this, _, _, cx| {
-                            let text = this.context_input.read(cx).value().to_string();
-                            this.session.update(cx, |s, cx| s.set_context(&text, cx));
-                        },
-                    )),
-                ))
-                .into_any_element(),
+            AiRow::Rules => self.rules_editor(true, cx),
             AiRow::Arrange => Switch::new("ai-arrange")
                 .checked(session.arrange)
                 .on_click(cx.listener(|this, on: &bool, _, cx| {

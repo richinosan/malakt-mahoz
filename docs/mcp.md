@@ -73,7 +73,8 @@ Windows のアプリは、起動のときに黒い窓を出さないように作
 | `add_attachment` / `delete_attachment` | ファイルを添付する、添付を削除する |
 | `issue_ticket` / `revoke_tickets` | 完了チケットを発行する、取り消す |
 | `create_workspace` / `update_workspace` / `delete_workspace` | ワークスペースを作る、名前を変える・移す、削除する |
-| `get_workspace_settings` / `update_workspace_settings` | ワークスペースの基準日、タスクを追加したときに入る値、AI に伝えること、ターミナルのフォルダー |
+| `get_workspace_settings` / `update_workspace_settings` | ワークスペースの基準日、タスクを追加したときに入る値、ターミナルのフォルダー |
+| `list_ai_rules` / `create_ai_rule` / `update_ai_rule` / `delete_ai_rule` | AI のルール（グローバルと、ワークスペースごと）を読む、足す、変える、削除する。サーバーの説明で、有効なルールに従うよう伝えている |
 | `create_person` / `update_person` / `delete_person` | 担当者を作る、名前・メモ・使うワークスペースを変える、削除する。`create_person` に `workspace_id` を渡すと、そのワークスペースの担当者になる |
 | `list_categories` / `list_notices` / `mark_notices_read` | カテゴリの一覧、通知の一覧、通知を既読にする |
 | `get_due_alerts` / `set_due_alerts` | 期限をいつ知らせるか（全体の標準と、タスクごとの上書き） |

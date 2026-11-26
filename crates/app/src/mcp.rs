@@ -34,7 +34,9 @@ const INSTRUCTIONS_HEAD: &str = "\
 タスク管理アプリ malakt-mahoz のタスク、ワークスペース、担当者、コメントを読み書きします。\
 ID は list_workspaces、list_people、list_tasks で調べてから使ってください。\
 日付は YYYY-MM-DD、時刻つきなら YYYY-MM-DD HH:MM で渡します。\
-変更は undo で 1 つずつ元に戻せます（このサーバーが動いている間）。";
+変更は undo で 1 つずつ元に戻せます（このサーバーが動いている間）。\
+ユーザーが決めた AI のルールは list_ai_rules で読めます。apply が always か chat の有効なルールに従ってください。\
+ワークスペースのルールは、そのワークスペースとサブワークスペースのタスクを扱うときに従ってください。";
 
 /// サーバーの説明。コメントの決まりは、アプリの中の AI と同じ文を渡す。
 fn instructions() -> String {
@@ -509,6 +511,7 @@ mod tests {
                 // 外のエージェントにも、中身のないコメントを書かせない
                 assert!(t["description"].as_str().unwrap().contains("事実だけ"));
                 assert!(instructions().contains("していないこと"));
+                assert!(instructions().contains("list_ai_rules"));
             }
         }
         // 書き込みとして扱うツールは、どれも一覧にある

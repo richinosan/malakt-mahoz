@@ -62,19 +62,17 @@ impl Default for Watch {
 /// 定期チェックで見に行くリンクと、それが書かれているタスク（ID とタイトル）。
 type WatchTarget = (Link, Vec<(String, String)>);
 
-/// すべてのタスクに書かれている issue とプルリクエストのリンクを集める（[`MAX_WATCH_LINKS`] 個まで）。
-/// 数が多いときは、未完了のタスクと、最近書き換えたタスクのリンクを先に見る。
+/// 未完了のタスクに書かれている issue とプルリクエストのリンクを集める（[`MAX_WATCH_LINKS`] 個まで）。
+/// 数が多いときは、最近書き換えたタスクのリンクを先に見る。
 fn watch_targets(store: &malakt_core::Store) -> Result<Vec<WatchTarget>, String> {
-    let mut tasks = store
-        .tasks(malakt_core::Scope::All, &malakt_core::TaskFilter::default())
-        .map_err(|e| format!("タスクを読めませんでした: {e}"))?;
-    let done = |status: malakt_core::Status| {
-        matches!(
-            status,
-            malakt_core::Status::Completed | malakt_core::Status::Cancelled
-        )
+    let filter = malakt_core::TaskFilter {
+        open_only: true,
+        ..Default::default()
     };
-    tasks.sort_by_key(|t| (done(t.status), std::cmp::Reverse(t.updated_at)));
+    let mut tasks = store
+        .tasks(malakt_core::Scope::All, &filter)
+        .map_err(|e| format!("タスクを読めませんでした: {e}"))?;
+    tasks.sort_by_key(|t| std::cmp::Reverse(t.updated_at));
     let mut targets: Vec<WatchTarget> = Vec::new();
     for task in tasks {
         for link in github::find_links(&format!("{}\n{}", task.title, task.description)) {
@@ -275,14 +273,6 @@ fn saved_bounds(v: &Value) -> Option<[f32; 4]> {
     (list.len() == 4 && out[2] >= 200. && out[3] >= 200.).then_some(out)
 }
 
-/// 新しいタスクを AI が整えるとき、1 回で扱うタスクの数。
-/// いつも AI に伝える前提と指示の保存先と、長さの上限。
-const CONTEXT_SETTING: &str = "ai.context";
-pub const MAX_CONTEXT_CHARS: usize = 4000;
-pub use malakt_ai::tools::{
-    workspace_context_error, workspace_context_key, MAX_WORKSPACE_CONTEXT_CHARS,
-};
-
 /// 整えられなかった理由を、タスクの画面に出す短い言葉にする。くわしい理由はホバーで出す。
 pub fn arrange_note_label(note: &str) -> &'static str {
     if note.contains("API キー") {
@@ -297,6 +287,7 @@ pub fn arrange_note_label(note: &str) -> &'static str {
 /// 入力欄に添えられるタスクの数。
 pub const MAX_ATTACHED_TASKS: usize = 10;
 
+/// 新しいタスクを AI が整えるとき、1 回で扱うタスクの数。
 const MAX_ARRANGE_TASKS: usize = 5;
 /// 新しいタスクを整えるとき、タスク 1 つで読みに行くリンクの数。
 const MAX_ARRANGE_LINKS: usize = 3;
@@ -666,8 +657,6 @@ pub struct Session {
     auto: bool,
     /// 新しいタスクを AI が整える。標準はオン（API キーがなければ動かない）。
     pub arrange: bool,
-    /// ユーザーが書いた、いつも AI に伝える前提と指示。
-    pub context: String,
     /// AI が今整えているタスクの ID。
     pub arranging: Vec<String>,
     /// タスクを整えられなかった理由。タスクの ID ごと。
@@ -779,7 +768,6 @@ impl Session {
         let mut runs = Vec::new();
         let arrange;
         let track;
-        let context;
         let (provider, effort, models, coordinators) = {
             let store = &db.read(cx).store;
             let mut read = |key: &str| match store.setting(key) {
@@ -890,7 +878,6 @@ impl Session {
             auto_run = read("ai.auto_run").as_deref() == Some("1");
             arrange = read("ai.arrange").as_deref() != Some("0");
             track = read("ai.track").as_deref() != Some("0");
-            context = read(CONTEXT_SETTING).unwrap_or_default();
             let defaults = Watch::default();
             watch = Watch {
                 enabled: read("ai.watch.enabled").as_deref() != Some("0"),
@@ -948,7 +935,6 @@ impl Session {
             watch_epoch: (unix_now(), cx.background_executor().now()),
             auto: false,
             arrange,
-            context,
             arranging: Vec::new(),
             arrange_notes: HashMap::new(),
             track,
@@ -1352,7 +1338,6 @@ impl Session {
             self.models.clone(),
             self.effort,
             self.key.clone(),
-            self.context.clone(),
             self.github.clone(),
             self.workspace.clone(),
             self.catalog.clone(),
@@ -1365,7 +1350,6 @@ impl Session {
                 w.models,
                 w.effort,
                 w.key,
-                w.context,
                 w.github,
                 w.workspace,
                 w.catalog,
@@ -1664,45 +1648,27 @@ impl Session {
         }
     }
 
-    /// 今開いているワークスペースについての、AI に伝える前提と指示。
-    fn workspace_context(&self, cx: &App) -> String {
+    /// この実行で使うルール。グローバルのものは最初の指示に、ワークスペースのものはメッセージに添える。
+    /// チャットでは今開いているワークスペース、自動の処理では扱うタスクのワークスペースのルールを使う。
+    fn rules(&self, cx: &App) -> Result<(String, String), String> {
         let store = &self.db.read(cx).store;
-        let Some(id) = &self.workspace else {
-            return String::new();
-        };
-        // 読めなければ添えない（次の操作でデータベースのエラーとして出る）
-        let own = store
-            .setting(&workspace_context_key(id))
-            .ok()
-            .flatten()
-            .unwrap_or_default();
-        if own.trim().is_empty() {
-            return String::new();
+        let fail = |e: malakt_core::Error| format!("AI のルールを読めませんでした: {e}");
+        let mut workspaces: Vec<String> = Vec::new();
+        if self.auto {
+            for (id, _) in &self.auto_tasks {
+                // 消えたタスクは扱わないので、そのワークスペースのルールも要らない
+                if let Ok(task) = store.task(id) {
+                    workspaces.extend(task.workspace_id);
+                }
+            }
+        } else {
+            workspaces.extend(self.workspace.clone());
         }
-        let name = store.workspace(id).map(|w| w.name).unwrap_or_default();
-        format!(
-            "ワークスペース「{name}」についての前提と指示:\n{}",
-            own.trim()
-        )
-    }
-
-    /// いつも AI に伝える前提と指示を保存する。
-    pub fn set_context(&mut self, text: &str, cx: &mut Context<Self>) {
-        let text = text.trim();
-        let count = text.chars().count();
-        if count > MAX_CONTEXT_CHARS {
-            self.error = Some(
-                format!("いつも伝えることは {MAX_CONTEXT_CHARS} 文字までです（今は {count} 文字）")
-                    .into(),
-            );
-            cx.notify();
-            return;
-        }
-        if text == self.context || !self.save_setting(CONTEXT_SETTING, text, cx) {
-            return;
-        }
-        self.context = text.to_owned();
-        cx.notify();
+        let ids: Vec<&str> = workspaces.iter().map(String::as_str).collect();
+        Ok((
+            tools::global_rules(store, self.auto).map_err(fail)?,
+            tools::workspace_rules(store, &ids, self.auto).map_err(fail)?,
+        ))
     }
 
     // ---- 新しいタスクを整える ----
@@ -2448,9 +2414,10 @@ impl Session {
     }
 
     /// タスクに書かれている GitHub のリンクを見に行き、前回から進展があれば AI がタスクにコメントする。
-    /// チャットが動いている間とロック中は、何もしない（手が空いてから次の時刻の確認で見る）。
+    /// ロック中も動く（画面を見ていない間の進展も、タスクに残す）。
+    /// チャットが動いている間は何もしない（手が空いてから次の時刻の確認で見る）。
     pub fn check_github(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.busy || !self.db.read(cx).unlocked {
+        if self.busy {
             return false;
         }
         let now = self.watch_now(cx);
@@ -3420,7 +3387,7 @@ impl Session {
         // 最初の指示は会話の間変えない。日付と今の画面は、最後のメッセージに添える
         let system = this
             .update(cx, |s, cx| {
-                let mut extra = s.workspace_context(cx);
+                let (global, mut extra) = s.rules(cx)?;
                 if let GithubAccount::Login(login) = &s.github {
                     extra = format!("{}\n{extra}", github::account_note(login));
                 }
@@ -3432,9 +3399,9 @@ impl Session {
                 if let Some(Turn::User(message)) = s.turns.last_mut() {
                     message.push_str(&note);
                 }
-                tools::system_prompt(&s.context)
+                Ok::<_, String>(tools::system_prompt(&global))
             })
-            .map_err(gone)?;
+            .map_err(gone)??;
         let mut recovered = false;
         for _ in 0..MAX_ROUNDS {
             let result = Self::complete(
