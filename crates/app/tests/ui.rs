@@ -4739,7 +4739,9 @@ fn standard_keys_work_on_the_list(cx: &mut TestAppContext) {
         assert_eq!(v.cursor, None);
         assert_eq!(v.modal, Modal::None);
     });
+    // ↓ は名前の末尾へ動く（選んでいた名前は選ばれていない）。選び直して打ち替える
     ui(cx, window, |window, cx| {
+        window.press("secondary-a", cx);
         window.input("しごと", cx);
         window.press("enter", cx);
     });
@@ -5841,4 +5843,171 @@ fn each_filter_is_cleared_by_its_own_x(cx: &mut TestAppContext) {
     for id in ids {
         assert!(disabled(cx, id), "{id} は押せない");
     }
+}
+
+/// 入力欄を 2 つだけ置いた画面。↑↓ の動きを確かめる。
+struct Fields {
+    line: Entity<InputState>,
+    area: Entity<gpui_kit::component::input::TextareaState>,
+}
+
+impl gpui_kit::Render for Fields {
+    fn render(
+        &mut self,
+        _: &mut gpui_kit::Window,
+        _: &mut gpui_kit::Context<Self>,
+    ) -> impl gpui_kit::IntoElement {
+        use gpui_kit::component::input::{Input, Textarea};
+        use gpui_kit::{div, ParentElement, Styled};
+        div().size_full().child(Input::new(&self.line)).child(
+            div()
+                .w(px(160.))
+                .child(Textarea::new(&self.area).h(px(200.))),
+        )
+    }
+}
+
+fn open_fields(cx: &mut TestAppContext) -> (AnyWindowHandle, Entity<Fields>) {
+    start(cx);
+    cx.update(|cx| {
+        gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
+            cx.new(|cx| Fields {
+                line: cx.new(|cx| InputState::new(window, cx)),
+                area: cx.new(|cx| gpui_kit::component::input::TextareaState::new(window, cx)),
+            })
+        })
+        .expect("ウィンドウを開く")
+    })
+}
+
+/// 1 行の欄では、↑ で文の先頭へ、↓ で文の末尾へ動く。Shift を押せば、そこまで選ぶ。
+#[gpui_kit::test]
+fn up_and_down_go_to_the_ends_in_a_line(cx: &mut TestAppContext) {
+    let (window, view) = open_fields(cx);
+    let line = cx.update(|cx| view.read(cx).line.clone());
+    let at = |cx: &mut TestAppContext, range: std::ops::Range<usize>| {
+        cx.update_window(window, |_, window, cx| {
+            line.update(cx, |s, cx| {
+                s.focus(window, cx);
+                s.set_selected_range(range, cx);
+            })
+        })
+        .unwrap();
+    };
+    let selected = |cx: &mut TestAppContext| {
+        cx.update(|cx| {
+            let s = line.read(cx);
+            (s.selected_range(), s.is_selection_reversed())
+        })
+    };
+    ui(cx, window, |window, cx| {
+        line.update(cx, |s, cx| s.focus(window, cx));
+        window.input("牛乳を買う", cx);
+    });
+    let len = "牛乳を買う".len();
+
+    at(cx, 6..6);
+    ui(cx, window, |window, cx| window.press("up", cx));
+    assert_eq!(selected(cx), (0..0, false), "↑ で先頭へ");
+    ui(cx, window, |window, cx| window.press("down", cx));
+    assert_eq!(selected(cx), (len..len, false), "↓ で末尾へ");
+    // 押し続けても、そこにとどまる
+    ui(cx, window, |window, cx| window.press("down", cx));
+    assert_eq!(selected(cx), (len..len, false));
+
+    at(cx, 6..6);
+    ui(cx, window, |window, cx| window.press("shift-up", cx));
+    assert_eq!(selected(cx), (0..6, true), "Shift+↑ で先頭まで選ぶ");
+    ui(cx, window, |window, cx| window.press("shift-down", cx));
+    assert_eq!(
+        selected(cx),
+        (6..len, false),
+        "Shift+↓ で、選び始めた所から末尾まで選ぶ"
+    );
+
+    // 選んでいるときの ↑ も、選ぶのをやめて先頭へ
+    at(cx, 3..9);
+    ui(cx, window, |window, cx| window.press("up", cx));
+    assert_eq!(selected(cx), (0..0, false));
+}
+
+/// 複数行の欄では、↑↓ はまず行を動き、いちばん上の行の ↑ で文の先頭へ、いちばん下の行の ↓ で
+/// 文の末尾へ動く。折り返した行も、見た目の行で数える。
+#[gpui_kit::test]
+fn up_and_down_go_to_the_ends_in_a_textarea(cx: &mut TestAppContext) {
+    let (window, view) = open_fields(cx);
+    let area = cx.update(|cx| view.read(cx).area.clone());
+    let first = "一行目のメモ";
+    let text = format!("{first}\n二行目\n三行目のメモ");
+    ui(cx, window, |window, cx| {
+        area.update(cx, |s, cx| {
+            s.set_value(text.clone(), window, cx);
+            s.focus(window, cx);
+        });
+    });
+    let cursor = |cx: &mut TestAppContext| cx.update(|cx| area.read(cx).selected_range());
+    let second = first.len() + 1;
+    cx.update(|cx| area.update(cx, |s, cx| s.set_selected_range(second + 3..second + 3, cx)));
+
+    ui(cx, window, |window, cx| window.press("up", cx));
+    let range = cursor(cx);
+    assert!(
+        range.is_empty() && range.start > 0 && range.start < first.len(),
+        "↑ でまず 1 行目へ: {range:?}"
+    );
+    ui(cx, window, |window, cx| window.press("up", cx));
+    assert_eq!(cursor(cx), 0..0, "1 行目の ↑ で先頭へ");
+
+    ui(cx, window, |window, cx| {
+        window.press("down", cx);
+        window.press("down", cx);
+    });
+    let range = cursor(cx);
+    assert!(
+        range.start > second && range.start < text.len(),
+        "↓ で 3 行目へ: {range:?}"
+    );
+    ui(cx, window, |window, cx| window.press("down", cx));
+    assert_eq!(cursor(cx), text.len()..text.len(), "最後の行の ↓ で末尾へ");
+}
+
+/// 1 行の文が折り返していれば、上の見た目の行の ↑ で先頭へ動く前に、まず見た目の行を上がる。
+#[gpui_kit::test]
+fn up_moves_by_wrapped_rows_first(cx: &mut TestAppContext) {
+    let (window, view) = open_fields(cx);
+    let area = cx.update(|cx| view.read(cx).area.clone());
+    let text = "とても長い一行の文で、欄の幅に入りきらないので、いくつもの見た目の行に折り返す。";
+    ui(cx, window, |window, cx| {
+        area.update(cx, |s, cx| {
+            s.set_value(text, window, cx);
+            s.focus(window, cx);
+        });
+    });
+    cx.update(|cx| area.update(cx, |s, cx| s.set_selected_range(text.len()..text.len(), cx)));
+    ui(cx, window, |window, cx| window.press("up", cx));
+    let range = cx.update(|cx| area.read(cx).selected_range());
+    assert!(
+        range.start > 0 && range.start < text.len(),
+        "折り返した行では、まず 1 つ上の見た目の行へ: {range:?}"
+    );
+}
+
+/// アプリの入力欄（タスクを追加する欄）でも、↑ で先頭へ、↓ で末尾へ動く。
+#[gpui_kit::test]
+fn up_goes_to_the_start_in_quick_add(cx: &mut TestAppContext) {
+    start(cx);
+    let (window, view) = open(cx, wide());
+    ui(cx, window, |window, cx| {
+        window.click("nav-all", cx);
+        window.click("quick-add", cx);
+        window.input("牛乳を買う", cx);
+    });
+    let quick_add = cx.update(|cx| view.read(cx).inputs.quick_add.clone());
+    let cursor = |cx: &mut TestAppContext| cx.update(|cx| quick_add.read(cx).selected_range());
+    let len = "牛乳を買う".len();
+    assert_eq!(cursor(cx), len..len);
+    ui(cx, window, |window, cx| window.press("up", cx));
+    assert_eq!(cursor(cx), 0..0, "↑ で先頭へ");
+    ui(cx, window, |window, cx| window.press("down", cx));
+    assert_eq!(cursor(cx), len..len, "↓ で末尾へ");
 }

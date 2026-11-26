@@ -7810,6 +7810,7 @@ impl Render for MainView {
             .when(self.pane_prefix || self.pane_resize, |d| {
                 d.capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                     if this.pane_key(&event.keystroke, window, cx) {
+                        crate::caret::cancel(cx);
                         cx.stop_propagation();
                     }
                 }))

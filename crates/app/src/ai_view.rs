@@ -3087,12 +3087,15 @@ impl AiPane {
                     }
                 }),
             )
+            // ↑↓ は前に入力したコマンドを出す。入力行の先頭・末尾へは動かさない
             .capture_action(cx.listener(|this, _: &MoveUp, window, cx| {
                 this.history_step(true, window, cx);
+                crate::caret::cancel(cx);
                 cx.stop_propagation();
             }))
             .capture_action(cx.listener(|this, _: &MoveDown, window, cx| {
                 this.history_step(false, window, cx);
+                crate::caret::cancel(cx);
                 cx.stop_propagation();
             }))
             .flex_1()
