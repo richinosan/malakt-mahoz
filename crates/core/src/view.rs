@@ -470,18 +470,128 @@ pub fn format_date(when: &str, today: &str) -> String {
     }
 }
 
-/// 一覧での期限の表示。開始と期限が同じ日で、どちらにも時刻があれば
-/// 「12/2 17:00–18:00」のように時間帯で出す。それ以外は期限だけ。
+/// 一覧での期限の見せ方。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DueFormat {
+    /// 「11/24～11/27」のように日付で出す。
+    #[default]
+    Date,
+    /// 「明日」「あと 3 日」「2 日前」のように今日から数えて出す。
+    Relative,
+}
+
+impl DueFormat {
+    pub const ALL: [DueFormat; 2] = [DueFormat::Date, DueFormat::Relative];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            DueFormat::Date => "日付",
+            DueFormat::Relative => "相対",
+        }
+    }
+
+    /// 保存するときの名前。
+    pub fn key(self) -> &'static str {
+        match self {
+            DueFormat::Date => "date",
+            DueFormat::Relative => "relative",
+        }
+    }
+
+    /// 保存した名前から読む。読めなければ日付。
+    pub fn from_key(key: Option<&str>) -> DueFormat {
+        match key {
+            Some("relative") => DueFormat::Relative,
+            _ => DueFormat::Date,
+        }
+    }
+}
+
+/// 一覧での期限の表示。開始が期限より前の日なら「11/24～11/27」のように範囲で出す。
+/// 開始と期限が同じ日で、どちらにも時刻があれば「12/2 17:00–18:00」のように時間帯で出す。
+/// それ以外は期限だけ。
 pub fn format_span(start: Option<&str>, due: &str, today: &str) -> String {
     let text = format_date(due, today);
-    match start.map(|s| (crate::date_of(s), crate::time_of(s))) {
-        Some((day, Some(from)))
-            if day == crate::date_of(due) && crate::time_of(due).is_some_and(|to| from < to) =>
-        {
+    match span_of(start, due) {
+        Span::Range(start) => format!("{}～{text}", format_date(start, today)),
+        Span::Hours(from) => {
             let (day, to) = text.split_once(' ').unwrap_or((&text, ""));
             format!("{day} {from}–{to}")
         }
-        _ => text,
+        Span::Due => text,
+    }
+}
+
+/// 一覧での期限の表示を、見せ方に合わせて作る。
+pub fn format_due(start: Option<&str>, due: &str, today: &str, format: DueFormat) -> String {
+    match format {
+        DueFormat::Date => format_span(start, due, today),
+        DueFormat::Relative => format_span_relative(start, due, today),
+    }
+}
+
+/// `format_span` の相対の版。「明日」「あと 3 日」「2 日前～あと 3 日」「今日 17:00–18:00」。
+pub fn format_span_relative(start: Option<&str>, due: &str, today: &str) -> String {
+    match span_of(start, due) {
+        Span::Range(start) => format!(
+            "{}～{}",
+            relative_day(start, today, false),
+            relative_day(due, today, true)
+        ),
+        Span::Hours(from) => {
+            let day = relative_day(crate::date_of(due), today, true);
+            let to = crate::time_of(due).unwrap_or_default();
+            format!("{day} {from}–{to}")
+        }
+        Span::Due => relative_day(due, today, true),
+    }
+}
+
+/// 開始と期限の組み合わせ方。
+enum Span<'a> {
+    /// 開始の日（時刻なし）から期限まで。
+    Range(&'a str),
+    /// 同じ日の、開始の時刻から期限の時刻まで。
+    Hours(&'a str),
+    /// 期限だけ。
+    Due,
+}
+
+fn span_of<'a>(start: Option<&'a str>, due: &str) -> Span<'a> {
+    let Some(start) = start else {
+        return Span::Due;
+    };
+    let (day, due_day) = (crate::date_of(start), crate::date_of(due));
+    if day < due_day && crate::is_valid_date(day) {
+        return Span::Range(day);
+    }
+    match crate::time_of(start) {
+        Some(from) if day == due_day && crate::time_of(due).is_some_and(|to| from < to) => {
+            Span::Hours(from)
+        }
+        _ => Span::Due,
+    }
+}
+
+/// 今日から数えた日の呼び方。今日・明日・昨日には時刻を添える。
+/// 期限（`due`）の先の日は「あと 3 日」、開始の先の日は「3 日後」、過ぎた日は「2 日前」。
+fn relative_day(when: &str, today: &str, due: bool) -> String {
+    let parse = |d: &str| chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").ok();
+    let (Some(day), Some(now)) = (parse(crate::date_of(when)), parse(crate::date_of(today))) else {
+        return format_date(when, today);
+    };
+    let days = (day - now).num_days();
+    let name = match days {
+        0 => "今日".to_owned(),
+        1 => "明日".to_owned(),
+        -1 => "昨日".to_owned(),
+        n if n < 0 => return format!("{} 日前", -n),
+        n if due => return format!("あと {n} 日"),
+        n => return format!("{n} 日後"),
+    };
+    match crate::time_of(when) {
+        Some(time) => format!("{name} {time}"),
+        None => name,
     }
 }
 
@@ -963,11 +1073,15 @@ mod tests {
             span(Some("2027-01-05 09:00"), "2027-01-05 10:30"),
             "2027/1/5 09:00–10:30"
         );
-        // 日が違う、時刻がない、開始が期限より後のときは期限だけ
+        // 開始が前の日なら、開始の日から期限までの範囲
         assert_eq!(
             span(Some("2026-12-01 17:00"), "2026-12-02 18:00"),
-            "12/2 18:00"
+            "12/1～12/2 18:00"
         );
+        assert_eq!(span(Some("2026-11-24"), "2026-11-27"), "11/24～11/27");
+        assert_eq!(span(Some("2026-12-28"), "2027-01-03"), "12/28～2027/1/3");
+        // 時刻がない、開始が期限より後のときは期限だけ
+        assert_eq!(span(Some("2026-12-05"), "2026-12-02"), "12/2");
         assert_eq!(span(Some("2026-12-02"), "2026-12-02 18:00"), "12/2 18:00");
         assert_eq!(span(Some("2026-12-02 17:00"), "2026-12-02"), "12/2");
         assert_eq!(
@@ -975,6 +1089,42 @@ mod tests {
             "12/2 18:00"
         );
         assert_eq!(span(None, "2026-12-02 18:00"), "12/2 18:00");
+    }
+
+    #[test]
+    fn due_shown_relative_to_today() {
+        let today = "2026-11-25";
+        let rel =
+            |start: Option<&str>, due: &str| format_due(start, due, today, DueFormat::Relative);
+        assert_eq!(rel(None, "2026-11-25"), "今日");
+        assert_eq!(rel(None, "2026-11-26"), "明日");
+        assert_eq!(rel(None, "2026-11-24"), "昨日");
+        assert_eq!(rel(None, "2026-11-28"), "あと 3 日");
+        assert_eq!(rel(None, "2026-11-23"), "2 日前");
+        assert_eq!(rel(None, "2027-01-04"), "あと 40 日");
+        assert_eq!(rel(None, "2026-11-26 18:00"), "明日 18:00");
+        assert_eq!(rel(None, "2026-11-30 18:00"), "あと 5 日");
+        // 開始があれば範囲。開始の先の日は「〜日後」
+        assert_eq!(rel(Some("2026-11-23"), "2026-11-28"), "2 日前～あと 3 日");
+        assert_eq!(rel(Some("2026-11-26"), "2026-11-30"), "明日～あと 5 日");
+        assert_eq!(rel(Some("2026-11-27"), "2026-11-30"), "2 日後～あと 5 日");
+        assert_eq!(
+            rel(Some("2026-11-25 17:00"), "2026-11-25 18:00"),
+            "今日 17:00–18:00"
+        );
+        assert_eq!(rel(Some("2026-11-29"), "2026-11-28"), "あと 3 日");
+        // 日付として読めないものは、そのまま
+        assert_eq!(rel(None, "bad"), "bad");
+        // 日付の見せ方は、これまでどおり
+        assert_eq!(
+            format_due(Some("2026-11-24"), "2026-11-27", today, DueFormat::Date),
+            "11/24～11/27"
+        );
+        for format in DueFormat::ALL {
+            assert_eq!(DueFormat::from_key(Some(format.key())), format);
+        }
+        assert_eq!(DueFormat::from_key(None), DueFormat::Date);
+        assert_eq!(DueFormat::from_key(Some("x")), DueFormat::Date);
     }
 
     #[test]

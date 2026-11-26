@@ -265,6 +265,7 @@ enum SettingKey {
     Font,
     Color(crate::theme::Slot),
     Density,
+    DueFormat,
     Feel,
     Cards,
     Float,
@@ -890,7 +891,7 @@ impl MainView {
                     .child(div().min_w_0().truncate().child(shown))
                     .child(app_icon("chevron-down").small().text_color(muted)),
             )
-            .dropdown_menu(move |mut menu, _, _| {
+            .pop_menu(move |mut menu, _, _| {
                 let reset_view = view.clone();
                 let reset_task = task_id.clone();
                 menu = menu
@@ -929,14 +930,20 @@ impl MainView {
         let Some(due) = &task.due else {
             return div().text_color(theme.muted_foreground).child("—");
         };
-        let text = view::format_span(task.start.as_deref(), due, &self.today);
+        let format = crate::theme::due_format(cx);
+        let relative = format == view::DueFormat::Relative;
+        let text = view::format_due(task.start.as_deref(), due, &self.today, format);
         if !task.status.is_open() {
             return div().text_color(theme.muted_foreground).child(text);
         }
+        let past_day = malakt_core::date_of(due) < self.today.as_str();
         match view::due_state(due, &view::now()) {
+            // 相対の表示は「2 日前」「今日」と書いてあるので、添えない
+            DueState::Overdue if relative && past_day => div().text_color(theme.danger).child(text),
             DueState::Overdue => div()
                 .text_color(theme.danger)
                 .child(format!("{text}（期限切れ）")),
+            DueState::Today if relative => div().text_color(theme.primary).child(text),
             DueState::Today => div()
                 .text_color(theme.primary)
                 .child(format!("{text}（今日）")),
@@ -2164,7 +2171,18 @@ impl MainView {
                         .child(self.workspace_name(task.workspace_id.as_deref())),
                 )
             })
-            .child(self.due_label(task, cx).w(px(130.)).text_sm())
+            .child({
+                let (view, format) = (cx.entity().downgrade(), crate::theme::due_format(cx));
+                div()
+                    .id(("home-due", ix))
+                    .flex_none()
+                    .child(self.due_label(task, cx).w(px(170.)).truncate().text_sm())
+                    .test_support()
+                    // 右クリックで、期限の見せ方を選ぶ
+                    .right_menu(move |menu, _, _| {
+                        crate::state::due_format_items(menu, &view, format)
+                    })
+            })
             .child(status_badge(task.status, cx).w(px(76.)))
             .when(roomy, |d| {
                 d.child(
@@ -3080,6 +3098,7 @@ impl MainView {
             // 中身（折り返した担当など）の高さに合わせて伸ばす。小さいボタンの高さのままだと、はみ出た上下が切れる
             .h_auto()
             .min_h_6()
+            .max_w_full()
             .py_0p5()
             .justify_start()
             .child(value_shown(shown))
@@ -3439,13 +3458,22 @@ impl MainView {
         };
         let due = {
             let id = id.clone();
-            self.value_menu(
-                ("due", ix),
-                self.due_label(task, cx).text_sm(),
-                self.due_options(task.due.as_deref()),
-                move |this, value, cx| this.edit_task_by_id(&id, cx, |d| d.due = value),
-                cx,
-            )
+            let format = crate::theme::due_format(cx);
+            let view = cx.entity().downgrade();
+            div()
+                .id(("due-cell", ix))
+                .max_w_full()
+                .child(self.value_menu(
+                    ("due", ix),
+                    // 列の幅に入らない範囲は、後ろを「…」にする
+                    self.due_label(task, cx).min_w_0().truncate().text_sm(),
+                    self.due_options(task.due.as_deref()),
+                    move |this, value, cx| this.edit_task_by_id(&id, cx, |d| d.due = value),
+                    cx,
+                ))
+                .test_support()
+                // 右クリックで、期限の見せ方を選ぶ（行のメニューは開かない）
+                .right_menu(move |menu, _, _| crate::state::due_format_items(menu, &view, format))
         };
         let updated = div()
             .text_sm()
@@ -5580,6 +5608,13 @@ impl MainView {
             ),
             Setting::new(
                 Section::Display,
+                SettingKey::DueFormat,
+                "期限の表示",
+                Some("一覧の期限の出し方"),
+                list(&["期限", "開始", "日付", "相対", "あと", "残り"]),
+            ),
+            Setting::new(
+                Section::Display,
                 SettingKey::Feel,
                 "ホバー",
                 Some("乗せたとき・押したときの見え方"),
@@ -5905,6 +5940,27 @@ impl MainView {
                     },
                 ))
                 .child(reset("density-reset", false))
+                .into_any_element(),
+            SettingKey::DueFormat => row()
+                .gap_1()
+                .children(
+                    view::DueFormat::ALL
+                        .into_iter()
+                        .enumerate()
+                        .map(|(ix, format)| {
+                            chip(
+                                ("due-format", ix),
+                                format.label(),
+                                crate::theme::due_format(cx) == format,
+                                cx,
+                            )
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                this.set_due_format(format, cx)
+                            }))
+                            .test_support()
+                        }),
+                )
+                .child(reset("due-format-reset", false))
                 .into_any_element(),
             SettingKey::Feel => row()
                 .gap_1()
