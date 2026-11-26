@@ -894,3 +894,50 @@ fn the_ai_sees_and_closes_a_small_window(cx: &mut TestAppContext) {
     assert!(terms(cx, |t| t.page(small).is_none()));
     assert_eq!(cx.update(|cx| cx.windows().len()), 1);
 }
+
+/// 小さなウィンドウのバーを右クリックすると、ほかのウィンドウと同じメニューが出る。
+/// メニューの間はページを隠し、「閉じる」でウィンドウとページを閉じる。
+#[gpui_kit::test]
+fn the_small_window_bar_has_the_window_menu(cx: &mut TestAppContext) {
+    let world = start(cx, Store::open_in_memory().unwrap());
+    let (window, _view) = open(cx);
+    ui(cx, window, |window, cx| window.click("ai-toggle", cx));
+    cx.update_window(window, |_, window, cx| {
+        browser::open("https://example.com/", window, cx)
+    })
+    .unwrap();
+    ui(cx, window, |_, _| {});
+    let tab = terms(cx, |t| t.active_page().map(|p| p.id)).expect("タブが開く");
+    world.send(tab, Event::Popup("https://example.com/b".into()));
+    cx.run_until_parked();
+    let small = terms(cx, |t| t.pages.iter().find(|p| p.popup).map(|p| p.id))
+        .expect("小さなウィンドウのページがある");
+    let popup = cx
+        .update(|cx| cx.windows())
+        .into_iter()
+        .find(|w| *w != window)
+        .expect("小さなウィンドウが開く");
+    ui(cx, popup, |_, _| {});
+    let fake = world.fake(small);
+    assert!(fake.visible.get());
+    ui(cx, popup, |window, cx| {
+        window.click_with_options(
+            "popup-title",
+            ClickOptions::new().with_button(MouseButton::Right),
+            cx,
+        )
+    });
+    assert!(cx.update(|cx| browser::menus_open(cx)));
+    assert!(!fake.visible.get(), "メニューの間はページを隠す");
+    // いちばん下の「閉じる」
+    cx.update_window(popup, |_, window, cx| {
+        window.render_frame(cx);
+        window.press("up", cx);
+        window.press("enter", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    assert!(fake.dropped.get());
+    assert!(terms(cx, |t| t.page(small).is_none()));
+    assert_eq!(cx.update(|cx| cx.windows().len()), 1);
+}

@@ -14,6 +14,7 @@ use crate::browser::{self, is_web, Step, ZoomBadge};
 use crate::db;
 use crate::feel::{self, Grip};
 use crate::render::{app_icon, row, window_controls};
+use crate::scroll::Menus;
 use crate::term::{self, Terms};
 use crate::{APP_ID, UI_SCALE};
 
@@ -92,6 +93,15 @@ pub fn open(url: &str, from: Option<WindowId>, cx: &mut App) {
             );
         }
     });
+}
+
+/// バーを右クリックしたときの、ほかのウィンドウと同じメニュー。設定はメインのウィンドウで開く。
+fn window_menu(
+    menu: gpui_kit::component::menu::PopupMenu,
+    window: &mut Window,
+    cx: &mut Context<gpui_kit::component::menu::PopupMenu>,
+) -> gpui_kit::component::menu::PopupMenu {
+    crate::render::window_menu(menu, None, window, cx)
 }
 
 /// 小さなウィンドウの中身。
@@ -330,7 +340,9 @@ impl Render for PopupView {
             // ここでもマウスの操作を見張る（自動でロックするまでの時間）
             .child(db::input_watcher());
         let Some((_, can_back, loading, url, zoom, error, shot)) = page.filter(|_| unlocked) else {
-            let bar = self.render_bar(title, None, window, cx);
+            let bar = self
+                .render_bar(title, None, window, cx)
+                .right_menu(window_menu);
             return base
                 .child(bar)
                 .child(
@@ -347,7 +359,9 @@ impl Render for PopupView {
                 .child(browser::frame_end(true, window, cx))
                 .test_support();
         };
-        let bar = self.render_bar(title, Some((can_back, loading, url, zoom)), window, cx);
+        let bar = self
+            .render_bar(title, Some((can_back, loading, url, zoom)), window, cx)
+            .right_menu(window_menu);
         let body = match error {
             Some(error) => div()
                 .flex()
