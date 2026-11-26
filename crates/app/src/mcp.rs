@@ -44,6 +44,7 @@ fn instructions() -> String {
 const WRITES: &[&str] = &[
     "create_task",
     "update_task",
+    "set_assignee",
     "move_task",
     "delete_task",
     "add_comment",
