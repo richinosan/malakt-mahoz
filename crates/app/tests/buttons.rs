@@ -14,7 +14,7 @@ use gpui_kit::{
 use malakt_core::panes::{Action, Dir};
 use malakt_core::view::Priority;
 use malakt_core::{NewComment, Scope, Status, Store, TaskDraft, TaskFilter};
-use malakt_mahoz::state::Editing;
+use malakt_mahoz::state::{Column, Editing};
 use malakt_mahoz::{db, MainView, Nav};
 
 /// 押せるものではない入れ物や入力欄。押しても何も変わらないのが正しい。
@@ -132,6 +132,10 @@ const QUIET: &[(&str, &str)] = &[
     ("説明を編集中の詳細 > title#1", "今開いているタスク"),
     ("担当を選んでいる詳細 > title#1", "今開いているタスク"),
     ("ホーム > p-due#0", "期限がもう今日のタスク"),
+    (
+        "見出しを右クリックしたメニュー > due#3",
+        "見出しのメニューの下に隠れている",
+    ),
     ("p-start#0", "開始日がもう今日のタスク"),
     ("def-prio#0", "今選んでいる優先度"),
     ("def-due-none", "今選んでいる期限の決め方"),
@@ -648,6 +652,16 @@ fn screens() -> Vec<(&'static str, Size<Pixels>, Setup)> {
                 v.start_editing(Editing::Description, window, cx);
             })
         }),
+        (
+            "見出しを右クリックしたメニュー",
+            wide,
+            |cx, w| {
+                with_view(cx, w, |v, window, cx| {
+                    v.go(Nav::All, cx);
+                    v.toggle_column_menu(Some(Column::Due), window, cx);
+                })
+            },
+        ),
         ("絞り込んだ一覧", wide, |cx, w| {
             with_view(cx, w, |v, _, cx| {
                 v.go(Nav::All, cx);
