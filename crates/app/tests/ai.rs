@@ -3254,3 +3254,65 @@ fn the_shell_of_the_ai_tab_can_be_chosen(cx: &mut TestAppContext) {
     cx.update(|cx| term::shared(cx).update(cx, |terms, cx| terms.set_ai_profile(None, cx)));
     assert_eq!(cx.update(|cx| term::ai_shell(cx)), standard);
 }
+
+/// シェルの出力をドラッグで選んで、Ctrl+C でコピーできる。選んでいなければ、Ctrl+C はコピーしない。
+#[gpui_kit::test]
+fn shell_output_can_be_selected_and_copied(cx: &mut TestAppContext) {
+    use gpui_kit::{point, Modifiers, MouseButton, VisualTestContext};
+
+    let _world = start(cx);
+    let (window, view) = open(cx, wide());
+    open_chat(cx, window, &view);
+    type_line(cx, window, "echo hello-copy");
+
+    let drag = |cx: &mut TestAppContext, from: Point<Pixels>, to: Point<Pixels>| {
+        let mut v = VisualTestContext::from_window(window, cx);
+        v.simulate_mouse_down(from, MouseButton::Left, Modifiers::default());
+        v.update(|window, cx| window.render_frame(cx));
+        v.simulate_mouse_move(to, MouseButton::Left, Modifiers::default());
+        v.update(|window, cx| window.render_frame(cx));
+        v.simulate_mouse_up(to, MouseButton::Left, Modifiers::default());
+        v.run_until_parked();
+    };
+    let row = |cx: &mut TestAppContext, ix: usize| {
+        let mut bounds = None;
+        ui(cx, window, |window, _| {
+            bounds = Some(window.find(("ai-shell-line", ix)).bounds())
+        });
+        bounds.unwrap()
+    };
+    let clipboard =
+        |cx: &mut TestAppContext| cx.update(|cx| cx.read_from_clipboard().and_then(|i| i.text()));
+
+    // 出力の行を端から端まで
+    let out = row(cx, 1);
+    drag(
+        cx,
+        point(out.left() + px(1.), out.center().y),
+        point(out.left() + px(400.), out.center().y),
+    );
+    ui(cx, window, |window, cx| window.press("ctrl-c", cx));
+    assert_eq!(clipboard(cx).as_deref(), Some("hello-copy"));
+
+    // コマンドの行から出力の行まで。行の間は改行になる
+    let command = row(cx, 0);
+    drag(
+        cx,
+        point(command.left() + px(1.), command.center().y),
+        point(out.left() + px(400.), out.center().y),
+    );
+    ui(cx, window, |window, cx| {
+        window.press("secondary-shift-c", cx)
+    });
+    assert_eq!(
+        clipboard(cx),
+        Some(format!("{}\nhello-copy", cmd_line("echo hello-copy")))
+    );
+
+    // 押しただけ（選んでいない）なら、Ctrl+C はコピーしない
+    cx.update(|cx| cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string("before".into())));
+    let at = point(out.left() + px(30.), out.center().y);
+    drag(cx, at, at);
+    ui(cx, window, |window, cx| window.press("ctrl-c", cx));
+    assert_eq!(clipboard(cx).as_deref(), Some("before"));
+}

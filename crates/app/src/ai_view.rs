@@ -49,6 +49,8 @@ const TERM_BG: u32 = 0x0f1115;
 const TERM_FG: u32 = 0xd4d7dd;
 const TERM_DIM: u32 = 0x7d8590;
 const TERM_PROMPT: u32 = 0x7ee787;
+/// 選んだ文字の背景。ターミナルのタブと同じ色。
+const TERM_SELECTION: u32 = malakt_term::SELECTION;
 
 fn term_color(color: Color) -> Hsla {
     rgb(match color {
@@ -234,6 +236,13 @@ pub struct AiPane {
     /// `shell_rows` を作ったときの、シェルの版と桁数。
     rows_key: (u64, usize),
     shell_cols: usize,
+    /// シェルの 1 桁の幅と、シェルの画面の左の端。マウスの位置から文字を決める。
+    shell_cell: Pixels,
+    shell_left: Pixels,
+    /// シェルの出力で選んでいる所（始めと今の位置）。ドラッグで選び、Ctrl+C でコピーする。
+    shell_sel: Option<(ShellPos, ShellPos)>,
+    /// ドラッグで選んでいる途中。
+    shell_dragging: bool,
     copied: bool,
     seen: usize,
     _subscriptions: Vec<Subscription>,
@@ -241,6 +250,69 @@ pub struct AiPane {
 
 fn row() -> Div {
     div().flex().flex_row().items_center()
+}
+
+/// シェルの出力の中の位置。行は消した行も数えた番号（[`Session::shell_dropped`] + 番号）、
+/// 桁はその行の文字列の中のバイトの位置。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ShellPos {
+    pub line: usize,
+    pub byte: usize,
+}
+
+/// 選んだ範囲を、前から後ろの順にする。
+fn ordered(sel: (ShellPos, ShellPos)) -> (ShellPos, ShellPos) {
+    if sel.0 <= sel.1 {
+        sel
+    } else {
+        (sel.1, sel.0)
+    }
+}
+
+/// 折り返した 1 行（`text` の `range`）の中で、左の端から `x` の所にある文字の境目。
+/// 文字の右半分なら、その文字の後ろにする。
+fn byte_at(text: &str, range: Range<usize>, x: Pixels, cell: Pixels) -> usize {
+    let mut left = px(0.);
+    for (ix, c) in text[range.clone()].char_indices() {
+        let width = cell * ansi::width(c) as f32;
+        if x < left + width / 2. {
+            return range.start + ix;
+        }
+        left += width;
+    }
+    range.end
+}
+
+/// 選んだ範囲の文字。行の間は改行でつなぐ（折り返しただけの所はつながったまま）。
+fn selected_text(lines: &[&str], dropped: usize, sel: (ShellPos, ShellPos)) -> String {
+    let (from, to) = ordered(sel);
+    let mut out = Vec::new();
+    for line in from.line..=to.line {
+        let Some(text) = line.checked_sub(dropped).and_then(|ix| lines.get(ix)) else {
+            continue;
+        };
+        let start = if line == from.line {
+            from.byte.min(text.len())
+        } else {
+            0
+        };
+        let end = if line == to.line {
+            to.byte.min(text.len())
+        } else {
+            text.len()
+        };
+        out.push(text.get(start..end.max(start)).unwrap_or_default());
+    }
+    out.join("\n")
+}
+
+/// コマンドの行の頭の印（`$`、`PS>`、`[WSL の Ubuntu] $`）の終わり。
+fn mark_end(text: &str) -> usize {
+    ["$ ", "> "]
+        .iter()
+        .filter_map(|mark| text.find(mark).map(|ix| ix + 1))
+        .min()
+        .unwrap_or(0)
 }
 
 fn col() -> Div {
@@ -473,6 +545,10 @@ impl AiPane {
             shell_rows: Vec::new(),
             rows_key: (u64::MAX, 0),
             shell_cols: 80,
+            shell_cell: px(8.),
+            shell_left: px(0.),
+            shell_sel: None,
+            shell_dragging: false,
             copied: false,
             seen,
             _subscriptions: subscriptions,
@@ -573,6 +649,59 @@ impl AiPane {
         true
     }
 
+    /// 折り返した行 `row` の、左の端から `x` の所。
+    fn shell_pos(&self, row: usize, x: Pixels, cx: &App) -> Option<ShellPos> {
+        let session = self.session.read(cx);
+        let (line, range) = self.shell_rows.get(row)?;
+        let text = &session.shell.get(*line)?.text;
+        let x = x - self.shell_left - TERM_PAD;
+        Some(ShellPos {
+            line: session.shell_dropped + line,
+            byte: byte_at(text, range.clone(), x, self.shell_cell),
+        })
+    }
+
+    /// シェルの出力を押した。ドラッグで選び始める。
+    fn shell_press(&mut self, row: usize, x: Pixels, cx: &mut Context<Self>) {
+        let pos = self.shell_pos(row, x, cx);
+        self.shell_sel = pos.map(|pos| (pos, pos));
+        self.shell_dragging = pos.is_some();
+        cx.notify();
+    }
+
+    /// ドラッグで、選ぶ所を広げる。
+    fn shell_drag(&mut self, row: usize, x: Pixels, cx: &mut Context<Self>) {
+        if !self.shell_dragging {
+            return;
+        }
+        if let (Some((from, _)), Some(to)) = (self.shell_sel, self.shell_pos(row, x, cx)) {
+            if self.shell_sel != Some((from, to)) {
+                self.shell_sel = Some((from, to));
+                cx.notify();
+            }
+        }
+    }
+
+    /// 選んでいる文字。何も選んでいなければ `None`。
+    pub fn shell_selection(&self, cx: &App) -> Option<String> {
+        let sel = self.shell_sel.filter(|(a, b)| a != b)?;
+        let session = self.session.read(cx);
+        let lines: Vec<&str> = session.shell.iter().map(|l| l.text.as_ref()).collect();
+        let text = selected_text(&lines, session.shell_dropped, sel);
+        (!text.is_empty()).then_some(text)
+    }
+
+    /// 選んでいる文字をコピーする。選んでいなければ `false`。
+    fn copy_selection(&mut self, cx: &mut Context<Self>) -> bool {
+        match self.shell_selection(cx) {
+            Some(text) => {
+                cx.write_to_clipboard(ClipboardItem::new_string(text));
+                true
+            }
+            None => false,
+        }
+    }
+
     /// シェルの幅から、1 行に入る桁数を決める。
     fn set_shell_width(&mut self, width: Pixels, window: &mut Window, cx: &mut Context<Self>) {
         let family = cx.theme().mono_font_family.clone();
@@ -582,6 +711,7 @@ impl AiPane {
             .ch_advance(text.resolve_font(&font(family)), size)
             .unwrap_or(size * 0.6);
         // 全角の字が 2 桁より少し広い書体でも、はみ出さないように 1 桁あける
+        self.shell_cell = cell;
         let cols = (((width - TERM_PAD * 2.) / cell).floor() as usize)
             .saturating_sub(1)
             .max(20);
@@ -2825,11 +2955,11 @@ impl AiPane {
                 let session = this.session.read(cx);
                 range
                     .filter_map(|ix| {
-                        let (line, range) = this.shell_rows.get(ix)?;
-                        let line = session.shell.get(*line)?;
-                        Some((ix, line, range.clone()))
+                        let (line_ix, range) = this.shell_rows.get(ix)?;
+                        let line = session.shell.get(*line_ix)?;
+                        Some((ix, *line_ix, line, range.clone()))
                     })
-                    .map(|(ix, line, range)| {
+                    .map(|(ix, line_ix, line, range)| {
                         let base = match line.kind {
                             LineKind::Command => rgb(0xffffff),
                             LineKind::Out => rgb(TERM_FG),
@@ -2837,9 +2967,13 @@ impl AiPane {
                             LineKind::Info => rgb(TERM_DIM),
                         };
                         let mut highlights = Vec::new();
-                        if line.kind == LineKind::Command && range.start == 0 && range.end > 0 {
-                            // 先頭の `$`
-                            highlights.push((0..1, HighlightStyle::color(rgb(TERM_PROMPT).into())));
+                        if line.kind == LineKind::Command && range.start == 0 {
+                            // 先頭の `$` や `PS>`
+                            let end = mark_end(&line.text).min(range.end);
+                            if end > 0 {
+                                highlights
+                                    .push((0..end, HighlightStyle::color(rgb(TERM_PROMPT).into())));
+                            }
                         }
                         for (span, color) in &line.spans {
                             let start = span.start.max(range.start);
@@ -2851,9 +2985,55 @@ impl AiPane {
                                 ));
                             }
                         }
+                        // 選んでいる所の背景
+                        let number = session.shell_dropped + line_ix;
+                        let picked = this.shell_sel.filter(|(a, b)| a != b).and_then(|sel| {
+                            let (from, to) = ordered(sel);
+                            if number < from.line || number > to.line {
+                                return None;
+                            }
+                            let start = if number == from.line { from.byte } else { 0 };
+                            let end = if number == to.line {
+                                to.byte
+                            } else {
+                                line.text.len()
+                            };
+                            let start = start.max(range.start);
+                            let end = end.min(range.end);
+                            (start < end).then(|| start - range.start..end - range.start)
+                        });
+                        let highlights = match picked {
+                            Some(picked) => combine_highlights(
+                                highlights,
+                                [(
+                                    picked,
+                                    HighlightStyle {
+                                        background_color: Some(rgb(TERM_SELECTION).into()),
+                                        ..Default::default()
+                                    },
+                                )],
+                            )
+                            .collect(),
+                            None => highlights,
+                        };
                         let text = SharedString::from(line.text[range].to_owned());
                         div()
                             .id(("ai-shell-line", ix))
+                            // 字のない右の所でも、押したりドラッグしたりできるように
+                            .w_full()
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, e: &MouseDownEvent, window, cx| {
+                                    this.shell_press(ix, e.position.x, cx);
+                                    // 選んだらすぐ Ctrl+C でコピーできるよう、シェルにフォーカスを置く
+                                    window.focus(&this.shell_focus, cx);
+                                }),
+                            )
+                            .on_mouse_move(cx.listener(move |this, e: &MouseMoveEvent, _, cx| {
+                                if e.pressed_button == Some(MouseButton::Left) {
+                                    this.shell_drag(ix, e.position.x, cx)
+                                }
+                            }))
                             .h(SHELL_ROW)
                             .px(TERM_PAD)
                             .flex()
@@ -2881,12 +3061,32 @@ impl AiPane {
                 this.session.update(cx, |s, cx| s.clear_shell(cx));
             }))
             // 入力行にいても、コマンドが動いている間の Ctrl+C は強制終了にする
+            // 出力を選んでいれば、Ctrl+C（macOS は ⌘C）はコピーにする。選んでいないときに
+            // コマンドが動いていれば、入力行にいても強制終了にする
             .capture_action(cx.listener(|this, _: &CopyText, _, cx| {
-                if this.session.read(cx).command_running() {
+                if this.copy_selection(cx) {
+                    cx.stop_propagation();
+                } else if this.session.read(cx).command_running() {
                     this.stop(cx);
                     cx.stop_propagation();
                 }
             }))
+            // どこにフォーカスがあっても、選んでいる間の Ctrl+C・Ctrl+Shift+C・⌘C はコピーにする
+            .capture_key_down(cx.listener(|this, e: &KeyDownEvent, _, cx| {
+                let m = &e.keystroke.modifiers;
+                if e.keystroke.key == "c" && (m.control || m.platform) && this.copy_selection(cx) {
+                    cx.stop_propagation();
+                }
+            }))
+            // 選び終わったら入力行に戻す。そのまま Ctrl+C でコピーでき、続けて打てる
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _, window, cx| {
+                    if std::mem::take(&mut this.shell_dragging) {
+                        this.shell_input.update(cx, |s, cx| s.focus(window, cx));
+                    }
+                }),
+            )
             .capture_action(cx.listener(|this, _: &MoveUp, window, cx| {
                 this.history_step(true, window, cx);
                 cx.stop_propagation();
@@ -2967,6 +3167,7 @@ impl AiPane {
                             canvas(
                                 move |bounds, window, cx| {
                                     pane.update(cx, |this, cx| {
+                                        this.shell_left = bounds.left();
                                         this.set_shell_width(bounds.size.width, window, cx)
                                     });
                                 },
@@ -3428,7 +3629,38 @@ impl Render for AiPane {
 
 #[cfg(test)]
 mod tests {
-    use super::{docked_width, px, short_path};
+    use super::{byte_at, docked_width, mark_end, px, selected_text, short_path, ShellPos};
+
+    #[test]
+    fn the_selection_follows_the_characters() {
+        let cell = px(10.);
+        // 全角の字は 2 桁。字の右半分を押すと、その字の後ろ
+        assert_eq!(byte_at("aあb", 0..5, px(4.), cell), 0);
+        assert_eq!(byte_at("aあb", 0..5, px(6.), cell), 1);
+        assert_eq!(byte_at("aあb", 0..5, px(21.), cell), 4);
+        assert_eq!(byte_at("aあb", 0..5, px(500.), cell), 5);
+        // 折り返した 2 行目は、その行の頭から数える
+        assert_eq!(byte_at("abcdef", 3..6, px(11.), cell), 4);
+
+        let lines = ["$ echo hi", "hi", "done"];
+        let at = |line, byte| ShellPos { line, byte };
+        // 前から選んでも、後ろから選んでも同じ
+        assert_eq!(
+            selected_text(&lines, 10, (at(10, 2), at(11, 2))),
+            "echo hi\nhi"
+        );
+        assert_eq!(
+            selected_text(&lines, 10, (at(11, 2), at(10, 2))),
+            "echo hi\nhi"
+        );
+        // 消えた行は飛ばす
+        assert_eq!(selected_text(&lines, 10, (at(8, 0), at(10, 1))), "$");
+
+        assert_eq!(mark_end("$ ls"), 1);
+        assert_eq!(mark_end("PS> ls"), 3);
+        assert_eq!(mark_end("[WSL の Ubuntu] $ ls"), "[WSL の Ubuntu] $".len());
+        assert_eq!(mark_end("hello"), 0);
+    }
 
     #[test]
     fn a_long_place_is_shortened_in_the_prompt() {

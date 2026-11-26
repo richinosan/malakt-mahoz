@@ -626,6 +626,8 @@ pub struct Session {
     pub shell: Vec<ShellLine>,
     /// シェルの中身が変わるたびに増える。表示の折り返しを作り直す目印。
     pub shell_rev: u64,
+    /// 古くなって消したシェルの行の数。行を `shell_dropped + 番号` で数えると、消しても変わらない。
+    pub shell_dropped: usize,
     ansi: ansi::State,
     /// シェルの今の場所。`cd` で変わる。
     pub cwd: std::path::PathBuf,
@@ -912,6 +914,7 @@ impl Session {
             pending: None,
             shell: Vec::new(),
             shell_rev: 0,
+            shell_dropped: 0,
             ansi: ansi::State::default(),
             cwd: dirs::home_dir()
                 .or_else(|| std::env::current_dir().ok())
@@ -3147,11 +3150,13 @@ impl Session {
         if self.shell.len() > MAX_SHELL_LINES {
             let extra = self.shell.len() - MAX_SHELL_LINES;
             self.shell.drain(..extra);
+            self.shell_dropped += extra;
         }
     }
 
     /// シェルの表示を消す（Ctrl+L）。実行中のコマンドはそのまま。
     pub fn clear_shell(&mut self, cx: &mut Context<Self>) {
+        self.shell_dropped += self.shell.len();
         self.shell.clear();
         self.shell_rev += 1;
         cx.notify();
