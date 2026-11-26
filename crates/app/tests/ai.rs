@@ -1349,6 +1349,40 @@ fn progress_on_github_is_summarized_into_a_task_comment(cx: &mut TestAppContext)
     assert!(!message.contains("直しました"), "{message}");
 }
 
+/// ロックしている間も定期チェックは動き、進展があれば AI がタスクにコメントする。ロックはそのまま。
+#[gpui_kit::test]
+fn the_periodic_check_runs_while_locked(cx: &mut TestAppContext) {
+    let world = start(cx);
+    world.keys.set(Provider::Claude, "k").unwrap();
+    let task = watched_task(cx, 1440);
+    set_pull(&world, pull("OPEN", json!([]), json!([])));
+    tick(cx, 1);
+    cx.update(|cx| {
+        db::shared(cx).update(cx, |db, _| {
+            malakt_core::lock::enable(&mut db.store).unwrap()
+        });
+        db::lock_now(cx);
+    });
+    assert!(!cx.update(|cx| db::shared(cx).read(cx).unlocked));
+
+    let comments = json!([{"author": {"login": "alice"}, "body": "直しました", "createdAt": "2026-11-25T03:00:00Z"}]);
+    set_pull(&world, pull("OPEN", comments, json!([])));
+    let summary = "alice が修正を push した。次は再レビュー。";
+    world.reply(tool_reply(
+        "t1",
+        "add_comment",
+        json!({"task_id": task, "body": summary}),
+    ));
+    world.reply(text_reply("コメントしました。"));
+    tick(cx, 1440);
+    assert_eq!(world.sent().len(), 2);
+    assert_eq!(comments_of(cx, &task), vec![summary.to_owned()]);
+    assert!(
+        !cx.update(|cx| db::shared(cx).read(cx).unlocked),
+        "ロックしたまま"
+    );
+}
+
 /// 定期チェックからは、タスクの削除もコマンドの実行もしない（確認に答える人がいない）。
 #[gpui_kit::test]
 fn the_periodic_check_never_deletes_or_runs_commands(cx: &mut TestAppContext) {
