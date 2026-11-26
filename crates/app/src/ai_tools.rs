@@ -398,7 +398,7 @@ pub fn definitions() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "set_ai_settings",
-            description: "AI チャットの設定を変える。渡した項目だけが変わり、次のメッセージから使う。provider は claude / chatgpt / opencode / opencode_go / cursor。routing_model は空で今のモデルを使う。watch_minutes は 15 / 30 / 60 / 180。auto_run をオンにするときは、実行の前にユーザーに確認が出る。API キーはここでは変えられない（チャットの「設定」で入れる）。",
+            description: "AI チャットの設定を変える。渡した項目だけが変わり、次のメッセージから使う。provider は claude / chatgpt / opencode / opencode_go / cursor。routing_model は空で今のモデルを使う。watch_minutes は 60 / 180 / 360 / 720 / 1440（分）。auto_run をオンにするときは、実行の前にユーザーに確認が出る。API キーはここでは変えられない（チャットの「設定」で入れる）。",
             schema: object(
                 json!({
                     "provider": {"type": "string"},
@@ -1710,7 +1710,9 @@ impl Session {
                 .as_u64()
                 .and_then(|n| u32::try_from(n).ok())
                 .filter(|n| WATCH_MINUTES.contains(n))
-                .ok_or_else(|| format!("watch_minutes は 15 / 30 / 60 / 180 のどれかです: {v}"))?;
+                .ok_or_else(|| {
+                    format!("watch_minutes は 60 / 180 / 360 / 720 / 1440 のどれかです: {v}")
+                })?;
             watch.minutes = minutes;
         }
         if let Some(text) = str_arg(args, "watch_instruction") {

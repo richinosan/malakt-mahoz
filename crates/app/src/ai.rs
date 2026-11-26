@@ -12,6 +12,7 @@ use malakt_ai::keys::{self, KeyStore, Source};
 use malakt_ai::provider::{self, CatalogModel, Endpoint};
 use malakt_ai::shell::{self, Shell, Spec};
 use malakt_ai::slack;
+use malakt_ai::watch;
 use malakt_ai::wire::{self, Reply, ToolCall, Turn, Wire};
 use malakt_ai::{clip_tail, tools, Effort, Provider, MAX_TOOL_OUTPUT_CHARS};
 use serde_json::Value;
@@ -25,16 +26,21 @@ const MAX_SHELL_LINES: usize = 4000;
 /// 自分で入力したコマンドの履歴の数。
 const MAX_HISTORY: usize = 200;
 /// 定期チェックで 1 回に見に行くリンクの数。
-const MAX_WATCH_LINKS: usize = 30;
-/// 定期チェックで AI に渡す、リンク 1 つあたりの文字数。
+const MAX_WATCH_LINKS: usize = 50;
+/// AI に渡す、リンク 1 つあたりの中身の文字数（タスクを整えるとき）。
 const MAX_WATCH_CHARS: usize = 4000;
 /// 定期チェックの間隔として選べる分数。
-pub const WATCH_MINUTES: [u32; 4] = [15, 30, 60, 180];
-/// 定期チェックで変化を見つけたときに AI に渡す、最初の指示。
-pub const DEFAULT_WATCH_INSTRUCTION: &str = "GitHub の状態に合わせて、関連するタスクを更新してください。\
-クローズまたはマージされていたらタスクを完了にし、新しい動きがあれば、何が変わったかをタスクにコメントで書いてください。";
+pub const WATCH_MINUTES: [u32; 5] = [60, 180, 360, 720, 1440];
+/// 定期チェックの時刻になったかを見る間隔。眠っていた PC が起きたときも、すぐに気づく。
+const WATCH_TICK: std::time::Duration = std::time::Duration::from_secs(60);
+/// 最後に定期チェックを始めた時刻（UNIX 秒）を保存する設定の名前。起動し直しても間隔を数え続ける。
+const WATCH_LAST_SETTING: &str = "ai.watch.last";
+/// 定期チェックで進展を見つけたときに AI に渡す、最初の指示。
+pub const DEFAULT_WATCH_INSTRUCTION: &str = "GitHub の進展を、関連するタスクにコメントで要約してください。\
+誰が何をしたか（自分のレビューやコメントと、ほかの人の返信・レビュー・コミット）、決まったこと、次にすることを短く書いてください。\
+未完了のタスクで、issue がクローズされていたりプルリクエストがマージされていたりしたら、タスクを完了にしてください。";
 
-/// GitHub の定期チェックの設定。標準はオフ。
+/// GitHub の定期チェックの設定。標準はオンで 24 時間ごと（API キーがなければ動かない）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Watch {
     pub enabled: bool,
@@ -46,8 +52,8 @@ pub struct Watch {
 impl Default for Watch {
     fn default() -> Self {
         Self {
-            enabled: false,
-            minutes: 30,
+            enabled: true,
+            minutes: 1440,
             instruction: DEFAULT_WATCH_INSTRUCTION.to_owned(),
         }
     }
@@ -56,25 +62,19 @@ impl Default for Watch {
 /// 定期チェックで見に行くリンクと、それが書かれているタスク（ID とタイトル）。
 type WatchTarget = (Link, Vec<(String, String)>);
 
-/// 中身が変わったかを見分けるための値（FNV-1a）。Rust の版が変わっても同じ値になる。
-fn fingerprint(text: &str) -> String {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in text.bytes() {
-        hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    format!("{hash:016x}")
-}
-
-/// 未完了のタスクに書かれている issue とプルリクエストのリンクを集める。
+/// すべてのタスクに書かれている issue とプルリクエストのリンクを集める（[`MAX_WATCH_LINKS`] 個まで）。
+/// 数が多いときは、未完了のタスクと、最近書き換えたタスクのリンクを先に見る。
 fn watch_targets(store: &malakt_core::Store) -> Result<Vec<WatchTarget>, String> {
-    let filter = malakt_core::TaskFilter {
-        open_only: true,
-        ..Default::default()
-    };
-    let tasks = store
-        .tasks(malakt_core::Scope::All, &filter)
+    let mut tasks = store
+        .tasks(malakt_core::Scope::All, &malakt_core::TaskFilter::default())
         .map_err(|e| format!("タスクを読めませんでした: {e}"))?;
+    let done = |status: malakt_core::Status| {
+        matches!(
+            status,
+            malakt_core::Status::Completed | malakt_core::Status::Cancelled
+        )
+    };
+    tasks.sort_by_key(|t| (done(t.status), std::cmp::Reverse(t.updated_at)));
     let mut targets: Vec<WatchTarget> = Vec::new();
     for task in tasks {
         for link in github::find_links(&format!("{}\n{}", task.title, task.description)) {
@@ -446,6 +446,9 @@ const ICON_PROMPT: &str = "ワークスペース（タスクをまとめるフ�
 - 具体的な物や生き物を表す、小文字の英語の名詞を 5 つまで、合う順にコンマで区切って書く（例: cat, plane, book, wrench, house）。\n\
 - 英単語のほかには何も書かない。";
 
+/// 定期チェックで、GitHub のリンクから進展を読むコマンドを作る。
+pub type ProgressFn = dyn Fn(&Link) -> Vec<Spec> + Send + Sync;
+
 /// Slack のリンクから、取りに行くコマンドを作る。
 pub type SlackFn = dyn Fn(&slack::Link) -> Vec<Spec> + Send + Sync;
 
@@ -462,6 +465,8 @@ pub struct AiConfig {
     pub slack: Arc<SlackFn>,
     /// `gh` にログインしているアカウントを調べるコマンド（引数は、GitHub に通信してよいか）。
     pub whoami: Arc<dyn Fn(bool) -> Vec<Spec> + Send + Sync>,
+    /// 定期チェックで、issue とプルリクエストの進展を読むコマンド（[`malakt_ai::watch::commands`]）。
+    pub gh_progress: Arc<ProgressFn>,
 }
 
 impl Default for AiConfig {
@@ -474,6 +479,7 @@ impl Default for AiConfig {
             gh: Arc::new(Link::gh),
             slack: Arc::new(slack::Link::commands),
             whoami: Arc::new(github::whoami),
+            gh_progress: Arc::new(malakt_ai::watch::commands),
         }
     }
 }
@@ -654,6 +660,8 @@ pub struct Session {
     /// 定期チェックの、いちばん新しい結果。
     pub watch_status: Option<SharedString>,
     watch_timer: Option<Task<()>>,
+    /// 定期チェックの時計の起点（UNIX 秒と、そのときのアプリの時計）。
+    watch_epoch: (i64, std::time::Instant),
     /// 今の進行が、定期チェックなどアプリから始まったものか。確認が要る操作は実行しない。
     auto: bool,
     /// 新しいタスクを AI が整える。標準はオン（API キーがなければ動かない）。
@@ -885,7 +893,7 @@ impl Session {
             context = read(CONTEXT_SETTING).unwrap_or_default();
             let defaults = Watch::default();
             watch = Watch {
-                enabled: read("ai.watch.enabled").as_deref() == Some("1"),
+                enabled: read("ai.watch.enabled").as_deref() != Some("0"),
                 minutes: read("ai.watch.minutes")
                     .and_then(|v| v.parse().ok())
                     .filter(|m| WATCH_MINUTES.contains(m))
@@ -937,6 +945,7 @@ impl Session {
             watch,
             watch_status: None,
             watch_timer: None,
+            watch_epoch: (unix_now(), cx.background_executor().now()),
             auto: false,
             arrange,
             context,
@@ -2394,24 +2403,64 @@ impl Session {
         if !self.watch.enabled {
             return;
         }
-        let every = std::time::Duration::from_secs(u64::from(self.watch.minutes) * 60);
+        // 時刻になったかを短い間隔で見る。間隔ぶん待つタイマーにすると、起動し直すたびに数え直しになり、
+        // PC が眠っていた間も進まない
         self.watch_timer = Some(cx.spawn(async move |this, cx| loop {
-            cx.background_executor().timer(every).await;
-            if this.update(cx, |s, cx| s.check_github(cx)).is_err() {
+            cx.background_executor().timer(WATCH_TICK).await;
+            let alive = this.update(cx, |s, cx| {
+                if s.watch_due(cx) {
+                    s.check_github(cx);
+                }
+            });
+            if alive.is_err() {
                 break;
             }
         }));
     }
 
-    /// タスクに書かれている GitHub のリンクを見に行き、変化があれば AI に渡す。
-    /// チャットが動いている間とロック中は、何もしない（次の回に見る）。
+    /// 今の時刻（UNIX 秒）。テストではアプリの時計を進めると進む。
+    fn watch_now(&self, cx: &App) -> i64 {
+        let (wall, at) = self.watch_epoch;
+        let passed = cx.background_executor().now().saturating_duration_since(at);
+        unix_now().max(wall + passed.as_secs() as i64)
+    }
+
+    /// 最後に定期チェックを始めた時刻（UNIX 秒）。
+    fn watch_last(&self, cx: &App) -> Option<i64> {
+        // 読めなければ、まだ一度もチェックしていないものとして扱う（次のチェックで書き直す）
+        self.db
+            .read(cx)
+            .store
+            .setting(WATCH_LAST_SETTING)
+            .ok()
+            .flatten()
+            .and_then(|v| v.parse().ok())
+    }
+
+    /// 定期チェックの時刻になったか。
+    fn watch_due(&self, cx: &App) -> bool {
+        if !self.watch.enabled {
+            return false;
+        }
+        let interval = i64::from(self.watch.minutes) * 60;
+        self.watch_last(cx)
+            .is_none_or(|last| self.watch_now(cx) - last >= interval)
+    }
+
+    /// タスクに書かれている GitHub のリンクを見に行き、前回から進展があれば AI がタスクにコメントする。
+    /// チャットが動いている間とロック中は、何もしない（手が空いてから次の時刻の確認で見る）。
     pub fn check_github(&mut self, cx: &mut Context<Self>) -> bool {
         if self.busy || !self.db.read(cx).unlocked {
             return false;
         }
+        let now = self.watch_now(cx);
+        let last = self.watch_last(cx);
+        if !self.save_setting(WATCH_LAST_SETTING, &now.to_string(), cx) {
+            return false;
+        }
         self.begin_auto(RunKind::Watch, Vec::new());
         self.task = Some(cx.spawn(async move |this, cx| {
-            let result = Self::watch_run(&this, cx).await;
+            let result = Self::watch_run(&this, last, cx).await;
             // チャットがなくなっていれば、知らせる先もない
             let _ = this.update(cx, |this, cx| {
                 match result {
@@ -2445,10 +2494,55 @@ impl Session {
         self.tracking.clear();
     }
 
-    async fn watch_run(this: &WeakEntity<Self>, cx: &mut AsyncApp) -> Result<String, String> {
-        let (config, provider, instruction) = this
+    /// 1 つのリンクの今の様子を、`gh` で読む。
+    async fn watch_read(
+        this: &WeakEntity<Self>,
+        config: &AiConfig,
+        link: &Link,
+        cx: &mut AsyncApp,
+    ) -> Result<watch::Snapshot, WatchError> {
+        let mut outputs = Vec::new();
+        for spec in (config.gh_progress)(link) {
+            let program = spec.display.clone();
+            match Self::run_command(this, spec, cx).await {
+                Ok(output) if output.code == Some(0) => outputs.push(output.stdout),
+                Ok(output) => {
+                    return Err(WatchError::Link(format!(
+                        "gh が失敗しました（終了コード {}）: {}",
+                        output.code.map_or("なし".to_owned(), |c| c.to_string()),
+                        clip_tail(output.all.trim(), 500)
+                    )))
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    return Err(WatchError::NoGh);
+                }
+                Err(e) => {
+                    return Err(WatchError::Link(format!(
+                        "{program} を起動できませんでした: {e}"
+                    )))
+                }
+            }
+        }
+        watch::read(link, &outputs).map_err(WatchError::Link)
+    }
+
+    async fn watch_run(
+        this: &WeakEntity<Self>,
+        last: Option<i64>,
+        cx: &mut AsyncApp,
+    ) -> Result<String, String> {
+        let (config, provider, instruction, me) = this
             .read_with(cx, |s, _| {
-                (s.config.clone(), s.provider, s.watch.instruction.clone())
+                let me = match &s.github {
+                    GithubAccount::Login(login) => Some(login.to_string()),
+                    _ => None,
+                };
+                (
+                    s.config.clone(),
+                    s.provider,
+                    s.watch.instruction.clone(),
+                    me,
+                )
             })
             .map_err(gone)?;
         // キーがなければ、GitHub にも AI にも通信しない
@@ -2469,7 +2563,7 @@ impl Session {
         let (targets, mut seen) = this
             .read_with(cx, |s, cx| {
                 let store = &s.db.read(cx).store;
-                let seen: HashMap<String, String> = store
+                let seen: HashMap<String, Value> = store
                     .setting("ai.watch.seen")
                     .map_err(|e| format!("前回の結果を読めませんでした: {e}"))?
                     .and_then(|v| serde_json::from_str(&v).ok())
@@ -2480,19 +2574,25 @@ impl Session {
 
         let mut changed = Vec::new();
         let mut failed = Vec::new();
-        let mut now: HashMap<String, String> = HashMap::new();
+        let mut now: HashMap<String, Value> = HashMap::new();
         for (link, tasks) in &targets {
             let url = link.url();
-            match Self::fetch_github(this, &config, link, cx).await {
-                Ok(content) => {
-                    let print = fingerprint(&content);
-                    // 初めて見るリンクは、次からの比べる元にするだけ
-                    if seen.get(&url).is_some_and(|old| *old != print) {
-                        changed.push((url.clone(), tasks.clone(), content));
+            match Self::watch_read(this, &config, link, cx).await {
+                Ok(snapshot) => {
+                    let progress = match seen.get(&url).and_then(watch::Mark::from_json) {
+                        Some(mark) => snapshot.since(&mark),
+                        // 初めて見るリンクは、前回のチェックより新しい動きだけ
+                        None => snapshot.after(last),
+                    };
+                    if let Some(progress) = progress {
+                        changed.push((url.clone(), tasks.clone(), progress));
                     }
-                    now.insert(url, print);
+                    now.insert(url, snapshot.mark().to_json());
                 }
-                Err(error) => {
+                Err(WatchError::NoGh) => {
+                    return Err("gh コマンドが見つかりませんでした。GitHub CLI を入れて、gh auth login でログインしてください".into());
+                }
+                Err(WatchError::Link(error)) => {
                     // 取れなかったものは、前の値のまま次に比べる
                     if let Some(old) = seen.remove(&url) {
                         now.insert(url.clone(), old);
@@ -2512,7 +2612,7 @@ impl Session {
         .map_err(gone)??;
 
         let mut status = format!(
-            "{} をチェックしました。リンク {} 件中、更新 {} 件。",
+            "{} にチェックしました。リンク {} 件中、進展 {} 件。",
             now_label(),
             targets.len(),
             changed.len()
@@ -2524,19 +2624,22 @@ impl Session {
             return Ok(status);
         }
 
+        let me_note = match &me {
+            Some(login) => format!("「自分」はユーザー本人（GitHub の @{login}）です。\n"),
+            None => String::new(),
+        };
         let mut message = format!(
             "（アプリの定期チェックからの自動のメッセージです）\n\
-             タスクに書かれている GitHub のリンクに変化がありました。\n\n指示: {instruction}\n"
+             タスクに書かれている GitHub のリンクに、前回のチェックから進展がありました。\n{me_note}\n指示: {instruction}\n"
         );
-        for (url, tasks, content) in &changed {
+        for (url, tasks, progress) in &changed {
             message.push_str(&format!("\n## {url}\n関連するタスク:\n"));
             for (id, title) in tasks {
                 message.push_str(&format!("- {title}（id: {id}）\n"));
             }
-            message.push_str(&format!(
-                "今の中身:\n{}\n",
-                clip_tail(content, MAX_WATCH_CHARS)
-            ));
+            message.push_str(&progress.describe(me.as_deref(), |secs| {
+                malakt_core::view::format_datetime(secs.saturating_mul(1000))
+            }));
         }
         let urls: Vec<&str> = changed.iter().map(|(url, _, _)| url.as_str()).collect();
         this.update(cx, |s, cx| {
@@ -2548,7 +2651,7 @@ impl Session {
                 .collect();
             s.items.push(Item::Notice(
                 format!(
-                    "GitHub の定期チェック: {} に更新がありました。AI がタスクに反映します。",
+                    "GitHub の定期チェック: {} に進展がありました。AI がタスクにコメントします。",
                     urls.join("、")
                 )
                 .into(),
@@ -3935,6 +4038,20 @@ fn resolve_dir(cwd: &std::path::Path, target: &str) -> std::io::Result<std::path
     };
     // `..` をたどって、実際の場所にする
     path.canonicalize()
+}
+
+/// 今の UNIX 秒。
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64)
+}
+
+/// 定期チェックで、1 つのリンクを読めなかった理由。
+enum WatchError {
+    /// `gh` が入っていない。ほかのリンクも読めないので、そこで止める
+    NoGh,
+    Link(String),
 }
 
 /// 「11/24 13:05」のような、今の時刻。

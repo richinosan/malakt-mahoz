@@ -82,6 +82,7 @@ fn start(cx: &mut TestAppContext, store: Store) -> World {
         gh: Arc::new(|_| Spec::shell("exit 1")),
         slack: Arc::new(|_| Vec::new()),
         whoami: Arc::new(|_| vec![Spec::shell("exit 1")]),
+        gh_progress: Arc::new(|_| vec![Spec::shell("exit 1")]),
     };
     cx.update(|cx| malakt_mahoz::init_with(store, config, cx));
     world
@@ -397,7 +398,10 @@ fn the_ai_changes_its_own_settings(cx: &mut TestAppContext) {
     );
     say(cx, window, &pane, "7 分ごとに");
     let (result, error) = world.last_result();
-    assert!(error && result.contains("15 / 30 / 60 / 180"), "{result}");
+    assert!(
+        error && result.contains("60 / 180 / 360 / 720 / 1440"),
+        "{result}"
+    );
 }
 
 /// AI の変更は、ツールの呼び出し 1 回ずつ元に戻せる（AI に頼んでも、Ctrl+Z でも）。
