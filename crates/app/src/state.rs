@@ -352,6 +352,8 @@ pub struct MainView {
 impl MainView {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let db = db::shared(cx);
+        // AI の画面の操作を受けられるようにする（ペインとして置かれたものは、あとで外す）
+        crate::ai_tools::register(window.window_handle(), cx.weak_entity(), cx);
         let drops = Rc::new(crate::drops::Surface::default());
         crate::drops::register(
             &drops,
@@ -2704,7 +2706,7 @@ impl MainView {
     }
 
     /// 色を選ぶところに、今の画面の色を出す。
-    fn sync_color_pickers(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn sync_color_pickers(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         for (slot, picker) in crate::theme::Slot::ALL.into_iter().zip(&self.color_pickers) {
             let color = crate::theme::shown(slot, cx);
             picker.update(cx, |picker, cx| picker.set_value(color, window, cx));
@@ -2887,6 +2889,21 @@ impl MainView {
         cx.notify();
     }
 
+    /// 左のメニューの幅を決めて、保存する。
+    pub fn set_sidebar_width(&mut self, width: f32, cx: &mut Context<Self>) {
+        self.sidebar_width = width.clamp(SIDEBAR_MIN, SIDEBAR_MAX).round();
+        self.sidebar_resizing = true;
+        self.finish_sidebar_drag(cx);
+    }
+
+    /// タスクの詳細の幅を決めて、保存する。
+    pub fn set_panel_width(&mut self, width: f32, cx: &mut Context<Self>) {
+        let width = width.clamp(PANEL_MIN, PANEL_MAX).round();
+        self.panel_width = width;
+        self.panel_resize = Some((0., width));
+        self.finish_panel_resize(cx);
+    }
+
     /// 境界をダブルクリックして、最初の幅に戻す。
     pub fn reset_sidebar_width(&mut self, cx: &mut Context<Self>) {
         self.sidebar_width = SIDEBAR_WIDTH;
@@ -2961,7 +2978,7 @@ impl MainView {
         }
     }
 
-    fn save_columns(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn save_columns(&mut self, cx: &mut Context<Self>) {
         let saved = format_columns(&self.columns);
         self.write(cx, |s| s.set_setting(COLUMNS_SETTING, Some(&saved)));
         cx.notify();
@@ -3827,35 +3844,53 @@ impl MainView {
     /// あるタスクのためのターミナルを開く。ワークスペースに決めたフォルダーで始め、
     /// タスクの ID・タイトル・ワークスペースの名前を環境変数で渡す。
     pub fn open_task_terminal(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let store = &self.db.read(cx).store;
-        let loaded = store.task(id).and_then(|task| {
-            let dir = match &task.workspace_id {
-                Some(workspace) => store.setting(&crate::term::workspace_dir_key(workspace))?,
-                None => None,
-            };
-            Ok((task, dir))
-        });
-        let (task, dir) = match loaded {
-            Ok(loaded) => loaded,
-            Err(e) => {
-                self.error = Some(format!("タスクを読めませんでした: {e}").into());
-                cx.notify();
-                return;
+        self.open_terminal(Some(id), None, window, cx);
+    }
+
+    /// ターミナルを開いて、見える所に出す。`task` があれば、そのタスクのフォルダーで開く。
+    /// `profile` を選んだときは、次からも同じシェルを開く。
+    pub fn open_terminal(
+        &mut self,
+        task: Option<&str>,
+        profile: Option<&str>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let context = match task {
+            Some(id) => {
+                let store = &self.db.read(cx).store;
+                let loaded = store.task(id).and_then(|task| {
+                    let dir = match &task.workspace_id {
+                        Some(workspace) => {
+                            store.setting(&crate::term::workspace_dir_key(workspace))?
+                        }
+                        None => None,
+                    };
+                    Ok((task, dir))
+                });
+                let (task, dir) = match loaded {
+                    Ok(loaded) => loaded,
+                    Err(e) => {
+                        self.error = Some(format!("タスクを読めませんでした: {e}").into());
+                        cx.notify();
+                        return;
+                    }
+                };
+                let workspace = match &task.workspace_id {
+                    Some(workspace) => self.workspace_name(Some(workspace)).to_string(),
+                    None => String::new(),
+                };
+                Some(crate::term::TaskContext {
+                    id: task.id.clone(),
+                    title: task.title.clone(),
+                    workspace,
+                    dir: dir.map(|dir| crate::term::expand_dir(&dir)),
+                })
             }
+            None => None,
         };
-        let workspace = match &task.workspace_id {
-            Some(workspace) => self.workspace_name(Some(workspace)).to_string(),
-            None => String::new(),
-        };
-        let context = crate::term::TaskContext {
-            id: task.id.clone(),
-            title: task.title.clone(),
-            workspace,
-            dir: dir.map(|dir| crate::term::expand_dir(&dir)),
-        };
-        let opened = crate::term::shared(cx).update(cx, |terms, cx| {
-            terms.open(None, Some(context), cx).is_some()
-        });
+        let opened = crate::term::shared(cx)
+            .update(cx, |terms, cx| terms.open(profile, context, cx).is_some());
         // シェルを見える所に出す
         let place = self.ai_session.read(cx).shell_place;
         let mut in_window = false;

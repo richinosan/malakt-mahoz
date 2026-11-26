@@ -594,6 +594,13 @@ pub fn overlay(cx: &App) -> bool {
     store.setting(OVERLAY).ok().flatten().as_deref() == Some("1")
 }
 
+/// 詳細を一覧の上に重ねるかを変える。
+pub fn set_overlay(on: bool, cx: &mut App) -> malakt_core::Result<()> {
+    db::shared(cx).update(cx, |db, _| db.store.set_setting(OVERLAY, on.then_some("1")))?;
+    cx.refresh_windows();
+    Ok(())
+}
+
 /// レイアウトを使う（AI チャットの開け閉めは、呼んだ側がする）。
 pub fn apply_layout(layout: &Layout, cx: &mut App) -> malakt_core::Result<()> {
     let flag = |on: bool| on.then_some("1");

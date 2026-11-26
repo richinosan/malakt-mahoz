@@ -18,22 +18,7 @@ use crate::db::{self, Db};
 pub const MAX_TERMS: usize = 8;
 /// 「＋」で開くシェルを覚える設定。
 const PROFILE_SETTING: &str = "term.profile";
-/// ワークスペースごとの、ターミナルを始めるフォルダー。
-pub fn workspace_dir_key(workspace: &str) -> String {
-    format!("term.dir.{workspace}")
-}
-
-/// 設定に書いたフォルダー。先頭の `~` はホームに読み替える。
-pub fn expand_dir(text: &str) -> PathBuf {
-    let text = text.trim();
-    let rest = text
-        .strip_prefix('~')
-        .filter(|rest| rest.is_empty() || rest.starts_with(['/', '\\']));
-    match (rest, dirs::home_dir()) {
-        (Some(rest), Some(home)) => home.join(rest.trim_start_matches(['/', '\\'])),
-        _ => PathBuf::from(text),
-    }
-}
+pub use malakt_ai::tools::{expand_dir, workspace_dir_key};
 
 /// WSL に渡す環境変数の名前を、今の `WSLENV` に足す。
 fn wsl_env(before: &str, names: &[String]) -> String {
