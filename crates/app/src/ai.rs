@@ -62,19 +62,17 @@ impl Default for Watch {
 /// 定期チェックで見に行くリンクと、それが書かれているタスク（ID とタイトル）。
 type WatchTarget = (Link, Vec<(String, String)>);
 
-/// すべてのタスクに書かれている issue とプルリクエストのリンクを集める（[`MAX_WATCH_LINKS`] 個まで）。
-/// 数が多いときは、未完了のタスクと、最近書き換えたタスクのリンクを先に見る。
+/// 未完了のタスクに書かれている issue とプルリクエストのリンクを集める（[`MAX_WATCH_LINKS`] 個まで）。
+/// 数が多いときは、最近書き換えたタスクのリンクを先に見る。
 fn watch_targets(store: &malakt_core::Store) -> Result<Vec<WatchTarget>, String> {
-    let mut tasks = store
-        .tasks(malakt_core::Scope::All, &malakt_core::TaskFilter::default())
-        .map_err(|e| format!("タスクを読めませんでした: {e}"))?;
-    let done = |status: malakt_core::Status| {
-        matches!(
-            status,
-            malakt_core::Status::Completed | malakt_core::Status::Cancelled
-        )
+    let filter = malakt_core::TaskFilter {
+        open_only: true,
+        ..Default::default()
     };
-    tasks.sort_by_key(|t| (done(t.status), std::cmp::Reverse(t.updated_at)));
+    let mut tasks = store
+        .tasks(malakt_core::Scope::All, &filter)
+        .map_err(|e| format!("タスクを読めませんでした: {e}"))?;
+    tasks.sort_by_key(|t| std::cmp::Reverse(t.updated_at));
     let mut targets: Vec<WatchTarget> = Vec::new();
     for task in tasks {
         for link in github::find_links(&format!("{}\n{}", task.title, task.description)) {

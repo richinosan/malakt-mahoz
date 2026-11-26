@@ -1327,13 +1327,7 @@ fn progress_on_github_is_summarized_into_a_task_comment(cx: &mut TestAppContext)
     assert_eq!(world.sent().len(), 2);
     assert_eq!(comments_of(cx, &task).len(), 1);
 
-    // 完了にしたタスクのリンクも見る。マージされると、状態の変化として渡す
-    cx.update(|cx| {
-        db::shared(cx).update(cx, |db, cx| {
-            db.store.set_task_status(&task, Status::Completed).unwrap();
-            cx.notify();
-        })
-    });
+    // マージされると、状態の変化として渡す
     let mut merged = pull("MERGED", comments, reviews);
     merged["mergedAt"] = json!("2026-11-27T00:00:00Z");
     set_pull(&world, merged);
@@ -1347,6 +1341,26 @@ fn progress_on_github_is_summarized_into_a_task_comment(cx: &mut TestAppContext)
         "{message}"
     );
     assert!(!message.contains("直しました"), "{message}");
+
+    // 完了したタスクのリンクは、もう見に行かない。覚えていた値も消える
+    cx.update(|cx| {
+        db::shared(cx).update(cx, |db, cx| {
+            db.store.set_task_status(&task, Status::Completed).unwrap();
+            cx.notify();
+        })
+    });
+    let before = gh_runs(cx);
+    tick(cx, 1440);
+    assert_eq!(gh_runs(cx), before);
+    assert_eq!(world.sent().len(), 3);
+    let seen = cx.update(|cx| {
+        db::shared(cx)
+            .read(cx)
+            .store
+            .setting("ai.watch.seen")
+            .unwrap()
+    });
+    assert_eq!(seen.as_deref(), Some("{}"));
 }
 
 /// ロックしている間も定期チェックは動き、進展があれば AI がタスクにコメントする。ロックはそのまま。
