@@ -604,6 +604,52 @@ fn text_is_selected_copied_pasted_and_scrolled(cx: &mut TestAppContext) {
     assert_eq!(screen(cx).offset, 0);
 }
 
+/// さかのぼれる出力があれば、右にスクロールバーが出る。つまみをドラッグして、いちばん古い行まで戻れる。
+#[gpui_kit::test]
+fn the_scrollbar_moves_through_the_output(cx: &mut TestAppContext) {
+    let (window, _view) = start(cx);
+    open_terminal(cx, window);
+    run(
+        cx,
+        window,
+        "clear; i=0; while [ $i -lt 200 ]; do echo row$i; i=$((i+1)); done",
+    );
+    wait_text(cx, "row199");
+    ui(cx, window, |_, _| {});
+    let history = screen(cx).history;
+    assert!(history > 0, "画面より長い出力");
+    assert_eq!(screen(cx).offset, 0);
+    let bar = gpui_kit::VisualTestContext::from_window(window, cx)
+        .debug_bounds("scrollbar-term")
+        .expect("スクロールバーがある");
+    let area = cx
+        .update_window(window, |_, window, _| window.find("term-screen").bounds())
+        .unwrap();
+    assert!(area.contains(&bar.center()), "ターミナルの画面の上に重ねる");
+    let x = bar.right() - px(6.);
+    // 今の出力にいるので、つまみは下の端にある。上の端までドラッグする
+    ui(cx, window, |window, cx| {
+        window.drag(
+            point(x, bar.bottom() - px(12.)),
+            point(x, bar.top() - px(200.)),
+            cx,
+        );
+    });
+    let top = screen(cx);
+    assert_eq!(top.offset, top.history, "いちばん古い行まで戻る");
+    assert!(top.text().contains("row0"));
+    // 下の端まで戻すと、今の出力に戻る
+    ui(cx, window, |window, cx| {
+        window.drag(
+            point(x, bar.top() + px(12.)),
+            point(x, bar.bottom() + px(200.)),
+            cx,
+        );
+    });
+    assert_eq!(screen(cx).offset, 0);
+    assert!(screen(cx).text().contains("row199"));
+}
+
 /// ファイルをドロップすると、その場所が入力の行に入る。空白のある場所は 1 つの引数として届く。
 #[gpui_kit::test]
 fn dropped_files_are_typed_as_paths(cx: &mut TestAppContext) {

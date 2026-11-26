@@ -756,6 +756,8 @@ pub struct TermPane {
     reported: Option<(usize, usize)>,
     /// ホイールの、1 行に満たない分。
     wheel: f32,
+    /// さかのぼれる行を動かすスクロールバー。
+    scroll: crate::scroll::TermScroll,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -786,6 +788,7 @@ impl TermPane {
             selecting: false,
             reported: None,
             wheel: 0.,
+            scroll: Default::default(),
             _subscriptions: subscriptions,
         }
     }
@@ -1168,6 +1171,7 @@ impl TermPane {
         );
         self.origin = origin;
         self.cell = cell;
+        self.scroll.update(bounds, height);
         Frame {
             snapshot: terminal.snapshot(),
             cell,
@@ -1395,6 +1399,8 @@ impl Render for TermPane {
         let danger = cx.theme().danger;
         let pane = cx.entity();
         let focus = self.focus.clone();
+        self.scroll.set_terminal(terminal.clone());
+        let scroll = self.scroll.clone();
         div()
             .id("term-screen")
             .key_context("Terminal")
@@ -1448,27 +1454,34 @@ impl Render for TermPane {
             })
             .when_some(terminal, |d, terminal| {
                 d.child(
-                    canvas(
-                        {
-                            let pane = pane.clone();
-                            move |bounds, window, cx| {
-                                pane.update(cx, |this, cx| {
-                                    this.prepare(&terminal, bounds, window, cx)
-                                })
-                            }
-                        },
-                        move |bounds, frame, window, cx| {
-                            window.handle_input(
-                                &focus,
-                                ElementInputHandler::new(bounds, pane.clone()),
-                                cx,
-                            );
-                            paint(&frame, window, cx);
-                        },
-                    )
-                    .flex_1()
-                    .min_h_0()
-                    .w_full(),
+                    div()
+                        .relative()
+                        .flex_1()
+                        .min_h_0()
+                        .w_full()
+                        .child(
+                            canvas(
+                                {
+                                    let pane = pane.clone();
+                                    move |bounds, window, cx| {
+                                        pane.update(cx, |this, cx| {
+                                            this.prepare(&terminal, bounds, window, cx)
+                                        })
+                                    }
+                                },
+                                move |bounds, frame, window, cx| {
+                                    window.handle_input(
+                                        &focus,
+                                        ElementInputHandler::new(bounds, pane.clone()),
+                                        cx,
+                                    );
+                                    paint(&frame, window, cx);
+                                },
+                            )
+                            .size_full(),
+                        )
+                        // さかのぼれる行があれば、右にスクロールバーを出す。つかんで動かせる
+                        .child(crate::scroll::bar_on_dark("term", &scroll)),
                 )
             })
             .test_support()

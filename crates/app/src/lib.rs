@@ -14,6 +14,7 @@ pub mod panes;
 pub mod passkey;
 pub mod reminders;
 mod render;
+pub mod scroll;
 pub mod session;
 pub mod shadow;
 pub mod shortcuts;

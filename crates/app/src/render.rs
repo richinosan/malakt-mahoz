@@ -8,7 +8,7 @@ use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::color_picker::ColorPicker;
 use gpui_kit::component::input::{Input, Textarea};
-use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu, PopupMenu, PopupMenuItem};
+use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
 use gpui_kit::component::scroll::ScrollableElement;
 use gpui_kit::component::slider::{Slider, SliderState};
 use gpui_kit::component::spinner::Spinner;
@@ -24,6 +24,7 @@ use malakt_core::{Comment, DueRule, Role as Raci, Roles, Status, Task as Todo, W
 use crate::ai::ShellPlace;
 use crate::ai_view::{docked_width, TASKS_MIN};
 use crate::feel::{self, Lit, Sunk};
+use crate::scroll::Menus;
 use crate::shadow::{Elevate, Elevation};
 use crate::state::{
     Column, CommentMode, Detail, DropTarget, Editing, MainView, Modal, Nav, SubModal, When,
@@ -1022,7 +1023,7 @@ impl MainView {
                 .when(!active, |b| {
                     b.opacity(0.).group_hover(group.clone(), |s| s.opacity(1.))
                 })
-                .dropdown_menu({
+                .pop_menu({
                     let menu = menu.clone();
                     move |m, _, _| menu(m)
                 });
@@ -1080,7 +1081,7 @@ impl MainView {
                 })
                 .child(more)
                 // 右クリックでも同じメニューを出す
-                .context_menu(move |m, _, _| menu(m)),
+                .right_menu(move |m, _, _| menu(m)),
             );
         }
 
@@ -1189,7 +1190,7 @@ impl MainView {
                     .when(!self.workspaces.is_empty(), |d| d.child(tree)),
             )
             // 何もないところの右クリックで、ワークスペースを足せる
-            .context_menu(move |menu, _, _| {
+            .right_menu(move |menu, _, _| {
                 let view = view.clone();
                 menu.item(PopupMenuItem::new("ワークスペースを追加").on_click(
                     move |_, window, cx| {
@@ -1369,7 +1370,7 @@ impl MainView {
                     )
                     .test_support(),
                 )
-                .context_menu(move |m, _, _| menu(m)),
+                .right_menu(move |m, _, _| menu(m)),
             );
         }
         let view = cx.entity().downgrade();
@@ -1394,7 +1395,7 @@ impl MainView {
             .child(nav)
             .test_support()
             // 何もないところの右クリックで、ワークスペースを足せる（広げたときと同じ）
-            .context_menu(move |menu, _, _| {
+            .right_menu(move |menu, _, _| {
                 let view = view.clone();
                 menu.item(PopupMenuItem::new("ワークスペースを追加").on_click(
                     move |_, window, cx| {
@@ -1770,7 +1771,7 @@ impl MainView {
                         .ghost()
                         .small()
                         .tooltip("設定")
-                        .dropdown_menu(move |menu, _, _| {
+                        .pop_menu(move |menu, _, _| {
                             let item = |label: &'static str,
                                         run: fn(
                                 &mut MainView,
@@ -2113,7 +2114,7 @@ impl MainView {
                     .child(div().flex_1().min_w_0().truncate().child(current))
                     .child(app_icon("chevron-down").xsmall().flex_none()),
             )
-            .dropdown_menu(move |mut menu, _, _| {
+            .pop_menu(move |mut menu, _, _| {
                 for (label, checked, value) in options.iter().cloned() {
                     let view = view.clone();
                     menu = menu.item(PopupMenuItem::new(label).checked(checked).on_click(
@@ -2628,7 +2629,7 @@ impl MainView {
                             .child(card),
                     )
                     // 何もないところの右クリックで、コピーしたタスクを貼り付けられる
-                    .context_menu(move |menu, _, cx| menu.item(paste_item(&view, cx))),
+                    .right_menu(move |menu, _, cx| menu.item(paste_item(&view, cx))),
             )
             .vertical_scrollbar(&self.page_scroll)
             // 右下の「＋」。どこまでスクロールしていても、新しいタスクを始められる
@@ -2932,7 +2933,7 @@ impl MainView {
             .py_0p5()
             .justify_start()
             .child(shown)
-            .dropdown_menu(move |mut menu, _, _| {
+            .pop_menu(move |mut menu, _, _| {
                 for (label, checked, value) in options.iter().cloned() {
                     let view = view.clone();
                     let apply = apply.clone();
@@ -2962,7 +2963,7 @@ impl MainView {
             .small()
             .justify_start()
             .child(status_badge(current, cx))
-            .dropdown_menu(move |menu, _, _| status_items(menu, &view, &task, current))
+            .pop_menu(move |menu, _, _| status_items(menu, &view, &task, current))
     }
 
     fn priority_options(current: Prio) -> Vec<(SharedString, bool, u8)> {
@@ -3111,7 +3112,7 @@ impl MainView {
         self.drop_zone(el, DropTarget::Workspace(Some(ws.id.clone())), cx)
             .rounded_none()
             .test_support()
-            .context_menu(move |menu, _, _| {
+            .right_menu(move |menu, _, _| {
                 let item =
                     |label: &'static str, run: fn(&mut MainView, Id, &mut Context<MainView>)| {
                         let view = view.clone();
@@ -3405,7 +3406,7 @@ impl MainView {
         };
         // 右クリックで、その行の操作を出す
         row_el
-            .context_menu(move |menu, window, cx| {
+            .right_menu(move |menu, window, cx| {
                 let item = |label: &'static str,
                             run: fn(&mut MainView, Id, &mut Window, &mut Context<MainView>)| {
                     let view = view.clone();
@@ -4018,7 +4019,7 @@ impl MainView {
                     .label("担当者を登録")
                     .ghost()
                     .small()
-                    .dropdown_menu(move |menu, _, _| person_items(menu, &view, &others)),
+                    .pop_menu(move |menu, _, _| person_items(menu, &view, &others)),
             ),
         )
     }
@@ -5188,7 +5189,7 @@ impl MainView {
                     .child(div().flex_1().min_w_0().truncate().child(shown))
                     .child(app_icon("chevron-down").small().text_color(muted)),
             )
-            .dropdown_menu(move |mut menu, _, _| {
+            .pop_menu(move |mut menu, _, _| {
                 for (label, checked, id) in options.iter().cloned() {
                     let view = view.clone();
                     menu = menu.item(PopupMenuItem::new(label).checked(checked).on_click(
@@ -5262,7 +5263,7 @@ impl MainView {
         if enabled {
             let auto = self.auto_lock(cx);
             let auto_view = view.clone();
-            let auto_menu = choice("auto-lock", auto_lock_label(auto).into()).dropdown_menu(
+            let auto_menu = choice("auto-lock", auto_lock_label(auto).into()).pop_menu(
                 move |mut menu, _, _| {
                     let options = std::iter::once(None)
                         .chain(malakt_core::lock::AUTO_CHOICES.into_iter().map(Some));
@@ -5283,8 +5284,8 @@ impl MainView {
                 },
             );
             let notices = self.locked_notices(cx);
-            let notice_menu = choice("locked-notices", notices.label().into()).dropdown_menu(
-                move |mut menu, _, _| {
+            let notice_menu =
+                choice("locked-notices", notices.label().into()).pop_menu(move |mut menu, _, _| {
                     for option in malakt_core::lock::LockedNotices::ALL {
                         let view = view.clone();
                         menu = menu.item(
@@ -5299,8 +5300,7 @@ impl MainView {
                         );
                     }
                     menu
-                },
-            );
+                });
             body = body
                 .child(
                     row()
@@ -5387,14 +5387,22 @@ impl MainView {
                 ),
             );
         }
+        // 低いウィンドウで入りきらないときは、カテゴリの列だけスクロールする
         let nav = col()
             .w(px(208.))
             .flex_none()
             .min_h_0()
-            .pr_3()
             .border_r_1()
             .border_color(theme.border)
-            .child(nav);
+            .child(
+                div()
+                    .id("customize-nav-list")
+                    .size_full()
+                    // 右の端はスクロールバーの場所
+                    .pr_3()
+                    .child(nav)
+                    .overflow_y_scrollbar(),
+            );
 
         // 右: カテゴリごとに見出しとカード。検索中は、合う設定のあるカテゴリをすべて並べる
         let sections: Vec<Section> = if searching {
@@ -6643,7 +6651,7 @@ impl MainView {
                             .ghost()
                             .xsmall()
                             .tooltip(label)
-                            .dropdown_menu(move |menu, _, _| {
+                            .pop_menu(move |menu, _, _| {
                                 person_workspace_items(menu, &view, &person, &current, &roots)
                             })
                     });

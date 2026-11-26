@@ -3184,6 +3184,7 @@ impl MainView {
             self.columns.iter().map(|c| (c.column, c.hidden)).collect();
         let view = cx.entity().downgrade();
         let menu = PopupMenu::build(window, cx, move |mut menu, _, _| {
+            menu = menu.scrollable(true);
             for (text, descending) in [("昇順で並べ替え", false), ("降順で並べ替え", true)]
             {
                 let view = view.clone();
