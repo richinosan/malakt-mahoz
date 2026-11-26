@@ -3022,18 +3022,65 @@ fn table_columns_resize_reorder_hide_and_sort(cx: &mut TestAppContext) {
             assert_eq!((v.query.sort, v.query.descending), (Sort::Due, false));
         })
     });
-    // 見出しを押すとメニューが開き、もう一度押すと閉じる
+    // 見出しを押すと、その列で並べ替える。押すたびに昇順と降順が入れ替わる
+    let sorted = |cx: &mut TestAppContext| {
+        cx.update(|cx| {
+            let v = view.read(cx);
+            (v.query.sort, v.query.descending)
+        })
+    };
     ui(cx, window, |window, cx| window.click("col-title", cx));
-    cx.update(|cx| assert!(view.read(cx).column_menu.is_some()));
+    assert_eq!(sorted(cx), (Sort::Title, false));
+    cx.update(|cx| assert_eq!(view.read(cx).column_sorted(None), Some(false)));
     ui(cx, window, |window, cx| window.click("col-title", cx));
-    cx.update(|cx| assert!(view.read(cx).column_menu.is_none()));
+    assert_eq!(sorted(cx), (Sort::Title, true));
+    cx.update(|cx| assert_eq!(view.read(cx).column_sorted(None), Some(true)));
+    ui(cx, window, |window, cx| window.click("col-title", cx));
+    assert_eq!(sorted(cx), (Sort::Title, false));
+    // 更新の昇順は古い順（もとの「新しい順」の逆）
+    let updated = ("col-menu", Column::Updated as usize);
+    ui(cx, window, |window, cx| window.click(updated, cx));
+    assert_eq!(sorted(cx), (Sort::Updated, true));
+    cx.update(|cx| {
+        assert_eq!(
+            view.read(cx).column_sorted(Some(Column::Updated)),
+            Some(false)
+        )
+    });
+    ui(cx, window, |window, cx| window.click(updated, cx));
+    assert_eq!(sorted(cx), (Sort::Updated, false));
+    // 担当の列も並べ替えられる（この表では隠しているので、見出しを押したときの処理を呼ぶ）
+    cx.update(|cx| view.update(cx, |v, cx| v.sort_by_column(Some(Column::Assignee), cx)));
+    assert_eq!(sorted(cx), (Sort::Assignee, false));
+
+    // 右クリックでメニューが開き、もう一度右クリックすると閉じる
+    let right_click = |cx: &mut TestAppContext, id: gpui_kit::ElementId| {
+        let mut at = None;
+        ui(cx, window, |window, _| {
+            at = Some(window.try_find(id).unwrap().bounds().center());
+        });
+        let mut v = gpui_kit::VisualTestContext::from_window(window, cx);
+        v.simulate_mouse_down(at.unwrap(), MouseButton::Right, Modifiers::default());
+        v.simulate_mouse_up(at.unwrap(), MouseButton::Right, Modifiers::default());
+        v.run_until_parked();
+    };
+    let menu_of = |cx: &mut TestAppContext| {
+        cx.update(|cx| view.read(cx).column_menu.as_ref().map(|m| m.column))
+    };
+    right_click(cx, "col-title".into());
+    assert_eq!(menu_of(cx), Some(None));
+    // 右クリックでは並べ替えない
+    assert_eq!(sorted(cx), (Sort::Assignee, false));
+    right_click(cx, "col-title".into());
+    assert_eq!(menu_of(cx), None);
+    right_click(cx, ("col-menu", Column::Due as usize).into());
+    assert_eq!(menu_of(cx), Some(Some(Column::Due)));
+    // メニューを開いたまま見出しを押すと、メニューを閉じて並べ替える
     ui(cx, window, |window, cx| {
         window.click(("col-menu", Column::Due as usize), cx)
     });
-    cx.update(|cx| {
-        let open = view.read(cx).column_menu.as_ref().map(|m| m.column);
-        assert_eq!(open, Some(Some(Column::Due)));
-    });
+    assert_eq!(menu_of(cx), None);
+    assert_eq!(sorted(cx), (Sort::Due, false));
 }
 
 /// タスクのリンクをコピーできる。コメントに貼ったリンクはカードになり、押すとそのタスクが開く。

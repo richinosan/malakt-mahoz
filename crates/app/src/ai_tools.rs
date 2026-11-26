@@ -75,13 +75,14 @@ pub fn is_app_tool(name: &str) -> bool {
     is_view_tool(name) || is_session_tool(name)
 }
 
-const SORTS: [(&str, Sort); 7] = [
+const SORTS: [(&str, Sort); 8] = [
     ("due", Sort::Due),
     ("priority", Sort::Priority),
     ("updated", Sort::Updated),
     ("created", Sort::Created),
     ("title", Sort::Title),
     ("status", Sort::Status),
+    ("assignee", Sort::Assignee),
     ("manual", Sort::Manual),
 ];
 

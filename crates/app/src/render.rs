@@ -2633,7 +2633,8 @@ impl MainView {
             )
     }
 
-    /// 表の見出し。押すと、並べ替えと、列を出す・隠すメニューが開く。`column` が `None` はタイトル。
+    /// 表の見出し。押すとその列で並べ替え（押すたびに昇順と降順が入れ替わる）、右クリックで
+    /// 並べ替えと、列を出す・隠すメニューが開く。`column` が `None` はタイトル。
     fn column_menu(
         &self,
         id: impl Into<ElementId>,
@@ -2647,6 +2648,8 @@ impl MainView {
             .column_menu
             .as_ref()
             .filter(|open| open.column == column);
+        let motion = self.motion && self.sort_turns > 0;
+        let turns = self.sort_turns;
         div()
             .relative()
             .child(
@@ -2659,21 +2662,41 @@ impl MainView {
                     .rounded(feel::md())
                     .cursor_pointer()
                     .when(open.is_some(), |d| d.bg(theme.accent))
+                    .when(current.is_some(), |d| d.text_color(theme.foreground))
                     .lit(theme.accent, cx)
                     .sunk(theme.primary.opacity(0.4), cx)
                     .child(label)
                     .when_some(current, |d, descending| {
-                        d.child(
+                        let arrow = div().relative().child(
                             app_icon(if descending { "arrow-down" } else { "arrow-up" }).xsmall(),
-                        )
+                        );
+                        if !motion {
+                            return d.child(arrow);
+                        }
+                        // 向きが変わるたびに、矢印の向きの方へすっと入る
+                        let from = if descending { -5. } else { 5. };
+                        d.child(arrow.with_animation(
+                            ("sort-arrow", turns),
+                            appear(200),
+                            move |d, t| d.opacity(t).top(px(from * (1. - t))),
+                        ))
                     })
-                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                        // 見出しを動かして離したときは、開かない
+                    .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
+                        // 見出しを動かして離したときは、並べ替えない
                         if this.column_drag.as_ref().is_some_and(|d| d.moved) {
                             return;
                         }
-                        this.toggle_column_menu(column, window, cx);
+                        if event.standard_click() {
+                            this.sort_by_column(column, cx);
+                        }
                     }))
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                            cx.stop_propagation();
+                            this.toggle_column_menu(column, window, cx);
+                        }),
+                    )
                     .test_support(),
             )
             .when_some(open, |d, open| {

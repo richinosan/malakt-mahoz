@@ -267,6 +267,8 @@ pub struct MainView {
     pub sidebar_hidden: bool,
     /// 左のメニューを開け閉めした回数。開け閉めの動きを、そのたびに頭から始めるのに使う
     pub sidebar_turns: usize,
+    /// 見出しで並べ替えた回数。並べ替えの矢印を動かす鍵にする。
+    pub sort_turns: usize,
     /// 左のメニューの幅（拡大率を掛ける前の値）。境界をドラッグして変えられ、保存される。
     pub sidebar_width: f32,
     /// 左のメニューの境界をドラッグしている間だけ `true`。
@@ -702,6 +704,7 @@ impl MainView {
             ai_session,
             sidebar_hidden: false,
             sidebar_turns: 0,
+            sort_turns: 0,
             sidebar_width: SIDEBAR_WIDTH,
             sidebar_resizing: false,
             panel_width: PANEL_WIDTH,
@@ -909,7 +912,9 @@ impl MainView {
     /// 絞り込みと並べ替えだけをやり直す（データベースは読まない）。
     pub fn refilter(&mut self) {
         self.counts = view::counts(&self.tasks);
-        let hits = view::apply(&self.tasks, &self.query, self.self_id.as_deref());
+        let hits = view::apply_named(&self.tasks, &self.query, self.self_id.as_deref(), &|id| {
+            self.person_name(id).to_owned()
+        });
         let outline = match &self.nav {
             // 絞り込んでいる間は、条件に合うタスクがないサブワークスペースを出さない
             Nav::Workspace(id) => view::outline(
@@ -3067,12 +3072,12 @@ impl MainView {
 
     /// その見出しの列で並べ替えているときの向き（`true` は降順）。`column` が `None` はタイトル。
     pub fn column_sorted(&self, column: Option<Column>) -> Option<bool> {
-        let sort = column_sort(column)?;
+        let sort = column_sort(column);
         // 更新は新しい順がもとの向きなので、昇順（古い順）は逆にする
         (sort == self.query.sort).then_some(self.query.descending != (sort == view::Sort::Updated))
     }
 
-    /// 見出しのメニューを開く。開いている見出しをもう一度押すと閉じる。
+    /// 見出しのメニューを開く（見出しを右クリック）。開いている見出しをもう一度右クリックすると閉じる。
     pub fn toggle_column_menu(
         &mut self,
         column: Option<Column>,
@@ -3088,29 +3093,26 @@ impl MainView {
             return;
         }
         let sort = column_sort(column);
-        let flip = sort == Some(view::Sort::Updated);
+        let flip = sort == view::Sort::Updated;
         let current = self.column_sorted(column);
         let columns: Vec<(Column, bool)> =
             self.columns.iter().map(|c| (c.column, c.hidden)).collect();
         let view = cx.entity().downgrade();
         let menu = PopupMenu::build(window, cx, move |mut menu, _, _| {
-            if let Some(sort) = sort {
-                for (text, descending) in [("昇順で並べ替え", false), ("降順で並べ替え", true)]
-                {
-                    let view = view.clone();
-                    menu = menu.item(
-                        PopupMenuItem::new(text)
-                            .checked(current == Some(descending))
-                            .on_click(move |_, _, cx| {
-                                // ウィンドウを閉じたあとなら、反映する先がない
-                                let _ = view.update(cx, |this, cx| {
-                                    this.sort_by(sort, descending != flip, cx)
-                                });
-                            }),
-                    );
-                }
-                menu = menu.separator();
+            for (text, descending) in [("昇順で並べ替え", false), ("降順で並べ替え", true)]
+            {
+                let view = view.clone();
+                menu = menu.item(
+                    PopupMenuItem::new(text)
+                        .checked(current == Some(descending))
+                        .on_click(move |_, _, cx| {
+                            // ウィンドウを閉じたあとなら、反映する先がない
+                            let _ = view
+                                .update(cx, |this, cx| this.sort_by(sort, descending != flip, cx));
+                        }),
+                );
             }
+            menu = menu.separator();
             if let Some(column) = column {
                 let view = view.clone();
                 menu = menu
@@ -3145,6 +3147,21 @@ impl MainView {
             _closed: closed,
         });
         cx.notify();
+    }
+
+    /// 見出しを押して、その列で並べ替える。押すたびに昇順と降順が入れ替わる。最初は昇順。
+    pub fn sort_by_column(&mut self, column: Option<Column>, cx: &mut Context<Self>) {
+        let sort = column_sort(column);
+        // 更新は新しい順がもとの向きなので、昇順（古い順）は逆にする
+        let flip = sort == view::Sort::Updated;
+        let descending = self.column_sorted(column) == Some(false);
+        if self.column_menu.take().is_some() {
+            cx.notify();
+        }
+        self.query.sort = sort;
+        self.query.descending = descending != flip;
+        self.sort_turns += 1;
+        self.reload(cx);
     }
 
     /// 見出しのメニューから並べ替える。同じ列で同じ向きをもう一度選ぶと、最初の並び順に戻る。
@@ -4218,14 +4235,14 @@ impl Column {
         }
     }
 
-    /// この列で並べ替えるときの並び順。担当では並べ替えない。
-    pub fn sort(self) -> Option<view::Sort> {
+    /// この列で並べ替えるときの並び順。
+    pub fn sort(self) -> view::Sort {
         match self {
-            Column::Status => Some(view::Sort::Status),
-            Column::Priority => Some(view::Sort::Priority),
-            Column::Assignee => None,
-            Column::Due => Some(view::Sort::Due),
-            Column::Updated => Some(view::Sort::Updated),
+            Column::Status => view::Sort::Status,
+            Column::Priority => view::Sort::Priority,
+            Column::Assignee => view::Sort::Assignee,
+            Column::Due => view::Sort::Due,
+            Column::Updated => view::Sort::Updated,
         }
     }
 }
@@ -4255,10 +4272,10 @@ impl TableColumn {
 }
 
 /// 見出しの列で並べ替えるときの並び順。`None` はタイトル。
-fn column_sort(column: Option<Column>) -> Option<view::Sort> {
+fn column_sort(column: Option<Column>) -> view::Sort {
     match column {
         Some(column) => column.sort(),
-        None => Some(view::Sort::Title),
+        None => view::Sort::Title,
     }
 }
 
