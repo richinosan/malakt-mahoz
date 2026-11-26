@@ -1,4 +1,4 @@
-# malakt-mahoz
+# Malakt Mahoz
 
 [![CI](https://github.com/richinosan/malakt-mahoz/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/richinosan/malakt-mahoz/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/richinosan/malakt-mahoz)](https://github.com/richinosan/malakt-mahoz/releases/latest)
