@@ -64,9 +64,14 @@ impl Look {
     /// 乗せたとき。`on_top` は、中身の上に重ねて描く部品（ライブラリのボタン）。
     /// `square` は角の丸みがない部品（一覧の行）。
     fn hover(color: Hsla, on_top: bool, square: bool, cx: &App) -> Self {
+        Look::hover_as(crate::theme::feel(cx), color, on_top, square, cx)
+    }
+
+    /// `feel` で描くときの、乗せたときの面。
+    fn hover_as(feel: Feel, color: Hsla, on_top: bool, square: bool, cx: &App) -> Self {
         let theme = cx.theme();
         let dark = theme.mode.is_dark();
-        match crate::theme::feel(cx) {
+        match feel {
             Feel::Standard => Look::flat(color),
             // 端から端まである行は、面を明るくするだけ。縁の線を引くと帯に見える
             Feel::Glass if square => Look::flat(white(if dark { 0.07 } else { 0.3 })),
@@ -176,6 +181,34 @@ impl Fade {
     fn moving(&self, now: Instant) -> bool {
         now.duration_since(self.since) < FADE
     }
+
+    /// 向かう先を `to` にする。`snap` のときは、濃くなるときだけすぐに移る（薄くなるときは動かす）。
+    fn aim(&mut self, to: f32, snap: bool, now: Instant) {
+        if to == self.to {
+            return;
+        }
+        self.from = if snap && to > self.to {
+            to
+        } else {
+            self.value(now)
+        };
+        self.to = to;
+        self.since = now;
+    }
+}
+
+/// 面の濃さの倍率と、濃くなるときにすぐ移るか。
+#[derive(Clone, Copy)]
+struct Strength {
+    scale: f32,
+    snap: bool,
+}
+
+impl Strength {
+    const FULL: Strength = Strength {
+        scale: 1.,
+        snap: false,
+    };
 }
 
 /// 乗せたとき・押している間の面。親の部品いっぱいに敷く。
@@ -185,6 +218,7 @@ fn wash(
     color: Hsla,
     radii: Option<CornersRefinement<AbsoluteLength>>,
     on_top: bool,
+    strength: Strength,
 ) -> impl IntoElement {
     canvas(
         |bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::Normal),
@@ -213,11 +247,7 @@ fn wash(
                             Kind::Press => hovered && state.held.get(),
                         };
                         let to = if on { 1. } else { 0. };
-                        if to != state.to {
-                            state.from = state.value(now);
-                            state.to = to;
-                            state.since = now;
-                        }
+                        state.aim(to, strength.snap, now);
                         let value = if still { to } else { state.value(now) };
                         let moving = !still && state.moving(now);
                         ((value, moving, state.held.clone()), state)
@@ -248,7 +278,7 @@ fn wash(
                     Kind::Hover => Look::hover(color, on_top, square, cx),
                     Kind::Press => Look::press(color, cx),
                 };
-                look.paint(bounds, radii, value, window);
+                look.paint(bounds, radii, value * strength.scale, window);
             }
 
             // ポインターが出入りしたら、描き直す
@@ -274,8 +304,22 @@ fn wash(
                         }
                     }
                 });
-                window.on_mouse_event(move |_: &MouseUpEvent, phase, _, cx| {
-                    if phase == DispatchPhase::Capture && held.get() {
+                window.on_mouse_event({
+                    let held = held.clone();
+                    move |_: &MouseUpEvent, phase, _, cx| {
+                        if phase == DispatchPhase::Capture && held.get() {
+                            held.set(false);
+                            cx.notify(view);
+                        }
+                    }
+                });
+                // ウィンドウを動かしたあとは、離したことが届かない OS がある。
+                // ボタンを押さずに動かしたら、離したものとして戻す
+                window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
+                    if phase == DispatchPhase::Capture
+                        && held.get()
+                        && event.pressed_button != Some(MouseButton::Left)
+                    {
                         held.set(false);
                         cx.notify(view);
                     }
@@ -287,12 +331,27 @@ fn wash(
     .inset_0()
 }
 
+/// `feel` で乗せたときの面を、乗せたままの濃さで描く（「設定」のプレビュー）。
+/// 親の部品いっぱいに敷く。`radius` は親の角の丸みで、0 なら一覧の行の描き方になる。
+pub(crate) fn hover_sample(feel: Feel, color: Hsla, radius: Pixels) -> impl IntoElement {
+    canvas(
+        |_, _, _| {},
+        move |bounds, _, window, cx| {
+            let radii = Corners::all(radius).clamp_radii_for_quad_size(bounds.size);
+            Look::hover_as(feel, color, false, radius == px(0.), cx)
+                .paint(bounds, radii, 1., window);
+        },
+    )
+    .absolute()
+    .inset_0()
+}
+
 /// 乗せたときの面を、テーマに合わせて付ける。
 /// 中身の後ろに敷くので、角の丸みを決めたあと、子を足す前に呼ぶ。
 pub(crate) trait Lit: Styled + ParentElement + Sized {
     fn lit(mut self, color: Hsla, _cx: &App) -> Self {
         let radii = self.style().corner_radii.clone();
-        self.child(wash(Kind::Hover, color, Some(radii), false))
+        self.child(wash(Kind::Hover, color, Some(radii), false, Strength::FULL))
     }
 }
 impl<E: Styled + ParentElement> Lit for E {}
@@ -301,10 +360,42 @@ impl<E: Styled + ParentElement> Lit for E {}
 pub(crate) trait Sunk: Styled + ParentElement + Sized {
     fn sunk(mut self, color: Hsla, _cx: &App) -> Self {
         let radii = self.style().corner_radii.clone();
-        self.child(wash(Kind::Press, color, Some(radii), false))
+        self.child(wash(Kind::Press, color, Some(radii), false, Strength::FULL))
     }
 }
 impl<E: Styled + ParentElement> Sunk for E {}
+
+/// ウィンドウを動かすバー（上のバー、別ウィンドウのバー）の、乗せたとき・つまんでいる間の面。
+/// バーはボタンより広いので、ボタンより薄く敷く。つまんだ面はすぐに出し（動かしている間は
+/// 描き直しが止まる OS がある）、離すと 180ms で戻る。ボタンの上（`occlude`）では出ない。
+/// 呼ぶ場所は `lit` と同じ。
+pub(crate) trait Grip: Styled + ParentElement + Sized {
+    fn grip(mut self, cx: &App) -> Self {
+        let radii = self.style().corner_radii.clone();
+        let ink = cx.theme().foreground;
+        self.child(wash(
+            Kind::Hover,
+            ink.opacity(0.08),
+            Some(radii.clone()),
+            false,
+            Strength {
+                scale: 0.5,
+                snap: false,
+            },
+        ))
+        .child(wash(
+            Kind::Press,
+            ink.opacity(0.075),
+            Some(radii),
+            false,
+            Strength {
+                scale: 0.8,
+                snap: true,
+            },
+        ))
+    }
+}
+impl<E: Styled + ParentElement> Grip for E {}
 
 /// ライブラリのボタンに、ガラスの反射と縁の光を重ねる。ガラスのテーマのときだけ箱で包む。
 pub(crate) fn gloss(button: Button) -> AnyElement {
@@ -353,8 +444,14 @@ pub(crate) fn gloss_when(enabled: bool, mut button: Button) -> AnyElement {
     frame
         .flex()
         .child(button.flex_grow(1.))
-        .child(wash(Kind::Hover, white(1.), radii.clone(), true))
-        .child(wash(Kind::Press, white(1.), radii, true))
+        .child(wash(
+            Kind::Hover,
+            white(1.),
+            radii.clone(),
+            true,
+            Strength::FULL,
+        ))
+        .child(wash(Kind::Press, white(1.), radii, true, Strength::FULL))
         .into_any_element()
 }
 
@@ -432,5 +529,43 @@ pub(crate) fn rim(cx: &App) -> Hsla {
     match crate::theme::feel(cx) {
         Feel::Glass => white(if cx.theme().mode.is_dark() { 0.22 } else { 0.7 }),
         _ => cx.theme().border,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Fade, FADE};
+    use std::time::{Duration, Instant};
+
+    fn fade(now: Instant) -> Fade {
+        Fade {
+            from: 0.,
+            to: 0.,
+            since: now - FADE,
+            held: Default::default(),
+        }
+    }
+
+    #[test]
+    fn snap_shows_at_once_and_fades_out() {
+        let now = Instant::now();
+        let mut state = fade(now);
+        state.aim(1., true, now);
+        assert_eq!(state.value(now), 1.);
+        let later = now + FADE;
+        state.aim(0., true, later);
+        assert_eq!(state.value(later), 1.);
+        let mid = state.value(later + Duration::from_millis(60));
+        assert!(mid > 0. && mid < 1., "{mid}");
+        assert_eq!(state.value(later + FADE), 0.);
+    }
+
+    #[test]
+    fn without_snap_fades_in() {
+        let now = Instant::now();
+        let mut state = fade(now);
+        state.aim(1., false, now);
+        assert_eq!(state.value(now), 0.);
+        assert_eq!(state.value(now + FADE), 1.);
     }
 }

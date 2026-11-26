@@ -334,12 +334,20 @@ pub fn quit_when_main_closes(cx: &mut App) {
     .detach();
 }
 
+/// 別ウィンドウの名前。中身の名前のあとに、アプリの名前を付ける。
+pub fn window_title(name: &str) -> String {
+    format!("{name} - {APP_NAME}")
+}
+
 /// AI チャット、またはシェルだけのウィンドウを開く。
 pub fn open_ai_window(mode: PaneMode, cx: &mut App) -> Result<AnyWindowHandle> {
     let px = |value: f32| px(value * UI_SCALE);
     let (title, window_size) = match mode {
-        PaneMode::ShellWindow => ("AI のシェル - Malakt Mahoz", size(px(640.), px(480.))),
-        _ => ("AI チャット - Malakt Mahoz", size(px(860.), px(720.))),
+        PaneMode::ShellWindow => (
+            window_title(&term::shared(cx).read(cx).active_label()),
+            size(px(640.), px(480.)),
+        ),
+        _ => (window_title("AI チャット"), size(px(860.), px(720.))),
     };
     let offset = px(28.) * (cx.windows().len() % 8) as f32;
     // 前に置いていた位置と大きさがあれば、そこに開く

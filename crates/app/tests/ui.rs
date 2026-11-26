@@ -578,7 +578,6 @@ fn every_screen_renders_at_any_size(cx: &mut TestAppContext) {
             Modal::DeleteWorkspace(ws.clone()),
             Modal::DeleteTasks(vec![task.clone()]),
             Modal::MoveTasks(vec![task.clone()]),
-            Modal::People,
             Modal::History,
             Modal::Status(task.clone(), Status::Completed),
             Modal::WorkspaceSettings(ws.clone()),
@@ -1703,6 +1702,98 @@ fn auto_lock_after_the_chosen_minutes(cx: &mut TestAppContext) {
     });
 }
 
+/// 歯車を押すと、メニューを挟まずに「設定」が開く。担当者・キー操作・新しいウィンドウ・今すぐロック・版も
+/// 「設定」の中にあり、左の目次を押すとその見出しまでスクロールして、目次のその行が光る。
+#[gpui_kit::test]
+fn the_gear_opens_settings_with_everything_inside(cx: &mut TestAppContext) {
+    use malakt_mahoz::state::CustomizeSection as Section;
+    start(cx);
+    let (window, view) = open(cx, wide());
+    let nav = |section: Section| {
+        (
+            "customize-nav",
+            Section::ALL.iter().position(|s| *s == section).unwrap(),
+        )
+    };
+    ui(cx, window, |window, cx| window.click("open-settings", cx));
+    cx.update(|cx| assert_eq!(view.read(cx).modal, Modal::Appearance));
+    ui(cx, window, |window, _| {
+        assert!(!window.find("person-add").visible())
+    });
+
+    // 担当者
+    ui(cx, window, |window, cx| {
+        window.click(nav(Section::People), cx)
+    });
+    ui(cx, window, |window, _| {
+        assert!(window.find("person-add").visible())
+    });
+    cx.update(|cx| {
+        let view = view.read(cx);
+        assert!(view.appearance_pinned);
+        assert_eq!(view.appearance_section, Section::People);
+    });
+    // キー操作
+    ui(cx, window, |window, cx| {
+        window.click(nav(Section::Keys), cx)
+    });
+    ui(cx, window, |window, _| {
+        assert!(window.find("app-keys").visible())
+    });
+
+    // 新しいウィンドウ
+    let before = cx.update(|cx| cx.windows().len());
+    ui(cx, window, |window, cx| {
+        window.click(nav(Section::Window), cx)
+    });
+    ui(cx, window, |window, cx| window.click("new-window", cx));
+    cx.run_until_parked();
+    assert_eq!(cx.update(|cx| cx.windows().len()), before + 1);
+
+    // 今すぐロックは、ロックが有効なときだけ出る。押すと「設定」を閉じてロックする
+    ui(cx, window, |window, _| {
+        assert!(window.try_find("lock-now").is_none())
+    });
+    let asked = passkey(cx, Ok(()));
+    ui(cx, window, |window, cx| {
+        window.click(nav(Section::Lock), cx)
+    });
+    ui(cx, window, |window, cx| window.click("lock-switch", cx));
+    assert_eq!(*asked.lock().unwrap(), ["ロックを有効にする"]);
+    ui(cx, window, |window, cx| window.click("lock-now", cx));
+    cx.run_until_parked();
+    cx.update(|cx| {
+        let view = view.read(cx);
+        assert_eq!(view.modal, Modal::None);
+        assert!(!view.unlocked(cx));
+    });
+}
+
+/// 動きを付けているときは、ダイアログは薄い所から浮かび上がり、閉じると薄くなってから消える。
+/// 消えるまでの間は上を覆い、閉じたダイアログのボタンは押せない。
+#[gpui_kit::test]
+fn dialogs_fade_in_and_out(cx: &mut TestAppContext) {
+    start(cx);
+    let (window, view) = open(cx, wide());
+    cx.update(|cx| view.update(cx, |v, _| v.motion = true));
+    ui(cx, window, |window, cx| window.click("open-settings", cx));
+    cx.update(|cx| assert!(view.read(cx).dialog_t.get() < 1.));
+    std::thread::sleep(std::time::Duration::from_millis(250));
+    ui(cx, window, |_, _| {});
+    cx.update(|cx| assert_eq!(view.read(cx).dialog_t.get(), 1.));
+
+    ui(cx, window, |window, cx| window.click("dialog-close", cx));
+    cx.update(|cx| assert_eq!(view.read(cx).modal, Modal::None));
+    ui(cx, window, |window, _| {
+        assert!(window.try_find("dialog-closing").is_some())
+    });
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    ui(cx, window, |_, _| {});
+    ui(cx, window, |window, _| {
+        assert!(window.try_find("dialog-closing").is_none())
+    });
+}
+
 /// 画面で発行した完了チケットをコマンドで引き換えると、開いている画面に届く。
 #[gpui_kit::test]
 fn completion_ticket_issued_here_and_redeemed_by_command(cx: &mut TestAppContext) {
@@ -2390,7 +2481,7 @@ fn backdrop_and_cards_are_chosen_in_settings(cx: &mut TestAppContext) {
                 window.find("pane-split").bounds(),
                 window.find("ai-toggle").bounds(),
                 window.find("open-notices").bounds(),
-                window.find("open-menu").bounds(),
+                window.find("open-settings").bounds(),
             ]
             .map(|bounds| bounds.center().y)
         })
@@ -2484,14 +2575,15 @@ fn themes_are_chosen_and_saved_in_settings(cx: &mut TestAppContext) {
     ui(cx, window, |window, cx| {
         view.update(cx, |v, cx| v.open_appearance(window, cx))
     });
-    // 開くとテーマのカテゴリが出ている。ほかのカテゴリの行は、左で選ぶまで出ない
+    // 開くとテーマの見出しが上に見えている。下の見出しは、左で押すとそこまでスクロールする
     ui(cx, window, |window, cx| {
-        assert!(window.try_find("font-open").is_none());
+        assert!(window.find(("preset", 0usize)).visible());
+        assert!(!window.find("font-open").visible());
         window.click(("customize-nav", 3usize), cx)
     });
     ui(cx, window, |window, cx| {
-        assert!(window.try_find("font-open").is_some());
-        assert!(window.try_find(("preset", 0usize)).is_none());
+        assert!(window.find("font-open").visible());
+        assert!(!window.find(("preset", 0usize)).visible());
         window.click(("customize-nav", 0usize), cx)
     });
 
@@ -4108,7 +4200,7 @@ fn reminders(
     os
 }
 
-/// 歯車の「設定」をそのカテゴリで開き、スイッチを押して閉じる。
+/// 歯車で「設定」を開いてそのカテゴリまでスクロールし、スイッチを押して閉じる。
 fn press_in_settings(
     cx: &mut TestAppContext,
     window: AnyWindowHandle,
@@ -4116,28 +4208,12 @@ fn press_in_settings(
     section: malakt_mahoz::state::CustomizeSection,
     id: &'static str,
 ) {
-    choose_in_menu(cx, window, "設定");
+    ui(cx, window, |window, cx| window.click("open-settings", cx));
     ui(cx, window, |window, cx| {
         view.update(cx, |v, cx| v.show_appearance_section(section, window, cx))
     });
     ui(cx, window, |window, cx| window.click(id, cx));
     ui(cx, window, |window, cx| window.click("dialog-close", cx));
-}
-
-/// 歯車のメニューを開いて、その文の項目を押す。
-fn choose_in_menu(cx: &mut TestAppContext, window: AnyWindowHandle, label: &str) {
-    ui(cx, window, |window, cx| window.click("open-menu", cx));
-    let id = cx
-        .update_window(window, |_, window, _| {
-            window
-                .elements()
-                .iter()
-                .find(|e| e.label() == Some(label))
-                .and_then(|e| e.path().last().cloned())
-        })
-        .unwrap()
-        .unwrap_or_else(|| panic!("メニューに「{label}」がありません"));
-    ui(cx, window, |window, cx| window.click(id, cx));
 }
 
 /// リマインダーとの連携は、選ぶまで動かない。選ぶと、タスクが期限つきでリストに入り、
@@ -4619,7 +4695,7 @@ fn escape_after_cancelling_a_name_closes_what_is_open(cx: &mut TestAppContext) {
     cx.update(|cx| {
         let view = view.read(cx);
         assert_eq!(view.person_naming, None);
-        assert_eq!(view.modal, Modal::People);
+        assert_eq!(view.modal, Modal::Appearance);
     });
     ui(cx, window, |window, cx| window.press("escape", cx));
     cx.update(|cx| assert_eq!(view.read(cx).modal, Modal::None));
@@ -4826,7 +4902,7 @@ fn people_are_added_and_named_in_the_list(cx: &mut TestAppContext) {
     cx.update(|cx| {
         let view = view.read(cx);
         assert_eq!(view.person_naming, None);
-        assert_eq!(view.modal, Modal::People);
+        assert_eq!(view.modal, Modal::Appearance);
     });
 
     // 名前を押すと書き直せる。Esc は書きかけを捨てて、ダイアログは開いたまま
@@ -4841,7 +4917,7 @@ fn people_are_added_and_named_in_the_list(cx: &mut TestAppContext) {
     cx.update(|cx| {
         let view = view.read(cx);
         assert_eq!(view.person_naming, None);
-        assert_eq!(view.modal, Modal::People);
+        assert_eq!(view.modal, Modal::Appearance);
     });
 
     // 書き直して、ほかの場所（追加のボタン）を押すと保存され、次の人が増える
@@ -5884,7 +5960,7 @@ fn notice_closes_after_three_minutes(cx: &mut TestAppContext) {
     cx.update(|cx| assert!(view.read(cx).error.is_some()));
 }
 
-/// 「カスタマイズ」の詳細に「AI のシェル」があり、押すとシェルを選ぶメニューが開く。
+/// 設定の「動作」に「AI のタブのシェル」があり、押すとシェルを選ぶメニューが開く。
 #[gpui_kit::test]
 fn the_ai_shell_is_chosen_in_customize(cx: &mut TestAppContext) {
     start(cx);

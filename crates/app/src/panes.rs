@@ -560,133 +560,145 @@ impl MainView {
         root.into_any_element()
     }
 
+    /// キー操作の一覧。アプリのキーと、Ctrl+B のあとに押すペインのキーを 2 列に並べる。
+    pub(crate) fn keys_help(&self, cx: &mut Context<Self>) -> Div {
+        let theme = cx.theme().clone();
+        let line = |key: SharedString, about: SharedString| {
+            div()
+                .flex()
+                .flex_row()
+                .gap_3()
+                .text_sm()
+                .child(
+                    div()
+                        .w(px(112.) * crate::UI_SCALE)
+                        .flex_none()
+                        .text_color(theme.primary)
+                        .child(key),
+                )
+                .child(div().flex_1().min_w_0().child(about))
+        };
+        let column = || {
+            div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_w(px(280.) * crate::UI_SCALE)
+                .gap_1()
+        };
+        let mut app = column().id("app-keys");
+        for (key, about) in crate::shortcuts::help() {
+            app = app.child(line(key.into(), about.into()));
+        }
+        let mut keys = div().flex().flex_row().gap_1();
+        for scheme in Keys::ALL {
+            let on = self.pane_keys == scheme;
+            keys = keys.child(feel::gloss(
+                Button::new(("pane-keys", scheme as usize))
+                    .label(scheme.label())
+                    .xsmall()
+                    .when(on, |b| b.primary())
+                    .on_click(cx.listener(move |this, _, _, cx| this.set_pane_keys(scheme, cx))),
+            ));
+        }
+        let mut panes = column().child(keys).child(
+            div()
+                .text_xs()
+                .text_color(theme.muted_foreground)
+                .child("ペイン: Ctrl+B のあとに押すキー"),
+        );
+        for (key, about) in self.pane_keys.help() {
+            panes = panes.child(line(key.into(), about.into()));
+        }
+        div()
+            .flex()
+            .flex_row()
+            .flex_wrap()
+            .gap_x_6()
+            .gap_y_3()
+            .child(app.test_support())
+            .child(panes)
+    }
+
+    /// キーの一覧か、配置のプリセットのダイアログ。
+    pub(crate) fn pane_overlay_dialog(
+        &self,
+        overlay: PaneOverlay,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let mut body = div().flex().flex_col().gap_1();
+
+        match overlay {
+            PaneOverlay::Help => {
+                // 狭いウィンドウでは縦に並び、入りきらない分はスクロールする
+                body = body.min_h_0().child(
+                    self.keys_help(cx)
+                        .id("keys-help")
+                        .min_h_0()
+                        .overflow_y_scrollbar(),
+                );
+            }
+            PaneOverlay::Presets => {
+                for (n, (name, text)) in PRESETS.into_iter().enumerate() {
+                    body = body.child(feel::gloss(
+                        Button::new(("pane-preset", n))
+                            .label(name)
+                            .ghost()
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.apply_pane_layout(text, window, cx)
+                            })),
+                    ));
+                }
+                for (n, (name, text)) in self.pane_presets.iter().cloned().enumerate() {
+                    body = body.child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_1()
+                            .child(
+                                div().flex_1().flex().flex_col().child(feel::gloss(
+                                    Button::new(("pane-preset-own", n))
+                                        .label(name)
+                                        .ghost()
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            this.apply_pane_layout(&text, window, cx)
+                                        })),
+                                )),
+                            )
+                            .child(feel::gloss(
+                                Button::new(("pane-preset-delete", n))
+                                    .icon(app_icon("trash"))
+                                    .ghost()
+                                    .xsmall()
+                                    .tooltip("この配置を削除")
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.delete_pane_preset(n, cx)
+                                    })),
+                            )),
+                    );
+                }
+                body = body.child(feel::gloss(
+                    Button::new("pane-preset-save")
+                        .icon(app_icon("plus"))
+                        .label("今の配置を保存")
+                        .on_click(cx.listener(|this, _, _, cx| this.save_pane_preset(cx))),
+                ));
+            }
+        }
+        let (title, width) = match overlay {
+            PaneOverlay::Help => ("キー操作", 720.),
+            PaneOverlay::Presets => ("配置のプリセット", 460.),
+        };
+        self.dialog_as("dialog", px(width) * crate::UI_SCALE, title, body, cx)
+            .into_any_element()
+    }
+
     /// Ctrl+B を押したあとの印、リサイズモードの印、キーの一覧、プリセット。
     pub(crate) fn render_pane_overlay(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let theme = cx.theme().clone();
         if let Some(overlay) = self.pane_overlay {
-            let mut body = div().flex().flex_col().gap_1();
-            match overlay {
-                PaneOverlay::Help => {
-                    let line = |key: SharedString, about: SharedString| {
-                        div()
-                            .flex()
-                            .flex_row()
-                            .gap_3()
-                            .text_sm()
-                            .child(
-                                div()
-                                    .w(px(112.) * crate::UI_SCALE)
-                                    .flex_none()
-                                    .text_color(theme.primary)
-                                    .child(key),
-                            )
-                            .child(about)
-                    };
-                    let column = || {
-                        div()
-                            .flex()
-                            .flex_col()
-                            .flex_1()
-                            .min_w(px(280.) * crate::UI_SCALE)
-                            .gap_1()
-                    };
-                    let mut app = column().id("app-keys");
-                    for (key, about) in crate::shortcuts::help() {
-                        app = app.child(line(key.into(), about.into()));
-                    }
-                    let mut keys = div().flex().flex_row().gap_1();
-                    for scheme in Keys::ALL {
-                        let on = self.pane_keys == scheme;
-                        keys = keys.child(feel::gloss(
-                            Button::new(("pane-keys", scheme as usize))
-                                .label(scheme.label())
-                                .xsmall()
-                                .when(on, |b| b.primary())
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.set_pane_keys(scheme, cx)
-                                })),
-                        ));
-                    }
-                    let mut panes = column().child(keys).child(
-                        div()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child("ペイン: Ctrl+B のあとに押すキー"),
-                    );
-                    for (key, about) in self.pane_keys.help() {
-                        panes = panes.child(line(key.into(), about.into()));
-                    }
-                    // 狭いウィンドウでは縦に並び、入りきらない分はスクロールする
-                    body = body.min_h_0().child(
-                        div()
-                            .id("keys-help")
-                            .flex()
-                            .flex_row()
-                            .flex_wrap()
-                            .gap_x_6()
-                            .gap_y_3()
-                            .min_h_0()
-                            .child(app.test_support())
-                            .child(panes)
-                            .overflow_y_scrollbar(),
-                    );
-                }
-                PaneOverlay::Presets => {
-                    for (n, (name, text)) in PRESETS.into_iter().enumerate() {
-                        body = body.child(feel::gloss(
-                            Button::new(("pane-preset", n))
-                                .label(name)
-                                .ghost()
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.apply_pane_layout(text, window, cx)
-                                })),
-                        ));
-                    }
-                    for (n, (name, text)) in self.pane_presets.iter().cloned().enumerate() {
-                        body = body.child(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .gap_1()
-                                .child(
-                                    div().flex_1().flex().flex_col().child(feel::gloss(
-                                        Button::new(("pane-preset-own", n))
-                                            .label(name)
-                                            .ghost()
-                                            .on_click(cx.listener(move |this, _, window, cx| {
-                                                this.apply_pane_layout(&text, window, cx)
-                                            })),
-                                    )),
-                                )
-                                .child(feel::gloss(
-                                    Button::new(("pane-preset-delete", n))
-                                        .icon(app_icon("trash"))
-                                        .ghost()
-                                        .xsmall()
-                                        .tooltip("この配置を削除")
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.delete_pane_preset(n, cx)
-                                        })),
-                                )),
-                        );
-                    }
-                    body = body.child(feel::gloss(
-                        Button::new("pane-preset-save")
-                            .icon(app_icon("plus"))
-                            .label("今の配置を保存")
-                            .on_click(cx.listener(|this, _, _, cx| this.save_pane_preset(cx))),
-                    ));
-                }
-            }
-            let (title, width) = match overlay {
-                PaneOverlay::Help => ("キー操作", 720.),
-                PaneOverlay::Presets => ("配置のプリセット", 460.),
-            };
-            return Some(
-                self.dialog_as("dialog", px(width) * crate::UI_SCALE, title, body, cx)
-                    .into_any_element(),
-            );
+            return Some(self.pane_overlay_dialog(overlay, cx));
         }
         let label = if self.pane_prefix {
             "Ctrl+B"

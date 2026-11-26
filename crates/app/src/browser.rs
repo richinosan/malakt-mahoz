@@ -48,6 +48,65 @@ const SHOT_WAIT: Duration = Duration::from_millis(300);
 /// ページの画像を受け取る関数。OS の部品が撮り終わったら呼ぶ。
 pub type Shot = Box<dyn FnOnce(Result<Arc<RenderImage>, String>) + Send + 'static>;
 
+/// ページの拡大率の段階。Ctrl+ホイールや Ctrl++ / Ctrl+- で 1 段ずつ動く。
+pub const ZOOM_LEVELS: &[f64] = &[
+    0.25, 0.33, 0.5, 0.67, 0.75, 0.8, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0, 4.0, 5.0,
+];
+/// 拡大率を変えたあと、拡大率の表示を目立たせておく時間。100% に戻したときは、このあと消える。
+pub const ZOOM_SHOWN: Duration = Duration::from_millis(1500);
+/// 100% に戻した表示が消えるまでの時間。
+const ZOOM_FADE: Duration = Duration::from_millis(200);
+
+/// 拡大率の変え方。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Zoom {
+    In,
+    Out,
+    /// 100% に戻す。
+    Reset,
+}
+
+impl Zoom {
+    /// ページから届いた知らせ（`zoom:in` など）を読む。
+    pub fn parse(text: &str) -> Option<Self> {
+        match text {
+            "zoom:in" => Some(Zoom::In),
+            "zoom:out" => Some(Zoom::Out),
+            "zoom:reset" => Some(Zoom::Reset),
+            _ => None,
+        }
+    }
+}
+
+/// `now` から 1 段動かした拡大率。端ではそのまま。
+pub fn zoom_step(now: f64, step: Zoom) -> f64 {
+    let first = ZOOM_LEVELS[0];
+    let last = ZOOM_LEVELS[ZOOM_LEVELS.len() - 1];
+    match step {
+        Zoom::Reset => 1.0,
+        Zoom::In => ZOOM_LEVELS
+            .iter()
+            .copied()
+            .find(|level| *level > now + 0.001)
+            .unwrap_or(last),
+        Zoom::Out => ZOOM_LEVELS
+            .iter()
+            .rev()
+            .copied()
+            .find(|level| *level < now - 0.001)
+            .unwrap_or(first),
+    }
+}
+
+/// 拡大率の表示（`1.1` なら `110%`）。
+pub fn zoom_label(zoom: f64) -> String {
+    format!("{}%", (zoom * 100.).round() as i64)
+}
+
+fn is_actual_size(zoom: f64) -> bool {
+    (zoom - 1.0).abs() < 0.001
+}
+
 /// OS のブラウザの部品からの知らせ。
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event {
@@ -68,6 +127,8 @@ pub enum Event {
         gen: u64,
         image: Result<Arc<RenderImage>, String>,
     },
+    /// ページの上で Ctrl+ホイールや Ctrl++ / Ctrl+- / Ctrl+0 を押した。
+    Zoom(Zoom),
 }
 
 /// 開いているページを動かす口。本物は [`crate::webview`]、テストでは差し替える。
@@ -92,6 +153,8 @@ pub trait Engine {
     fn clear_data(&self) -> Result<(), String>;
     /// 今見えている部分の画像を撮る。メニューやダイアログが上に出ている間、隠したページの代わりに出す。
     fn snapshot(&self, done: Shot) -> Result<(), String>;
+    /// ページの拡大率を変える（`1.0` が 100%）。
+    fn zoom(&self, factor: f64) -> Result<(), String>;
 }
 
 /// ページを作るときに渡すもの。
@@ -146,6 +209,16 @@ pub struct Page {
     pub(crate) shooting: Option<Instant>,
     /// 画像を撮れなかった。このページでは、もう撮らずに画像なしで隠す。
     pub(crate) shot_failed: bool,
+    /// 拡大率（`1.0` が 100%）。
+    pub zoom: f64,
+    /// 拡大率を変えた回数。表示の動きを、変えるたびに始め直す。
+    pub(crate) zoom_turn: u64,
+    /// 拡大率の表示が出てきたときの `zoom_turn`。この回だけ、ふわっと出す。
+    pub(crate) zoom_entered: u64,
+    /// 拡大率を変えたばかりで、表示を目立たせている。
+    pub zoom_recent: bool,
+    /// 100% に戻した表示が、消えていく途中。
+    pub(crate) zoom_leaving: bool,
 }
 
 impl Page {
@@ -169,6 +242,11 @@ impl Page {
             shot_gen: 0,
             shooting: None,
             shot_failed: false,
+            zoom: 1.0,
+            zoom_turn: 0,
+            zoom_entered: 0,
+            zoom_recent: false,
+            zoom_leaving: false,
         }
     }
 
@@ -201,6 +279,11 @@ impl Page {
         started
     }
 
+    /// 拡大率の表示を出すか。100% でないあいだと、変えたばかりのとき。
+    pub fn zoom_badge(&self) -> bool {
+        !is_actual_size(self.zoom) || self.zoom_recent || self.zoom_leaving
+    }
+
     /// タブに出す名前。題名、なければ場所。
     pub fn label(&self) -> SharedString {
         if let Some(title) = &self.title {
@@ -220,6 +303,7 @@ impl Page {
             "title": self.title.as_ref().map(|t| t.to_string()),
             "loading": self.loading,
             "shown": active,
+            "zoom": zoom_label(self.zoom),
         })
     }
 }
@@ -384,6 +468,59 @@ impl Terms {
         cx.notify();
     }
 
+    /// ページの拡大率を 1 段変える・100% に戻す。変えたら、拡大率を少しのあいだ目立たせて出す。
+    pub fn zoom_page(&mut self, id: u64, step: Zoom, cx: &mut Context<Self>) {
+        let Some(page) = self.page_mut(id) else {
+            return;
+        };
+        let to = zoom_step(page.zoom, step);
+        if let Some(engine) = page.engine.clone() {
+            if let Err(e) = engine.zoom(to) {
+                self.fail(format!("ページの拡大率を変更できませんでした: {e}"), cx);
+                return;
+            }
+        }
+        let entering = !page.zoom_badge();
+        page.zoom = to;
+        // 拡大率が変わると見た目も変わるので、撮った画像を捨てる
+        page.forget_shot();
+        page.zoom_turn += 1;
+        if entering {
+            page.zoom_entered = page.zoom_turn;
+        }
+        page.zoom_recent = true;
+        page.zoom_leaving = false;
+        let turn = page.zoom_turn;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(ZOOM_SHOWN).await;
+            // タブを閉じていれば、何もしない
+            let leaving = this
+                .update(cx, |this, cx| {
+                    let page = this.page_mut(id).filter(|p| p.zoom_turn == turn)?;
+                    page.zoom_recent = false;
+                    page.zoom_leaving = is_actual_size(page.zoom);
+                    cx.notify();
+                    Some(page.zoom_leaving)
+                })
+                .ok()
+                .flatten()
+                .unwrap_or(false);
+            if !leaving {
+                return;
+            }
+            cx.background_executor().timer(ZOOM_FADE).await;
+            // タブを閉じていれば、何もしない
+            let _ = this.update(cx, |this, cx| {
+                if let Some(page) = this.page_mut(id).filter(|p| p.zoom_turn == turn) {
+                    page.zoom_leaving = false;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
     /// ページを閉じる（[`Terms::close`] から呼ぶ）。
     pub(crate) fn remove_page(&mut self, id: u64, cx: &mut Context<Self>) -> bool {
         let Some(at) = self.pages.iter().position(|page| page.id == id) else {
@@ -454,6 +591,10 @@ impl Terms {
                 cx.open_url(&url);
                 return;
             }
+            Event::Zoom(step) => {
+                self.zoom_page(id, step, cx);
+                return;
+            }
             _ => {}
         }
         let events = self.page_events.clone();
@@ -519,7 +660,11 @@ impl Terms {
                 page.focused = true;
                 page.forget_shot();
             }
-            Event::NewTab(_) | Event::External(_) | Event::Pointer(_) | Event::Snapshot { .. } => {}
+            Event::NewTab(_)
+            | Event::External(_)
+            | Event::Zoom(_)
+            | Event::Pointer(_)
+            | Event::Snapshot { .. } => {}
         }
         if let Some(engine) = page.engine.clone() {
             // ページの中だけで場所が変わるもの（GitHub など）は、読み込みの知らせが来ない
@@ -602,6 +747,13 @@ impl Terms {
         };
         match made {
             Ok(engine) => {
+                // ほかのウィンドウから移したページは、前の拡大率のまま出す
+                if !is_actual_size(page.zoom) {
+                    if let Err(e) = engine.zoom(page.zoom) {
+                        page.error =
+                            Some(format!("ページの拡大率を変更できませんでした: {e}").into());
+                    }
+                }
                 page.engine = Some(engine);
                 page.window = Some(window.window_handle().window_id());
                 page.shown = false;
@@ -956,6 +1108,80 @@ impl BrowserPane {
     }
 }
 
+/// 場所の欄の右に出す、ページの拡大率。押すと 100% に戻す。
+struct ZoomBadge {
+    zoom: f64,
+    turn: u64,
+    /// 出てきたばかり。
+    entering: bool,
+    /// 変えたばかり。
+    recent: bool,
+    /// 100% に戻して、消えていく途中。
+    leaving: bool,
+}
+
+impl ZoomBadge {
+    fn render(
+        self,
+        still: bool,
+        accent: Hsla,
+        reset: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    ) -> AnyElement {
+        let icon = if self.zoom < 1.0 {
+            "zoom-out"
+        } else {
+            "zoom-in"
+        };
+        let button = Button::new("browser-zoom")
+            .icon(app_icon(icon))
+            .label(zoom_label(self.zoom))
+            .tooltip("100% に戻す")
+            .tooltip_placement(Placement::Top)
+            .ghost()
+            .small()
+            .on_click(reset);
+        let badge = div()
+            .flex_none()
+            .rounded(feel::md())
+            .child(feel::gloss(button));
+        if still {
+            return badge
+                .when(self.recent, |d| d.bg(accent.opacity(0.18)))
+                .into_any_element();
+        }
+        let ZoomBadge {
+            turn,
+            entering,
+            leaving,
+            ..
+        } = self;
+        if leaving {
+            return badge
+                .with_animation(
+                    ("browser-zoom-leave", turn as usize),
+                    Animation::new(ZOOM_FADE).with_easing(ease_in_out),
+                    |d, t| d.opacity(1. - t),
+                )
+                .into_any_element();
+        }
+        // 変えるたびに金色がさっと乗って、ゆっくり引く。初めて出るときは、ふわっと出す
+        badge
+            .with_animation(
+                ("browser-zoom", turn as usize),
+                Animation::new(ZOOM_SHOWN).with_easing(ease_out_quint()),
+                move |d, t| {
+                    let d = d.bg(accent.opacity(0.32 * (1. - t)));
+                    if entering {
+                        d.opacity((t * 8.).min(1.))
+                    } else {
+                        d
+                    }
+                },
+            )
+            .into_any_element()
+    }
+}
+
 /// ページを読み込んでいる間、上の端を流れる線。
 fn loading_line(color: Hsla) -> AnyElement {
     div()
@@ -999,11 +1225,19 @@ impl Render for BrowserPane {
                     p.error.clone(),
                     elsewhere,
                     p.shot.clone(),
+                    p.zoom_badge().then_some(ZoomBadge {
+                        zoom: p.zoom,
+                        turn: p.zoom_turn,
+                        entering: p.zoom_turn == p.zoom_entered,
+                        recent: p.zoom_recent,
+                        leaving: p.zoom_leaving,
+                    }),
                 )
             });
             (page, terms.focus_bar)
         };
-        let Some((id, url, title, loading, (can_back, can_forward), error, elsewhere, shot)) = page
+        let Some((id, url, title, loading, (can_back, can_forward), error, elsewhere, shot, zoom)) =
+            page
         else {
             return div().into_any_element();
         };
@@ -1069,6 +1303,12 @@ impl Render for BrowserPane {
                     .child(Input::new(&self.bar).small().aria_label("URL"))
                     .test_support(),
             )
+            .children(zoom.map(|zoom| {
+                let terms = self.terms.clone();
+                zoom.render(cx.reduce_motion(), theme.primary, move |_, _, cx| {
+                    terms.update(cx, |terms, cx| terms.zoom_page(id, Zoom::Reset, cx))
+                })
+            }))
             .child(feel::gloss_when(
                 is_web(&url),
                 tool("browser-external", "external-link", "ブラウザで開く")
@@ -1281,6 +1521,26 @@ pub fn run_tool(args: &Value, reveal: &mut bool, cx: &mut App) -> Result<Value, 
             match terms.read(cx).error.clone() {
                 Some(error) => Err(error.to_string()),
                 None => Ok(json!({"tab": id})),
+            }
+        }
+        "zoom_in" | "zoom_out" | "zoom_reset" => {
+            let id = target(cx)?;
+            let step = match action {
+                "zoom_in" => Zoom::In,
+                "zoom_out" => Zoom::Out,
+                _ => Zoom::Reset,
+            };
+            terms.update(cx, |terms, cx| {
+                terms.error = None;
+                terms.zoom_page(id, step, cx);
+            });
+            let terms = terms.read(cx);
+            match &terms.error {
+                Some(error) => Err(error.to_string()),
+                None => Ok(json!({
+                    "tab": id,
+                    "zoom": terms.page(id).map(|p| zoom_label(p.zoom)),
+                })),
             }
         }
         "close" => {
@@ -1578,6 +1838,24 @@ mod tests {
         assert_eq!(host("about:blank"), None);
         assert!(is_web("HTTPS://x.example"));
         assert!(!is_web("malakt-mahoz://task/1"));
+    }
+
+    #[test]
+    fn the_zoom_moves_one_level_at_a_time() {
+        use super::{zoom_label, zoom_step, Zoom};
+        assert_eq!(zoom_step(1.0, Zoom::In), 1.1);
+        assert_eq!(zoom_step(1.0, Zoom::Out), 0.9);
+        assert_eq!(zoom_step(1.25, Zoom::Reset), 1.0);
+        assert_eq!(zoom_step(5.0, Zoom::In), 5.0);
+        assert_eq!(zoom_step(0.25, Zoom::Out), 0.25);
+        // 段の間の値からは、近い次の段へ
+        assert_eq!(zoom_step(1.2, Zoom::In), 1.25);
+        assert_eq!(zoom_step(1.2, Zoom::Out), 1.1);
+        assert_eq!(zoom_label(0.67), "67%");
+        assert_eq!(zoom_label(1.1), "110%");
+        assert_eq!(Zoom::parse("zoom:in"), Some(Zoom::In));
+        assert_eq!(Zoom::parse("zoom:reset"), Some(Zoom::Reset));
+        assert_eq!(Zoom::parse("focus"), None);
     }
 
     #[test]

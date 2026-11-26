@@ -45,7 +45,6 @@ pub enum Modal {
     DeleteTasks(Vec<Id>),
     /// 移動先のワークスペースを選ぶ
     MoveTasks(Vec<Id>),
-    People,
     History,
     /// 状態の変更（コメントを添えられる）
     Status(Id, Status),
@@ -104,11 +103,14 @@ pub enum CustomizeSection {
     Lock,
     Notices,
     Update,
+    People,
+    Keys,
+    Window,
     Data,
 }
 
 impl CustomizeSection {
-    pub const ALL: [CustomizeSection; 13] = [
+    pub const ALL: [CustomizeSection; 16] = [
         CustomizeSection::Theme,
         CustomizeSection::Layout,
         CustomizeSection::Backdrop,
@@ -121,6 +123,9 @@ impl CustomizeSection {
         CustomizeSection::Lock,
         CustomizeSection::Notices,
         CustomizeSection::Update,
+        CustomizeSection::People,
+        CustomizeSection::Keys,
+        CustomizeSection::Window,
         CustomizeSection::Data,
     ];
 
@@ -138,6 +143,9 @@ impl CustomizeSection {
             CustomizeSection::Lock => "ロック",
             CustomizeSection::Notices => "通知",
             CustomizeSection::Update => "アップデート",
+            CustomizeSection::People => "担当者",
+            CustomizeSection::Keys => "キー操作",
+            CustomizeSection::Window => "ウィンドウ",
             CustomizeSection::Data => "データ",
         }
     }
@@ -156,6 +164,9 @@ impl CustomizeSection {
             CustomizeSection::Lock => "lock",
             CustomizeSection::Notices => "bell",
             CustomizeSection::Update => "refresh-cw",
+            CustomizeSection::People => "users",
+            CustomizeSection::Keys => "keyboard",
+            CustomizeSection::Window => "app-window",
             CustomizeSection::Data => "database",
         }
     }
@@ -170,6 +181,9 @@ impl CustomizeSection {
             CustomizeSection::Lock
             | CustomizeSection::Notices
             | CustomizeSection::Update
+            | CustomizeSection::People
+            | CustomizeSection::Keys
+            | CustomizeSection::Window
             | CustomizeSection::Data => "アプリ",
             _ => "見た目",
         }
@@ -186,6 +200,18 @@ impl CustomizeSection {
             _ => None,
         }
     }
+}
+
+/// 「設定」のプレビューに映す、マウスを乗せている選択肢。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreviewPick {
+    Density(crate::theme::Density),
+    Due(malakt_core::view::DueFormat),
+    Feel(crate::theme::Feel),
+    Cards(bool),
+    Float(bool),
+    /// `Layout::PATTERNS` の何番目か
+    Layout(usize),
 }
 
 /// ダイアログの上に、もう 1 枚重ねて出すダイアログ。
@@ -435,8 +461,12 @@ pub struct MainView {
     pub sub_modal: Option<SubModal>,
     /// ロック中に OS の通知を押したときの、その通知。解除したら開く。
     pub open_after_unlock: Option<Id>,
-    /// 「設定」で開いているカテゴリ。
+    /// 「設定」の左で押したカテゴリ。
     pub appearance_section: CustomizeSection,
+    /// 左でカテゴリを押してから、まだスクロールしていない。左はそのカテゴリを光らせる。
+    pub appearance_pinned: bool,
+    /// 「設定」のプレビューに映している、マウスを乗せている選択肢。
+    pub preview_pick: Option<PreviewPick>,
     /// 「設定」の AI のカテゴリに出す行。
     pub ai_settings: Entity<crate::ai_settings::AiSettings>,
     pub appearance_scroll: gpui_kit::ScrollHandle,
@@ -454,6 +484,14 @@ pub struct MainView {
     pub blur_slider: Entity<SliderState>,
     /// 出入りの動きを付ける。テストでは止めて、すぐ最後の位置に出す
     pub motion: bool,
+    /// ダイアログが出た時刻。出てくる動きに使う。
+    pub modal_opened: Option<std::time::Instant>,
+    /// 閉じたばかりのダイアログと、閉じた時刻。消える動きの間だけ描く。
+    pub modal_closing: Option<(std::time::Instant, Modal, Option<crate::panes::PaneOverlay>)>,
+    /// 前に描いたときに出ていたダイアログ。
+    pub modal_seen: Option<(Modal, Option<crate::panes::PaneOverlay>)>,
+    /// 今描いているダイアログの出方。0 で消えていて、1 で出きっている。
+    pub dialog_t: std::cell::Cell<f32>,
     pub today: String,
     pub inputs: Inputs,
     _subscriptions: Vec<Subscription>,
@@ -853,6 +891,8 @@ impl MainView {
             sub_modal: None,
             open_after_unlock: None,
             appearance_section: CustomizeSection::Theme,
+            appearance_pinned: false,
+            preview_pick: None,
             ai_settings,
             appearance_scroll: gpui_kit::ScrollHandle::new(),
             own_presets: Vec::new(),
@@ -866,6 +906,10 @@ impl MainView {
             border_drag: None,
             window_place: None,
             motion: true,
+            modal_opened: None,
+            modal_closing: None,
+            modal_seen: None,
+            dialog_t: std::cell::Cell::new(1.),
             today: view::today(),
             inputs,
             _subscriptions: subs,
@@ -2665,10 +2709,12 @@ impl MainView {
         self.sub_modal = None;
         // エディタ風のテーマが使う書体は、この PC に入っているものから決まる
         self.fonts = crate::theme::fonts(cx);
-        // 「AI のシェル」で選べるシェルの一覧
+        // 「AI のタブのシェル」で選べるシェルの一覧
         crate::term::shared(cx).update(cx, |terms, cx| terms.load_profiles(cx));
         self.preset_naming = None;
         self.appearance_section = CustomizeSection::Theme;
+        self.appearance_pinned = false;
+        self.preview_pick = None;
         self.ai_settings.update(cx, |s, cx| s.show_rules(None, cx));
         // 「データ」に出す、アプリ内ブラウザのデータの大きさ
         crate::browser::count_usage(cx);
@@ -2726,7 +2772,7 @@ impl MainView {
         cx.notify();
     }
 
-    /// 「カスタマイズ」の左で、カテゴリを選ぶ。検索していたら、検索をやめてそのカテゴリを出す。
+    /// 「設定」の左で、カテゴリを選ぶ。検索していたら検索をやめ、そのカテゴリの見出しまでスクロールする。
     pub fn show_appearance_section(
         &mut self,
         section: CustomizeSection,
@@ -2734,12 +2780,30 @@ impl MainView {
         cx: &mut Context<Self>,
     ) {
         self.appearance_section = section;
-        self.appearance_scroll
-            .set_offset(gpui_kit::Point::default());
+        self.appearance_pinned = true;
         if !self.inputs.customize_search.read(cx).value().is_empty() {
             self.inputs
                 .customize_search
                 .update(cx, |s, cx| s.set_value("", window, cx));
+        }
+        if let Some(ix) = self
+            .customize_sections(cx)
+            .iter()
+            .position(|shown| *shown == section)
+        {
+            self.appearance_scroll.scroll_to_top_of_item(ix);
+        }
+        cx.notify();
+    }
+
+    /// 「設定」のプレビューに、マウスを乗せた選択肢を映す。外れたら今の設定に戻す。
+    pub fn preview_hover(&mut self, pick: PreviewPick, on: bool, cx: &mut Context<Self>) {
+        if on {
+            self.preview_pick = Some(pick);
+        } else if self.preview_pick == Some(pick) {
+            self.preview_pick = None;
+        } else {
+            return;
         }
         cx.notify();
     }
@@ -3016,12 +3080,11 @@ impl MainView {
         cx.notify();
     }
 
+    /// 「設定」を担当者のカテゴリで開く。
     pub fn open_people(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // メニューから開くとフォーカスがなくなるので、Esc を受けられるように戻す
-        self.focus.focus(window, cx);
+        self.open_appearance(window, cx);
         self.person_naming = None;
-        self.modal = Modal::People;
-        cx.notify();
+        self.show_appearance_section(CustomizeSection::People, window, cx);
     }
 
     // ---- 左のメニューの幅 ----
@@ -3422,8 +3485,7 @@ impl MainView {
     pub fn open_lock_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.open_appearance(window, cx);
         self.error = None;
-        self.appearance_section = CustomizeSection::Lock;
-        cx.notify();
+        self.show_appearance_section(CustomizeSection::Lock, window, cx);
     }
 
     /// 操作がないまま自動でロックするまでの分数。自動でロックしないなら `None`。
@@ -4938,6 +5000,8 @@ bundled_icons! {
         "external-link",
         "rotate-cw",
         "app-window",
+        "zoom-in",
+        "zoom-out",
     ],
 }
 
