@@ -5151,9 +5151,10 @@ impl MainView {
                             .child(div().flex_1().text_lg().child(title.into()))
                             .child(feel::gloss(
                                 Button::new("dialog-close")
-                                    .label("閉じる")
+                                    .icon(app_icon("x"))
+                                    .tooltip("閉じる")
                                     .ghost()
-                                    .xsmall()
+                                    .small()
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.close_top_dialog(window, cx)
                                     })),
