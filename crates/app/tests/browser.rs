@@ -9,14 +9,14 @@ use std::sync::{Arc, Mutex};
 use gpui_kit::test::{ClickOptions, TestWindowExt};
 use gpui_kit::{
     point, px, size, AnyWindowHandle, AppContext, Bounds, Entity, MouseButton, Pixels, Point,
-    TestAppContext, WindowBounds, WindowOptions,
+    RenderImage, TestAppContext, WindowBounds, WindowOptions,
 };
 use malakt_ai::keys::{KeyStore, MemoryKeys};
 use malakt_ai::shell::Spec;
 use malakt_ai::Provider;
 use malakt_core::{Store, TaskDraft};
 use malakt_mahoz::ai::{self, ShellPlace};
-use malakt_mahoz::browser::{self, Engine, Event, Factory, Setup, Zoom};
+use malakt_mahoz::browser::{self, Engine, Event, Factory, Setup, Shot, Zoom};
 use malakt_mahoz::term::{self, Terms};
 use malakt_mahoz::{AiConfig, AiPane, MainView, Modal, Nav};
 use serde_json::{json, Value};
@@ -30,6 +30,8 @@ struct Fake {
     history: Cell<(bool, bool)>,
     url: RefCell<String>,
     dropped: Cell<bool>,
+    /// 画像を撮った回数。
+    shots: Cell<usize>,
 }
 
 struct FakeEngine(Rc<Fake>);
@@ -100,6 +102,14 @@ impl Engine for FakeEngine {
     }
     fn zoom(&self, factor: f64) -> Result<(), String> {
         self.0.calls.borrow_mut().push(format!("zoom {factor}"));
+        Ok(())
+    }
+    fn snapshot(&self, done: Shot) -> Result<(), String> {
+        // 本物と同じく、見えていないページは撮らない
+        assert!(self.0.visible.get(), "隠したページを撮ろうとした");
+        self.0.shots.set(self.0.shots.get() + 1);
+        let frame = image::Frame::new(image::RgbaImage::new(4, 3));
+        done(Ok(Arc::new(RenderImage::new(vec![frame]))));
         Ok(())
     }
 }
@@ -466,6 +476,57 @@ fn the_page_hides_when_something_is_over_it(cx: &mut TestAppContext) {
     });
     assert!(fake.dropped.get());
     assert!(terms(cx, |t| t.pages.is_empty() && t.active.is_none()));
+}
+
+/// シェルを選ぶメニューを開いても、後ろのページは消えない。ページは上に重なるので隠すが、
+/// 隠す前に撮った画像を同じ場所に出す。閉じるとページに戻る。
+#[gpui_kit::test]
+fn the_page_stays_on_screen_behind_a_menu(cx: &mut TestAppContext) {
+    let world = start(cx, Store::open_in_memory().unwrap());
+    let (window, _view) = open(cx);
+    ui(cx, window, |window, cx| window.click("ai-toggle", cx));
+    cx.update_window(window, |_, window, cx| {
+        browser::open("https://example.com/", window, cx)
+    })
+    .unwrap();
+    ui(cx, window, |_, _| {});
+    let tab = terms(cx, |t| t.active_page().map(|p| p.id)).expect("タブが開く");
+    let fake = world.fake(tab);
+    assert!(fake.visible.get());
+    // メニューを開くと、ページの画像を撮ってから隠す
+    ui(cx, window, |window, cx| window.click("term-shells", cx));
+    assert!(cx.update(|cx| browser::menus_open(cx)));
+    assert_eq!(fake.shots.get(), 1);
+    assert!(!fake.visible.get());
+    assert!(terms(cx, |t| t.page(tab).is_some_and(|p| p.shot.is_some())));
+    // 閉じると、ページに戻る
+    ui(cx, window, |window, cx| window.press("escape", cx));
+    assert!(!cx.update(|cx| browser::menus_open(cx)));
+    assert!(fake.visible.get());
+    // ページが変わっていなければ、次は撮った画像ですぐに隠す
+    ui(cx, window, |window, cx| window.click("term-shells", cx));
+    assert_eq!(fake.shots.get(), 1);
+    assert!(!fake.visible.get());
+    ui(cx, window, |window, cx| window.press("escape", cx));
+    assert!(fake.visible.get());
+    // マウスがページに入ると画像を捨て、出たときに撮り直す
+    world.send(tab, Event::Pointer(true));
+    cx.run_until_parked();
+    assert!(terms(cx, |t| t.page(tab).is_some_and(|p| p.shot.is_none())));
+    world.send(tab, Event::Pointer(false));
+    cx.run_until_parked();
+    assert_eq!(fake.shots.get(), 2);
+    assert!(terms(cx, |t| t.page(tab).is_some_and(|p| p.shot.is_some())));
+    // 読み込むと、画像を捨てる
+    world.send(
+        tab,
+        Event::Load {
+            done: true,
+            url: "https://example.com/next".into(),
+        },
+    );
+    cx.run_until_parked();
+    assert!(terms(cx, |t| t.page(tab).is_some_and(|p| p.shot.is_none())));
 }
 
 /// 開いていたタブの場所は残り、次に起動したときに並ぶ。ページは見せるときに作る。
