@@ -2,7 +2,8 @@
 //!
 //! ページは OS のブラウザの部品（[`crate::webview`]）で、ウィンドウの上に重なる。
 //! 描いたときに場所を合わせ、描かなかったとき（ほかのタブ、閉じたシェル）と、
-//! アプリのメニューやダイアログが上に出ているときは隠す。
+//! アプリのメニューやダイアログが上に出ているときは隠す。メニューやダイアログの間は、
+//! 隠す前に撮ったページの画像を同じ場所に出すので、後ろのページは消えずに見えたままになる。
 //!
 //! ログインの情報（Cookie）は OS の部品がデータベースの隣の `browser` に保存する
 //! （macOS は OS が決めた場所）。キャッシュは上限を超えたら、最初のページを開く前に消す。
@@ -11,7 +12,8 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::time::Duration;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use gpui_kit::base::TestSupportExt;
 use gpui_kit::component::button::{Button, ButtonVariants};
@@ -40,6 +42,11 @@ pub const READ_TOOL: &str = "read_browser";
 const MAX_READ_CHARS: usize = 20_000;
 /// 文字の検索に使うページ。URL でない言葉を URL の欄に書いたときに開く。
 const SEARCH: &str = "https://www.google.com/search?q=";
+/// メニューを開いてから、ページの画像が撮れるのを待つ長さ。撮れなければ画像なしで隠す。
+const SHOT_WAIT: Duration = Duration::from_millis(300);
+
+/// ページの画像を受け取る関数。OS の部品が撮り終わったら呼ぶ。
+pub type Shot = Box<dyn FnOnce(Result<Arc<RenderImage>, String>) + Send + 'static>;
 
 /// OS のブラウザの部品からの知らせ。
 #[derive(Debug, Clone, PartialEq)]
@@ -54,6 +61,13 @@ pub enum Event {
     External(String),
     /// ページを押した、ページの中に入力が移った。
     Focused,
+    /// マウスがページに入った（`true`）、出た（`false`）。
+    Pointer(bool),
+    /// ページの画像を撮り終わった。`gen` は撮り始めたときの [`Page`] の画像の回。
+    Snapshot {
+        gen: u64,
+        image: Result<Arc<RenderImage>, String>,
+    },
 }
 
 /// 開いているページを動かす口。本物は [`crate::webview`]、テストでは差し替える。
@@ -76,6 +90,8 @@ pub trait Engine {
     fn read(&self, done: Box<dyn Fn(String) + Send + 'static>) -> Result<(), String>;
     /// ログインの情報とキャッシュを消す。
     fn clear_data(&self) -> Result<(), String>;
+    /// 今見えている部分の画像を撮る。メニューやダイアログが上に出ている間、隠したページの代わりに出す。
+    fn snapshot(&self, done: Shot) -> Result<(), String>;
 }
 
 /// ページを作るときに渡すもの。
@@ -122,6 +138,14 @@ pub struct Page {
     pub(crate) creating: bool,
     /// キーの入力先がページにある。
     pub(crate) focused: bool,
+    /// 今のページの画像。隠している間、ページの代わりに出す。ページが変わったら捨てる。
+    pub shot: Option<Arc<RenderImage>>,
+    /// 画像の回。ページが変わるたびに増やし、撮っている途中の古い画像を捨てる。
+    pub(crate) shot_gen: u64,
+    /// 画像を撮っている途中なら、撮り始めた時刻。
+    pub(crate) shooting: Option<Instant>,
+    /// 画像を撮れなかった。このページでは、もう撮らずに画像なしで隠す。
+    pub(crate) shot_failed: bool,
 }
 
 impl Page {
@@ -141,7 +165,40 @@ impl Page {
             painted: None,
             creating: false,
             focused: false,
+            shot: None,
+            shot_gen: 0,
+            shooting: None,
+            shot_failed: false,
         }
+    }
+
+    /// ページが変わった（マウスが入った、読み込んだ、場所や大きさが変わった）。撮った画像を捨てる。
+    fn forget_shot(&mut self) {
+        self.shot = None;
+        self.shot_gen += 1;
+        self.shooting = None;
+    }
+
+    /// 見せているページの画像を撮り始める。撮れたら `events` に届く。
+    fn shoot(&mut self, events: &async_channel::Sender<(u64, Event)>) -> Result<(), String> {
+        let Some(engine) = self.engine.clone() else {
+            return Ok(());
+        };
+        if !self.shown || self.shot.is_some() || self.shooting.is_some() || self.shot_failed {
+            return Ok(());
+        }
+        let (id, gen) = (self.id, self.shot_gen);
+        let events = events.clone();
+        self.shooting = Some(Instant::now());
+        let started = engine.snapshot(Box::new(move |image| {
+            // アプリを閉じている途中なら、受け取る先がない
+            let _ = events.try_send((id, Event::Snapshot { gen, image }));
+        }));
+        if started.is_err() {
+            self.shooting = None;
+            self.shot_failed = true;
+        }
+        started
     }
 
     /// タブに出す名前。題名、なければ場所。
@@ -399,11 +456,56 @@ impl Terms {
             }
             _ => {}
         }
+        let events = self.page_events.clone();
+        let Some(page) = self.page_mut(id) else {
+            return;
+        };
+        let failed = match event {
+            Event::Pointer(true) => {
+                page.forget_shot();
+                return;
+            }
+            // メニューを開くときはマウスがページの外にあるので、出たときに撮っておく
+            Event::Pointer(false) => page.shoot(&events).err(),
+            Event::Snapshot { gen, image } => {
+                if gen != page.shot_gen {
+                    // 撮っている間にページが変わった
+                    return;
+                }
+                page.shooting = None;
+                match image {
+                    Ok(image) => {
+                        page.shot = Some(image);
+                        None
+                    }
+                    Err(e) => {
+                        page.shot_failed = true;
+                        Some(e)
+                    }
+                }
+            }
+            event => {
+                self.on_page_change(id, event, cx);
+                return;
+            }
+        };
+        if let Some(e) = failed {
+            self.fail(
+                format!("メニューの後ろに出すページの画像を作れませんでした: {e}"),
+                cx,
+            );
+        }
+        cx.notify();
+    }
+
+    /// ページの場所・題名・読み込みの知らせ。
+    fn on_page_change(&mut self, id: u64, event: Event, cx: &mut Context<Self>) {
         let Some(page) = self.page_mut(id) else {
             return;
         };
         match event {
             Event::Load { done, url } => {
+                page.forget_shot();
                 page.loading = !done;
                 if !url.is_empty() {
                     page.url = url;
@@ -413,8 +515,11 @@ impl Terms {
                 let title = title.trim();
                 page.title = (!title.is_empty()).then(|| title.to_owned().into());
             }
-            Event::Focused => page.focused = true,
-            Event::NewTab(_) | Event::External(_) => {}
+            Event::Focused => {
+                page.focused = true;
+                page.forget_shot();
+            }
+            Event::NewTab(_) | Event::External(_) | Event::Pointer(_) | Event::Snapshot { .. } => {}
         }
         if let Some(engine) = page.engine.clone() {
             // ページの中だけで場所が変わるもの（GitHub など）は、読み込みの知らせが来ない
@@ -445,11 +550,13 @@ impl Terms {
             }
             page.shown = false;
             page.window = None;
+            page.forget_shot();
         }
         match page.engine.clone() {
             Some(engine) => {
                 if page.bounds != Some(bounds) {
                     page.bounds = Some(bounds);
+                    page.forget_shot();
                     if let Err(e) = engine.place(bounds) {
                         page.error = Some(format!("ページを置けませんでした: {e}").into());
                     }
@@ -542,6 +649,7 @@ impl Terms {
         let now = *frame;
         *frame += 1;
         let covered = covered || menus_open(cx);
+        let events = self.page_events.clone();
         let mut waiting = false;
         let mut failed: Vec<String> = Vec::new();
         for page in &mut self.pages {
@@ -552,7 +660,18 @@ impl Terms {
                 continue;
             };
             let wanted = page.painted == Some((here, now));
-            let visible = wanted && !covered;
+            let mut visible = wanted && !covered;
+            if wanted && covered && page.shown && page.shot.is_none() && !page.shot_failed {
+                // 隠す前に画像を撮る。撮れるまで（長くても SHOT_WAIT）ページを見せておく
+                if let Err(e) = page.shoot(&events) {
+                    failed.push(format!(
+                        "メニューの後ろに出すページの画像を作れませんでした: {e}"
+                    ));
+                }
+                visible = page
+                    .shooting
+                    .is_some_and(|started| started.elapsed() < SHOT_WAIT);
+            }
             waiting |= wanted && covered;
             if visible == page.shown {
                 continue;
@@ -879,11 +998,12 @@ impl Render for BrowserPane {
                     (p.can_back, p.can_forward),
                     p.error.clone(),
                     elsewhere,
+                    p.shot.clone(),
                 )
             });
             (page, terms.focus_bar)
         };
-        let Some((id, url, title, loading, (can_back, can_forward), error, elsewhere)) = page
+        let Some((id, url, title, loading, (can_back, can_forward), error, elsewhere, shot)) = page
         else {
             return div().into_any_element();
         };
@@ -1029,6 +1149,17 @@ impl Render for BrowserPane {
                 .min_h_0()
                 .w_full()
                 .bg(theme.background)
+                // 撮った画像はページの下に置く。メニューやダイアログでページを隠している間だけ見える
+                .children(shot.map(|shot| {
+                    img(shot)
+                        .id("browser-shot")
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .size_full()
+                        .object_fit(ObjectFit::Fill)
+                        .test_support()
+                }))
                 .child(
                     canvas(
                         move |bounds, window, cx| {

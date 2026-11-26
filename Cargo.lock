@@ -4946,6 +4946,7 @@ name = "malakt-mahoz"
 version = "0.1.0"
 dependencies = [
  "async-channel",
+ "block2 0.6.2",
  "chrono",
  "dirs 5.0.1",
  "embed-resource",
@@ -4960,11 +4961,17 @@ dependencies = [
  "malakt-term",
  "malakt-update",
  "objc2 0.6.5",
+ "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.3.2",
+ "objc2-web-kit",
  "raw-window-handle",
  "resvg 0.45.1",
  "serde",
  "serde_json",
  "tempfile",
+ "webkit2gtk",
+ "webview2-com",
+ "windows 0.62.2",
  "wry",
 ]
 
