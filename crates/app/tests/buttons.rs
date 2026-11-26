@@ -125,7 +125,7 @@ const LOCK: &[&str] = &["lock-disable", "lock-save", "unlock"];
 const ICON_PICKER: &[&str] = &["icon-category", "icon-add-image"];
 
 /// 入力欄。名前が `-input` で終わるもののほかに、ここにあるもの。
-const INPUTS: &[&str] = &["ws-date", "ws-context", "ws-term-dir", "def-categories"];
+const INPUTS: &[&str] = &["ws-date", "ws-term-dir", "def-categories"];
 
 /// 押しても画面とデータが変わらないのが正しいもの。ID（番号つきは番号まで）と理由。
 const QUIET: &[(&str, &str)] = &[
@@ -195,23 +195,27 @@ const QUIET: &[(&str, &str)] = &[
         "今開いているカテゴリ",
     ),
     ("設定の AI の動作 > customize-nav#6", "今開いているカテゴリ"),
-    ("設定の GitHub > customize-nav#7", "今開いているカテゴリ"),
     (
-        "ロックのダイアログ > customize-nav#8",
+        "設定の AI のルール > customize-nav#7",
+        "今開いているカテゴリ",
+    ),
+    ("設定の GitHub > customize-nav#8", "今開いているカテゴリ"),
+    (
+        "ロックのダイアログ > customize-nav#9",
         "今開いているカテゴリ",
     ),
     (
-        "ロックを有効にしたダイアログ > customize-nav#8",
+        "ロックを有効にしたダイアログ > customize-nav#9",
         "今開いているカテゴリ",
     ),
     (
-        "ロックを有効にした通知 > customize-nav#9",
+        "ロックを有効にした通知 > customize-nav#10",
         "今開いているカテゴリ",
     ),
-    ("設定のデータ > customize-nav#11", "今開いているカテゴリ"),
+    ("設定のデータ > customize-nav#12", "今開いているカテゴリ"),
     ("export-all", "OS の保存先の選択を開く"),
     ("import-all", "OS のファイル選択を開く"),
-    ("設定の通知 > customize-nav#9", "今開いているカテゴリ"),
+    ("設定の通知 > customize-nav#10", "今開いているカテゴリ"),
     ("alert-hour#0", "今選んでいる時刻"),
     (
         "カスタマイズ（自分のテーマあり） > preset#0",
@@ -817,6 +821,12 @@ fn screens() -> Vec<(&'static str, Size<Pixels>, Setup)> {
             with_view(cx, w, |v, window, cx| {
                 v.open_appearance(window, cx);
                 v.show_appearance_section(CustomizeSection::AiBehavior, window, cx);
+            })
+        }),
+        ("設定の AI のルール", wide, |cx, w| {
+            with_view(cx, w, |v, window, cx| {
+                v.open_appearance(window, cx);
+                v.show_appearance_section(CustomizeSection::AiRules, window, cx);
             })
         }),
         ("設定の GitHub", wide, |cx, w| {

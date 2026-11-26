@@ -355,7 +355,7 @@ fn the_ai_changes_its_own_settings(cx: &mut TestAppContext) {
 
     world.call(
         "set_ai_settings",
-        json!({"track": false, "arrange": false, "watch_minutes": 60, "context": "敬語で答える"}),
+        json!({"track": false, "arrange": false, "watch_minutes": 60}),
         "変えました。",
     );
     say(
@@ -370,7 +370,6 @@ fn the_ai_changes_its_own_settings(cx: &mut TestAppContext) {
         assert!(!s.track);
         assert!(!s.arrange);
         assert_eq!(s.watch.minutes, 60);
-        assert_eq!(s.context, "敬語で答える");
     });
 
     world.call(
@@ -425,6 +424,63 @@ fn ai_changes_are_undone_one_call_at_a_time(cx: &mut TestAppContext) {
     world.call("redo", json!({}), "やり直しました。");
     say(cx, window, &pane, "やっぱりやり直して");
     assert_eq!(tasks(cx).len(), 2);
+}
+
+/// 「これからは〜して」のような頼みは、AI がルールにする。ルールの変更も 1 回ずつ元に戻せる。
+#[gpui_kit::test]
+fn the_ai_writes_its_own_rules(cx: &mut TestAppContext) {
+    let mut store = Store::open_in_memory().unwrap();
+    let ws = store.create_workspace(None, "仕事").unwrap();
+    let world = start(cx, store);
+    let (window, view) = open(cx);
+    let pane = open_chat(cx, window, &view);
+    let rules = |cx: &mut TestAppContext, ws: Option<&str>| {
+        cx.update(|cx| {
+            malakt_mahoz::db::shared(cx)
+                .read(cx)
+                .store
+                .ai_rules(ws)
+                .unwrap()
+        })
+    };
+
+    world.call(
+        "create_ai_rule",
+        json!({"workspace_id": ws.id, "name": "優先度", "body": "PR のタスクは優先度を高にする"}),
+        "ルールにしました。",
+    );
+    say(
+        cx,
+        window,
+        &pane,
+        "仕事では、これからは PR のタスクを優先度高にして",
+    );
+    let made = rules(cx, Some(&ws.id));
+    assert_eq!(made.len(), 1);
+    assert_eq!(made[0].body, "PR のタスクは優先度を高にする");
+    // 一覧の画面にもすぐ出る
+    cx.update(|cx| {
+        view.update(cx, |v, cx| {
+            v.ai_settings
+                .update(cx, |s, cx| s.show_rules(Some(ws.id.clone()), cx))
+        })
+    });
+
+    world.call(
+        "update_ai_rule",
+        json!({"id": made[0].id, "enabled": false}),
+        "止めました。",
+    );
+    say(cx, window, &pane, "そのルールは止めて");
+    assert!(!rules(cx, Some(&ws.id))[0].enabled);
+
+    world.call("undo", json!({}), "戻しました。");
+    say(cx, window, &pane, "やっぱり戻して");
+    assert!(rules(cx, Some(&ws.id))[0].enabled);
+
+    world.call("delete_ai_rule", json!({"id": made[0].id}), "消しました。");
+    say(cx, window, &pane, "消して");
+    assert!(rules(cx, Some(&ws.id)).is_empty());
 }
 
 /// ワークスペースの名前・アイコン・設定、担当者、エクスポートも AI に頼める。

@@ -5,6 +5,7 @@
 use std::io::{Cursor, Write};
 
 use malakt_core::archive::{self, FORMAT, FORMAT_VERSION};
+use malakt_core::rules::{Apply, RulePatch};
 use malakt_core::{lock, Error, Status, Store, TaskDraft, TaskFilter};
 
 fn draft(title: &str) -> TaskDraft {
@@ -40,6 +41,22 @@ fn plan_work_and_move_to_another_device() {
         .unwrap();
     a.set_comment_pinned(&pin.id, true).unwrap();
     a.set_task_status(&flyer.id, Status::Completed).unwrap();
+    // AI のルールも一緒に移す
+    let global = a
+        .create_ai_rule(None, "言葉づかい", "敬語で答える")
+        .unwrap();
+    let local = a
+        .create_ai_rule(Some(&venue.id), "", "会場は予約が先")
+        .unwrap();
+    a.update_ai_rule(
+        &local.id,
+        &RulePatch {
+            enabled: Some(false),
+            apply: Some(Apply::Auto),
+            ..RulePatch::default()
+        },
+    )
+    .unwrap();
 
     // 親のワークスペースから、子孫の未完了だけを見る
     let open = a
@@ -76,6 +93,12 @@ fn plan_work_and_move_to_another_device() {
     assert_eq!(b.comments(&desk.id).unwrap(), a.comments(&desk.id).unwrap());
     assert_eq!(b.changes(&desk.id).unwrap(), a.changes(&desk.id).unwrap());
     assert_eq!(b.workspace_path(&venue.id).unwrap().len(), 2);
+    assert_eq!(b.ai_rules(None).unwrap(), vec![global]);
+    assert_eq!(
+        b.ai_rules(Some(&venue.id)).unwrap(),
+        a.ai_rules(Some(&venue.id)).unwrap()
+    );
+    assert_eq!(b.ai_rule(&local.id).unwrap().apply, Apply::Auto);
 }
 
 /// 2 台で別々に進めたあと取り込むと、同じものは上書き、ないものは追加になる。
@@ -323,6 +346,7 @@ fn archive_layout_is_portable() {
     assert_eq!(
         names,
         [
+            "data/ai_rules.json",
             "data/attachments.json",
             "data/changes.json",
             "data/comments.json",

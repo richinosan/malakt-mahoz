@@ -1591,6 +1591,14 @@ fn locked_notices_hide_what_was_chosen(cx: &mut TestAppContext) {
 
 /// 「設定」のロックと通知で、自動でロックするまでの時間と、ロック中の通知をメニューから選ぶ。
 /// 操作がないまま選んだ時間が過ぎるとロックし、操作すると数え直す。
+/// 設定の左に並ぶカテゴリの番号。
+fn nav_ix(section: malakt_mahoz::state::CustomizeSection) -> usize {
+    malakt_mahoz::state::CustomizeSection::ALL
+        .iter()
+        .position(|s| *s == section)
+        .unwrap()
+}
+
 #[gpui_kit::test]
 fn auto_lock_after_the_chosen_minutes(cx: &mut TestAppContext) {
     use malakt_mahoz::state::CustomizeSection;
@@ -1630,7 +1638,13 @@ fn auto_lock_after_the_chosen_minutes(cx: &mut TestAppContext) {
     cx.update(|cx| assert_eq!(view.read(cx).auto_lock(cx), Some(15)));
     // ロック中の通知は「通知」のカテゴリにある
     ui(cx, window, |window, cx| {
-        window.click(("customize-nav", 9usize), cx)
+        window.click(
+            (
+                "customize-nav",
+                nav_ix(malakt_mahoz::state::CustomizeSection::Notices),
+            ),
+            cx,
+        )
     });
     ui(cx, window, |window, cx| window.click("locked-notices", cx));
     pick(cx, window, "タイトルを出さない");
@@ -1672,7 +1686,13 @@ fn auto_lock_after_the_chosen_minutes(cx: &mut TestAppContext) {
 
     // 「しない」にすると、いくら待ってもロックしない
     ui(cx, window, |window, cx| {
-        window.click(("customize-nav", 8usize), cx)
+        window.click(
+            (
+                "customize-nav",
+                nav_ix(malakt_mahoz::state::CustomizeSection::Lock),
+            ),
+            cx,
+        )
     });
     ui(cx, window, |window, cx| window.click("auto-lock", cx));
     pick(cx, window, "しない");

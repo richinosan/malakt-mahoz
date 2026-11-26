@@ -1146,6 +1146,9 @@ impl MainView {
             .item(item("設定", |this, id, window, cx| {
                 this.open_workspace_settings(&id, window, cx)
             }))
+            .item(item("AI のルール", |this, id, window, cx| {
+                this.open_workspace_rules(&id, window, cx)
+            }))
             .separator()
             .item(item("削除", |this, id, _, cx| {
                 this.modal = Modal::DeleteWorkspace(id);
@@ -5524,7 +5527,7 @@ impl MainView {
             )
         };
         let (title, width, over) = match self.sub_modal {
-            None => return sized("dialog", body, cx),
+            None | Some(SubModal::Rules) => return sized("dialog", body, cx),
             Some(SubModal::Font) => ("フォント", px(400.), self.font_picker(cx)),
             Some(SubModal::Scene) => ("背景の画像", px(680.), self.scene_picker(cx)),
         };
@@ -5653,6 +5656,7 @@ impl MainView {
             let section = match row_kind.group() {
                 crate::ai_settings::AiGroup::Model => Section::AiModel,
                 crate::ai_settings::AiGroup::Behavior => Section::AiBehavior,
+                crate::ai_settings::AiGroup::Rules => Section::AiRules,
                 crate::ai_settings::AiGroup::Github => Section::AiGithub,
             };
             all.push(Setting::new(
@@ -7685,12 +7689,10 @@ impl MainView {
                             .child(Textarea::new(&self.inputs.def_description).h(px(96.))),
                     )
                     .child(
-                        col().gap_1().child(label("AI に伝えること")).child(
-                            div()
-                                .id("ws-context")
-                                .child(Textarea::new(&self.inputs.ws_context).h(px(56.)))
-                                .test_support(),
-                        ),
+                        col()
+                            .gap_1()
+                            .child(label("AI のルール"))
+                            .child(self.rules_opener(id, cx)),
                     )
                     .child(
                         col().gap_1().child(label("ターミナルのフォルダー")).child(
@@ -7735,13 +7737,77 @@ impl MainView {
                                     })),
                             )),
                     );
-                self.dialog(
-                    format!("「{}」の設定", self.workspace_name(Some(id))),
-                    body,
+                let title = format!("「{}」の設定", self.workspace_name(Some(id)));
+                if self.sub_modal != Some(SubModal::Rules) {
+                    return Some(self.dialog(title, body, cx));
+                }
+                // AI のルールは、設定の上にもう 1 枚重ねる
+                let rules = self
+                    .ai_settings
+                    .update(cx, |s, cx| s.rules_editor(false, cx));
+                let over = self.dialog_as(
+                    "dialog",
+                    px(560.),
+                    format!("「{}」の AI のルール", self.workspace_name(Some(id))),
+                    col().child(rules),
                     cx,
-                )
+                );
+                let over = if self.motion {
+                    over.with_animation("sub-modal-in", appear(140), |d, t| d.opacity(t))
+                        .into_any_element()
+                } else {
+                    over.into_any_element()
+                };
+                div()
+                    .absolute()
+                    .inset_0()
+                    .child(self.dialog_as("dialog-under", px(460.), title, body, cx))
+                    .child(over)
             }
         })
+    }
+
+    /// ワークスペースの設定の「AI のルール」。ルールの数を出し、押すとルールの一覧を重ねて開く。
+    fn rules_opener(&self, id: &str, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let rules = self.db.read(cx).store.ai_rules(Some(id));
+        let shown: SharedString = match &rules {
+            Ok(rules) if rules.is_empty() => "なし".into(),
+            Ok(rules) => {
+                let on = rules.iter().filter(|r| r.enabled).count();
+                if on == rules.len() {
+                    format!("{} 件", rules.len()).into()
+                } else {
+                    format!("{} 件（使うのは {on} 件）", rules.len()).into()
+                }
+            }
+            Err(error) => format!("読めませんでした: {error}").into(),
+        };
+        row()
+            .id("ws-rules")
+            .h_8()
+            .px_3()
+            .gap_2()
+            .rounded(feel::md())
+            .border_1()
+            .border_color(theme.input)
+            .cursor_pointer()
+            .text_sm()
+            .lit(theme.muted, cx)
+            .child(
+                app_icon("scroll-text")
+                    .small()
+                    .text_color(theme.muted_foreground),
+            )
+            .child(div().flex_1().min_w_0().truncate().child(shown))
+            .child(
+                app_icon("chevron-right")
+                    .small()
+                    .text_color(theme.muted_foreground),
+            )
+            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.open_rules_over_settings(cx)))
+            .test_support()
+            .into_any_element()
     }
 
     fn render_lock_screen(&self, cx: &mut Context<Self>) -> Div {

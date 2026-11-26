@@ -99,6 +99,7 @@ pub enum CustomizeSection {
     Display,
     AiModel,
     AiBehavior,
+    AiRules,
     AiGithub,
     Lock,
     Notices,
@@ -107,7 +108,7 @@ pub enum CustomizeSection {
 }
 
 impl CustomizeSection {
-    pub const ALL: [CustomizeSection; 12] = [
+    pub const ALL: [CustomizeSection; 13] = [
         CustomizeSection::Theme,
         CustomizeSection::Layout,
         CustomizeSection::Backdrop,
@@ -115,6 +116,7 @@ impl CustomizeSection {
         CustomizeSection::Display,
         CustomizeSection::AiModel,
         CustomizeSection::AiBehavior,
+        CustomizeSection::AiRules,
         CustomizeSection::AiGithub,
         CustomizeSection::Lock,
         CustomizeSection::Notices,
@@ -131,6 +133,7 @@ impl CustomizeSection {
             CustomizeSection::Display => "表示",
             CustomizeSection::AiModel => crate::ai_settings::AiGroup::Model.label(),
             CustomizeSection::AiBehavior => crate::ai_settings::AiGroup::Behavior.label(),
+            CustomizeSection::AiRules => crate::ai_settings::AiGroup::Rules.label(),
             CustomizeSection::AiGithub => crate::ai_settings::AiGroup::Github.label(),
             CustomizeSection::Lock => "ロック",
             CustomizeSection::Notices => "通知",
@@ -148,6 +151,7 @@ impl CustomizeSection {
             CustomizeSection::Display => "rows-3",
             CustomizeSection::AiModel => "sparkles",
             CustomizeSection::AiBehavior => "bot",
+            CustomizeSection::AiRules => "scroll-text",
             CustomizeSection::AiGithub => "github",
             CustomizeSection::Lock => "lock",
             CustomizeSection::Notices => "bell",
@@ -161,6 +165,7 @@ impl CustomizeSection {
         match self {
             CustomizeSection::AiModel
             | CustomizeSection::AiBehavior
+            | CustomizeSection::AiRules
             | CustomizeSection::AiGithub => "AI",
             CustomizeSection::Lock
             | CustomizeSection::Notices
@@ -176,6 +181,7 @@ impl CustomizeSection {
         match self {
             CustomizeSection::AiModel => Some(AiGroup::Model),
             CustomizeSection::AiBehavior => Some(AiGroup::Behavior),
+            CustomizeSection::AiRules => Some(AiGroup::Rules),
             CustomizeSection::AiGithub => Some(AiGroup::Github),
             _ => None,
         }
@@ -189,6 +195,8 @@ pub enum SubModal {
     Font,
     /// 背景の画像を選ぶ
     Scene,
+    /// ワークスペースの AI のルール（ワークスペースの設定の上に重ねる）
+    Rules,
 }
 
 /// 詳細で日付と時刻を入れる 2 つの項目。
@@ -262,7 +270,6 @@ pub struct Inputs {
     pub def_time: Entity<InputState>,
     pub def_categories: Entity<InputState>,
     pub def_description: Entity<TextareaState>,
-    pub ws_context: Entity<TextareaState>,
     /// ターミナルを始めるフォルダー。
     pub ws_term_dir: Entity<InputState>,
     pub bulk_due: Entity<InputState>,
@@ -494,11 +501,6 @@ impl MainView {
             def_time: input(window, cx, "HH:MM（空なら日付だけ）"),
             def_categories: input(window, cx, "「、」で区切って入力"),
             def_description: area(window, cx, "説明の雛形"),
-            ws_context: area(
-                window,
-                cx,
-                "例: このワークスペースのタスクは優先度を高にする",
-            ),
             bulk_due: input(window, cx, "11/27 14:00"),
             bulk_categories: input(window, cx, "「、」で区切って入力"),
         };
@@ -2653,6 +2655,7 @@ impl MainView {
         crate::term::shared(cx).update(cx, |terms, cx| terms.load_profiles(cx));
         self.preset_naming = None;
         self.appearance_section = CustomizeSection::Theme;
+        self.ai_settings.update(cx, |s, cx| s.show_rules(None, cx));
         self.appearance_scroll
             .set_offset(gpui_kit::Point::default());
         // 開いたらすぐ、設定を探す文字を書ける
@@ -3811,11 +3814,10 @@ impl MainView {
             .workspace(id)
             .and_then(|w| Ok((w, store.task_defaults(id)?)));
         let loaded = loaded.and_then(|(w, d)| {
-            let context = store.setting(&crate::ai::workspace_context_key(id))?;
             let dir = store.setting(&crate::term::workspace_dir_key(id))?;
-            Ok((w, d, context.unwrap_or_default(), dir.unwrap_or_default()))
+            Ok((w, d, dir.unwrap_or_default()))
         });
-        let (workspace, defaults, context, term_dir) = match loaded {
+        let (workspace, defaults, term_dir) = match loaded {
             Ok(loaded) => loaded,
             Err(error) => {
                 self.error = Some(error.to_string().into());
@@ -3860,12 +3862,30 @@ impl MainView {
         self.inputs
             .def_description
             .update(cx, |s, cx| s.set_value(description, window, cx));
-        self.inputs
-            .ws_context
-            .update(cx, |s, cx| s.set_value(context, window, cx));
         self.defaults_draft = defaults;
+        self.sub_modal = None;
         self.modal = Modal::WorkspaceSettings(id.to_owned());
         self.error = None;
+        cx.notify();
+    }
+
+    /// 「設定」の AI のルールを、そのワークスペースのものにして開く（ワークスペースのメニューから）。
+    pub fn open_workspace_rules(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_appearance(window, cx);
+        self.show_appearance_section(CustomizeSection::AiRules, window, cx);
+        let id = id.to_owned();
+        self.ai_settings
+            .update(cx, |s, cx| s.show_rules(Some(id), cx));
+    }
+
+    /// ワークスペースの設定の上に、そのワークスペースの AI のルールを重ねて出す。
+    pub fn open_rules_over_settings(&mut self, cx: &mut Context<Self>) {
+        let Modal::WorkspaceSettings(id) = self.modal.clone() else {
+            return;
+        };
+        self.ai_settings
+            .update(cx, |s, cx| s.show_rules(Some(id), cx));
+        self.sub_modal = Some(SubModal::Rules);
         cx.notify();
     }
 
@@ -3930,13 +3950,6 @@ impl MainView {
         defaults.categories = split_list(&read(&self.inputs.def_categories));
         defaults.description = self.inputs.def_description.read(cx).value().to_string();
         let date = when::resolve(&read(&self.inputs.ws_date), &view::now(), None);
-        let context = self.inputs.ws_context.read(cx).value().trim().to_owned();
-        if let Some(error) = crate::ai::workspace_context_error(&context) {
-            self.error = Some(error.into());
-            cx.notify();
-            return;
-        }
-        let context_key = crate::ai::workspace_context_key(&id);
         let term_dir = read(&self.inputs.ws_term_dir).trim().to_owned();
         if !term_dir.is_empty() && !crate::term::expand_dir(&term_dir).is_dir() {
             self.error = Some(format!("フォルダーが見つかりません: {term_dir}").into());
@@ -3950,10 +3963,6 @@ impl MainView {
             s.set_workspace_date(&id, Some(&date))?;
             s.set_task_defaults(&defaults)?;
             // 空にしたら、保存してあるものを消す
-            s.set_setting(
-                &context_key,
-                (!context.is_empty()).then_some(context.as_str()),
-            )?;
             s.set_setting(
                 &dir_key,
                 (!term_dir.is_empty()).then_some(term_dir.as_str()),
