@@ -73,6 +73,7 @@ impl Engine for FakeEngine {
         Ok(())
     }
     fn focus(&self) -> Result<(), String> {
+        self.0.calls.borrow_mut().push("focus".into());
         Ok(())
     }
     fn focus_parent(&self) -> Result<(), String> {
@@ -102,6 +103,29 @@ impl Engine for FakeEngine {
     }
     fn zoom(&self, factor: f64) -> Result<(), String> {
         self.0.calls.borrow_mut().push(format!("zoom {factor}"));
+        Ok(())
+    }
+    fn print(&self) -> Result<(), String> {
+        self.0.calls.borrow_mut().push("print".into());
+        Ok(())
+    }
+    fn find(
+        &self,
+        query: &str,
+        backwards: bool,
+        again: bool,
+        done: Box<dyn Fn(bool) + Send + 'static>,
+    ) -> Result<(), String> {
+        let how = match (backwards, again) {
+            (_, false) => "from top",
+            (false, true) => "next",
+            (true, true) => "previous",
+        };
+        self.0
+            .calls
+            .borrow_mut()
+            .push(format!("find {query} {how}"));
+        done(!query.contains("ない"));
         Ok(())
     }
     fn snapshot(&self, done: Shot) -> Result<(), String> {
@@ -895,6 +919,228 @@ fn the_ai_sees_and_closes_a_small_window(cx: &mut TestAppContext) {
     assert_eq!(cx.update(|cx| cx.windows().len()), 1);
 }
 
+/// macOS では ⌘、ほかでは Ctrl などのキー。
+fn key(others: &'static str, mac: &'static str) -> &'static str {
+    if cfg!(target_os = "macos") {
+        mac
+    } else {
+        others
+    }
+}
+
+/// ブラウザのタブを 1 つ開いて、ページの部品を作る。
+fn open_page(cx: &mut TestAppContext, window: AnyWindowHandle, url: &str) -> u64 {
+    cx.update_window(window, |_, window, cx| browser::open(url, window, cx))
+        .unwrap();
+    ui(cx, window, |_, _| {});
+    terms(cx, |t| t.active_page().map(|p| p.id)).expect("タブが開く")
+}
+
+/// ページの中でキーを押した（ページのスクリプトが知らせた）。
+fn press_in_page(
+    cx: &mut TestAppContext,
+    world: &World,
+    window: AnyWindowHandle,
+    tab: u64,
+    keys: &str,
+) {
+    world.send(tab, Event::Focused);
+    ui(cx, window, |_, _| {});
+    world.send(tab, Event::Key(keys.into()));
+    ui(cx, window, |_, _| {});
+}
+
+/// ページの中にキーの入力先があっても、Chrome と同じキーで読み込み直す・戻る・進む・
+/// 新しいタブ・タブを閉じる・閉じたタブを開き直す・タブを切り替える。
+#[gpui_kit::test]
+fn browser_keys_work_inside_the_page(cx: &mut TestAppContext) {
+    let world = start(cx, Store::open_in_memory().unwrap());
+    let (window, _view) = open(cx);
+    ui(cx, window, |window, cx| window.click("ai-toggle", cx));
+    let tab = open_page(cx, window, "https://example.com/a");
+    let fake = world.fake(tab);
+    press_in_page(cx, &world, window, tab, key("ctrl-r", "cmd-r"));
+    press_in_page(cx, &world, window, tab, "f5");
+    press_in_page(cx, &world, window, tab, key("alt-left", "cmd-["));
+    press_in_page(cx, &world, window, tab, key("alt-right", "cmd-]"));
+    let calls = fake.calls.borrow().clone();
+    let steps: Vec<&String> = calls
+        .iter()
+        .filter(|c| ["reload", "back", "forward"].contains(&c.as_str()))
+        .collect();
+    assert_eq!(steps, ["reload", "reload", "back", "forward"], "{calls:?}");
+    // 知らせると決めていないキーは受けない
+    press_in_page(cx, &world, window, tab, "ctrl-shift-alt-x");
+    assert_eq!(fake.calls.borrow().len(), calls.len());
+
+    // 新しいタブ。何もないタブは、すぐに URL を書ける
+    press_in_page(cx, &world, window, tab, key("ctrl-t", "cmd-t"));
+    let blank = terms(cx, |t| t.active_page().map(|p| (p.id, p.url.clone())));
+    let (blank, url) = blank.expect("新しいタブを見ている");
+    assert_ne!(blank, tab);
+    assert_eq!(url, browser::BLANK);
+    // タブを切り替える。AI のタブ → a → 新しいタブ の順で回る
+    press_in_page(cx, &world, window, tab, "ctrl-tab");
+    assert_eq!(terms(cx, |t| t.active), None, "端からは AI のタブへ回る");
+    // AI のタブでは、入力行で続けて押せる
+    ui(cx, window, |window, cx| {
+        window.press(key("ctrl-2", "cmd-2"), cx)
+    });
+    assert_eq!(terms(cx, |t| t.active), Some(tab));
+    // 見せたページには、続けてキーを使えるように入力先を移す
+    assert_eq!(
+        fake.calls.borrow().last().map(String::as_str),
+        Some("focus")
+    );
+    press_in_page(cx, &world, window, tab, "ctrl-shift-tab");
+    assert_eq!(terms(cx, |t| t.active), None);
+    ui(cx, window, |window, cx| {
+        window.press(key("ctrl-9", "cmd-9"), cx)
+    });
+    assert_eq!(terms(cx, |t| t.active), Some(blank), "9 は最後のタブ");
+
+    // 閉じて、開き直す
+    cx.update(|cx| term::shared(cx).update(cx, |t, cx| t.activate(Some(tab), cx)));
+    ui(cx, window, |_, _| {});
+    press_in_page(cx, &world, window, tab, key("ctrl-w", "cmd-w"));
+    assert!(terms(cx, |t| t.page(tab).is_none()), "タブを閉じる");
+    assert_eq!(terms(cx, |t| t.active), Some(blank));
+    press_in_page(
+        cx,
+        &world,
+        window,
+        blank,
+        key("ctrl-shift-t", "cmd-shift-t"),
+    );
+    assert_eq!(
+        terms(cx, |t| t.active_page().map(|p| p.url.clone())),
+        Some("https://example.com/a".to_owned())
+    );
+}
+
+/// ページの中の Ctrl+L（⌘L）は URL の欄に移って、書いてある場所をすべて選ぶ。
+/// URL の欄にいるときの Ctrl+R は、アプリではなくページを読み込み直す。
+#[gpui_kit::test]
+fn ctrl_l_moves_to_the_url_bar_and_ctrl_r_reloads_the_page(cx: &mut TestAppContext) {
+    let world = start(cx, Store::open_in_memory().unwrap());
+    let (window, _view) = open(cx);
+    ui(cx, window, |window, cx| window.click("ai-toggle", cx));
+    // ロックを使える状態でも、Ctrl+L はロックしない
+    cx.update(|cx| {
+        malakt_mahoz::db::shared(cx).update(cx, |db, _| {
+            malakt_core::lock::enable(&mut db.store).unwrap()
+        })
+    });
+    let tab = open_page(cx, window, "https://example.com/a");
+    let fake = world.fake(tab);
+    press_in_page(cx, &world, window, tab, key("ctrl-l", "cmd-l"));
+    assert!(
+        cx.update(|cx| malakt_mahoz::db::shared(cx).read(cx).unlocked),
+        "ロックしない"
+    );
+    assert!(fake.calls.borrow().contains(&"focus_parent".to_owned()));
+    // 選んだ場所を書き換えて開く
+    ui(cx, window, |window, cx| {
+        window.input("example.org", cx);
+        window.press("enter", cx);
+    });
+    assert!(fake
+        .calls
+        .borrow()
+        .contains(&"load https://example.org".to_owned()));
+    let before = fake.calls.borrow().len();
+    ui(cx, window, |window, cx| window.click("browser-url", cx));
+    ui(cx, window, |window, cx| {
+        window.press(key("ctrl-r", "cmd-r"), cx)
+    });
+    // 開いたあとはページにいる。URL の欄を押すと、キーの入力先がアプリに戻る
+    assert_eq!(
+        fake.calls.borrow()[before..],
+        ["focus_parent".to_owned(), "reload".to_owned()]
+    );
+}
+
+/// Ctrl+F（⌘F）でページの中を探す欄が出る。書くと頭から探し、Enter で次、Shift+Enter で前、
+/// 見つからなければ「見つかりません」。Esc で閉じてページに戻る。
+#[gpui_kit::test]
+fn ctrl_f_finds_in_the_page(cx: &mut TestAppContext) {
+    let world = start(cx, Store::open_in_memory().unwrap());
+    let (window, _view) = open(cx);
+    ui(cx, window, |window, cx| window.click("ai-toggle", cx));
+    let tab = open_page(cx, window, "https://example.com/a");
+    let fake = world.fake(tab);
+    press_in_page(cx, &world, window, tab, key("ctrl-f", "cmd-f"));
+    ui(cx, window, |window, _| {
+        assert!(window.find("browser-find").visible())
+    });
+    ui(cx, window, |window, cx| window.input("例", cx));
+    ui(cx, window, |window, cx| window.press("enter", cx));
+    ui(cx, window, |window, cx| window.press("shift-enter", cx));
+    let calls = fake.calls.borrow().clone();
+    let finds: Vec<&String> = calls.iter().filter(|c| c.starts_with("find")).collect();
+    assert_eq!(
+        finds,
+        ["find 例 from top", "find 例 next", "find 例 previous"],
+        "{calls:?}"
+    );
+    ui(cx, window, |window, _| {
+        assert!(window.try_find("browser-find-missing").is_none())
+    });
+    ui(cx, window, |window, cx| window.input("ない", cx));
+    ui(cx, window, |_, _| {});
+    ui(cx, window, |window, _| {
+        assert!(window.find("browser-find-missing").visible())
+    });
+    // F3（⌘G）でも次を探す
+    press_in_page(cx, &world, window, tab, key("f3", "cmd-g"));
+    assert!(fake
+        .calls
+        .borrow()
+        .last()
+        .is_some_and(|c| c.ends_with("next")));
+    // Esc で閉じて、ページに戻る
+    ui(cx, window, |window, cx| {
+        window.click("browser-find-input", cx)
+    });
+    ui(cx, window, |window, cx| window.press("escape", cx));
+    ui(cx, window, |window, _| {
+        assert!(window.try_find("browser-find").is_none())
+    });
+    assert_eq!(
+        fake.calls.borrow().last().map(String::as_str),
+        Some("focus")
+    );
+    // 印刷
+    press_in_page(cx, &world, window, tab, key("ctrl-p", "cmd-p"));
+    assert_eq!(
+        fake.calls.borrow().last().map(String::as_str),
+        Some("print")
+    );
+}
+
+/// ページの中で押したアプリのキー（全画面、AI チャット）も、いつもどおりに働く。
+#[gpui_kit::test]
+fn app_keys_work_inside_the_page(cx: &mut TestAppContext) {
+    let world = start(cx, Store::open_in_memory().unwrap());
+    let (window, view) = open(cx);
+    ui(cx, window, |window, cx| window.click("ai-toggle", cx));
+    let tab = open_page(cx, window, "https://example.com/a");
+    let fullscreen = |cx: &mut TestAppContext| {
+        cx.update_window(window, |_, window, _| window.is_fullscreen())
+            .unwrap()
+    };
+    assert!(!fullscreen(cx));
+    cx.update_window(window, |_, window, _| window.activate_window())
+        .unwrap();
+    press_in_page(cx, &world, window, tab, key("f11", "ctrl-cmd-f"));
+    assert!(fullscreen(cx), "全画面になる");
+    press_in_page(cx, &world, window, tab, key("ctrl-j", "cmd-j"));
+    assert!(
+        !cx.update(|cx| view.read(cx).ai_open),
+        "AI チャットを閉じる"
+    );
+}
+
 /// 小さなウィンドウのバーを右クリックすると、ほかのウィンドウと同じメニューが出る。
 /// メニューの間はページを隠し、「閉じる」でウィンドウとページを閉じる。
 #[gpui_kit::test]
@@ -936,6 +1182,69 @@ fn the_small_window_bar_has_the_window_menu(cx: &mut TestAppContext) {
         window.press("enter", cx);
     })
     .unwrap();
+    cx.run_until_parked();
+    assert!(fake.dropped.get());
+    assert!(terms(cx, |t| t.page(small).is_none()));
+    assert_eq!(cx.update(|cx| cx.windows().len()), 1);
+}
+
+/// 小さなウィンドウのページでも、タブと同じキーで読み込み直す・戻る・探す・印刷し、
+/// タブを閉じるキーでウィンドウを閉じる。
+#[gpui_kit::test]
+fn the_small_window_takes_the_browser_keys(cx: &mut TestAppContext) {
+    let world = start(cx, Store::open_in_memory().unwrap());
+    let (window, _view) = open(cx);
+    ui(cx, window, |window, cx| window.click("ai-toggle", cx));
+    let tab = open_page(cx, window, "https://example.com/");
+    world.send(tab, Event::Popup("https://example.com/b".into()));
+    cx.run_until_parked();
+    let small = terms(cx, |t| t.pages.iter().find(|p| p.popup).map(|p| p.id))
+        .expect("小さなウィンドウのページがある");
+    let popup = cx
+        .update(|cx| cx.windows())
+        .into_iter()
+        .find(|w| *w != window)
+        .expect("小さなウィンドウが開く");
+    ui(cx, popup, |_, _| {});
+    let fake = world.fake(small);
+    let tab_calls = world.fake(tab).calls.borrow().len();
+    press_in_page(cx, &world, popup, small, key("ctrl-r", "cmd-r"));
+    press_in_page(cx, &world, popup, small, key("alt-left", "cmd-["));
+    press_in_page(cx, &world, popup, small, key("ctrl-p", "cmd-p"));
+    let calls = fake.calls.borrow().clone();
+    let done: Vec<&String> = calls
+        .iter()
+        .filter(|c| ["reload", "back", "print"].contains(&c.as_str()))
+        .collect();
+    assert_eq!(done, ["reload", "back", "print"], "{calls:?}");
+    assert_eq!(
+        world.fake(tab).calls.borrow().len(),
+        tab_calls,
+        "タブのページは動かない"
+    );
+    // ページの中を探す
+    press_in_page(cx, &world, popup, small, key("ctrl-f", "cmd-f"));
+    ui(cx, popup, |window, _| {
+        assert!(window.find("browser-find").visible())
+    });
+    ui(cx, popup, |window, cx| window.input("例", cx));
+    ui(cx, popup, |window, cx| window.press("enter", cx));
+    let finds: Vec<String> = fake
+        .calls
+        .borrow()
+        .iter()
+        .filter(|c| c.starts_with("find"))
+        .cloned()
+        .collect();
+    assert_eq!(finds, ["find 例 from top", "find 例 next"]);
+    ui(cx, popup, |window, cx| window.press("escape", cx));
+    ui(cx, popup, |window, _| {
+        assert!(window.try_find("browser-find").is_none())
+    });
+    // タブを閉じるキーで、ウィンドウを閉じる
+    world.send(small, Event::Focused);
+    ui(cx, popup, |_, _| {});
+    world.send(small, Event::Key(key("ctrl-w", "cmd-w").into()));
     cx.run_until_parked();
     assert!(fake.dropped.get());
     assert!(terms(cx, |t| t.page(small).is_none()));

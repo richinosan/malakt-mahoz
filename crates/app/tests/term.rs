@@ -976,3 +976,47 @@ fn the_terminal_keeps_the_keys_while_the_screen_changes(cx: &mut TestAppContext)
     run(cx, window, "echo still-$((1+1))");
     wait_text(cx, "still-2");
 }
+
+/// ターミナルのタブのキー（Windows Terminal、macOS のターミナルと同じ）。新しいタブ・タブを閉じる・
+/// Ctrl+Tab での切り替え・全画面は、動いているプログラムに渡さずにアプリが受ける。
+#[gpui_kit::test]
+fn terminal_tab_keys_work_like_a_terminal_app(cx: &mut TestAppContext) {
+    let (window, _view) = start(cx);
+    open_terminal(cx, window);
+    #[cfg(target_os = "macos")]
+    let (new_tab, close_tab) = ("cmd-t", "cmd-w");
+    #[cfg(not(target_os = "macos"))]
+    let (new_tab, close_tab) = ("ctrl-shift-t", "ctrl-shift-w");
+    ui(cx, window, |window, cx| window.press(new_tab, cx));
+    assert_eq!(terms(cx, |t| t.tabs.len()), 2);
+    assert_eq!(terms(cx, |t| t.active), Some(2));
+    wait_text(cx, "$");
+    // 開いたターミナルにそのまま書ける
+    run(cx, window, "echo two");
+    wait_text(cx, "two\n");
+    // Ctrl+Tab で AI のタブへ回り、Ctrl+Shift+Tab で戻る
+    ui(cx, window, |window, cx| window.press("ctrl-tab", cx));
+    assert_eq!(terms(cx, |t| t.active), None);
+    ui(cx, window, |window, cx| window.press("ctrl-shift-tab", cx));
+    assert_eq!(terms(cx, |t| t.active), Some(2));
+    ui(cx, window, |window, cx| window.press("ctrl-shift-tab", cx));
+    assert_eq!(terms(cx, |t| t.active), Some(1));
+    // 閉じる。となりのタブを見せる
+    ui(cx, window, |window, cx| window.press(close_tab, cx));
+    assert_eq!(
+        terms(cx, |t| t.tabs.iter().map(|tab| tab.id).collect::<Vec<_>>()),
+        [2]
+    );
+    assert_eq!(terms(cx, |t| t.active), Some(2));
+    // 全画面
+    cx.update_window(window, |_, window, _| window.activate_window())
+        .unwrap();
+    #[cfg(target_os = "macos")]
+    let fullscreen = "ctrl-cmd-f";
+    #[cfg(not(target_os = "macos"))]
+    let fullscreen = "f11";
+    ui(cx, window, |window, cx| window.press(fullscreen, cx));
+    assert!(cx
+        .update_window(window, |_, window, _| window.is_fullscreen())
+        .unwrap());
+}

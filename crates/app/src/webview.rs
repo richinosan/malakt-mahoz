@@ -77,6 +77,7 @@ const ZOOM_SCRIPT: &str = r#"(() => {
     send(sum < 0 ? "in" : "out");
     sum = 0;
   }, { passive: false });
+  // 修飾キーは ctrl・alt・shift・cmd の順（shell_keys::page_keys も同じ順に並べている）
   window.addEventListener("keydown", (e) => {
     if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
     if (e.shiftKey && e.code === "KeyL" && (mac ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey)) {
@@ -139,6 +140,76 @@ const POPUP_SCRIPT: &str = r#"(() => {
 fn popup_url(body: &str) -> Option<&str> {
     body.strip_prefix("popup:")
         .filter(|url| crate::browser::is_web(url))
+}
+
+/// ページの中で押したブラウザやアプリのキー（[`crate::shell_keys::page_keys`]）を、アプリに知らせる。
+/// OS の部品にキーの入力先があると、キーはアプリに届かないため。
+/// `__TAKE__` のキーはページより先に受けてページには渡さない。`__SOFT__` のキーは、ページが使わなかった
+/// （`preventDefault` しなかった）ときだけ知らせる。中の枠（iframe）からは、いちばん外のページを通して知らせる。
+const KEY_SCRIPT: &str = r#"(() => {
+  const take = new Set(__TAKE__);
+  const soft = new Set(__SOFT__);
+  const top = window.top === window;
+  const send = (key) => {
+    try {
+      if (top) window.ipc.postMessage("key:" + key);
+      else window.top.postMessage({ malaktKey: key }, "*");
+    } catch (_) {}
+  };
+  if (top) {
+    window.addEventListener("message", (e) => {
+      const key = e.data && e.data.malaktKey;
+      if (typeof key === "string" && (take.has(key) || soft.has(key))) send(key);
+    });
+  }
+  const named = {
+    ArrowLeft: "left", ArrowRight: "right", Tab: "tab", PageUp: "pageup", PageDown: "pagedown",
+    BracketLeft: "[", BracketRight: "]", Comma: ",", Slash: "/",
+  };
+  const name = (e) => {
+    const code = e.code || "";
+    if (/^Key[A-Z]$/.test(code)) return code.slice(3).toLowerCase();
+    if (/^Digit[0-9]$/.test(code)) return code.slice(5);
+    if (/^F([1-9]|1[0-2])$/.test(e.key)) return e.key.toLowerCase();
+    return named[code] || named[e.key] || null;
+  };
+  // 修飾キーは ctrl・alt・shift・cmd の順（shell_keys::page_keys も同じ順に並べている）
+  window.addEventListener("keydown", (e) => {
+    if (e.isComposing) return;
+    const key = name(e);
+    if (!key) return;
+    const combo = (e.ctrlKey ? "ctrl-" : "") + (e.altKey ? "alt-" : "") +
+      (e.shiftKey ? "shift-" : "") + (e.metaKey ? "cmd-" : "") + key;
+    if (take.has(combo)) {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      send(combo);
+    } else if (soft.has(combo)) {
+      // ページの処理が終わってから、ページが使ったかを見る
+      setTimeout(() => { if (!e.defaultPrevented) send(combo); }, 0);
+    }
+  }, true);
+})();"#;
+
+/// [`KEY_SCRIPT`] に、知らせるキーを入れる。
+fn key_script() -> String {
+    let keys = crate::shell_keys::page_keys();
+    let list = |keys: &[String]| serde_json::Value::from(keys.to_vec()).to_string();
+    KEY_SCRIPT
+        .replace("__TAKE__", &list(&keys.take))
+        .replace("__SOFT__", &list(&keys.soft))
+}
+
+/// ページの中を探す。`window.find` は見つけた所を選んで、見える所まで動かす。
+fn find_script(text: &str, backwards: bool, again: bool) -> String {
+    let text = serde_json::Value::from(text).to_string();
+    let restart = if again {
+        ""
+    } else {
+        // 書き換えたときは、ページの頭から探し直す
+        "const s = window.getSelection(); if (s) s.removeAllRanges();"
+    };
+    format!("(() => {{ {restart} return window.find({text}, false, {backwards}, true, false, false, false); }})()")
 }
 
 /// ページの文字を読むスクリプト。AI に渡す。
@@ -271,6 +342,24 @@ impl Engine for Wry {
 
     fn snapshot(&self, done: Shot) -> Result<(), String> {
         snapshot(&self.view, done)
+    }
+
+    fn print(&self) -> Result<(), String> {
+        self.view.print().map_err(text)
+    }
+
+    fn find(
+        &self,
+        query: &str,
+        backwards: bool,
+        again: bool,
+        done: Box<dyn Fn(bool) + Send + 'static>,
+    ) -> Result<(), String> {
+        self.view
+            .evaluate_script_with_callback(&find_script(query, backwards, again), move |result| {
+                done(result.trim() == "true")
+            })
+            .map_err(text)
     }
 }
 
@@ -460,6 +549,7 @@ pub fn create(window: &mut Window, setup: Setup) -> Result<Rc<dyn Engine>, Strin
             .with_initialization_script(FOCUS_SCRIPT)
             .with_initialization_script_for_main_only(ZOOM_SCRIPT, false)
             .with_initialization_script_for_main_only(POPUP_SCRIPT, false)
+            .with_initialization_script_for_main_only(key_script(), false)
             .with_ipc_handler({
                 let send = send.clone();
                 move |request| {
@@ -474,6 +564,8 @@ pub fn create(window: &mut Window, setup: Setup) -> Result<Rc<dyn Engine>, Strin
                                 send(Event::Zoom(step));
                             } else if let Some(url) = popup_url(body) {
                                 send(Event::Popup(url.to_owned()));
+                            } else if let Some(key) = body.strip_prefix("key:") {
+                                send(Event::Key(key.to_owned()));
                             }
                         }
                     }
@@ -512,7 +604,9 @@ pub fn create(window: &mut Window, setup: Setup) -> Result<Rc<dyn Engine>, Strin
         #[cfg(windows)]
         let builder = {
             use wry::WebViewBuilderExtWindows;
-            builder.with_additional_browser_args(format!(
+            // ブラウザのキー（Ctrl+R、Ctrl+F など）は KEY_SCRIPT で受けて、アプリが動かす。
+            // OS の部品にも任せると、ほかの OS と働きが変わり、同じキーで 2 回動くこともある
+            builder.with_browser_accelerator_keys(false).with_additional_browser_args(format!(
                 "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --disk-cache-size={WINDOWS_CACHE_BYTES}"
             ))
         };

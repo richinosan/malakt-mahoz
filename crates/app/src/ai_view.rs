@@ -24,6 +24,7 @@ use crate::feel::{self, Grip, Lit};
 use crate::render::app_icon;
 use crate::scroll::{self, Menus};
 use crate::shadow::{Elevate, Elevation};
+use crate::shell_keys;
 use crate::state::{DropTarget, MainView};
 use crate::term::{self, TermPane};
 use crate::{ClearShell, StopAi};
@@ -2466,6 +2467,24 @@ impl AiPane {
                     this.stop(cx);
                 }
             }))
+            // タブの列のキー。AI のタブ・ターミナル・ブラウザのどこでも
+            .on_action(|_: &shell_keys::NextTab, _, cx| {
+                term::shared(cx).update(cx, |terms, cx| terms.step_tab(true, cx))
+            })
+            .on_action(|_: &shell_keys::PreviousTab, _, cx| {
+                term::shared(cx).update(cx, |terms, cx| terms.step_tab(false, cx))
+            })
+            .on_action(|tab: &shell_keys::SelectTab, _, cx| {
+                term::shared(cx).update(cx, |terms, cx| terms.select_tab(tab.0, cx))
+            })
+            .on_action(|_: &shell_keys::CloseTab, _, cx| {
+                term::shared(cx).update(cx, |terms, cx| terms.close_active(cx))
+            })
+            .on_action(|_: &shell_keys::NewTerminal, _, cx| {
+                term::shared(cx).update(cx, |terms, cx| {
+                    terms.open(None, None, cx);
+                })
+            })
             .on_action(cx.listener(|this, _: &ClearShell, _, cx| {
                 this.session.update(cx, |s, cx| s.clear_shell(cx));
             }))
@@ -2881,6 +2900,13 @@ impl Render for AiPane {
                 .into_any_element();
         }
         self.refresh_rows(cx);
+        // AI のタブに切り替えたら（Ctrl+Tab など）、続けて入力行に書ける
+        let shell_shown = self.mode == PaneMode::ShellWindow
+            || self.session.read(cx).shell_place == ShellPlace::Docked;
+        if shell_shown && term::shared(cx).read(cx).focus_ai {
+            term::shared(cx).update(cx, |terms, _| terms.focus_ai = false);
+            self.shell_input.update(cx, |s, cx| s.focus(window, cx));
+        }
         let width = window.viewport_size().width;
         let shell_docked = self.session.read(cx).shell_place == ShellPlace::Docked;
         // シェルを広げている間は、チャットを出さない
@@ -2895,6 +2921,9 @@ impl Render for AiPane {
         let base = div()
             .flex()
             .relative()
+            .on_action(|_: &crate::shortcuts::ToggleFullscreen, window, _| {
+                window.toggle_fullscreen()
+            })
             .bg(theme.background)
             .text_color(theme.foreground)
             .children(chat_drop)

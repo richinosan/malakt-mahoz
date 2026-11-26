@@ -60,11 +60,16 @@ const NOT_BUTTONS: &[&str] = &[
     "folder-cursor",
     "keys-help",
     "app-keys",
+    "browser-keys",
+    "terminal-keys",
     // ブラウザの入れ物と、ページ・失敗・使用量の文字。ボタンは tests/browser.rs で押す
     "browser",
     "browser-page",
     "browser-error",
     "browser-usage",
+    "browser-find",
+    "browser-find-input",
+    "browser-find-missing",
 ];
 
 /// 押せるものの縦と横の、いちばん小さい大きさ（拡大率を掛ける前の値）。

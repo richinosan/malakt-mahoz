@@ -4,13 +4,15 @@
 //! テストに `ctrl-a` と書くと、macOS では「行の先頭へ」になり、macOS のテストだけが失敗する。
 //! こういうキーは `secondary-` で書く。
 
-/// どの OS でも Ctrl で押すキー（端末に届く中断・画面のクリア・行の消去・入力の終わりなど）
-const SAME_ON_EVERY_OS: [&str; 5] = [
+/// どの OS でも Ctrl で押すキー（端末に届く中断・画面のクリア・行の消去・入力の終わり、タブの切り替えなど）
+const SAME_ON_EVERY_OS: [&str; 7] = [
     "\"ctrl-c\"",
     "\"ctrl-l\"",
     "\"ctrl-u\"",
     "\"ctrl-d\"",
     "\"ctrl-j\"",
+    "\"ctrl-tab\"",
+    "\"ctrl-shift-tab\"",
 ];
 
 #[test]
