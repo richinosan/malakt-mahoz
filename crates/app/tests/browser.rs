@@ -960,7 +960,8 @@ fn browser_keys_work_inside_the_page(cx: &mut TestAppContext) {
     let tab = open_page(cx, window, "https://example.com/a");
     let fake = world.fake(tab);
     press_in_page(cx, &world, window, tab, key("ctrl-r", "cmd-r"));
-    press_in_page(cx, &world, window, tab, "f5");
+    // macOS（Safari）は F5 ではなく ⌘⇧R
+    press_in_page(cx, &world, window, tab, key("f5", "cmd-shift-r"));
     press_in_page(cx, &world, window, tab, key("alt-left", "cmd-["));
     press_in_page(cx, &world, window, tab, key("alt-right", "cmd-]"));
     let calls = fake.calls.borrow().clone();
