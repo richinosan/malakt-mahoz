@@ -2704,8 +2704,23 @@ impl MainView {
             .collect()
     }
 
+    /// 一覧の 1 件の中で、担当の欄に使える高さ。表は行の高さ、カードは 1 段目（タイトル）の下の残り。
+    fn assignee_room(&self, table: bool, cx: &App) -> Pixels {
+        let rem = cx.theme().font_size;
+        // 値のボタンの上下の余白（py_0p5）
+        let pad = rem * 0.25;
+        let height = task_height(table, self.row_density) - pad;
+        if table {
+            height
+        } else {
+            // タイトルの段（チェックボックスの高さ）と、段の間（gap_1）
+            height - rem * 1.5 - rem * 0.25
+        }
+    }
+
     /// 一覧での担当の表示。全員を頭文字の丸と名前で並べ、幅が足りなければ人ごとに折り返す。
-    fn assignee_cell(&self, ids: &[Id], cx: &App) -> Div {
+    /// 折り返すのは、1 件の高さに丸ごと入る行までにする（入らない行は丸ごと隠し、丸を途中で切らない）。
+    fn assignee_cell(&self, ids: &[Id], table: bool, cx: &App) -> Div {
         let theme = cx.theme();
         if ids.is_empty() {
             return row()
@@ -2713,9 +2728,15 @@ impl MainView {
                 .text_color(theme.muted_foreground)
                 .child("未割り当て");
         }
+        // 1 行は頭文字の丸（size_6）の高さ、行の間は gap_y_1
+        let rem = theme.font_size;
+        let line = rem * 1.5;
+        let gap = rem * 0.25;
+        let room = self.assignee_room(table, cx);
+        let lines = ((room + gap) / (line + gap)).floor().max(1.);
         let mut cell = row()
             .min_w_0()
-            .max_h(px(52.))
+            .max_h(line * lines + gap * (lines - 1.))
             .overflow_hidden()
             .flex_wrap()
             .gap_x_2p5()
@@ -2747,6 +2768,10 @@ impl MainView {
         Button::new(id)
             .ghost()
             .small()
+            // 中身（折り返した担当など）の高さに合わせて伸ばす。小さいボタンの高さのままだと、はみ出た上下が切れる
+            .h_auto()
+            .min_h_6()
+            .py_0p5()
             .justify_start()
             .child(shown)
             .dropdown_menu(move |mut menu, _, _| {
@@ -3089,7 +3114,7 @@ impl MainView {
             let id = id.clone();
             self.value_menu(
                 ("assignee", ix),
-                self.assignee_cell(&task.assignee_ids, cx),
+                self.assignee_cell(&task.assignee_ids, table, cx),
                 self.assignee_options(task.workspace_id.as_deref(), &task.assignee_ids),
                 move |this, person: Id, cx| {
                     this.edit_task_by_id(&id, cx, |d| {
@@ -3281,7 +3306,7 @@ impl MainView {
         );
         let assignees = self.value_menu(
             "quick-assignee",
-            self.assignee_cell(&quick.assignee_ids, cx),
+            self.assignee_cell(&quick.assignee_ids, table, cx),
             self.assignee_options(self.current_workspace(), &quick.assignee_ids),
             |this, person: Id, cx| {
                 if let Some(i) = this.quick.assignee_ids.iter().position(|a| a == &person) {

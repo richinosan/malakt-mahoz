@@ -2739,6 +2739,57 @@ fn sidebar_toggles_and_keeps_its_width(cx: &mut TestAppContext) {
     cx.update(|cx| assert_eq!(second_view.read(cx).sidebar_width, SIDEBAR_MAX));
 }
 
+/// 表の担当の欄は、人が多くて折り返しても、頭文字の丸を上下で切らない。行に入る段だけ出す。
+#[gpui_kit::test]
+fn assignee_cell_wraps_without_cutting(cx: &mut TestAppContext) {
+    start(cx);
+    cx.update(|cx| {
+        db::shared(cx).update(cx, |db, _| {
+            let s = &mut db.store;
+            let ids = ["田中 一郎", "Alice Johnson", "佐藤 花子"]
+                .map(|name| s.create_person(name, false).unwrap().id)
+                .to_vec();
+            let draft = malakt_core::TaskDraft {
+                title: "受付".into(),
+                assignee_ids: ids,
+                ..Default::default()
+            };
+            s.create_task(None, &draft).unwrap();
+        })
+    });
+    let (window, view) = open(cx, wide());
+    cx.update(|cx| view.update(cx, |v, cx| v.go(Nav::All, cx)));
+    let rem = cx.update(|cx| {
+        use gpui_kit::component::ActiveTheme;
+        cx.theme().font_size
+    });
+    // 頭文字の丸 1 段（size_6）と、段の間（gap_y_1）
+    let (line, gap) = (rem * 1.5, rem * 0.25);
+    // 担当のボタンの高さと、表の 1 行の高さ
+    let heights = |cx: &mut TestAppContext| {
+        let mut cell = px(0.);
+        ui(cx, window, |window, _| {
+            cell = window.find(("assignee", 0usize)).bounds().size.height;
+        });
+        let density = cx.update(|cx| view.read(cx).row_density);
+        (cell, px(60. * malakt_mahoz::UI_SCALE * density.rows()))
+    };
+    // 標準の詰め方では 2 段に折り返し、ボタンは 2 段の高さまで伸びて、行の中に収まる
+    let (cell, row) = heights(cx);
+    assert!(cell >= line * 2. + gap, "{cell:?}");
+    assert!(cell <= row, "{cell:?} > {row:?}");
+    // 詰めると 2 段は入らないので、1 段だけ出す
+    cx.update(|cx| {
+        view.update(cx, |v, cx| {
+            v.set_density(malakt_mahoz::theme::Density::Compact, cx)
+        })
+    });
+    let (cell, row) = heights(cx);
+    assert!(cell >= line, "{cell:?}");
+    assert!(cell < line * 2. + gap, "{cell:?}");
+    assert!(cell <= row, "{cell:?} > {row:?}");
+}
+
 /// 左のメニューの矢印は、小さくても押しやすい大きさで押せる。
 #[gpui_kit::test]
 fn tree_caret_has_room_to_press(cx: &mut TestAppContext) {
