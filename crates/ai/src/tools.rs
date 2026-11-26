@@ -1,7 +1,7 @@
 //! AI がタスクを読み書きするためのツール。
 
 use malakt_core::view::Priority;
-use malakt_core::{Scope, Status, Store, Task, TaskDraft, TaskFilter};
+use malakt_core::{Person, Role, Roles, Scope, Status, Store, Task, TaskDraft, TaskFilter};
 use serde_json::{json, Value};
 
 use crate::wire::ToolDef;
@@ -35,8 +35,34 @@ fn task_fields() -> Value {
         "due": {"type": ["string", "null"], "description": "期限 YYYY-MM-DD。時刻つきなら YYYY-MM-DD HH:MM。null でなくす"},
         "percent": {"type": "integer", "minimum": 0, "maximum": 100, "description": "進捗"},
         "parent_id": {"type": ["string", "null"], "description": "親のタスクの ID（サブタスクにする）"},
-        "assignee_ids": {"type": "array", "items": {"type": "string"}, "description": "担当者の ID"},
+        "assignee_ids": {"type": "array", "items": {"type": "string"},
+                         "description": "担当者の ID。足した人の役は R。役も決めるときは assignees を使う"},
+        "assignees": {
+            "type": "array",
+            "description": "担当者と役（RACI）。渡すと担当者がこの並びになる（assignee_ids と一緒には渡さない）。\
+                            person は担当者の ID か名前。登録されていない名前は、その場で担当者に登録する",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "person": {"type": "string", "description": "担当者の ID か名前（敬称は付けない）"},
+                    "roles": roles_schema("省くと、もう担当の人は今の役のまま、新しい人は R"),
+                },
+                "required": ["person"],
+                "additionalProperties": false,
+            },
+        },
         "categories": {"type": "array", "items": {"type": "string"}},
+    })
+}
+
+/// RACI の説明。ツールの説明とシステムの指示で同じ文を使う。
+const RACI: &str = "R=実行責任者、A=説明責任者（1 つのタスクに 1 人まで）、C=相談先、I=報告先";
+
+fn roles_schema(extra: &str) -> Value {
+    json!({
+        "type": "array",
+        "items": {"type": "string", "enum": ["R", "A", "C", "I"]},
+        "description": format!("役。{RACI}。{extra}"),
     })
 }
 
@@ -57,7 +83,8 @@ pub fn definitions() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "list_people",
-            description: "担当者の一覧を返す。",
+            description: "担当者の一覧を返す。workspace_ids が空の人はすべてのワークスペースで、\
+                          そうでない人はそのワークスペース（とサブワークスペース）で選べる。",
             schema: object(json!({}), &[]),
         },
         ToolDef {
@@ -91,6 +118,18 @@ pub fn definitions() -> Vec<ToolDef> {
             schema: object(with(task_fields(), json!({"id": {"type": "string"}})), &["id"]),
         },
         ToolDef {
+            name: "set_assignee",
+            description: SET_ASSIGNEE_TOOL,
+            schema: object(
+                json!({
+                    "task_id": {"type": "string"},
+                    "person": {"type": "string", "description": "担当者の ID か名前（敬称は付けない）"},
+                    "roles": roles_schema("A を付けると、ほかの人の A は外れる。空にすると担当から外す"),
+                }),
+                &["task_id", "person", "roles"],
+            ),
+        },
+        ToolDef {
             name: "move_task",
             description: "タスクを別のワークスペースへ移す。workspace_id が null なら、どこにも入れない。",
             schema: object(
@@ -121,8 +160,11 @@ pub fn definitions() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "create_person",
-            description: "担当者を登録する。",
-            schema: object(json!({"name": {"type": "string"}}), &["name"]),
+            description: "担当者を登録する。workspace_id を渡すと、そのワークスペース（のいちばん上の親とサブワークスペース）で選べる担当者になり、省くとすべてのワークスペースで選べる担当者になる。",
+            schema: object(
+                json!({"name": {"type": "string"}, "workspace_id": {"type": "string"}}),
+                &["name"],
+            ),
         },
         ToolDef {
             name: GITHUB_FETCH,
@@ -239,6 +281,161 @@ fn apply_fields(draft: &mut TaskDraft, args: &Value) -> Result<(), String> {
     Ok(())
 }
 
+const SET_ASSIGNEE_TOOL: &str = "タスクの担当者 1 人の役（RACI）を決める。担当でない人は担当に加える。\
+person は担当者の ID か名前。登録されていない名前は、タスクのワークスペースの担当者としてその場で登録する。";
+
+/// 担当者を ID か名前で探した結果。
+enum Who {
+    /// 登録されている担当者。`share` なら、このワークスペースでも選べるようにする。
+    Known { id: String, share: bool },
+    /// 登録されていない名前。
+    New(String),
+}
+
+/// そのワークスペース（いちばん上の親）で選べる担当者か。どこにも入っていないタスクでは、誰でも選べる。
+fn usable(person: &Person, root: Option<&str>) -> bool {
+    person.workspace_ids.is_empty()
+        || root.is_none_or(|r| person.workspace_ids.iter().any(|w| w == r))
+}
+
+/// 担当者を ID か名前で探す。同じ名前の人が何人もいて決められなければ、失敗にする。
+fn find_person(people: &[Person], key: &str, root: Option<&str>) -> Result<Who, String> {
+    let key = key.trim();
+    if key.is_empty() {
+        return Err("person に担当者の ID か名前が必要です".into());
+    }
+    if let Some(p) = people.iter().find(|p| p.id == key) {
+        return Ok(Who::Known {
+            id: p.id.clone(),
+            share: !usable(p, root),
+        });
+    }
+    let named: Vec<&Person> = people.iter().filter(|p| p.name.trim() == key).collect();
+    let here: Vec<&Person> = named.iter().copied().filter(|p| usable(p, root)).collect();
+    let pick = if here.is_empty() { &named } else { &here };
+    match pick.as_slice() {
+        [] => Ok(Who::New(key.to_owned())),
+        [p] => Ok(Who::Known {
+            id: p.id.clone(),
+            share: !usable(p, root),
+        }),
+        many => Err(format!(
+            "「{key}」という担当者が {} 人います。ID で指定してください: {}",
+            many.len(),
+            many.iter()
+                .map(|p| p.id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    }
+}
+
+/// 探した担当者を使える形にする。登録されていない名前はここで登録する。
+fn settle_person(store: &mut Store, who: Who, workspace: Option<&str>) -> Result<String, String> {
+    let core = |e: malakt_core::Error| e.to_string();
+    match (who, workspace) {
+        (Who::Known { id, share: true }, Some(w)) => {
+            store.share_person(&id, w).map_err(core)?;
+            Ok(id)
+        }
+        (Who::Known { id, .. }, _) => Ok(id),
+        (Who::New(name), Some(w)) => Ok(store.create_local_person(&name, w).map_err(core)?.id),
+        (Who::New(name), None) => Ok(store.create_person(&name, false).map_err(core)?.id),
+    }
+}
+
+/// `["R", "C"]` の形を読む。
+fn parse_roles(v: &Value) -> Result<Roles, String> {
+    let bad = || format!("roles が正しくありません: {v}");
+    let list = v.as_array().ok_or_else(bad)?;
+    let mut roles = Roles::NONE;
+    for code in list {
+        let role = code
+            .as_str()
+            .and_then(|c| Role::parse(&c.trim().to_uppercase()))
+            .ok_or_else(bad)?;
+        roles = roles.with(role);
+    }
+    Ok(roles)
+}
+
+fn role_codes(roles: Roles) -> Vec<&'static str> {
+    roles.iter().map(Role::code).collect()
+}
+
+/// 担当者と役の並び。役が `None` の人は、もう担当なら今の役のまま、新しい人は R。
+type Plan = Vec<(Who, Option<Roles>)>;
+
+/// `assignees` を読んで、確かめる。何も書き込まない。
+fn plan_assignees(store: &Store, args: &Value, root: Option<&str>) -> Result<Option<Plan>, String> {
+    let Some(v) = args.get("assignees") else {
+        return Ok(None);
+    };
+    if args.get("assignee_ids").is_some() {
+        return Err("assignee_ids と assignees は一緒に渡せません".into());
+    }
+    let bad = || format!("assignees が正しくありません: {v}");
+    let people = store.people().map_err(|e| e.to_string())?;
+    let mut plan: Plan = Vec::new();
+    for entry in v.as_array().ok_or_else(bad)? {
+        let key = entry
+            .get("person")
+            .and_then(Value::as_str)
+            .ok_or_else(bad)?;
+        let roles = match entry.get("roles") {
+            None | Some(Value::Null) => None,
+            Some(r) => {
+                let roles = parse_roles(r)?;
+                if roles.is_empty() {
+                    return Err(format!("{key} の roles が空です。役は 1 つ以上必要です"));
+                }
+                Some(roles)
+            }
+        };
+        let who = find_person(&people, key, root)?;
+        let same = plan.iter().any(|(other, _)| match (other, &who) {
+            (Who::Known { id: a, .. }, Who::Known { id: b, .. }) => a == b,
+            (Who::New(a), Who::New(b)) => a == b,
+            _ => false,
+        });
+        if same {
+            return Err(format!("担当者 {key} が 2 回あります"));
+        }
+        plan.push((who, roles));
+    }
+    let accountable = plan
+        .iter()
+        .filter(|(_, r)| r.is_some_and(|r| r.contains(Role::A)))
+        .count();
+    if accountable > 1 {
+        return Err("A（説明責任者）は 1 つのタスクに 1 人までです".into());
+    }
+    Ok(Some(plan))
+}
+
+/// 確かめた `assignees` を書き込む。担当者の並びを決めてから、役を付ける。
+fn apply_assignees(store: &mut Store, task: Task, plan: Plan) -> Result<Task, String> {
+    let core = |e: malakt_core::Error| e.to_string();
+    let workspace = task.workspace_id.clone();
+    let mut people = Vec::new();
+    for (who, roles) in plan {
+        people.push((settle_person(store, who, workspace.as_deref())?, roles));
+    }
+    let mut draft = TaskDraft::from(&task);
+    draft.assignee_ids = people.iter().map(|(id, _)| id.clone()).collect();
+    let mut task = store.update_task(&task.id, &draft).map_err(core)?;
+    // A を付ける人を最後にする（ほかの人に付け直した役で A が外れないように）
+    people.sort_by_key(|(_, r)| r.is_some_and(|r| r.contains(Role::A)));
+    for (id, roles) in people {
+        if let Some(roles) = roles.filter(|r| task.roles_of(&id) != Some(*r)) {
+            task = store
+                .set_assignee_roles(&task.id, &id, roles)
+                .map_err(core)?;
+        }
+    }
+    Ok(task)
+}
+
 fn priority_name(value: u8) -> &'static str {
     match Priority::of(value) {
         Priority::None => "none",
@@ -261,6 +458,10 @@ fn task_json(task: &Task) -> Value {
         "workspace_id": task.workspace_id,
         "parent_id": task.parent_id,
         "assignee_ids": task.assignee_ids,
+        "assignees": task.assignee_ids.iter().map(|id| json!({
+            "person_id": id,
+            "roles": role_codes(task.roles_of(id).unwrap_or_default()),
+        })).collect::<Vec<_>>(),
         "categories": task.categories,
     })
 }
@@ -297,7 +498,7 @@ pub fn execute(
             .people()
             .map_err(core)?
             .iter()
-            .map(|p| json!({"id": p.id, "name": p.name, "is_self": p.is_self}))
+            .map(|p| json!({"id": p.id, "name": p.name, "is_self": p.is_self, "workspace_ids": p.workspace_ids}))
             .collect(),
         "list_tasks" => {
             let filter = TaskFilter {
@@ -340,13 +541,62 @@ pub fn execute(
             let mut draft = TaskDraft::default();
             apply_fields(&mut draft, args)?;
             let workspace = optional(args, "workspace_id").filter(|id| !id.is_empty());
-            task_json(&store.create_task(workspace, &draft).map_err(core)?)
+            let root = match workspace {
+                Some(w) => Some(store.workspace_root(w).map_err(core)?),
+                None => None,
+            };
+            let plan = plan_assignees(store, args, root.as_deref())?;
+            let task = store.create_task(workspace, &draft).map_err(core)?;
+            match plan {
+                Some(plan) => task_json(&apply_assignees(store, task, plan)?),
+                None => task_json(&task),
+            }
         }
         "update_task" => {
             let id = required(args, "id")?;
-            let mut draft = TaskDraft::from(&store.task(id).map_err(core)?);
+            let old = store.task(id).map_err(core)?;
+            let mut draft = TaskDraft::from(&old);
             apply_fields(&mut draft, args)?;
-            task_json(&store.update_task(id, &draft).map_err(core)?)
+            let root = match &old.workspace_id {
+                Some(w) => Some(store.workspace_root(w).map_err(core)?),
+                None => None,
+            };
+            let plan = plan_assignees(store, args, root.as_deref())?;
+            let task = store.update_task(id, &draft).map_err(core)?;
+            match plan {
+                Some(plan) => task_json(&apply_assignees(store, task, plan)?),
+                None => task_json(&task),
+            }
+        }
+        "set_assignee" => {
+            let task = store.task(required(args, "task_id")?).map_err(core)?;
+            let roles = parse_roles(args.get("roles").unwrap_or(&Value::Null))?;
+            let root = match &task.workspace_id {
+                Some(w) => Some(store.workspace_root(w).map_err(core)?),
+                None => None,
+            };
+            let people = store.people().map_err(core)?;
+            let who = find_person(&people, required(args, "person")?, root.as_deref())?;
+            if roles.is_empty() {
+                // 担当から外す。登録されていない人や担当でない人は、もう外れている
+                if let Who::Known { id, .. } = who {
+                    if task.roles_of(&id).is_some() {
+                        let mut draft = TaskDraft::from(&task);
+                        draft.assignee_ids.retain(|p| *p != id);
+                        return Ok(task_json(&store.update_task(&task.id, &draft).map_err(core)?).to_string());
+                    }
+                }
+                task_json(&task)
+            } else {
+                let id = settle_person(store, who, task.workspace_id.as_deref())?;
+                let mut task = task;
+                if task.roles_of(&id).is_none() {
+                    let mut draft = TaskDraft::from(&task);
+                    draft.assignee_ids.push(id.clone());
+                    task = store.update_task(&task.id, &draft).map_err(core)?;
+                }
+                task_json(&store.set_assignee_roles(&task.id, &id, roles).map_err(core)?)
+            }
         }
         "move_task" => {
             let id = required(args, "id")?;
@@ -377,10 +627,13 @@ pub fn execute(
             json!({"id": w.id, "name": w.name, "parent_id": w.parent_id})
         }
         "create_person" => {
-            let p = store
-                .create_person(required(args, "name")?, false)
-                .map_err(core)?;
-            json!({"id": p.id, "name": p.name})
+            let name = required(args, "name")?;
+            let p = match optional(args, "workspace_id").filter(|id| !id.is_empty()) {
+                Some(w) => store.create_local_person(name, w),
+                None => store.create_person(name, false),
+            }
+            .map_err(core)?;
+            json!({"id": p.id, "name": p.name, "workspace_ids": p.workspace_ids})
         }
         other => return Err(format!("{other} というツールはありません")),
     };
@@ -400,6 +653,18 @@ pub fn summary(name: &str, args: &Value) -> String {
         "get_task" => "タスクを取得".into(),
         "create_task" => format!("タスクを作成: {}", arg("title")),
         "update_task" => "タスクを更新".into(),
+        "set_assignee" => match args.get("roles").and_then(Value::as_array) {
+            Some(r) if r.is_empty() => format!("担当から外す: {}", arg("person")),
+            Some(r) => format!(
+                "担当者の役を設定: {}（{}）",
+                arg("person"),
+                r.iter()
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join("・")
+            ),
+            None => format!("担当者の役を設定: {}", arg("person")),
+        },
         "move_task" => "タスクを移動".into(),
         "delete_task" => "タスクを削除".into(),
         "add_comment" => "コメントを追加".into(),
@@ -459,6 +724,7 @@ pub fn system_prompt(context: &str) -> String {
 \
          - 頼まれた操作は、確認を取らずにツールで実行してください。タスクの削除とシェルのコマンドは、アプリが実行の前にユーザーへ確認を出します。\n\
          - ID はツールで調べてから使ってください。ID を作らないでください。\n\
+         - 担当者は ID か名前で指定できます。登録されていない人の名前が出たら、聞き返さずにその名前で指定してください（アプリがその場で担当者に登録します）。担当者の役（RACI: {RACI}）は set_assignee か、create_task / update_task の assignees で付けてください。\n\
          - GitHub のリンクの中身は、必ず {GITHUB_FETCH} で取ってきてください（アプリが、ユーザーのログイン済みの gh で読みます）。{RUN_SHELL} で gh を呼ぶのは、{GITHUB_FETCH} で読めない種類のものだけにしてください。\n\
          - Slack のメッセージへのリンクの中身は、必ず {SLACK_FETCH} で取ってきてください（アプリが、ユーザーの Slack CLI で読みます）。\n\
          - {RUN_SHELL} のコマンドは {shell} で動きます。そのシェルの書き方で書いてください。\n\
@@ -632,6 +898,221 @@ mod tests {
         assert!(confirmation_text(&store, "delete_task", &json!({"id": id})).contains("牛乳を買う"));
         run(&mut store, "delete_task", json!({"id": id}));
         assert!(store.task(&id).is_err());
+    }
+
+    #[test]
+    fn roles_are_set_by_name_and_new_names_are_registered_in_the_workspace() {
+        let mut store = Store::open_in_memory().unwrap();
+        let me = store.create_person("自分", true).unwrap();
+        let ws = run(&mut store, "create_workspace", json!({"name": "イベント"}));
+        let sub = run(
+            &mut store,
+            "create_workspace",
+            json!({"name": "告知", "parent_id": ws["id"]}),
+        );
+        let task = run(
+            &mut store,
+            "create_task",
+            json!({
+                "title": "チラシを作る", "workspace_id": sub["id"],
+                "assignees": [{"person": me.id, "roles": ["R", "A"]}, {"person": "佐藤"}],
+            }),
+        );
+        let people = run(&mut store, "list_people", json!({}));
+        let sato = people
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["name"] == "佐藤")
+            .unwrap()
+            .clone();
+        // 登録されていない名前は、いちばん上の親のワークスペースの担当者になる
+        assert_eq!(sato["workspace_ids"], json!([ws["id"]]));
+        // 返す内容に、担当者ごとの役が入る
+        let mine = task["assignees"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["person_id"] == me.id.as_str())
+            .unwrap();
+        assert_eq!(mine["roles"], json!(["R", "A"]));
+        let id = task["id"].as_str().unwrap().to_owned();
+        let roles = |store: &Store, person: &str| {
+            role_codes(
+                store
+                    .task(&id)
+                    .unwrap()
+                    .roles_of(person)
+                    .unwrap_or(Roles::NONE),
+            )
+        };
+        assert_eq!(roles(&store, &me.id), ["R", "A"]);
+        assert_eq!(roles(&store, sato["id"].as_str().unwrap()), ["R"]);
+
+        // C（相談先）を名前で付ける。登録されていない人は、その場で登録して担当に加える
+        let t = run(
+            &mut store,
+            "set_assignee",
+            json!({"task_id": id, "person": "鈴木", "roles": ["C"]}),
+        );
+        assert_eq!(t["assignee_ids"].as_array().unwrap().len(), 3);
+        let suzuki = store
+            .people()
+            .unwrap()
+            .into_iter()
+            .find(|p| p.name == "鈴木")
+            .unwrap();
+        assert_eq!(suzuki.workspace_ids, [ws["id"].as_str().unwrap()]);
+        assert_eq!(roles(&store, &suzuki.id), ["C"]);
+        // 同じ名前は、登録し直さずに同じ人を使う
+        run(
+            &mut store,
+            "set_assignee",
+            json!({"task_id": id, "person": " 鈴木 ", "roles": ["C", "I"]}),
+        );
+        assert_eq!(store.people().unwrap().len(), 3);
+        assert_eq!(roles(&store, &suzuki.id), ["C", "I"]);
+
+        // A を付けると、ほかの人の A は外れる
+        run(
+            &mut store,
+            "set_assignee",
+            json!({"task_id": id, "person": "佐藤", "roles": ["a"]}),
+        );
+        assert_eq!(roles(&store, sato["id"].as_str().unwrap()), ["A"]);
+        assert_eq!(roles(&store, &me.id), ["R"]);
+
+        // update_task の assignees は並びを置き換え、役を省いた人は今の役のまま
+        let t = run(
+            &mut store,
+            "update_task",
+            json!({"id": id, "assignees": [{"person": "佐藤"}, {"person": me.id, "roles": ["A"]}]}),
+        );
+        assert_eq!(t["assignee_ids"].as_array().unwrap().len(), 2);
+        assert_eq!(roles(&store, &me.id), ["A"]);
+        assert_eq!(roles(&store, sato["id"].as_str().unwrap()), ["R"]);
+
+        // 役を空にすると担当から外す
+        run(
+            &mut store,
+            "set_assignee",
+            json!({"task_id": id, "person": "佐藤", "roles": []}),
+        );
+        assert_eq!(
+            store.task(&id).unwrap().assignee_ids,
+            std::slice::from_ref(&me.id)
+        );
+
+        // 別のワークスペースのローカル担当者は、名前で選ぶとこちらでも使えるようにする
+        let other = run(&mut store, "create_workspace", json!({"name": "家"}));
+        let home = run(
+            &mut store,
+            "create_task",
+            json!({"title": "買い物", "workspace_id": other["id"]}),
+        );
+        run(
+            &mut store,
+            "set_assignee",
+            json!({"task_id": home["id"], "person": "鈴木", "roles": ["I"]}),
+        );
+        let suzuki = store
+            .people()
+            .unwrap()
+            .into_iter()
+            .find(|p| p.id == suzuki.id)
+            .unwrap();
+        assert_eq!(suzuki.workspace_ids.len(), 2);
+        assert_eq!(store.people().unwrap().len(), 3);
+
+        // どこにも入っていないタスクでは、すべてのワークスペースの担当者として登録する
+        let loose = run(&mut store, "create_task", json!({"title": "メモ"}));
+        run(
+            &mut store,
+            "set_assignee",
+            json!({"task_id": loose["id"], "person": "高橋", "roles": ["R"]}),
+        );
+        let takahashi = store
+            .people()
+            .unwrap()
+            .into_iter()
+            .find(|p| p.name == "高橋")
+            .unwrap();
+        assert!(takahashi.workspace_ids.is_empty());
+
+        // create_person に workspace_id を渡すと、そのワークスペースの担当者になる
+        let local = run(
+            &mut store,
+            "create_person",
+            json!({"name": "伊藤", "workspace_id": sub["id"]}),
+        );
+        assert_eq!(local["workspace_ids"], json!([ws["id"]]));
+    }
+
+    #[test]
+    fn bad_assignees_fail_before_anything_is_written() {
+        let mut store = Store::open_in_memory().unwrap();
+        let task = run(&mut store, "create_task", json!({"title": "a"}));
+        let id = task["id"].as_str().unwrap();
+        let mut fail =
+            |name: &str, args: Value| execute(&mut store, None, name, &args).unwrap_err();
+        assert!(fail(
+            "update_task",
+            json!({"id": id, "title": "b", "assignees": [{"person": "x", "roles": ["A"]}, {"person": "y", "roles": ["A"]}]})
+        )
+        .contains("1 人まで"));
+        assert!(fail(
+            "update_task",
+            json!({"id": id, "assignees": [{"person": "x"}, {"person": "x"}]})
+        )
+        .contains("2 回"));
+        assert!(fail(
+            "update_task",
+            json!({"id": id, "assignees": [{"person": "x", "roles": []}]})
+        )
+        .contains("1 つ以上"));
+        assert!(fail(
+            "update_task",
+            json!({"id": id, "assignees": [{"person": "x", "roles": ["Z"]}]})
+        )
+        .contains("roles"));
+        assert!(fail(
+            "update_task",
+            json!({"id": id, "assignee_ids": [], "assignees": []})
+        )
+        .contains("一緒に"));
+        assert!(fail(
+            "set_assignee",
+            json!({"task_id": id, "person": " ", "roles": ["R"]})
+        )
+        .contains("person"));
+        assert!(fail(
+            "set_assignee",
+            json!({"task_id": "none", "person": "x", "roles": ["R"]})
+        )
+        .contains("見つかりません"));
+        assert!(store.people().unwrap().is_empty());
+        assert_eq!(store.task(id).unwrap().title, "a");
+    }
+
+    #[test]
+    fn two_people_with_the_same_name_need_an_id() {
+        let mut store = Store::open_in_memory().unwrap();
+        store.create_person("佐藤", false).unwrap();
+        store.create_person("佐藤", false).unwrap();
+        let task = run(&mut store, "create_task", json!({"title": "a"}));
+        let error = execute(
+            &mut store,
+            None,
+            "set_assignee",
+            &json!({"task_id": task["id"], "person": "佐藤", "roles": ["C"]}),
+        )
+        .unwrap_err();
+        assert!(error.contains("2 人"), "{error}");
+        assert!(store
+            .task(task["id"].as_str().unwrap())
+            .unwrap()
+            .assignee_ids
+            .is_empty());
     }
 
     #[test]
