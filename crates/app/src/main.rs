@@ -43,6 +43,8 @@ fn main() {
         .run(move |cx| {
             malakt_mahoz::db::clear_stale_opened();
             malakt_mahoz::init(store, cx);
+            // アプリ内ブラウザは、OS のブラウザの部品で開く
+            malakt_mahoz::browser::use_system_browser(cx);
             // 動いている印を付ける。MCP サーバーはこれを見て、アプリを閉じると一緒に終わる
             if let Err(error) = malakt_mahoz::mcp::hold_running(&malakt_mahoz::database_path()) {
                 eprintln!("アプリが動いている印を付けられませんでした: {error}");

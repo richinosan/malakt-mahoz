@@ -57,7 +57,8 @@ Linux では次のライブラリが必要です（Ubuntu の例）。
 
 ```sh
 sudo apt-get install clang pkg-config libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev \
-  libwayland-dev libvulkan-dev libfontconfig-dev libfreetype-dev libssl-dev libasound2-dev libzstd-dev
+  libwayland-dev libvulkan-dev libfontconfig-dev libfreetype-dev libssl-dev libasound2-dev libzstd-dev \
+  libwebkit2gtk-4.1-dev libgtk-3-dev
 ```
 
 データベースは OS のデータ用フォルダの `malakt-mahoz/data.sqlite3` です。環境変数 `MALAKT_MAHOZ_DB` で場所を変えられます。

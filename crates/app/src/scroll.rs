@@ -83,7 +83,11 @@ pub trait Menus: Sized {
     where
         Self: ContextMenuExt,
     {
-        self.context_menu(move |menu, window, cx| f(menu.scrollable(true), window, cx))
+        self.context_menu(move |menu, window, cx| {
+            // ブラウザのページはメニューより手前に出るので、開いている間は隠す
+            crate::browser::note_menu(cx.weak_entity(), cx);
+            f(menu.scrollable(true), window, cx)
+        })
     }
 }
 
@@ -179,6 +183,7 @@ mod tests {
         ("theme.rs", include_str!("theme.rs")),
         ("shortcuts.rs", include_str!("shortcuts.rs")),
         ("history_view.rs", include_str!("history_view.rs")),
+        ("browser.rs", include_str!("browser.rs")),
     ];
 
     /// コメントを除いたコードの行。
