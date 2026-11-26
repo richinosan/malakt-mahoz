@@ -5419,3 +5419,104 @@ fn the_ai_shell_is_chosen_in_customize(cx: &mut TestAppContext) {
         assert!(window.try_find("popup-menu").is_some());
     });
 }
+
+/// 絞り込みの右の × は、いつも同じ場所にあり、効いているときだけ押せる。押すとその絞り込みだけ外れる。
+#[gpui_kit::test]
+fn each_filter_is_cleared_by_its_own_x(cx: &mut TestAppContext) {
+    start(cx);
+    let (window, view) = open(cx, wide());
+    cx.update(|cx| {
+        db::shared(cx).update(cx, |db, _| {
+            let s = &mut db.store;
+            s.add_task_in(None, "会場を決める").unwrap();
+            s.add_task_in(None, "機材を借りる").unwrap();
+        })
+    });
+    ui(cx, window, |window, cx| window.click("nav-all", cx));
+    let ids = [
+        "task-search-clear",
+        "f-status-clear",
+        "f-assignee-clear",
+        "f-role-clear",
+        "f-priority-clear",
+        "f-category-clear",
+    ];
+    let disabled = |cx: &mut TestAppContext, id: &'static str| {
+        let mut out = None;
+        ui(cx, window, |window, _| out = window.find(id).disabled());
+        out == Some(true)
+    };
+    let place = |cx: &mut TestAppContext, id: &'static str| {
+        let mut out = None;
+        ui(cx, window, |window, _| out = Some(window.find(id).bounds()));
+        out.unwrap()
+    };
+    // 何も絞り込んでいないときも置いてあり、押せない
+    let before: Vec<_> = ids.iter().map(|id| place(cx, id)).collect();
+    for id in ids {
+        assert!(disabled(cx, id), "{id} は押せない");
+    }
+
+    // キーワードを打つと、検索の × だけが押せるようになる
+    ui(cx, window, |window, cx| {
+        window.click("task-search", cx);
+        window.input("会場", cx);
+    });
+    cx.update(|cx| assert_eq!(view.read(cx).visible.len(), 1));
+    assert!(!disabled(cx, "task-search-clear"));
+    assert!(disabled(cx, "f-status-clear"));
+    // × が押せるようになっても、欄の場所と大きさは変わらない
+    assert_eq!(place(cx, "task-search-clear"), before[0]);
+    ui(cx, window, |window, cx| {
+        window.click("task-search-clear", cx)
+    });
+    cx.update(|cx| {
+        let v = view.read(cx);
+        assert_eq!(v.query.q, "");
+        assert_eq!(v.inputs.search.read(cx).value().as_ref(), "");
+        assert_eq!(v.visible.len(), 2);
+    });
+    assert!(disabled(cx, "task-search-clear"));
+
+    // 状態と優先度を絞り込む。状態の × は状態だけを外す
+    cx.update(|cx| {
+        view.update(cx, |v, cx| {
+            v.query.status = Some(Status::InProcess);
+            v.query.priority = Some(malakt_core::view::Priority::High);
+            v.query.my_role = Some(Role::A);
+            v.query.assignee = malakt_core::view::AssigneeFilter::Unassigned;
+            v.query.category = Some("設営".into());
+            v.refilter();
+            cx.notify();
+        })
+    });
+    for id in &ids[1..] {
+        assert!(!disabled(cx, id), "{id} は押せる");
+    }
+    ui(cx, window, |window, cx| window.click("f-status-clear", cx));
+    cx.update(|cx| {
+        let q = &view.read(cx).query;
+        assert_eq!(q.status, None);
+        assert_eq!(q.priority, Some(malakt_core::view::Priority::High));
+    });
+    assert!(disabled(cx, "f-status-clear"));
+    assert!(!disabled(cx, "f-priority-clear"));
+    for id in [
+        "f-assignee-clear",
+        "f-role-clear",
+        "f-priority-clear",
+        "f-category-clear",
+    ] {
+        ui(cx, window, |window, cx| window.click(id, cx));
+    }
+    cx.update(|cx| {
+        let v = view.read(cx);
+        assert_eq!(v.query.active_count(), 0);
+        assert_eq!(v.visible.len(), 2);
+    });
+    let after: Vec<_> = ids.iter().map(|id| place(cx, id)).collect();
+    assert_eq!(before, after);
+    for id in ids {
+        assert!(disabled(cx, id), "{id} は押せない");
+    }
+}

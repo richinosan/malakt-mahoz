@@ -537,6 +537,33 @@ fn avatar(name: &str, cx: &App) -> Div {
 }
 
 /// 欄の上に付ける小さな見出し。
+/// 絞り込みを外す ×。場所がずれないよう、効いていないときも薄く置いておき、押せなくする。
+/// 押せるようになったときと、押せなくなったときに、薄い所から濃さを戻して変わったことを見せる。
+fn clear_filter(
+    id: impl Into<SharedString>,
+    active: bool,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    let id: SharedString = id.into();
+    div()
+        .flex_none()
+        .child(feel::gloss_when(
+            active,
+            Button::new(id.clone())
+                .icon(app_icon("x"))
+                .ghost()
+                .small()
+                .disabled(!active)
+                .tooltip("解除")
+                .on_click(on_click),
+        ))
+        .with_animation(
+            SharedString::from(format!("{id}-{active}")),
+            Animation::new(std::time::Duration::from_millis(180)).with_easing(ease_out_quint()),
+            |el, delta| el.opacity(0.3 + 0.7 * delta),
+        )
+}
+
 fn field_label(text: &'static str, cx: &App) -> Div {
     div()
         .text_xs()
@@ -1994,45 +2021,87 @@ impl MainView {
         apply: fn(&mut MainView, T),
         cx: &mut Context<Self>,
     ) -> Div {
+        self.select_with(id, label, options, apply, false, cx)
+    }
+
+    /// 絞り込みの選択。最初の選択肢（すべて）以外を選んでいるとき、右の × で外せる。
+    fn filter_select<T: Clone + 'static>(
+        &self,
+        id: &'static str,
+        label: &'static str,
+        options: Vec<(SharedString, bool, T)>,
+        apply: fn(&mut MainView, T),
+        cx: &mut Context<Self>,
+    ) -> Div {
+        self.select_with(id, label, options, apply, true, cx)
+    }
+
+    fn select_with<T: Clone + 'static>(
+        &self,
+        id: &'static str,
+        label: &'static str,
+        options: Vec<(SharedString, bool, T)>,
+        apply: fn(&mut MainView, T),
+        clearable: bool,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        // 最初の選択肢が「すべて」。それを選んでいないときが、絞り込みが効いているとき
+        let reset = clearable
+            .then(|| options.first().map(|o| (!o.1, o.2.clone())))
+            .flatten();
         let current = options
             .iter()
             .find(|o| o.1)
             .map(|o| o.0.clone())
             .unwrap_or_default();
         let view = cx.entity().downgrade();
+        let button = Button::new(id)
+            .framed(cx)
+            .w_full()
+            .child(
+                row()
+                    .w_full()
+                    .gap_1()
+                    .child(div().flex_1().min_w_0().truncate().child(current))
+                    .child(app_icon("chevron-down").xsmall().flex_none()),
+            )
+            .dropdown_menu(move |mut menu, _, _| {
+                for (label, checked, value) in options.iter().cloned() {
+                    let view = view.clone();
+                    menu = menu.item(PopupMenuItem::new(label).checked(checked).on_click(
+                        move |_, _, cx| {
+                            // ウィンドウを閉じたあとなら、反映する先がない
+                            let _ = view.update(cx, |this, cx| {
+                                apply(this, value.clone());
+                                this.refilter();
+                                cx.notify();
+                            });
+                        },
+                    ));
+                }
+                menu
+            });
+        let control = row()
+            .w_full()
+            .gap_1()
+            .child(div().flex_1().min_w_0().child(button));
         col()
             .flex_1()
             .min_w(px(110.))
             .gap_1()
             .child(field_label(label, cx))
-            .child(
-                Button::new(id)
-                    .framed(cx)
-                    .w_full()
-                    .child(
-                        row()
-                            .w_full()
-                            .gap_1()
-                            .child(div().flex_1().min_w_0().truncate().child(current))
-                            .child(app_icon("chevron-down").xsmall().flex_none()),
-                    )
-                    .dropdown_menu(move |mut menu, _, _| {
-                        for (label, checked, value) in options.iter().cloned() {
-                            let view = view.clone();
-                            menu = menu.item(PopupMenuItem::new(label).checked(checked).on_click(
-                                move |_, _, cx| {
-                                    // ウィンドウを閉じたあとなら、反映する先がない
-                                    let _ = view.update(cx, |this, cx| {
-                                        apply(this, value.clone());
-                                        this.refilter();
-                                        cx.notify();
-                                    });
-                                },
-                            ));
-                        }
-                        menu
+            .child(match reset {
+                Some((active, value)) => control.child(clear_filter(
+                    SharedString::from(format!("{id}-clear")),
+                    active,
+                    cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        apply(this, value.clone());
+                        this.refilter();
+                        cx.notify();
                     }),
-            )
+                )),
+                None => control,
+            })
     }
 
     fn render_filters(&self, cx: &mut Context<Self>) -> Div {
@@ -2102,42 +2171,60 @@ impl MainView {
                     .gap_1()
                     .child(field_label("検索", cx))
                     .child(
-                        Input::new(&self.inputs.search)
-                            .id("task-search")
-                            .aria_label("検索")
-                            .prefix(app_icon("search").small())
-                            .cleanable(true),
+                        row()
+                            .w_full()
+                            .gap_1()
+                            .child(
+                                div().flex_1().min_w_0().child(
+                                    Input::new(&self.inputs.search)
+                                        .id("task-search")
+                                        .aria_label("検索")
+                                        .prefix(app_icon("search").small()),
+                                ),
+                            )
+                            .child(clear_filter(
+                                "task-search-clear",
+                                !q.q.trim().is_empty(),
+                                cx.listener(|this, _: &ClickEvent, window, cx| {
+                                    this.query.q.clear();
+                                    this.inputs
+                                        .search
+                                        .update(cx, |s, cx| s.set_value("", window, cx));
+                                    this.refilter();
+                                    cx.notify();
+                                }),
+                            )),
                     ),
             )
-            .child(self.select(
+            .child(self.filter_select(
                 "f-status",
                 "状態",
                 status,
                 |this, v| this.query.status = v,
                 cx,
             ))
-            .child(self.select(
+            .child(self.filter_select(
                 "f-assignee",
                 "担当",
                 assignee,
                 |this, v| this.query.assignee = v,
                 cx,
             ))
-            .child(self.select(
+            .child(self.filter_select(
                 "f-role",
                 "自分の役",
                 my_role,
                 |this, v| this.query.my_role = v,
                 cx,
             ))
-            .child(self.select(
+            .child(self.filter_select(
                 "f-priority",
                 "優先度",
                 priority,
                 |this, v| this.query.priority = v,
                 cx,
             ))
-            .child(self.select(
+            .child(self.filter_select(
                 "f-category",
                 "カテゴリ",
                 category,
