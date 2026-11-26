@@ -530,3 +530,67 @@ fn the_chat_offers_the_app_tools(cx: &mut TestAppContext) {
         assert!(names.contains(&name.to_owned()), "{name}");
     }
 }
+
+/// 自動でロックするまでの時間と、ロック中の通知も、AI に頼んで変えられる。
+#[gpui_kit::test]
+fn the_ai_changes_the_lock_options(cx: &mut TestAppContext) {
+    let world = start(cx, Store::open_in_memory().unwrap());
+    let (window, view) = open(cx);
+    let pane = open_chat(cx, window, &view);
+
+    world.call(
+        "lock",
+        json!({"action": "set_options", "auto_lock_minutes": 30, "locked_notices": "hidden"}),
+        "変えました。",
+    );
+    say(
+        cx,
+        window,
+        &pane,
+        "30 分でロックして、ロック中の通知はタイトルを出さないで",
+    );
+    cx.update(|cx| {
+        let v = view.read(cx);
+        assert_eq!(v.auto_lock(cx), Some(30));
+        assert_eq!(
+            v.locked_notices(cx),
+            malakt_core::lock::LockedNotices::Hidden
+        );
+    });
+
+    // 選べない時間は、何も変えずに失敗する
+    world.call(
+        "lock",
+        json!({"action": "set_options", "auto_lock_minutes": 7, "locked_notices": "title"}),
+        "できませんでした。",
+    );
+    say(cx, window, &pane, "7 分で");
+    let (result, error) = world.last_result();
+    assert!(error && result.contains("1 / 5 / 10"), "{result}");
+    cx.update(|cx| {
+        assert_eq!(view.read(cx).auto_lock(cx), Some(30));
+        assert_eq!(
+            view.read(cx).locked_notices(cx),
+            malakt_core::lock::LockedNotices::Hidden
+        );
+    });
+
+    world.call(
+        "lock",
+        json!({"action": "set_options", "auto_lock_minutes": 0}),
+        "止めました。",
+    );
+    say(cx, window, &pane, "自動でロックしないで");
+    cx.update(|cx| assert_eq!(view.read(cx).auto_lock(cx), None));
+
+    world.call("get_screen", json!({}), "読みました。");
+    say(cx, window, &pane, "ロックの設定は？");
+    let (result, _) = world.last_result();
+    let screen: Value = serde_json::from_str(&result).unwrap();
+    assert_eq!(screen["lock"]["auto_lock_minutes"], 0);
+    assert_eq!(screen["lock"]["locked_notices"], "hidden");
+
+    world.call("open_dialog", json!({"name": "lock"}), "開きました。");
+    say(cx, window, &pane, "ロックの設定を開いて");
+    cx.update(|cx| assert_eq!(view.read(cx).modal, Modal::Lock));
+}

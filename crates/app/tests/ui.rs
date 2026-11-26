@@ -1,7 +1,7 @@
 //! 画面を通したシナリオテスト。実際のウィンドウ（ヘッドレス）を開き、クリックと入力で操作する。
 
 use gpui_kit::component::input::InputState;
-use gpui_kit::test::{TestQueryExt, TestWindowExt};
+use gpui_kit::test::{TestEventExt, TestQueryExt, TestWindowExt};
 use gpui_kit::{
     px, size, AnyWindowHandle, AppContext, Bounds, Entity, Modifiers, MouseButton, Pixels, Point,
     Size, TestAppContext, WindowBounds, WindowOptions,
@@ -1384,32 +1384,196 @@ fn due_today_reaches_the_notice_list_and_the_os(cx: &mut TestAppContext) {
     });
 }
 
-/// ロック中は、タスクのタイトルを OS の通知に出さない。解除したら出す。
+/// 開いているメニューの中の、`label` の項目を押す。
+fn pick(cx: &mut TestAppContext, window: AnyWindowHandle, label: &str) {
+    ui(cx, window, |window, cx| {
+        let center = window.find_by_label(label).bounds().center();
+        window.pointer_move(center, None, cx);
+        window.pointer_down(center, MouseButton::Left, cx);
+        window.pointer_up(center, MouseButton::Left, cx);
+    });
+}
+
+/// ロック中も OS の通知は届く。押すと解除を求め、解除したらそのタスクを開く。
 #[gpui_kit::test]
-fn notices_wait_until_unlocked(cx: &mut TestAppContext) {
+fn notices_arrive_while_locked(cx: &mut TestAppContext) {
     start(cx);
     let today = malakt_core::view::today();
-    cx.update(|cx| {
+    let task = cx.update(|cx| {
         db::shared(cx).update(cx, |db, _| {
             let draft = malakt_core::TaskDraft {
                 title: "ひみつの用事".into(),
                 due: Some(today.clone()),
                 ..Default::default()
             };
-            db.store.create_task(None, &draft).unwrap();
+            let task = db.store.create_task(None, &draft).unwrap();
             lock::enable(&mut db.store).unwrap();
+            task
         })
     });
     cx.update(db::lock_now);
     let (window, view) = open(cx, wide());
     cx.run_until_parked();
     cx.update(|cx| assert!(!view.read(cx).unlocked(cx)));
-    assert!(cx.shown_system_notifications().is_empty());
+    let shown = cx.shown_system_notifications();
+    assert_eq!(shown.len(), 1);
+    assert_eq!(shown[0].title.as_ref(), "「ひみつの用事」の期限は今日です");
 
+    // 押すと解除を求め、通ったらそのタスクを開く
+    let asked = passkey(cx, Ok(()));
+    cx.simulate_system_notification_response(gpui_kit::SystemNotificationResponse {
+        tag: shown[0].tag.clone(),
+        action_id: None,
+    });
+    cx.run_until_parked();
+    ui(cx, window, |_, _| {});
+    assert_eq!(*asked.lock().unwrap(), ["ロックを解除"]);
+    cx.update(|cx| {
+        let view = view.read(cx);
+        assert!(view.unlocked(cx));
+        assert_eq!(view.panel.as_deref(), Some(task.id.as_str()));
+        assert_eq!(view.open_after_unlock, None);
+    });
+    // 解除しても、同じ通知は出し直さない
+    assert_eq!(cx.shown_system_notifications().len(), 1);
+}
+
+/// ロック中にコメントの通知が来たら、本文は出さない。「タイトルを出さない」にすると、1 行も出さない。
+#[gpui_kit::test]
+fn locked_notices_hide_what_was_chosen(cx: &mut TestAppContext) {
+    start(cx);
+    let (_window, view) = open(cx, wide());
+    enable_lock(cx);
+    let comment = |cx: &mut TestAppContext, title: &str| {
+        let title = title.to_owned();
+        cx.update(|cx| {
+            db::shared(cx).update(cx, |db, cx| {
+                let me = db
+                    .store
+                    .people()
+                    .unwrap()
+                    .into_iter()
+                    .find(|p| p.is_self)
+                    .unwrap();
+                let sato = db.store.create_person("佐藤", false).unwrap();
+                let draft = malakt_core::TaskDraft {
+                    title,
+                    assignee_ids: vec![me.id.clone(), sato.id.clone()],
+                    ..Default::default()
+                };
+                let task = db.store.create_task(None, &draft).unwrap();
+                let ticket = db.store.issue_ticket(&task.id, Some(&sato.id)).unwrap();
+                db.store
+                    .redeem_ticket(&ticket.secret, "駅前で配り終えました")
+                    .unwrap();
+                cx.notify();
+            })
+        });
+        cx.run_until_parked();
+    };
+    cx.update(db::lock_now);
+    cx.run_until_parked();
+    comment(cx, "チラシを配る");
+    let shown = cx.shown_system_notifications();
+    assert_eq!(shown.len(), 1);
+    assert!(
+        shown[0].title.contains("チラシを配る"),
+        "{}",
+        shown[0].title
+    );
+    assert_eq!(shown[0].body.as_ref(), "", "ロック中は本文を出さない");
+
+    cx.update(|cx| {
+        view.update(cx, |v, cx| {
+            assert!(v.set_locked_notices(lock::LockedNotices::Hidden, cx))
+        })
+    });
+    comment(cx, "ポスターを貼る");
+    let shown = cx.shown_system_notifications();
+    assert_eq!(shown.len(), 2);
+    assert_eq!(shown[1].title.as_ref(), "新しい通知があります");
+    assert_eq!(shown[1].body.as_ref(), "");
+}
+
+/// 「ロック」のダイアログで、自動でロックするまでの時間と、ロック中の通知をメニューから選ぶ。
+/// 操作がないまま選んだ時間が過ぎるとロックし、操作すると数え直す。
+#[gpui_kit::test]
+fn auto_lock_after_the_chosen_minutes(cx: &mut TestAppContext) {
+    start(cx);
+    let (window, view) = open(cx, wide());
+    ui(cx, window, |window, cx| {
+        view.update(cx, |v, cx| v.open_lock_settings(window, cx))
+    });
+    cx.update(|cx| assert_eq!(view.read(cx).modal, Modal::Lock));
+    // ロックが無効なうちは、時間と通知の行は出ない
+    ui(cx, window, |window, _| {
+        assert!(window.try_find("auto-lock").is_none());
+        assert!(window.try_find("locked-notices").is_none());
+    });
+
+    // スイッチで有効にする（パスキーで確認する）
+    let asked = passkey(cx, Ok(()));
+    ui(cx, window, |window, cx| window.click("lock-switch", cx));
+    assert_eq!(*asked.lock().unwrap(), ["ロックを有効にする"]);
+    cx.update(|cx| {
+        assert!(view.read(cx).lock_enabled(cx));
+        assert_eq!(
+            view.read(cx).auto_lock(cx),
+            None,
+            "最初は自動でロックしない"
+        );
+    });
+
+    // 時間はその場のメニューで選ぶ
+    ui(cx, window, |window, cx| window.click("auto-lock", cx));
+    pick(cx, window, "15 分");
+    cx.update(|cx| assert_eq!(view.read(cx).auto_lock(cx), Some(15)));
+    ui(cx, window, |window, cx| window.click("locked-notices", cx));
+    pick(cx, window, "タイトルを出さない");
+    cx.update(|cx| {
+        assert_eq!(
+            view.read(cx).locked_notices(cx),
+            lock::LockedNotices::Hidden
+        )
+    });
+
+    // 15 分たつ前はロックしない。過ぎたらロックする
+    let last = cx.update(|cx| db::shared(cx).read(cx).last_input);
+    cx.update(|cx| db::lock_if_idle(last + 15 * 60 - 1, cx));
+    cx.update(|cx| assert!(view.read(cx).unlocked(cx)));
+    cx.update(|cx| db::lock_if_idle(last + 15 * 60, cx));
+    cx.run_until_parked();
+    cx.update(|cx| assert!(!view.read(cx).unlocked(cx)));
+
+    // 解除したら、そこから数え直す
     passkey(cx, Ok(()));
     ui(cx, window, |window, cx| window.click("unlock", cx));
+    let unlocked_at = cx.update(|cx| db::shared(cx).read(cx).last_input);
+    assert!(unlocked_at >= last);
+    cx.update(|cx| db::lock_if_idle(unlocked_at + 15 * 60 - 1, cx));
     cx.update(|cx| assert!(view.read(cx).unlocked(cx)));
-    assert_eq!(cx.shown_system_notifications().len(), 1);
+
+    // マウスを動かすと、数え直す
+    cx.update(|cx| db::shared(cx).update(cx, |db, _| db.last_input = 0));
+    ui(cx, window, |window, cx| {
+        window.pointer_move(Point::new(px(200.), px(200.)), None, cx)
+    });
+    let moved = cx.update(|cx| db::shared(cx).read(cx).last_input);
+    assert!(moved > 0, "マウスの操作を数えていない");
+    // キーを押しても、数え直す
+    cx.update(|cx| db::shared(cx).update(cx, |db, _| db.last_input = 0));
+    cx.simulate_keystrokes(window, "a");
+    let typed = cx.update(|cx| db::shared(cx).read(cx).last_input);
+    assert!(typed > 0, "キーの操作を数えていない");
+
+    // 「しない」にすると、いくら待ってもロックしない
+    ui(cx, window, |window, cx| window.click("auto-lock", cx));
+    pick(cx, window, "しない");
+    cx.update(|cx| {
+        assert_eq!(view.read(cx).auto_lock(cx), None);
+        db::lock_if_idle(i64::MAX / 2, cx);
+        assert!(view.read(cx).unlocked(cx));
+    });
 }
 
 /// 画面で発行した完了チケットをコマンドで引き換えると、開いている画面に届く。

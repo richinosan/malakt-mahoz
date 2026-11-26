@@ -243,7 +243,7 @@ pub fn definitions() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "open_dialog",
-            description: "ダイアログを開く。people（担当者）、customize（カスタマイズ）、notices（通知）、keys（キー操作の一覧）、workspace_settings（ワークスペースの設定。workspace_id が要る）、workspace_icon（ワークスペースのアイコン。workspace_id が要る）、history（開いているタスクの変更履歴）、ticket（完了チケット。task_id が要る）。",
+            description: "ダイアログを開く。people（担当者）、customize（カスタマイズ）、lock（ロックの設定）、notices（通知）、keys（キー操作の一覧）、workspace_settings（ワークスペースの設定。workspace_id が要る）、workspace_icon（ワークスペースのアイコン。workspace_id が要る）、history（開いているタスクの変更履歴）、ticket（完了チケット。task_id が要る）。",
             schema: object(
                 json!({
                     "name": {"type": "string", "enum": ["people", "customize", "notices", "keys", "workspace_settings", "workspace_icon", "history", "ticket"]},
@@ -268,9 +268,13 @@ pub fn definitions() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "lock",
-            description: "ロック。lock_now（今すぐロック）、enable（ロックを有効にする）、disable（ロックを無効にする）。有効と無効は、OS の認証（パスキー）が出て、ユーザーが通したときだけ変わる。",
+            description: "ロック。lock_now（今すぐロック）、enable（ロックを有効にする）、disable（ロックを無効にする）、set_options（ロックの設定を変える。渡した項目だけが変わる）。有効と無効は、OS の認証（パスキー）が出て、ユーザーが通したときだけ変わる。auto_lock_minutes は、操作がないまま自動でロックするまでの分数（0 で自動でロックしない）。locked_notices は、ロック中の OS の通知に出すもの（title: 通知の 1 行を出す、hidden: 「新しい通知があります」だけ）。今の値は get_screen の lock にある。",
             schema: object(
-                json!({"action": {"type": "string", "enum": ["lock_now", "enable", "disable"]}}),
+                json!({
+                    "action": {"type": "string", "enum": ["lock_now", "enable", "disable", "set_options"]},
+                    "auto_lock_minutes": {"type": "integer", "enum": [0, 1, 5, 10, 15, 30, 60, 120]},
+                    "locked_notices": {"type": "string", "enum": ["title", "hidden"]},
+                }),
                 &["action"],
             ),
         },
@@ -667,6 +671,7 @@ impl MainView {
                     self.disable_lock(window, cx);
                     json!({"asked": "OS の認証が出ています。通ると無効になります"})
                 }
+                "set_options" => self.ai_set_lock_options(args, cx)?,
                 other => return Err(format!("action が正しくありません: {other}")),
             },
             "set_app_options" => self.ai_set_options(args, cx)?,
@@ -996,6 +1001,7 @@ impl MainView {
             "pane_keys": self.pane_keys.code(),
             "saved_pane_layouts": self.pane_presets.iter().map(|(n, _)| n).collect::<Vec<_>>(),
             "lock_enabled": self.lock_enabled(cx),
+            "lock": self.lock_json(cx),
             "reminders": crate::reminders::enabled(cx),
             "auto_update": crate::update::enabled(cx),
             "update_ready": crate::update::ready_version(cx).map(|v| v.to_string()),
@@ -1289,6 +1295,7 @@ impl MainView {
         match name {
             "people" => self.open_people(window, cx),
             "customize" => self.open_appearance(window, cx),
+            "lock" => self.open_lock_settings(window, cx),
             "notices" => {
                 self.modal = Modal::Notices;
                 self.focus.focus(window, cx);
@@ -1369,6 +1376,62 @@ impl MainView {
             return Err("ターミナルを開けませんでした".into());
         }
         Ok(json!({"terminals": terms.tabs.len()}))
+    }
+
+    fn lock_json(&self, cx: &App) -> Value {
+        json!({
+            "enabled": self.lock_enabled(cx),
+            "auto_lock_minutes": self.auto_lock(cx).unwrap_or(0),
+            "locked_notices": self.locked_notices(cx).code(),
+        })
+    }
+
+    fn ai_set_lock_options(
+        &mut self,
+        args: &Value,
+        cx: &mut Context<Self>,
+    ) -> Result<Value, String> {
+        // 先に全部の値を確かめ、1 つでも正しくなければ何も変えない
+        let minutes = match args.get("auto_lock_minutes") {
+            None | Some(Value::Null) => None,
+            Some(value) => {
+                let minutes = value
+                    .as_u64()
+                    .ok_or_else(|| format!("auto_lock_minutes は分数です: {value}"))?;
+                let choices = malakt_core::lock::AUTO_CHOICES;
+                match u32::try_from(minutes) {
+                    Ok(0) => Some(None),
+                    Ok(m) if choices.contains(&m) => Some(Some(m)),
+                    _ => {
+                        return Err(format!(
+                            "auto_lock_minutes は 0 / {} のどれかです: {minutes}",
+                            choices.map(|c| c.to_string()).join(" / ")
+                        ))
+                    }
+                }
+            }
+        };
+        let notices =
+            match str_arg(args, "locked_notices") {
+                None => None,
+                Some(code) => Some(malakt_core::lock::LockedNotices::parse(code).ok_or_else(
+                    || format!("locked_notices は title / hidden のどれかです: {code}"),
+                )?),
+            };
+        if minutes.is_none() && notices.is_none() {
+            return Err("auto_lock_minutes か locked_notices を渡してください".into());
+        }
+        if let Some(minutes) = minutes {
+            if !self.set_auto_lock(minutes, cx) {
+                return Err(self.take_error("自動でロックするまでの時間を保存できませんでした"));
+            }
+        }
+        if let Some(notices) = notices {
+            if !self.set_locked_notices(notices, cx) {
+                return Err(self.take_error("ロック中の通知の設定を保存できませんでした"));
+            }
+        }
+        Ok(self.lock_json(cx))
     }
 
     fn ai_set_options(&mut self, args: &Value, cx: &mut Context<Self>) -> Result<Value, String> {

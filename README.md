@@ -33,7 +33,7 @@
 - **ペイン**: 画面を分けて、配置をプリセットとして保存
 - **カスタマイズ**: テーマ 13 個、レイアウト、密度、背景の画像、書体、色。自分のテーマを保存
 - **マルチウィンドウ**: `Ctrl/⌘ + N`
-- **ロック**: パスキー（Windows Hello、Touch ID、fprintd）。`Ctrl/⌘ + L`
+- **ロック**: パスキー（Windows Hello、Touch ID、fprintd）。`Ctrl/⌘ + L`。操作がないときに自動でロックする時間を選べます。ロック中も OS の通知は届きます（[docs/lock.md](docs/lock.md)）
 - **エクスポート / インポート**: 全データを zip 1 つに書き出し、別の端末で取り込み
 - **リマインダーとの連携**（標準はオフ）: macOS の「リマインダー」、Windows の通知（[docs/reminders.md](docs/reminders.md)）
 - **自動アップデート**: GitHub Releases の新しい版に入れ替え（[docs/update.md](docs/update.md)）
