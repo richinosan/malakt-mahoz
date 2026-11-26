@@ -1140,3 +1140,113 @@ fn app_keys_work_inside_the_page(cx: &mut TestAppContext) {
         "AI チャットを閉じる"
     );
 }
+
+/// 小さなウィンドウのバーを右クリックすると、ほかのウィンドウと同じメニューが出る。
+/// メニューの間はページを隠し、「閉じる」でウィンドウとページを閉じる。
+#[gpui_kit::test]
+fn the_small_window_bar_has_the_window_menu(cx: &mut TestAppContext) {
+    let world = start(cx, Store::open_in_memory().unwrap());
+    let (window, _view) = open(cx);
+    ui(cx, window, |window, cx| window.click("ai-toggle", cx));
+    cx.update_window(window, |_, window, cx| {
+        browser::open("https://example.com/", window, cx)
+    })
+    .unwrap();
+    ui(cx, window, |_, _| {});
+    let tab = terms(cx, |t| t.active_page().map(|p| p.id)).expect("タブが開く");
+    world.send(tab, Event::Popup("https://example.com/b".into()));
+    cx.run_until_parked();
+    let small = terms(cx, |t| t.pages.iter().find(|p| p.popup).map(|p| p.id))
+        .expect("小さなウィンドウのページがある");
+    let popup = cx
+        .update(|cx| cx.windows())
+        .into_iter()
+        .find(|w| *w != window)
+        .expect("小さなウィンドウが開く");
+    ui(cx, popup, |_, _| {});
+    let fake = world.fake(small);
+    assert!(fake.visible.get());
+    ui(cx, popup, |window, cx| {
+        window.click_with_options(
+            "popup-title",
+            ClickOptions::new().with_button(MouseButton::Right),
+            cx,
+        )
+    });
+    assert!(cx.update(|cx| browser::menus_open(cx)));
+    assert!(!fake.visible.get(), "メニューの間はページを隠す");
+    // いちばん下の「閉じる」
+    cx.update_window(popup, |_, window, cx| {
+        window.render_frame(cx);
+        window.press("up", cx);
+        window.press("enter", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    assert!(fake.dropped.get());
+    assert!(terms(cx, |t| t.page(small).is_none()));
+    assert_eq!(cx.update(|cx| cx.windows().len()), 1);
+}
+
+/// 小さなウィンドウのページでも、タブと同じキーで読み込み直す・戻る・探す・印刷し、
+/// タブを閉じるキーでウィンドウを閉じる。
+#[gpui_kit::test]
+fn the_small_window_takes_the_browser_keys(cx: &mut TestAppContext) {
+    let world = start(cx, Store::open_in_memory().unwrap());
+    let (window, _view) = open(cx);
+    ui(cx, window, |window, cx| window.click("ai-toggle", cx));
+    let tab = open_page(cx, window, "https://example.com/");
+    world.send(tab, Event::Popup("https://example.com/b".into()));
+    cx.run_until_parked();
+    let small = terms(cx, |t| t.pages.iter().find(|p| p.popup).map(|p| p.id))
+        .expect("小さなウィンドウのページがある");
+    let popup = cx
+        .update(|cx| cx.windows())
+        .into_iter()
+        .find(|w| *w != window)
+        .expect("小さなウィンドウが開く");
+    ui(cx, popup, |_, _| {});
+    let fake = world.fake(small);
+    let tab_calls = world.fake(tab).calls.borrow().len();
+    press_in_page(cx, &world, popup, small, key("ctrl-r", "cmd-r"));
+    press_in_page(cx, &world, popup, small, key("alt-left", "cmd-["));
+    press_in_page(cx, &world, popup, small, key("ctrl-p", "cmd-p"));
+    let calls = fake.calls.borrow().clone();
+    let done: Vec<&String> = calls
+        .iter()
+        .filter(|c| ["reload", "back", "print"].contains(&c.as_str()))
+        .collect();
+    assert_eq!(done, ["reload", "back", "print"], "{calls:?}");
+    assert_eq!(
+        world.fake(tab).calls.borrow().len(),
+        tab_calls,
+        "タブのページは動かない"
+    );
+    // ページの中を探す
+    press_in_page(cx, &world, popup, small, key("ctrl-f", "cmd-f"));
+    ui(cx, popup, |window, _| {
+        assert!(window.find("browser-find").visible())
+    });
+    ui(cx, popup, |window, cx| window.input("例", cx));
+    ui(cx, popup, |window, cx| window.press("enter", cx));
+    let finds: Vec<String> = fake
+        .calls
+        .borrow()
+        .iter()
+        .filter(|c| c.starts_with("find"))
+        .cloned()
+        .collect();
+    assert_eq!(finds, ["find 例 from top", "find 例 next"]);
+    ui(cx, popup, |window, cx| window.press("escape", cx));
+    ui(cx, popup, |window, _| {
+        assert!(window.try_find("browser-find").is_none())
+    });
+    // タブを閉じるキーで、ウィンドウを閉じる
+    world.send(small, Event::Focused);
+    ui(cx, popup, |_, _| {});
+    world.send(small, Event::Key(key("ctrl-w", "cmd-w").into()));
+    cx.run_until_parked();
+    assert!(fake.dropped.get());
+    assert!(terms(cx, |t| t.page(small).is_none()));
+    assert_eq!(cx.update(|cx| cx.windows().len()), 1);
+}

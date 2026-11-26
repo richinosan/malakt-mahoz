@@ -10,10 +10,11 @@ use gpui_kit::component::{ActiveTheme, Disableable, Placement, Sizable};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
-use crate::browser::{self, is_web, Step, ZoomBadge};
+use crate::browser::{self, is_web, FindBar, Step, Zoom, ZoomBadge};
 use crate::db;
 use crate::feel::{self, Grip};
 use crate::render::{app_icon, row, window_controls};
+use crate::scroll::Menus;
 use crate::term::{self, Terms};
 use crate::{APP_ID, UI_SCALE};
 
@@ -94,6 +95,15 @@ pub fn open(url: &str, from: Option<WindowId>, cx: &mut App) {
     });
 }
 
+/// バーを右クリックしたときの、ほかのウィンドウと同じメニュー。設定はメインのウィンドウで開く。
+fn window_menu(
+    menu: gpui_kit::component::menu::PopupMenu,
+    window: &mut Window,
+    cx: &mut Context<gpui_kit::component::menu::PopupMenu>,
+) -> gpui_kit::component::menu::PopupMenu {
+    crate::render::window_menu(menu, None, window, cx)
+}
+
 /// 小さなウィンドウの中身。
 pub struct PopupView {
     id: u64,
@@ -102,12 +112,20 @@ pub struct PopupView {
     bar_pressed: bool,
     /// ウィンドウの名前に出している題名。
     window_title: SharedString,
+    /// ブラウザのキーの入力先。ページの中で押したキーも、ここで受ける。
+    focus: FocusHandle,
+    /// ページの中を探す欄。
+    find: Entity<FindBar>,
     _subscriptions: Vec<Subscription>,
 }
 
 impl PopupView {
     fn new(id: u64, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let terms = term::shared(cx);
+        let focus = cx.focus_handle();
+        let here = window.window_handle().window_id();
+        terms.update(cx, |terms, _| terms.note_browser_focus(here, &focus));
+        let find = cx.new(|cx| FindBar::new(move |_| Some(id), window, cx));
         // OS のボタンや Alt+F4 で閉じるときも、ウィンドウより先にページの部品を捨てる
         window.on_window_should_close(cx, |window, cx| {
             browser::window_closing(window, cx);
@@ -132,6 +150,8 @@ impl PopupView {
             terms,
             bar_pressed: false,
             window_title: SharedString::default(),
+            focus,
+            find,
             _subscriptions: subscriptions,
         }
     }
@@ -150,6 +170,52 @@ impl PopupView {
         let id = self.id;
         self.terms
             .update(cx, |terms, cx| terms.page_step(id, step, cx));
+    }
+
+    fn zoom(&self, zoom: Zoom, cx: &mut App) {
+        let id = self.id;
+        self.terms
+            .update(cx, |terms, cx| terms.zoom_page(id, zoom, cx));
+    }
+
+    /// ブラウザのタブと同じキー（[`crate::shell_keys`]）を受ける。タブを閉じるキーでは、このウィンドウを閉じる。
+    fn with_keys(&self, d: Stateful<Div>, cx: &mut Context<Self>) -> Stateful<Div> {
+        use crate::shell_keys::*;
+        d.key_context(BROWSER)
+            .track_focus(&self.focus)
+            .on_action(cx.listener(|this, _: &BrowserReload, _, cx| this.step(Step::Reload, cx)))
+            .on_action(cx.listener(|this, _: &BrowserBack, _, cx| this.step(Step::Back, cx)))
+            .on_action(cx.listener(|this, _: &BrowserForward, _, cx| this.step(Step::Forward, cx)))
+            .on_action(cx.listener(|this, _: &FindInPage, window, cx| {
+                this.find.update(cx, |find, cx| find.show(window, cx))
+            }))
+            .on_action(cx.listener(|this, _: &FindNext, window, cx| {
+                this.find
+                    .update(cx, |find, cx| find.step(false, window, cx))
+            }))
+            .on_action(cx.listener(|this, _: &FindPrevious, window, cx| {
+                this.find.update(cx, |find, cx| find.step(true, window, cx))
+            }))
+            .on_action(cx.listener(|this, _: &CloseFind, _, cx| {
+                if !this.find.update(cx, |find, cx| find.hide(cx)) {
+                    cx.propagate();
+                }
+            }))
+            .on_action(cx.listener(|this, _: &PrintPage, _, cx| {
+                let id = this.id;
+                this.terms.update(cx, |terms, cx| terms.print_page(id, cx));
+            }))
+            .on_action(cx.listener(|this, _: &BrowserZoomIn, _, cx| this.zoom(Zoom::In, cx)))
+            .on_action(cx.listener(|this, _: &BrowserZoomOut, _, cx| this.zoom(Zoom::Out, cx)))
+            .on_action(cx.listener(|this, _: &BrowserZoomReset, _, cx| this.zoom(Zoom::Reset, cx)))
+            .on_action(|_: &CloseTab, window, cx| {
+                // ページの部品は、ウィンドウより先に捨てる
+                browser::window_closing(window, cx);
+                window.remove_window();
+            })
+            .on_action(|_: &crate::shortcuts::ToggleFullscreen, window, _| {
+                window.toggle_fullscreen()
+            })
     }
 
     /// 上の低い 1 行のバー。空いているところを掴むと、ウィンドウを動かせる。
@@ -309,6 +375,7 @@ impl Render for PopupView {
                 ZoomBadge::of(p),
                 p.error.clone(),
                 p.shot.clone(),
+                p.focused,
             )
         });
         let title = page
@@ -329,8 +396,12 @@ impl Render for PopupView {
             .text_color(theme.foreground)
             // ここでもマウスの操作を見張る（自動でロックするまでの時間）
             .child(db::input_watcher());
-        let Some((_, can_back, loading, url, zoom, error, shot)) = page.filter(|_| unlocked) else {
-            let bar = self.render_bar(title, None, window, cx);
+        let Some((_, can_back, loading, url, zoom, error, shot, page_focused)) =
+            page.filter(|_| unlocked)
+        else {
+            let bar = self
+                .render_bar(title, None, window, cx)
+                .right_menu(window_menu);
             return base
                 .child(bar)
                 .child(
@@ -347,7 +418,13 @@ impl Render for PopupView {
                 .child(browser::frame_end(true, window, cx))
                 .test_support();
         };
-        let bar = self.render_bar(title, Some((can_back, loading, url, zoom)), window, cx);
+        // ページの中にキーの入力先があるときも、アプリではこのウィンドウのブラウザにいることにする
+        if page_focused && !self.focus.contains_focused(window, cx) {
+            window.focus(&self.focus, cx);
+        }
+        let bar = self
+            .render_bar(title, Some((can_back, loading, url, zoom)), window, cx)
+            .right_menu(window_menu);
         let body = match error {
             Some(error) => div()
                 .flex()
@@ -372,7 +449,9 @@ impl Render for PopupView {
                 .into_any_element(),
             None => browser::page_view(self.id, shot, theme.background),
         };
-        base.child(bar)
+        self.with_keys(base, cx)
+            .child(bar)
+            .child(self.find.clone())
             .child(
                 div()
                     .flex_none()

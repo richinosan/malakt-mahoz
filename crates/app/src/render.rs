@@ -290,7 +290,11 @@ pub(crate) fn window_menu(
     .item(
         PopupMenuItem::new("閉じる")
             .icon(Icon::new(IconName::WindowClose))
-            .on_click(|_, window, _| window.remove_window()),
+            .on_click(|_, window, cx| {
+                // ページの部品は、ウィンドウより先に捨てる
+                crate::browser::window_closing(window, cx);
+                window.remove_window()
+            }),
     )
 }
 

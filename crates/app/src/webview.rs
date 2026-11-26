@@ -77,6 +77,7 @@ const ZOOM_SCRIPT: &str = r#"(() => {
     send(sum < 0 ? "in" : "out");
     sum = 0;
   }, { passive: false });
+  // 修飾キーは ctrl・alt・shift・cmd の順（shell_keys::page_keys も同じ順に並べている）
   window.addEventListener("keydown", (e) => {
     if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
     if (e.shiftKey && e.code === "KeyL" && (mac ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey)) {
@@ -172,6 +173,7 @@ const KEY_SCRIPT: &str = r#"(() => {
     if (/^F([1-9]|1[0-2])$/.test(e.key)) return e.key.toLowerCase();
     return named[code] || named[e.key] || null;
   };
+  // 修飾キーは ctrl・alt・shift・cmd の順（shell_keys::page_keys も同じ順に並べている）
   window.addEventListener("keydown", (e) => {
     if (e.isComposing) return;
     const key = name(e);

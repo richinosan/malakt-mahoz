@@ -225,13 +225,29 @@ pub fn page_keys() -> PageKeys {
             "ctrl-p",
         ])
     };
-    PageKeys { take, soft }
+    let script_order = |keys: Vec<String>| keys.iter().map(|k| in_script_order(k)).collect();
+    PageKeys {
+        take: script_order(take),
+        soft: script_order(soft),
+    }
+}
+
+/// ページのスクリプト（`webview.rs` の KEY_SCRIPT）が組み立てる順に、修飾キーを並べ直す。
+/// スクリプトは ctrl・alt・shift・cmd の順に書くので、`cmd-shift-t` は `shift-cmd-t` になる。
+fn in_script_order(key: &str) -> String {
+    const ORDER: [&str; 4] = ["ctrl", "alt", "shift", "cmd"];
+    let mut parts: Vec<&str> = key.split('-').collect();
+    let last = parts.pop().unwrap_or_default();
+    parts.sort_by_key(|part| ORDER.iter().position(|m| m == part));
+    parts.push(last);
+    parts.join("-")
 }
 
 /// ページから届いたキーか（[`page_keys`] にあるか）。ページのスクリプトはほかのキーも送れるので、確かめる。
 pub fn is_page_key(key: &str) -> bool {
     let keys = page_keys();
-    keys.take.iter().chain(&keys.soft).any(|k| k == key)
+    let key = in_script_order(key);
+    keys.take.iter().chain(&keys.soft).any(|k| *k == key)
 }
 
 /// ページから届いたキーを、gpui のキーにする。
@@ -307,7 +323,7 @@ pub fn terminal_help() -> Vec<(&'static str, &'static str)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_page_key, keystroke, page_keys};
+    use super::{in_script_order, is_page_key, keystroke, page_keys};
 
     /// ページから届くキーは、どれも gpui のキーとして読め、同じキーが 2 回並ばない。
     #[test]
@@ -325,5 +341,24 @@ mod tests {
         assert_eq!(sorted.len(), all.len(), "同じキーが並んでいる");
         assert!(!is_page_key("ctrl-a"), "ページの文字の操作はページのまま");
         assert!(!is_page_key("ctrl-c"));
+    }
+
+    /// ページのスクリプトと同じ順（ctrl・alt・shift・cmd）に並べる。macOS の ⌘⇧T や ⌘⌥→ も届く。
+    #[test]
+    fn page_keys_follow_the_script_order() {
+        assert_eq!(in_script_order("cmd-shift-t"), "shift-cmd-t");
+        assert_eq!(in_script_order("cmd-alt-right"), "alt-cmd-right");
+        assert_eq!(in_script_order("cmd-shift-]"), "shift-cmd-]");
+        assert_eq!(in_script_order("ctrl-cmd-f"), "ctrl-cmd-f");
+        assert_eq!(in_script_order("ctrl-shift-tab"), "ctrl-shift-tab");
+        assert_eq!(in_script_order("f11"), "f11");
+        assert_eq!(in_script_order("ctrl-,"), "ctrl-,");
+        if cfg!(target_os = "macos") {
+            assert!(is_page_key("shift-cmd-t") && is_page_key("cmd-shift-t"));
+        }
+        let keys = page_keys();
+        for key in keys.take.iter().chain(&keys.soft) {
+            assert_eq!(&in_script_order(key), key);
+        }
     }
 }

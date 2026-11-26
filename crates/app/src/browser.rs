@@ -1363,9 +1363,7 @@ pub struct BrowserPane {
     focus: FocusHandle,
     bar: Entity<InputState>,
     /// ページの中を探す欄。
-    find: Entity<InputState>,
-    /// ページの中を探す欄を出している。
-    finding: bool,
+    find: Entity<FindBar>,
     /// 場所の欄に出しているページと場所。
     shown: Option<(u64, String)>,
     _subscriptions: Vec<Subscription>,
@@ -1375,7 +1373,13 @@ impl BrowserPane {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let terms = term::shared(cx);
         let bar = cx.new(|cx| InputState::new(window, cx).placeholder("URL を入力、または検索"));
-        let find = cx.new(|cx| InputState::new(window, cx).placeholder("ページ内を検索"));
+        let find = cx.new(|cx| {
+            FindBar::new(
+                |cx| term::shared(cx).read(cx).active_page().map(|p| p.id),
+                window,
+                cx,
+            )
+        });
         let focus = cx.focus_handle();
         let here = window.window_handle().window_id();
         terms.update(cx, |terms, _| terms.note_browser_focus(here, &focus));
@@ -1386,21 +1390,12 @@ impl BrowserPane {
                     this.go(window, cx);
                 }
             }),
-            cx.subscribe_in(&find, window, |this, _, event: &InputEvent, _, cx| {
-                match event {
-                    // 書き換えたら、ページの頭から探し直す
-                    InputEvent::Change => this.search(false, false, cx),
-                    InputEvent::PressEnter { shift, .. } => this.search(*shift, true, cx),
-                    _ => {}
-                }
-            }),
         ];
         Self {
             terms,
             focus,
             bar,
             find,
-            finding: false,
             shown: None,
             _subscriptions: subscriptions,
         }
@@ -1424,51 +1419,19 @@ impl BrowserPane {
         cx.notify();
     }
 
-    /// ページの中を探す欄を出して、そこに移る（Ctrl+F）。前に探した言葉は選んだまま残す。
     fn open_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(id) = self.page_id(cx) else {
-            return;
-        };
-        self.terms
-            .update(cx, |terms, cx| terms.release_page(id, cx));
-        self.finding = true;
-        self.find.update(cx, |find, cx| {
-            find.focus(window, cx);
-            find.select_all(window, cx);
-        });
-        cx.notify();
+        self.find.update(cx, |find, cx| find.show(window, cx));
     }
 
-    /// ページの中を探す欄を閉じて、ページに戻る（Esc）。
     fn close_find(&mut self, cx: &mut Context<Self>) {
-        if !self.finding {
+        if !self.find.update(cx, |find, cx| find.hide(cx)) {
             cx.propagate();
-            return;
         }
-        self.finding = false;
-        if let Some(id) = self.page_id(cx) {
-            self.terms.update(cx, |terms, cx| terms.focus_page(id, cx));
-        }
-        cx.notify();
-    }
-
-    /// 探す欄の言葉を、ページの中で探す。欄を出していなければ、出す（F3 / Ctrl+G）。
-    fn search(&mut self, backwards: bool, again: bool, cx: &mut Context<Self>) {
-        let Some(id) = self.page_id(cx) else {
-            return;
-        };
-        let query = self.find.read(cx).value().to_string();
-        self.terms.update(cx, |terms, cx| {
-            terms.find_in_page(id, &query, backwards, again, cx)
-        });
     }
 
     fn find_step(&mut self, backwards: bool, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.finding || self.find.read(cx).value().is_empty() {
-            self.open_find(window, cx);
-            return;
-        }
-        self.search(backwards, true, cx);
+        self.find
+            .update(cx, |find, cx| find.step(backwards, window, cx));
     }
 
     /// ブラウザのキー（[`crate::shell_keys`]）を受ける。
@@ -1539,6 +1502,181 @@ impl BrowserPane {
     fn step(&self, id: u64, step: Step, cx: &mut App) {
         self.terms
             .update(cx, |terms, cx| terms.page_step(id, step, cx));
+    }
+}
+
+/// 探すページを返す。
+type PageOf = Box<dyn Fn(&App) -> Option<u64>>;
+
+/// ページの中を探す欄（Ctrl+F）。ブラウザのタブと小さなウィンドウで使う。
+pub(crate) struct FindBar {
+    terms: Entity<Terms>,
+    /// 探すページ。タブの画面では、見ているページが変わる。
+    page: PageOf,
+    input: Entity<InputState>,
+    /// 欄を出している。
+    open: bool,
+    _subscriptions: Vec<Subscription>,
+}
+
+impl FindBar {
+    pub(crate) fn new(
+        page: impl Fn(&App) -> Option<u64> + 'static,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let terms = term::shared(cx);
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder("ページ内を検索"));
+        let subscriptions = vec![
+            // 見つからなかったことを出し直す
+            cx.observe(&terms, |_, _, cx| cx.notify()),
+            cx.subscribe(&input, |this, _, event: &InputEvent, cx| match event {
+                // 書き換えたら、ページの頭から探し直す
+                InputEvent::Change => this.search(false, false, cx),
+                InputEvent::PressEnter { shift, .. } => this.search(*shift, true, cx),
+                _ => {}
+            }),
+        ];
+        Self {
+            terms,
+            page: Box::new(page),
+            input,
+            open: false,
+            _subscriptions: subscriptions,
+        }
+    }
+
+    /// 欄を出して、そこに移る（Ctrl+F）。前に探した言葉は選んだまま残す。
+    pub(crate) fn show(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = (self.page)(cx) else {
+            return;
+        };
+        self.terms
+            .update(cx, |terms, cx| terms.release_page(id, cx));
+        self.open = true;
+        self.input.update(cx, |input, cx| {
+            input.focus(window, cx);
+            input.select_all(window, cx);
+        });
+        cx.notify();
+    }
+
+    /// 欄を閉じて、ページに戻る（Esc）。出していなければ false。
+    pub(crate) fn hide(&mut self, cx: &mut Context<Self>) -> bool {
+        if !self.open {
+            return false;
+        }
+        self.open = false;
+        if let Some(id) = (self.page)(cx) {
+            self.terms.update(cx, |terms, cx| terms.focus_page(id, cx));
+        }
+        cx.notify();
+        true
+    }
+
+    /// 次（前）を探す。欄を出していなければ、出す（F3 / Ctrl+G）。
+    pub(crate) fn step(&mut self, backwards: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.open || self.input.read(cx).value().is_empty() {
+            self.show(window, cx);
+            return;
+        }
+        self.search(backwards, true, cx);
+    }
+
+    /// 欄の言葉を、ページの中で探す。
+    fn search(&mut self, backwards: bool, again: bool, cx: &mut Context<Self>) {
+        let Some(id) = (self.page)(cx) else {
+            return;
+        };
+        let query = self.input.read(cx).value().to_string();
+        self.terms.update(cx, |terms, cx| {
+            terms.find_in_page(id, &query, backwards, again, cx)
+        });
+    }
+}
+
+impl Render for FindBar {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if !self.open {
+            return div().into_any_element();
+        }
+        let theme = cx.theme().clone();
+        let find_missing = (self.page)(cx)
+            .and_then(|id| self.terms.read(cx).page(id).map(|p| p.find_missing))
+            .unwrap_or(false);
+        let query_empty = self.input.read(cx).value().is_empty();
+        let tool = |id: &'static str, icon: &str, tip: &'static str| {
+            Button::new(id)
+                .icon(app_icon(icon))
+                .tooltip(tip)
+                // ページは下に重なるので、名前はボタンの上に出す
+                .tooltip_placement(Placement::Top)
+                .ghost()
+                .small()
+        };
+        div()
+            .id("browser-find")
+            .key_context(crate::shell_keys::FIND)
+            .flex()
+            .flex_row()
+            .items_center()
+            .flex_none()
+            .h_9()
+            .px_2()
+            .gap_0p5()
+            .border_t_1()
+            .border_color(theme.border)
+            .child(
+                div()
+                    .id("browser-find-input")
+                    .flex_1()
+                    .min_w_0()
+                    .mx_1()
+                    .child(
+                        Input::new(&self.input)
+                            .small()
+                            .prefix(app_icon("search").size_3p5())
+                            .aria_label("ページ内を検索"),
+                    )
+                    .test_support(),
+            )
+            .when(find_missing && !query_empty, |d| {
+                d.child(
+                    div()
+                        .id("browser-find-missing")
+                        .flex_none()
+                        .px_1()
+                        .text_xs()
+                        .text_color(theme.danger)
+                        .child("見つかりません")
+                        .test_support(),
+                )
+            })
+            .child(feel::gloss(
+                tool(
+                    "browser-find-previous",
+                    "chevron-up",
+                    if cfg!(target_os = "macos") {
+                        "前を検索（⇧Enter）"
+                    } else {
+                        "前を検索（Shift+Enter）"
+                    },
+                )
+                .on_click(cx.listener(|this, _, window, cx| this.step(true, window, cx))),
+            ))
+            .child(feel::gloss(
+                tool("browser-find-next", "chevron-down", "次を検索（Enter）")
+                    .on_click(cx.listener(|this, _, window, cx| this.step(false, window, cx))),
+            ))
+            .child(feel::gloss(
+                tool("browser-find-close", "x", "閉じる（Esc）").on_click(cx.listener(
+                    |this, _, _, cx| {
+                        this.hide(cx);
+                    },
+                )),
+            ))
+            .test_support()
+            .into_any_element()
     }
 }
 
@@ -1715,7 +1853,7 @@ impl Render for BrowserPane {
                     elsewhere,
                     p.shot.clone(),
                     ZoomBadge::of(p),
-                    (p.focused, p.find_missing),
+                    p.focused,
                 )
             });
             (page, terms.focus_bar)
@@ -1730,7 +1868,7 @@ impl Render for BrowserPane {
             elsewhere,
             shot,
             zoom,
-            (page_focused, find_missing),
+            page_focused,
         )) = page
         else {
             return div().into_any_element();
@@ -1882,69 +2020,6 @@ impl Render for BrowserPane {
         } else {
             page_view(id, shot, theme.background)
         };
-        let find_bar = self.finding.then(|| {
-            let query_empty = self.find.read(cx).value().is_empty();
-            div()
-                .id("browser-find")
-                .key_context(crate::shell_keys::FIND)
-                .flex()
-                .flex_row()
-                .items_center()
-                .flex_none()
-                .h_9()
-                .px_2()
-                .gap_0p5()
-                .border_t_1()
-                .border_color(theme.border)
-                .child(
-                    div()
-                        .id("browser-find-input")
-                        .flex_1()
-                        .min_w_0()
-                        .mx_1()
-                        .child(
-                            Input::new(&self.find)
-                                .small()
-                                .prefix(app_icon("search").size_3p5())
-                                .aria_label("ページ内を検索"),
-                        )
-                        .test_support(),
-                )
-                .when(find_missing && !query_empty, |d| {
-                    d.child(
-                        div()
-                            .id("browser-find-missing")
-                            .flex_none()
-                            .px_1()
-                            .text_xs()
-                            .text_color(theme.danger)
-                            .child("見つかりません")
-                            .test_support(),
-                    )
-                })
-                .child(feel::gloss(
-                    tool(
-                        "browser-find-previous",
-                        "chevron-up",
-                        if cfg!(target_os = "macos") {
-                            "前を検索（⇧Enter）"
-                        } else {
-                            "前を検索（Shift+Enter）"
-                        },
-                    )
-                    .on_click(cx.listener(|this, _, window, cx| this.find_step(true, window, cx))),
-                ))
-                .child(feel::gloss(
-                    tool("browser-find-next", "chevron-down", "次を検索（Enter）").on_click(
-                        cx.listener(|this, _, window, cx| this.find_step(false, window, cx)),
-                    ),
-                ))
-                .child(feel::gloss(
-                    tool("browser-find-close", "x", "閉じる（Esc）")
-                        .on_click(cx.listener(|this, _, _, cx| this.close_find(cx))),
-                ))
-                .test_support()
-        });
         let root = div()
             .id("browser")
             .key_context(crate::shell_keys::BROWSER)
@@ -1957,7 +2032,7 @@ impl Render for BrowserPane {
             .min_w_0()
             .bg(theme.background)
             .child(toolbar)
-            .children(find_bar)
+            .child(self.find.clone())
             .child(
                 div()
                     .flex_none()
