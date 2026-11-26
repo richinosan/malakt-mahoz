@@ -300,7 +300,7 @@ impl Store {
             status: finished.then_some(Status::Completed),
             done_count: counts.0,
             total_count: counts.1,
-            dedupe: None,
+            ..Default::default()
         };
         notice::insert(&self.conn, NoticeKind::StatusChanged, &new)?;
         if me.is_some_and(|me| comment.mentions.contains(&me.id)) {

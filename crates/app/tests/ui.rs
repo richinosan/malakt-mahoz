@@ -12,7 +12,10 @@ use malakt_mahoz::passkey::{Failure, Passkey};
 use malakt_mahoz::{db, CommentMode, MainView, Modal, Nav};
 
 fn start(cx: &mut TestAppContext) {
-    cx.update(|cx| malakt_mahoz::init(Store::open_in_memory().unwrap(), cx));
+    let mut store = Store::open_in_memory().unwrap();
+    // 日付だけの期限は 0:00 に知らせる。テストを走らせる時刻によらず、当日の通知が出る
+    store.set_due_alert_hour(0).unwrap();
+    cx.update(|cx| malakt_mahoz::init(store, cx));
 }
 
 fn open(cx: &mut TestAppContext, window_size: Size<Pixels>) -> (AnyWindowHandle, Entity<MainView>) {
@@ -1382,6 +1385,97 @@ fn due_today_reaches_the_notice_list_and_the_os(cx: &mut TestAppContext) {
         assert_eq!(view.unread_notices, 0);
         assert_eq!(second_view.read(cx).unread_notices, 0);
     });
+}
+
+/// 設定の「通知」で、期限をいつ知らせるかを選ぶ。選んだ時刻が来ていれば、すぐ OS の通知が出る。
+/// タスクの詳細の「通知」のメニューでは、そのタスクだけを変え、標準に戻せる。
+#[gpui_kit::test]
+fn due_alert_timing_can_be_chosen(cx: &mut TestAppContext) {
+    use malakt_core::alert::TaskAlerts;
+    use malakt_mahoz::state::CustomizeSection;
+    start(cx);
+    // 2 時間後（分は切り捨て）が期限のタスク
+    let due = (chrono::Local::now() + chrono::Duration::hours(2))
+        .format("%Y-%m-%d %H:%M")
+        .to_string();
+    let task = cx.update(|cx| {
+        db::shared(cx).update(cx, |db, _| {
+            let me = db.store.create_person("自分", true).unwrap();
+            let draft = malakt_core::TaskDraft {
+                title: "会議".into(),
+                due: Some(due.clone()),
+                assignee_ids: vec![me.id],
+                ..Default::default()
+            };
+            db.store.create_task(None, &draft).unwrap()
+        })
+    });
+    let (window, view) = open(cx, wide());
+    cx.run_until_parked();
+    // 標準は期限ちょうどなので、まだ知らせない
+    assert!(cx.shown_system_notifications().is_empty());
+
+    ui(cx, window, |window, cx| {
+        view.update(cx, |v, cx| {
+            v.open_appearance(window, cx);
+            v.show_appearance_section(CustomizeSection::Notices, window, cx);
+        })
+    });
+    // 「2 時間前」を足すと、その時刻はもう来ているので、すぐ知らせる
+    ui(cx, window, |window, cx| {
+        window.click(("alert-timed", 6usize), cx)
+    });
+    cx.run_until_parked();
+    cx.update(|cx| {
+        assert_eq!(view.read(cx).due_alert_standard(cx).timed, [0, 120]);
+    });
+    let shown = cx.shown_system_notifications();
+    assert_eq!(shown.len(), 1);
+    assert!(
+        shown[0].title.starts_with("「会議」の期限は"),
+        "{}",
+        shown[0].title
+    );
+    // 日付だけの期限の側と時刻も変えられる
+    ui(cx, window, |window, cx| {
+        window.click(("alert-date", 1usize), cx)
+    });
+    ui(cx, window, |window, cx| {
+        window.click(("alert-hour", 3usize), cx)
+    });
+    cx.update(|cx| {
+        let standard = view.read(cx).due_alert_standard(cx);
+        assert_eq!((standard.date, standard.hour), (vec![0, 1], 8));
+    });
+    ui(cx, window, |window, cx| {
+        window.click("alert-timed-reset", cx)
+    });
+    cx.update(|cx| assert_eq!(view.read(cx).due_alert_standard(cx).timed, [0]));
+
+    // タスクの詳細では、そのタスクだけを変える。標準から始まる
+    ui(cx, window, |window, cx| {
+        view.update(cx, |v, cx| {
+            v.modal = Modal::None;
+            v.open_panel(&task.id, window, cx);
+        })
+    });
+    ui(cx, window, |window, cx| window.click("task-alerts", cx));
+    pick(cx, window, "15 分前");
+    let own = |cx: &mut TestAppContext| cx.update(|cx| view.read(cx).task_alerts(&task.id, cx));
+    assert_eq!(
+        own(cx),
+        TaskAlerts {
+            task_id: task.id.clone(),
+            timed: Some(vec![0, 15]),
+            date: None,
+        }
+    );
+    ui(cx, window, |window, cx| window.click("task-alerts", cx));
+    pick(cx, window, "期限ちょうど");
+    assert_eq!(own(cx).timed, Some(vec![15]));
+    ui(cx, window, |window, cx| window.click("task-alerts", cx));
+    pick(cx, window, "標準に合わせる（期限ちょうど）");
+    assert!(own(cx).is_standard());
 }
 
 /// 開いているメニューの中の、`label` の項目を押す。

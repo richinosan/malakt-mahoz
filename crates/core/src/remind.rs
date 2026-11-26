@@ -20,23 +20,6 @@ pub const UNFILED_LIST: &str = "Malakt Mahoz";
 /// リマインダーのメモに写す説明の長さ（文字数）。
 const NOTES_CHARS: usize = 2000;
 
-/// 時刻のない期限を知らせる時刻（時）。
-const ALL_DAY_HOUR: u32 = 9;
-
-/// 期限を知らせる時刻（UNIX 秒、端末の時刻帯）。
-fn fire_at(due: &str) -> Option<i64> {
-    use chrono::TimeZone;
-    let date = chrono::NaiveDate::parse_from_str(date_of(due), "%Y-%m-%d").ok()?;
-    let time = match time_of(due) {
-        Some(time) => chrono::NaiveTime::parse_from_str(time, "%H:%M").ok()?,
-        None => chrono::NaiveTime::from_hms_opt(ALL_DAY_HOUR, 0, 0)?,
-    };
-    chrono::Local
-        .from_local_datetime(&date.and_time(time))
-        .earliest()
-        .map(|t| t.timestamp())
-}
-
 impl Store {
     /// 連携が有効か。
     pub fn reminders_enabled(&self) -> Result<bool> {
@@ -73,6 +56,12 @@ impl Store {
                     WHERE l.kind = 'item' AND l.key = t.id)) \
              ORDER BY t.id",
         )?;
+        let standard = self.due_alert_standard()?;
+        let overrides: HashMap<Id, crate::alert::TaskAlerts> = self
+            .all_task_alerts()?
+            .into_iter()
+            .map(|a| (a.task_id.clone(), a))
+            .collect();
         let mut snapshot = Snapshot::default();
         let mut seen = HashSet::new();
         let mut rows = stmt.query([])?;
@@ -91,12 +80,24 @@ impl Store {
                     key: list.clone(),
                 });
             }
+            let task_id: Id = row.get(0)?;
+            let own = overrides.get(&task_id);
+            let alarms = due.as_deref().map_or_else(Vec::new, |due| {
+                crate::alert::fire_times(
+                    due,
+                    own.and_then(|a| a.timed.as_deref())
+                        .unwrap_or(&standard.timed),
+                    own.and_then(|a| a.date.as_deref())
+                        .unwrap_or(&standard.date),
+                    standard.hour,
+                )
+            });
             snapshot.items.push(Item {
-                task_id: row.get(0)?,
+                task_id,
                 list,
                 title: row.get(2)?,
                 notes: description.chars().take(NOTES_CHARS).collect(),
-                fire_at: due.as_deref().and_then(fire_at),
+                alarms,
                 due,
                 priority: row.get(5)?,
                 done: status == "completed",
@@ -209,12 +210,40 @@ mod tests {
         assert_eq!((desk.priority, desk.notes.as_str()), (1, "受付に電話する"));
         let milk = os.find("牛乳を買う").unwrap();
         assert_eq!(milk.due_parts(), Some((2026, 12, 1, None)));
-        // 時刻のない期限は、その日の 9 時に知らせる
+        // 標準は、時刻のない期限はその日の 9 時、時刻つきは期限ちょうどに知らせる
         assert_eq!(
-            milk.fire_at.unwrap() + 9 * 3600 + 30 * 60,
-            os.find("机を借りる").unwrap().fire_at.unwrap() - 19 * 86400
+            milk.alarms[0] + 9 * 3600 + 30 * 60,
+            os.find("机を借りる").unwrap().alarms[0] - 19 * 86400
         );
+        assert_eq!(milk.alarms.len(), 1);
         assert_eq!(os.find("いつかやる").unwrap().due_parts(), None);
+    }
+
+    #[test]
+    fn alarms_follow_the_chosen_times() {
+        let mut store = Store::open_in_memory().unwrap();
+        let mut os = Memory::default();
+        let task = store
+            .create_task(None, &draft("会議", Some("2026-12-24 18:00")))
+            .unwrap();
+        run(&mut store, &mut os);
+        let at = os.find("会議").unwrap().alarms[0];
+        // 標準を変えると、リマインダーも書き直す
+        store.set_due_alert_timed(&[0, 15]).unwrap();
+        let writes = os.writes;
+        run(&mut store, &mut os);
+        assert_eq!(os.writes, writes + 1);
+        assert_eq!(os.find("会議").unwrap().alarms, [at - 15 * 60, at]);
+        // タスクごとの上書きが勝つ
+        store
+            .set_task_alerts(&crate::alert::TaskAlerts {
+                task_id: task.id.clone(),
+                timed: Some(vec![]),
+                date: None,
+            })
+            .unwrap();
+        run(&mut store, &mut os);
+        assert!(os.find("会議").unwrap().alarms.is_empty());
     }
 
     #[test]
@@ -339,7 +368,7 @@ mod tests {
             title: "自分で足した".into(),
             notes: String::new(),
             due: None,
-            fire_at: None,
+            alarms: Vec::new(),
             priority: 0,
             done: false,
         };

@@ -1,6 +1,6 @@
 //! 通知。
 //!
-//! 自分の操作では作らない。作るのは、時間で起きること（期限が今日）と、
+//! 自分の操作では作らない。作るのは、時間で起きること（期限が近い。いつ知らせるかは [`crate::alert`]）と、
 //! 自分以外から届いた変更（完了チケットでの報告、取り込んだデータでの割り当て）だけ。
 //! 画面の通知一覧に出し、OS の通知にも 1 回だけ出す。
 
@@ -18,8 +18,10 @@ pub enum NoticeKind {
     Commented,
     /// 状態が変わった（担当者が自分の分だけ完了にした場合も含む）
     StatusChanged,
-    /// 期限が今日
+    /// 期限が今日（前の版が作ったもの。今は [`NoticeKind::Due`] を作る）
     DueToday,
+    /// 期限が近い・期限になった（いつ知らせるかは [`crate::alert`]）
+    Due,
     /// メンションされた
     Mentioned,
 }
@@ -31,6 +33,7 @@ impl NoticeKind {
             NoticeKind::Commented => "commented",
             NoticeKind::StatusChanged => "status_changed",
             NoticeKind::DueToday => "due_today",
+            NoticeKind::Due => "due",
             NoticeKind::Mentioned => "mentioned",
         }
     }
@@ -41,6 +44,7 @@ impl NoticeKind {
             "commented" => NoticeKind::Commented,
             "status_changed" => NoticeKind::StatusChanged,
             "due_today" => NoticeKind::DueToday,
+            "due" => NoticeKind::Due,
             "mentioned" => NoticeKind::Mentioned,
             _ => return None,
         })
@@ -67,6 +71,8 @@ pub struct Notice {
     pub created_at: i64,
     /// 既読にした時刻。未読なら `None`。
     pub read_at: Option<i64>,
+    /// 期限の通知のときの、その時点の期限。
+    pub due: Option<String>,
 }
 
 impl Notice {
@@ -84,6 +90,10 @@ impl Notice {
         };
         match self.kind {
             NoticeKind::DueToday => format!("「{title}」の期限は今日です"),
+            NoticeKind::Due => match self.due.as_deref() {
+                Some(due) => crate::alert::headline(title, due, self.created_at),
+                None => format!("「{title}」の期限です"),
+            },
             NoticeKind::Assigned if self.actor.is_empty() => {
                 format!("「{title}」の担当になりました")
             }
@@ -115,6 +125,19 @@ pub(crate) struct NewNotice<'a> {
     pub total_count: u32,
     /// 同じ鍵の通知は 1 回しか作らない。
     pub dedupe: Option<String>,
+    /// 期限の通知のときの期限。
+    pub due: Option<&'a str>,
+    /// 作った時刻（ミリ秒）。`None` なら今。
+    pub at: Option<i64>,
+}
+
+/// [`Store::sweep_due_alerts`] の結果。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Sweep {
+    /// 作った通知の数。
+    pub made: usize,
+    /// 次に知らせる時刻（UNIX 秒）。なければ `None`。
+    pub next: Option<i64>,
 }
 
 /// 既読の通知を残す日数。
@@ -125,7 +148,7 @@ pub const MAX_NOTICES: usize = 500;
 pub const EXCERPT_CHARS: usize = 200;
 
 const COLUMNS: &str = "id, kind, task_id, task_title, actor, comment_id, excerpt, status, \
-                       done_count, total_count, created_at, read_at";
+                       done_count, total_count, created_at, read_at, due";
 
 fn from_row(r: &Row<'_>) -> rusqlite::Result<Notice> {
     let kind: String = r.get(1)?;
@@ -144,6 +167,7 @@ fn from_row(r: &Row<'_>) -> rusqlite::Result<Notice> {
         total_count: r.get(9)?,
         created_at: r.get(10)?,
         read_at: r.get(11)?,
+        due: r.get(12)?,
     })
 }
 
@@ -156,8 +180,8 @@ pub(crate) fn insert(conn: &Connection, kind: NoticeKind, new: &NewNotice<'_>) -
     let n = conn
         .prepare_cached(
             "INSERT OR IGNORE INTO notices(id, kind, task_id, task_title, actor, comment_id, \
-             excerpt, status, done_count, total_count, created_at, dedupe) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+             excerpt, status, done_count, total_count, created_at, dedupe, due) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         )?
         .execute(params![
             new_id(),
@@ -170,8 +194,9 @@ pub(crate) fn insert(conn: &Connection, kind: NoticeKind, new: &NewNotice<'_>) -
             new.status.map(Status::as_str),
             new.done_count,
             new.total_count,
-            now_ms(),
-            new.dedupe
+            new.at.unwrap_or_else(now_ms),
+            new.dedupe,
+            new.due
         ])?;
     Ok(n > 0)
 }
@@ -210,15 +235,31 @@ impl Store {
         )?)
     }
 
-    /// 期限が今日の、未完了のタスクの通知を作る。同じタスク・同じ日には 1 回だけ。
-    /// 対象は、自分が担当のタスクと、担当者のいないタスク。作った数を返す。
-    /// ついでに、古い通知を片付ける。
-    pub fn sweep_due_today(&mut self, today: &str) -> Result<usize> {
+    /// 期限の通知を作る。`now` は今の時刻（UNIX 秒）。
+    ///
+    /// 対象は、自分が担当の未完了のタスクと、担当者のいない未完了のタスク。知らせる時刻
+    /// （[`crate::alert`]）が来たら、期限の日のうちに 1 回知らせる。アプリを閉じている間に
+    /// いくつも時刻が過ぎていたら、いちばん新しいものだけを知らせる。期限を変えたら、
+    /// 新しい期限で知らせ直す。ついでに、古い通知を片付ける。
+    pub fn sweep_due_alerts(&mut self, now: i64) -> Result<Sweep> {
+        use chrono::TimeZone;
+        let standard = self.due_alert_standard()?;
+        // 知らせる時刻は、いちばん早くて期限の 4 週間前。それより先の期限は見ない
+        let day = |secs: i64| {
+            chrono::Local
+                .timestamp_opt(secs, 0)
+                .single()
+                .map(|t| t.format("%Y-%m-%d").to_string())
+                .unwrap_or_default()
+        };
+        let from = day(now - 86_400);
+        let until = day(now + i64::from(crate::alert::MAX_DAYS + 1) * 86_400);
         let tx = self.conn.transaction()?;
-        let ids: Vec<Id> = tx
+        let rows: Vec<(Id, String, Option<String>, Option<String>)> = tx
             .prepare_cached(
-                "SELECT t.id FROM tasks t \
-                 WHERE substr(t.due, 1, 10) = ?1 \
+                "SELECT t.id, t.due, al.timed, al.date FROM tasks t \
+                 LEFT JOIN task_alerts al ON al.task_id = t.id \
+                 WHERE t.due IS NOT NULL AND substr(t.due, 1, 10) BETWEEN ?1 AND ?2 \
                    AND t.status IN ('needs_action', 'in_process') \
                    AND (NOT EXISTS (SELECT 1 FROM task_assignees a WHERE a.task_id = t.id) \
                         OR EXISTS (SELECT 1 FROM task_assignees a JOIN people p \
@@ -226,16 +267,57 @@ impl Store {
                                    WHERE a.task_id = t.id AND p.is_self = 1)) \
                  ORDER BY t.due, t.id",
             )?
-            .query_map(params![today], |r| r.get(0))?
+            .query_map(params![from, until], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            })?
             .collect::<rusqlite::Result<_>>()?;
-        let mut made = 0;
-        for id in &ids {
+        let mut sweep = Sweep::default();
+        for (id, due, timed, date) in &rows {
+            let list = |text: &Option<String>, standard: &[u32]| -> Vec<u32> {
+                match text {
+                    Some(text) => crate::alert::decode(text),
+                    None => standard.to_vec(),
+                }
+            };
+            let fires = crate::alert::fire_times(
+                due,
+                &list(timed, &standard.timed),
+                &list(date, &standard.date),
+                standard.hour,
+            );
+            let Some(end) = crate::alert::day_end(due) else {
+                continue;
+            };
+            if now >= end {
+                continue;
+            }
+            if let Some(next) = fires.iter().copied().find(|at| *at > now) {
+                sweep.next = Some(sweep.next.map_or(next, |n| n.min(next)));
+            }
+            let Some(latest) = fires.iter().copied().filter(|at| *at <= now).max() else {
+                continue;
+            };
+            // この期限で、もう同じか新しい時刻の分を知らせていたら作らない
+            let prefix = format!("due:{id}:{due}:");
+            let told: Option<i64> = tx
+                .prepare_cached(
+                    "SELECT dedupe FROM notices WHERE task_id = ?1 AND kind = 'due' \
+                     AND substr(dedupe, 1, length(?2)) = ?2",
+                )?
+                .query_map(params![id, prefix], |r| r.get::<_, String>(0))?
+                .filter_map(|key| key.ok()?.strip_prefix(&prefix)?.parse::<i64>().ok())
+                .max();
+            if told.is_some_and(|t| t >= latest) {
+                continue;
+            }
             let new = NewNotice {
                 task_id: id,
-                dedupe: Some(format!("due:{id}:{today}")),
+                dedupe: Some(format!("{prefix}{latest}")),
+                due: Some(due),
+                at: Some(now * 1000),
                 ..Default::default()
             };
-            made += usize::from(insert(&tx, NoticeKind::DueToday, &new)?);
+            sweep.made += usize::from(insert(&tx, NoticeKind::Due, &new)?);
         }
         // ディスクを使い続けないよう、既読の古いものと、多すぎる分を消す
         tx.execute(
@@ -248,7 +330,7 @@ impl Store {
             params![MAX_NOTICES as i64],
         )?;
         tx.commit()?;
-        Ok(made)
+        Ok(sweep)
     }
 
     /// まだ OS の通知に出していないもの（古い順）。
@@ -323,8 +405,19 @@ mod tests {
         s.create_task(None, &draft).unwrap()
     }
 
+    /// 端末の時刻帯での日時（UNIX 秒）。
+    fn at(text: &str) -> i64 {
+        use chrono::TimeZone;
+        let t = chrono::NaiveDateTime::parse_from_str(text, "%Y-%m-%d %H:%M").unwrap();
+        chrono::Local
+            .from_local_datetime(&t)
+            .earliest()
+            .unwrap()
+            .timestamp()
+    }
+
     #[test]
-    fn due_today_is_notified_once_per_task_and_day() {
+    fn due_alerts_come_at_the_chosen_times_once() {
         let (mut s, me, sato) = setup();
         let mine = task(&mut s, "自分の", Some("2026-12-24"), &[&me, &sato]);
         let timed = task(&mut s, "時刻つき", Some("2026-12-24 18:00"), &[]);
@@ -333,23 +426,67 @@ mod tests {
         let done = task(&mut s, "済み", Some("2026-12-24"), &[&me]);
         s.set_task_status(&done.id, Status::Completed).unwrap();
 
-        assert_eq!(s.sweep_due_today("2026-12-24").unwrap(), 2);
-        assert_eq!(s.sweep_due_today("2026-12-24").unwrap(), 0);
+        // 標準は、日付だけの期限は当日の 9:00、時刻つきは期限ちょうど
+        let sweep = s.sweep_due_alerts(at("2026-12-24 08:59")).unwrap();
+        assert_eq!(sweep.made, 0);
+        assert_eq!(sweep.next, Some(at("2026-12-24 09:00")));
+        let sweep = s.sweep_due_alerts(at("2026-12-24 09:00")).unwrap();
+        assert_eq!(sweep.made, 1);
+        assert_eq!(sweep.next, Some(at("2026-12-24 18:00")));
+        assert_eq!(s.sweep_due_alerts(at("2026-12-24 12:00")).unwrap().made, 0);
+        assert_eq!(s.sweep_due_alerts(at("2026-12-24 18:00")).unwrap().made, 1);
         let notices = s.notices(10).unwrap();
-        let mut ids: Vec<&str> = notices.iter().map(|n| n.task_id.as_str()).collect();
-        ids.sort_unstable();
-        let mut expected = [mine.id.as_str(), timed.id.as_str()];
-        expected.sort_unstable();
-        assert_eq!(ids, expected);
+        let ids: Vec<&str> = notices.iter().map(|n| n.task_id.as_str()).collect();
+        assert_eq!(ids, [timed.id.as_str(), mine.id.as_str()]);
         assert!(notices
             .iter()
-            .all(|n| n.kind == NoticeKind::DueToday && n.is_unread()));
-        assert_eq!(s.unread_notice_count().unwrap(), 2);
+            .all(|n| n.kind == NoticeKind::Due && n.is_unread()));
+        assert_eq!(notices[1].headline(), "「自分の」の期限は今日です");
         // 次の日に延ばしたら、その日にもう一度知らせる
         let mut draft = TaskDraft::from(&s.task(&mine.id).unwrap());
         draft.due = Some("2026-12-25".into());
         s.update_task(&mine.id, &draft).unwrap();
-        assert_eq!(s.sweep_due_today("2026-12-25").unwrap(), 2);
+        assert_eq!(s.sweep_due_alerts(at("2026-12-25 09:30")).unwrap().made, 2);
+    }
+
+    #[test]
+    fn several_alerts_and_overrides() {
+        let (mut s, me, _) = setup();
+        let meeting = task(&mut s, "会議", Some("2026-12-24 18:00"), &[&me]);
+        s.set_due_alert_timed(&[0, 5, 1440]).unwrap();
+        assert_eq!(s.sweep_due_alerts(at("2026-12-23 18:00")).unwrap().made, 1);
+        let sweep = s.sweep_due_alerts(at("2026-12-24 17:55")).unwrap();
+        assert_eq!(sweep.made, 1);
+        assert_eq!(sweep.next, Some(at("2026-12-24 18:00")));
+        assert_eq!(
+            s.notices(1).unwrap()[0].headline(),
+            "「会議」の期限まであと 5 分です"
+        );
+        // タスクごとに「通知しない」にすると、もう知らせない
+        s.set_task_alerts(&crate::alert::TaskAlerts {
+            task_id: meeting.id.clone(),
+            timed: Some(vec![]),
+            date: None,
+        })
+        .unwrap();
+        let sweep = s.sweep_due_alerts(at("2026-12-24 18:00")).unwrap();
+        assert_eq!((sweep.made, sweep.next), (0, None));
+    }
+
+    #[test]
+    fn opening_late_tells_only_the_latest_alert() {
+        let (mut s, me, _) = setup();
+        task(&mut s, "会議", Some("2026-12-24 18:00"), &[&me]);
+        s.set_due_alert_timed(&[0, 60, 1440]).unwrap();
+        // 閉じていた間に 1 日前と 1 時間前が過ぎた。新しいほうだけを 1 回知らせる
+        assert_eq!(s.sweep_due_alerts(at("2026-12-24 17:10")).unwrap().made, 1);
+        assert_eq!(s.sweep_due_alerts(at("2026-12-24 17:20")).unwrap().made, 0);
+        assert_eq!(
+            s.notices(1).unwrap()[0].headline(),
+            "「会議」の期限まであと 50 分です"
+        );
+        // 期限の日を過ぎたら、もう知らせない
+        assert_eq!(s.sweep_due_alerts(at("2026-12-25 00:00")).unwrap().made, 0);
     }
 
     #[test]
@@ -357,7 +494,7 @@ mod tests {
         let (mut s, me, _) = setup();
         let a = task(&mut s, "a", Some("2026-12-24"), &[&me]);
         task(&mut s, "b", Some("2026-12-24"), &[&me]);
-        s.sweep_due_today("2026-12-24").unwrap();
+        s.sweep_due_alerts(at("2026-12-24 10:00")).unwrap();
         let pending = s.undelivered_notices().unwrap();
         assert_eq!(pending.len(), 2);
         assert_eq!(pending[0].headline(), "「a」の期限は今日です");
@@ -393,7 +530,7 @@ mod tests {
             s.notices(1).unwrap()[0].excerpt.chars().count(),
             EXCERPT_CHARS
         );
-        s.sweep_due_today("2026-12-24").unwrap();
+        s.sweep_due_alerts(at("2026-12-24 10:00")).unwrap();
         assert_eq!(s.notices(10_000).unwrap().len(), MAX_NOTICES);
         // 既読にして 90 日を過ぎたものは消える
         let old = now_ms() - (KEEP_READ_DAYS + 1) * 24 * 60 * 60 * 1000;
@@ -403,7 +540,7 @@ mod tests {
                 params![old],
             )
             .unwrap();
-        s.sweep_due_today("2026-12-24").unwrap();
+        s.sweep_due_alerts(at("2026-12-24 10:00")).unwrap();
         let left = s.notices(10_000).unwrap();
         assert!(left.len() < MAX_NOTICES && left.iter().all(Notice::is_unread));
     }
@@ -423,6 +560,7 @@ mod tests {
             total_count: 0,
             created_at: 0,
             read_at: None,
+            due: None,
         };
         let with = |f: &dyn Fn(&mut Notice)| {
             let mut n = base.clone();

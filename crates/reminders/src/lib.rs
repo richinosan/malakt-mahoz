@@ -86,8 +86,8 @@ pub struct Item {
     pub notes: String,
     /// 期限。`YYYY-MM-DD` か `YYYY-MM-DD HH:MM`。
     pub due: Option<String>,
-    /// 期限を知らせる時刻（UNIX 秒）。時刻のない期限は、その日の 9 時。
-    pub fire_at: Option<i64>,
+    /// 期限を知らせる時刻（UNIX 秒、古い順）。いつ知らせるかはアプリの設定で決まる。
+    pub alarms: Vec<i64>,
     /// 0 = なし、1 = 最高 … 9 = 最低。
     pub priority: u8,
     pub done: bool,
@@ -198,11 +198,20 @@ pub struct Outcome {
 pub const TOAST_ID_CHARS: usize = 12;
 const _: () = assert!(TOAST_ID_CHARS <= 15);
 
-/// タスクから決まる、Windows の予約した通知の id。
+/// タスクから決まる、Windows の予約した通知の id。1 つのタスクの通知はみな、これで始まる。
 pub fn toast_id(task_id: &str) -> String {
     let mut id = digest(&[task_id]);
     id.truncate(TOAST_ID_CHARS);
     id
+}
+
+/// 1 つのタスクに予約する通知の数。Windows の id に番号を 1 文字足すので、16 個まで。
+pub const MAX_TOASTS: usize = 16;
+const _: () = assert!(TOAST_ID_CHARS < 15);
+
+/// タスクの `n` 番目の予約した通知の id。
+pub fn toast_alarm_id(base: &str, n: usize) -> String {
+    format!("{base}{:x}", n % MAX_TOASTS)
 }
 
 /// 中身の要約（FNV-1a、16 進 16 桁）。版が変わっても同じ値になる。
@@ -222,6 +231,12 @@ pub fn digest(parts: &[&str]) -> String {
 }
 
 fn item_hash(item: &Item, list_external: &str) -> String {
+    let alarms = item
+        .alarms
+        .iter()
+        .map(i64::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
     digest(&[
         list_external,
         &item.title,
@@ -229,6 +244,7 @@ fn item_hash(item: &Item, list_external: &str) -> String {
         item.due.as_deref().unwrap_or(""),
         &item.priority.to_string(),
         if item.done { "1" } else { "0" },
+        &alarms,
     ])
 }
 
@@ -491,5 +507,7 @@ mod tests {
         assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
         assert_ne!(a, b);
         assert_eq!(a, toast_id("01JDF3Z8Q4X7M2N5P9R6S1T0VW"));
+        let alarm = toast_alarm_id(&a, 15);
+        assert!(alarm.chars().count() <= 15 && alarm.starts_with(&a));
     }
 }

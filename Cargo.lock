@@ -4527,6 +4527,7 @@ name = "malakt-mahoz"
 version = "0.1.0"
 dependencies = [
  "async-channel",
+ "chrono",
  "dirs 5.0.1",
  "embed-resource",
  "flate2",
