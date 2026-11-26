@@ -657,6 +657,14 @@ fn the_github_account_is_read_from_gh(cx: &mut TestAppContext) {
     let (window, view) = open(cx, wide());
     let pane = open_chat(cx, window, &view);
     open_settings(cx, window, &pane);
+    // GitHub の欄は設定の下のほうにあるので、下までスクロールする
+    ui(cx, window, |window, cx| {
+        window.scroll(
+            "ai-key-state",
+            ScrollDelta::Pixels(point(px(0.), px(-3000.))),
+            cx,
+        )
+    });
 
     // ログインしていない
     ui(cx, window, |window, cx| window.click("ai-github-read", cx));
@@ -1371,7 +1379,7 @@ fn the_periodic_check_is_set_up_in_settings(cx: &mut TestAppContext) {
     // 定期チェックの欄は設定の下のほうにあるので、下までスクロールする
     ui(cx, window, |window, cx| {
         window.scroll(
-            "ai-github-account",
+            "ai-key-state",
             ScrollDelta::Pixels(point(px(0.), px(-3000.))),
             cx,
         )

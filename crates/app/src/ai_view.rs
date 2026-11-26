@@ -10,19 +10,14 @@ use gpui_kit::component::input::{
 };
 use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
 use gpui_kit::component::spinner::Spinner;
-use gpui_kit::component::switch::Switch;
 use gpui_kit::component::text::TextView;
-use gpui_kit::component::{ActiveTheme, Disableable, Selectable, Sizable};
+use gpui_kit::component::{ActiveTheme, Sizable};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use malakt_ai::ansi::{self, Color};
-use malakt_ai::keys::Source;
 use malakt_ai::{Effort, Provider};
 
-use crate::ai::{
-    self, Decision, GithubAccount, Item, KeyState, LineKind, Run, Session, ShellPlace, ToolState,
-    Watch, WATCH_MINUTES,
-};
+use crate::ai::{self, Decision, Item, KeyState, LineKind, Run, Session, ShellPlace, ToolState};
 use crate::db::{self, Db};
 use crate::feel::{self, Lit};
 use crate::render::app_icon;
@@ -93,7 +88,7 @@ fn short_path(path: &str) -> String {
 }
 
 /// 現れるときの動き。
-fn appear() -> Animation {
+pub(crate) fn appear() -> Animation {
     Animation::new(Duration::from_millis(160)).with_easing(ease_out_quint())
 }
 
@@ -141,7 +136,7 @@ pub fn run_details(run: &Run, theme: &gpui_kit::component::Theme) -> Div {
     body
 }
 
-fn icon_button(id: &'static str, icon: &str, tip: &'static str) -> Button {
+pub(crate) fn icon_button(id: &'static str, icon: &str, tip: &'static str) -> Button {
     Button::new(id)
         .icon(app_icon(icon))
         .tooltip(tip)
@@ -207,14 +202,8 @@ pub struct AiPane {
     /// 別ウィンドウの上のバーを押している（動かすと、ウィンドウを動かし始める）。
     bar_pressed: bool,
     input: Entity<TextareaState>,
-    key_input: Entity<InputState>,
-    model_input: Entity<InputState>,
-    /// 定期チェックの指示。
-    watch_input: Entity<TextareaState>,
-    context_input: Entity<TextareaState>,
-    /// モデルの入力欄に出している値。
-    /// 設定で、モデルの一覧を開いている。
-    model_open: bool,
+    /// 設定の行（サービス、モデル、API キーなど）。
+    pub settings: Entity<crate::ai_settings::AiSettings>,
     pub settings_open: bool,
     /// チャットの場所に出している一覧。
     pub side: Option<Side>,
@@ -320,7 +309,7 @@ fn col() -> Div {
 }
 
 /// いくつかの中から 1 つを選ぶボタン。選んでいるものは色とチェックで分かる。
-fn chip(
+pub(crate) fn chip(
     id: impl Into<ElementId>,
     label: impl Into<SharedString>,
     active: bool,
@@ -381,26 +370,7 @@ impl AiPane {
                 .auto_grow(1, 8)
                 .placeholder("メッセージを入力（Shift+Enter で改行）")
         });
-        let key_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .masked(true)
-                .placeholder("API キー")
-        });
-        let model_input =
-            cx.new(|cx| InputState::new(window, cx).placeholder("検索、またはモデル ID を入力"));
-        let instruction = session.read(cx).watch.instruction.clone();
-        let watch_input = cx.new(|cx| {
-            let mut state = TextareaState::new(window, cx).placeholder("AI への指示");
-            state.set_value(instruction, window, cx);
-            state
-        });
-        let context = session.read(cx).context.clone();
-        let context_input = cx.new(|cx| {
-            let mut state =
-                TextareaState::new(window, cx).placeholder("例: PR のタスクは優先度を高にする");
-            state.set_value(context, window, cx);
-            state
-        });
+        let settings = cx.new(|cx| crate::ai_settings::AiSettings::new(window, cx));
         let shell_input = cx.new(|cx| InputState::new(window, cx));
         term::shared(cx).update(cx, |terms, cx| terms.load_profiles(cx));
 
@@ -420,40 +390,7 @@ impl AiPane {
                     _ => {}
                 }
             }),
-            cx.subscribe_in(
-                &key_input,
-                window,
-                |this, _, event: &InputEvent, window, cx| {
-                    if matches!(event, InputEvent::PressEnter { .. }) {
-                        this.save_key(window, cx);
-                    }
-                },
-            ),
-            cx.subscribe_in(
-                &model_input,
-                window,
-                |this, input, event: &InputEvent, window, cx| match event {
-                    // 絞り込んだ先頭のモデルを選ぶ。一覧になければ、入力した ID をそのまま使う
-                    InputEvent::PressEnter { .. } => {
-                        let typed = input.read(cx).value().trim().to_owned();
-                        if typed.is_empty() {
-                            return;
-                        }
-                        let model = this
-                            .model_groups(cx)
-                            .into_iter()
-                            .flat_map(|(_, models)| models)
-                            .next()
-                            .map_or(typed, |m| m.to_string());
-                        this.session.update(cx, |s, cx| s.set_model(&model, cx));
-                        input.update(cx, |s, cx| s.set_value("", window, cx));
-                        this.model_open = false;
-                        cx.notify();
-                    }
-                    InputEvent::Change => cx.notify(),
-                    _ => {}
-                },
-            ),
+            cx.observe(&settings, |_, _, cx| cx.notify()),
             cx.subscribe_in(
                 &shell_input,
                 window,
@@ -526,11 +463,7 @@ impl AiPane {
             term: cx.new(TermPane::new),
             shell_wide: false,
             input,
-            key_input,
-            model_input,
-            watch_input,
-            context_input,
-            model_open: false,
+            settings,
             settings_open: false,
             side: None,
             run_open: None,
@@ -822,23 +755,6 @@ impl AiPane {
         self.session.update(cx, |s, cx| s.send(text, place, cx))
     }
 
-    /// 定期チェックの設定を、入力欄の指示と一緒に保存する。
-    fn set_watch(&mut self, change: impl FnOnce(&mut Watch), cx: &mut Context<Self>) {
-        let mut watch = self.session.read(cx).watch.clone();
-        watch.instruction = self.watch_input.read(cx).value().to_string();
-        change(&mut watch);
-        self.session.update(cx, |s, cx| s.set_watch(watch, cx));
-    }
-
-    fn save_key(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let key = self.key_input.read(cx).value().to_string();
-        self.session.update(cx, |s, cx| s.save_key(&key, cx));
-        if self.session.read(cx).error.is_none() {
-            self.key_input
-                .update(cx, |s, cx| s.set_value("", window, cx));
-        }
-    }
-
     fn stop(&mut self, cx: &mut Context<Self>) {
         self.session.update(cx, |s, cx| s.stop(cx));
     }
@@ -888,526 +804,13 @@ impl AiPane {
 
     fn render_settings(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
-        let session = self.session.read(cx);
-        let provider = session.provider;
-        let model = session.model().to_owned();
-        let label = |text: &'static str| {
-            div()
-                .text_xs()
-                .text_color(theme.muted_foreground)
-                .child(text)
-        };
-
-        let mut providers = row().gap_1().flex_wrap();
-        for p in Provider::ALL {
-            providers = providers.child(
-                chip(("ai-provider", p as usize), p.label(), p == provider, cx)
-                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                        this.session.update(cx, |s, cx| s.set_provider(p, cx));
-                    }))
-                    .test_support(),
-            );
-        }
-
-        let model_open = self.model_open;
-        let mut models = col()
-            .id("ai-model-list")
-            .max_h(px(260.))
-            .overflow_y_scroll()
-            .p_1();
-        let mut ix = 0usize;
-        let groups = if model_open {
-            self.model_groups(cx)
-        } else {
-            Vec::new()
-        };
-        let none = groups.is_empty();
-        for (group, names) in groups {
-            models = models.child(
-                div()
-                    .px_2()
-                    .pt_2()
-                    .pb_1()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .child(group),
-            );
-            for m in names {
-                let active = m.as_ref() == model;
-                let chosen = m.clone();
-                models = models.child(
-                    row()
-                        .id(("ai-model", ix))
-                        .gap_2()
-                        .px_2()
-                        .py_1()
-                        .rounded(feel::md())
-                        .items_center()
-                        .text_sm()
-                        .cursor_pointer()
-                        .when(active, |d| d.bg(theme.accent))
-                        .lit(theme.muted, cx)
-                        .active(|s| s.opacity(0.6))
-                        .child(
-                            div()
-                                .w_4()
-                                .flex_none()
-                                .when(active, |d| d.child(app_icon("check").size_4())),
-                        )
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .truncate()
-                                .child(session.model_label(&m)),
-                        )
-                        .tooltip({
-                            let id = m.clone();
-                            move |window, cx| {
-                                gpui_kit::component::tooltip::Tooltip::new(id.clone())
-                                    .build(window, cx)
-                            }
-                        })
-                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                            this.session.update(cx, |s, cx| s.set_model(&chosen, cx));
-                            this.model_input
-                                .update(cx, |s, cx| s.set_value("", window, cx));
-                            this.model_open = false;
-                            cx.notify();
-                        }))
-                        .test_support(),
-                );
-                ix += 1;
-            }
-        }
-        if none {
-            models = models.child(
-                div()
-                    .px_2()
-                    .py_2()
-                    .text_sm()
-                    .text_color(theme.muted_foreground)
-                    .child("Enter で、入力した ID を使います"),
-            );
-        }
-
-        // 考え中に送ったメッセージを、続きか並列かに振り分けるモデル
-        let coordinators = {
-            let pane = cx.entity().downgrade();
-            let set = session
-                .coordinator_set()
-                .then(|| session.coordinator_model());
-            let shown: SharedString = match &set {
-                Some(id) => session.model_label(id),
-                None => "今のモデル".into(),
-            };
-            let models: Vec<(String, SharedString)> = provider
-                .models()
-                .iter()
-                .map(|m| (m.to_string(), session.model_label(m)))
-                .collect();
-            Button::new("ai-coordinator")
-                .label(shown)
-                .outline()
-                .small()
-                .dropdown_caret(true)
-                .dropdown_menu_with_anchor(Anchor::TopLeft, move |mut menu, _, _| {
-                    let choices = std::iter::once((None, SharedString::from("今のモデル"))).chain(
-                        models
-                            .iter()
-                            .map(|(id, name)| (Some(id.clone()), name.clone())),
-                    );
-                    for (id, name) in choices {
-                        let pane = pane.clone();
-                        let checked = id == set;
-                        menu = menu.item(PopupMenuItem::new(name).checked(checked).on_click(
-                            move |_, _, cx| {
-                                // チャットを閉じたあとなら、反映する先がない
-                                let _ = pane.update(cx, |this, cx| {
-                                    this.session
-                                        .update(cx, |s, cx| s.set_coordinator(id.as_deref(), cx));
-                                });
-                            },
-                        ));
-                    }
-                    menu
-                })
-        };
-        let mut efforts = row().gap_1().flex_wrap();
-        for e in Effort::ALL {
-            // 今のモデルで選べない値は、薄くして押せなくする
-            let allowed = session.effort_allowed(e);
-            efforts = efforts.child(
-                chip(
-                    ("ai-effort", e as usize),
-                    e.label(),
-                    e == session.effort,
-                    cx,
-                )
-                .when(!allowed, |d| d.opacity(0.4).cursor_default())
-                .when(allowed, |d| {
-                    d.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                        this.session.update(cx, |s, cx| s.set_effort(e, cx));
-                    }))
-                })
-                .test_support(),
-            );
-        }
-
-        let (key_text, key_color, deletable): (SharedString, Hsla, bool) = match &session.key {
-            KeyState::Unknown => ("確認中…".into(), theme.muted_foreground, false),
-            KeyState::Missing => ("未設定".into(), theme.muted_foreground, false),
-            KeyState::Present {
-                masked,
-                source: Source::Keychain,
-            } => (
-                format!("保存済み {masked}（OS のキーチェーン）").into(),
-                theme.success,
-                true,
-            ),
-            KeyState::Present {
-                masked,
-                source: Source::Env,
-            } => (
-                format!("環境変数 {} を使用 {masked}", provider.env_var()).into(),
-                theme.success,
-                false,
-            ),
-            KeyState::Failed(e) => (e.clone(), theme.danger, false),
-        };
-
-        let (account, signed_in): (SharedString, bool) = match session.github() {
-            GithubAccount::Login(login) => (format!("@{login}").into(), true),
-            GithubAccount::Missing => ("gh にログインしていません".into(), false),
-            GithubAccount::Unknown => ("".into(), false),
-        };
-        let watch = session.watch.clone();
-        let watch_status = session.watch_status.clone();
-        let busy = session.busy;
-        let auto_run = session.auto_run;
-        let arrange = session.arrange;
-        let track = session.track;
-        let mut minutes_row = row().gap_1().flex_wrap();
-        for minutes in WATCH_MINUTES {
-            let text = if minutes < 60 {
-                format!("{minutes} 分")
-            } else {
-                format!("{} 時間", minutes / 60)
-            };
-            minutes_row = minutes_row.child(
-                chip(
-                    ("ai-watch-minutes", minutes as usize),
-                    text,
-                    watch.minutes == minutes,
-                    cx,
-                )
-                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                    this.set_watch(|w| w.minutes = minutes, cx);
-                }))
-                .test_support(),
-            );
-        }
-        let section = || {
-            col()
-                .gap_2()
-                .p_3()
-                .rounded(feel::lg())
-                .border_1()
-                .border_color(theme.border)
-                .bg(theme.background)
-                .elevate(Elevation::Low, cx)
-        };
-
         col()
             .id("ai-settings")
-            .gap_2()
             .p_3()
             .border_b_1()
             .border_color(theme.border)
             .bg(theme.secondary)
-            .child(
-                section()
-                    .child(label("サービス"))
-                    .child(providers)
-                    .child(label("モデル"))
-                    .child(
-                        feel::gloss(Button::new("ai-model-open")
-                            .outline()
-                            .small()
-                            .w_full()
-                            .justify_between()
-                            .label(if model.is_empty() {
-                                SharedString::from("標準のモデル")
-                            } else {
-                                SharedString::from(model.clone())
-                            })
-                            .dropdown_caret(true)
-                            .selected(model_open)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.model_open = !this.model_open;
-                                if this.model_open {
-                                    this.model_input
-                                        .update(cx, |s, cx| s.focus(window, cx));
-                                    // 一覧がまだなければ、開いたときに取ってくる
-                                    this.session.update(cx, |s, cx| {
-                                        if s.listed.is_empty()
-                                            && matches!(s.key, KeyState::Present { .. })
-                                        {
-                                            s.fetch_models(cx);
-                                        }
-                                    });
-                                }
-                                cx.notify();
-                            }))),
-                    )
-                    .when(model_open, |d| {
-                        d.child(
-                            col()
-                                .rounded(feel::md())
-                                .border_1()
-                                .border_color(theme.border)
-                                .bg(theme.background)
-                                .elevate(Elevation::Mid, cx)
-                                .child(
-                                    row()
-                                        .gap_1()
-                                        .p_1()
-                                        .border_b_1()
-                                        .border_color(theme.border)
-                                        .child(
-                                            Input::new(&self.model_input)
-                                                .id("ai-model-input")
-                                                .aria_label("モデルを検索")
-                                                .small()
-                                                .flex_1(),
-                                        )
-                                        .when(
-                                            provider == Provider::Claude
-                                                || provider.catalog_url().is_some(),
-                                            |d| {
-                                                d.child(
-                                                    feel::gloss(icon_button(
-                                                        "ai-fetch-models",
-                                                        "refresh-cw",
-                                                        "モデル一覧を更新",
-                                                    )
-                                                    .on_click(cx.listener(|this, _, _, cx| {
-                                                        this.session
-                                                            .update(cx, |s, cx| s.fetch_models(cx));
-                                                    }))),
-                                                )
-                                            },
-                                        ),
-                                )
-                                .child(models)
-                                .with_animation("ai-model-list-in", appear(), |el, delta| {
-                                    el.opacity(delta)
-                                }),
-                        )
-                    })
-                    .when(provider.supports_effort(), |d| {
-                        d.child(label("effort")).child(efforts)
-                    })
-                    .when(provider != Provider::Cursor, |d| {
-                        d.child(label("振り分けのモデル")).child(row().child(coordinators))
-                    }),
-            )
-            .child(
-                section()
-                    .child(
-                        row()
-                            .gap_1()
-                            .child(label("API キー"))
-                            .child(
-                                div()
-                                    .id("ai-key-state")
-                                    .flex_1()
-                                    .min_w_0()
-                                    .text_xs()
-                                    .text_color(key_color)
-                                    .truncate()
-                                    .child(key_text)
-                                    .test_support(),
-                            )
-                            .when(deletable, |d| {
-                                d.child(
-                                    feel::gloss(icon_button("ai-key-delete", "trash", "API キーを削除")
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.session.update(cx, |s, cx| s.delete_key(cx));
-                                        }))),
-                                )
-                            }),
-                    )
-                    .child(
-                        row()
-                            .gap_1()
-                            .child(
-                                Input::new(&self.key_input)
-                                    .id("ai-key-input")
-                                    .aria_label("API キー")
-                                    .small()
-                                    .flex_1(),
-                            )
-                            .child(
-                                feel::gloss(icon_button("ai-key-save", "check", "API キーを保存")
-                                    .primary()
-                                    .on_click(
-                                        cx.listener(|this, _, window, cx| {
-                                            this.save_key(window, cx)
-                                        }),
-                                    )),
-                            ),
-                    ),
-            )
-            .child(
-                section().child(
-                    Switch::new("ai-auto")
-                        .checked(auto_run)
-                        .label("オート実行")
-                        .tooltip("コマンド実行とタスク削除を確認なしで行う")
-                        .on_click(cx.listener(|this, on: &bool, _, cx| {
-                            let on = *on;
-                            this.session.update(cx, |s, cx| s.set_auto_run(on, cx));
-                        })),
-                ),
-            )
-            .child(
-                section().child(label("いつも AI に伝えること")).child(
-                    row()
-                        .gap_1()
-                        .items_end()
-                        .child(
-                            div()
-                                .id("ai-context")
-                                .flex_1()
-                                .min_w_0()
-                                .child(Textarea::new(&self.context_input).h(px(72.)))
-                                .test_support(),
-                        )
-                        .child(
-                            feel::gloss(icon_button("ai-context-save", "check", "保存").on_click(cx.listener(|this, _, _, cx| {
-                                let text = this.context_input.read(cx).value().to_string();
-                                this.session.update(cx, |s, cx| s.set_context(&text, cx));
-                            }))),
-                        ),
-                ),
-            )
-            .child(
-                section().child(
-                    Switch::new("ai-arrange")
-                        .checked(arrange)
-                        .label("新しいタスクを整える")
-                        .tooltip("タスクを作ると、AI がリンクを読んでタイトルと説明を整える")
-                        .on_click(cx.listener(|this, on: &bool, _, cx| {
-                            let on = *on;
-                            this.session.update(cx, |s, cx| s.set_arrange(on, cx));
-                        })),
-                ),
-            )
-            .child(
-                section().child(
-                    Switch::new("ai-track")
-                        .checked(track)
-                        .label("コメントから進捗を更新する")
-                        .tooltip("タスクにコメントを書くと、AI が進捗・状態・期限を更新する")
-                        .on_click(cx.listener(|this, on: &bool, _, cx| {
-                            let on = *on;
-                            this.session.update(cx, |s, cx| s.set_track(on, cx));
-                        })),
-                ),
-            )
-            .child(
-                section().child(
-                    row()
-                        .gap_2()
-                        .child(
-                            app_icon("github")
-                                .size_4()
-                                .text_color(theme.muted_foreground),
-                        )
-                        .child(
-                            div()
-                                .id("ai-github-account")
-                                .flex_1()
-                                .min_w_0()
-                                .truncate()
-                                .text_sm()
-                                .when(!signed_in, |d| d.text_color(theme.muted_foreground))
-                                .child(account)
-                                .test_support(),
-                        )
-                        .child(feel::gloss(
-                            icon_button("ai-github-read", "refresh-cw", "gh から読み直す")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.session.update(cx, |s, cx| s.read_github(cx));
-                                })),
-                        )),
-                ),
-            )
-            .child(
-                section()
-                    .child(
-                        row()
-                            .gap_1()
-                            .child(
-                                div().flex_1().child(
-                                    Switch::new("ai-watch")
-                                        .checked(watch.enabled)
-                                        .label("GitHub の定期チェック")
-                                        .tooltip(
-                                            "タスクの issue・プルリクエストに進展があれば、AI がタスクにコメントする",
-                                        )
-                                        .on_click(cx.listener(|this, on: &bool, _, cx| {
-                                            let on = *on;
-                                            this.set_watch(|w| w.enabled = on, cx);
-                                        })),
-                                ),
-                            )
-                            .child(
-                                feel::gloss(icon_button("ai-watch-now", "play", "今すぐチェック")
-                                    .disabled(busy)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.session.update(cx, |s, cx| {
-                                            s.check_github(cx);
-                                        });
-                                    }))),
-                            ),
-                    )
-                    .when_some(watch_status, |d, status| {
-                        d.child(
-                            div()
-                                .id("ai-watch-status")
-                                .text_xs()
-                                .text_color(theme.muted_foreground)
-                                .child(status)
-                                .test_support(),
-                        )
-                    })
-                    .when(watch.enabled, |d| {
-                        d.child(label("間隔"))
-                            .child(minutes_row)
-                            .child(label("AI への指示"))
-                            .child(
-                                row()
-                                    .gap_1()
-                                    .items_end()
-                                    .child(
-                                        div()
-                                            .id("ai-watch-instruction")
-                                            .flex_1()
-                                            .min_w_0()
-                                            .child(Textarea::new(&self.watch_input).h(px(72.)))
-                                            .test_support(),
-                                    )
-                                    .child(
-                                        feel::gloss(icon_button("ai-watch-save", "check", "保存")
-                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                this.set_watch(|_| {}, cx)
-                                            }))),
-                                    ),
-                            )
-                    }),
-            )
+            .child(self.settings.clone())
             .overflow_y_scroll()
             .flex_1()
             .min_h_0()
@@ -2141,49 +1544,6 @@ impl AiPane {
             .into_any_element()
     }
 
-    /// 検索の言葉に合うモデル。おすすめを先に、残りは名前の頭でまとめる。
-    fn model_groups(&self, cx: &App) -> Vec<(SharedString, Vec<SharedString>)> {
-        let session = self.session.read(cx);
-        let query = self.model_input.read(cx).value().trim().to_lowercase();
-        let matches = |m: &str| query.is_empty() || m.to_lowercase().contains(&query);
-        let presets: Vec<SharedString> = session
-            .provider
-            .models()
-            .iter()
-            .filter(|m| matches(m))
-            .map(|m| SharedString::from(*m))
-            .collect();
-        let mut rest: Vec<SharedString> = Vec::new();
-        let current = SharedString::from(session.model().to_owned());
-        for m in session.listed.iter().chain(std::iter::once(&current)) {
-            if !m.is_empty() && matches(m) && !presets.contains(m) && !rest.contains(m) {
-                rest.push(m.clone());
-            }
-        }
-        rest.sort();
-        let mut groups: Vec<(SharedString, Vec<SharedString>)> = Vec::new();
-        if !presets.is_empty() {
-            groups.push(("おすすめ".into(), presets));
-        }
-        for m in rest {
-            // 「glm-5.3」なら「glm」。同じ頭のモデルを 1 つにまとめる
-            let family: SharedString = m
-                .chars()
-                .take_while(|c| c.is_ascii_alphabetic())
-                .collect::<String>()
-                .into();
-            match groups
-                .iter_mut()
-                .skip_while(|(g, _)| g == "おすすめ")
-                .find(|(g, _)| *g == family)
-            {
-                Some((_, names)) => names.push(m),
-                None => groups.push((family, vec![m])),
-            }
-        }
-        groups
-    }
-
     /// サービス・モデル・effort を、押してその場で選ぶボタン。
     fn render_pills(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let session = self.session.read(cx);
@@ -2272,7 +1632,10 @@ impl AiPane {
                                 PopupMenuItem::new("ほかのモデル…").on_click(move |_, _, cx| {
                                     let _ = pane.update(cx, |this, cx| {
                                         this.settings_open = true;
-                                        this.model_open = true;
+                                        this.settings.update(cx, |s, cx| {
+                                            s.model_open = true;
+                                            cx.notify();
+                                        });
                                         cx.notify();
                                     });
                                 }),

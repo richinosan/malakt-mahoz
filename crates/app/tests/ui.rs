@@ -1495,16 +1495,22 @@ fn locked_notices_hide_what_was_chosen(cx: &mut TestAppContext) {
     assert_eq!(shown[1].body.as_ref(), "");
 }
 
-/// 「ロック」のダイアログで、自動でロックするまでの時間と、ロック中の通知をメニューから選ぶ。
+/// 「設定」のロックと通知で、自動でロックするまでの時間と、ロック中の通知をメニューから選ぶ。
 /// 操作がないまま選んだ時間が過ぎるとロックし、操作すると数え直す。
 #[gpui_kit::test]
 fn auto_lock_after_the_chosen_minutes(cx: &mut TestAppContext) {
+    use malakt_mahoz::state::CustomizeSection;
     start(cx);
     let (window, view) = open(cx, wide());
     ui(cx, window, |window, cx| {
         view.update(cx, |v, cx| v.open_lock_settings(window, cx))
     });
-    cx.update(|cx| assert_eq!(view.read(cx).modal, Modal::Lock));
+    // 「設定」がロックのカテゴリで開く
+    cx.update(|cx| {
+        let v = view.read(cx);
+        assert_eq!(v.modal, Modal::Appearance);
+        assert_eq!(v.appearance_section, CustomizeSection::Lock);
+    });
     // ロックが無効なうちは、時間と通知の行は出ない
     ui(cx, window, |window, _| {
         assert!(window.try_find("auto-lock").is_none());
@@ -1528,6 +1534,10 @@ fn auto_lock_after_the_chosen_minutes(cx: &mut TestAppContext) {
     ui(cx, window, |window, cx| window.click("auto-lock", cx));
     pick(cx, window, "15 分");
     cx.update(|cx| assert_eq!(view.read(cx).auto_lock(cx), Some(15)));
+    // ロック中の通知は「通知」のカテゴリにある
+    ui(cx, window, |window, cx| {
+        window.click(("customize-nav", 9usize), cx)
+    });
     ui(cx, window, |window, cx| window.click("locked-notices", cx));
     pick(cx, window, "タイトルを出さない");
     cx.update(|cx| {
@@ -1567,6 +1577,9 @@ fn auto_lock_after_the_chosen_minutes(cx: &mut TestAppContext) {
     assert!(typed > 0, "キーの操作を数えていない");
 
     // 「しない」にすると、いくら待ってもロックしない
+    ui(cx, window, |window, cx| {
+        window.click(("customize-nav", 8usize), cx)
+    });
     ui(cx, window, |window, cx| window.click("auto-lock", cx));
     pick(cx, window, "しない");
     cx.update(|cx| {
@@ -2577,7 +2590,8 @@ fn customize_settings_are_searched(cx: &mut TestAppContext) {
     ui(cx, window, |window, _| {
         // 開いたときはテーマ。左にはカテゴリがすべて並ぶ
         assert!(window.try_find(("preset", 0usize)).is_some());
-        assert!((0..CustomizeSection::ALL.len()).all(|ix| nav(window, ix)));
+        // この OS にない連携（通知・アップデート）のほかは、カテゴリがすべて並ぶ
+        assert!((0..=8).all(|ix| nav(window, ix)));
     });
 
     // 書いた言葉に合う設定だけが出る。補足の言葉でも当たる
@@ -2628,16 +2642,17 @@ fn customize_settings_are_searched(cx: &mut TestAppContext) {
     });
     ui(cx, window, |window, cx| {
         assert!(!nav(window, 0));
-        window.click(("customize-nav", 5usize), cx)
+        window.click(("customize-nav", 6usize), cx)
     });
     assert!(cx.update(|cx| {
         let v = view.read(cx);
-        v.appearance_section == CustomizeSection::Ai
+        v.appearance_section == CustomizeSection::AiBehavior
             && v.inputs.customize_search.read(cx).value().is_empty()
     }));
     ui(cx, window, |window, _| {
         assert!(window.try_find("shell-choice").is_some());
-        assert!((0..CustomizeSection::ALL.len()).all(|ix| nav(window, ix)));
+        // この OS にない連携（通知・アップデート）のほかは、カテゴリがすべて並ぶ
+        assert!((0..=8).all(|ix| nav(window, ix)));
     });
 
     // 検索欄に書いている途中でも、Esc で閉じる
@@ -3979,7 +3994,23 @@ fn reminders(
     os
 }
 
-/// 設定のメニューを開いて、その文の項目を押す。
+/// 歯車の「設定」をそのカテゴリで開き、スイッチを押して閉じる。
+fn press_in_settings(
+    cx: &mut TestAppContext,
+    window: AnyWindowHandle,
+    view: &Entity<MainView>,
+    section: malakt_mahoz::state::CustomizeSection,
+    id: &'static str,
+) {
+    choose_in_menu(cx, window, "設定");
+    ui(cx, window, |window, cx| {
+        view.update(cx, |v, cx| v.show_appearance_section(section, window, cx))
+    });
+    ui(cx, window, |window, cx| window.click(id, cx));
+    ui(cx, window, |window, cx| window.click("dialog-close", cx));
+}
+
+/// 歯車のメニューを開いて、その文の項目を押す。
 fn choose_in_menu(cx: &mut TestAppContext, window: AnyWindowHandle, label: &str) {
     ui(cx, window, |window, cx| window.click("open-menu", cx));
     let id = cx
@@ -4026,7 +4057,13 @@ fn reminders_follow_tasks_once_chosen(cx: &mut TestAppContext) {
     // 標準では何も作らない
     assert!(os.lock().unwrap().items.is_empty());
 
-    choose_in_menu(cx, window, "リマインダーと連携する");
+    press_in_settings(
+        cx,
+        window,
+        &view,
+        malakt_mahoz::state::CustomizeSection::Notices,
+        "reminders-switch",
+    );
     cx.run_until_parked();
     {
         let os = os.lock().unwrap();
@@ -4065,7 +4102,13 @@ fn reminders_follow_tasks_once_chosen(cx: &mut TestAppContext) {
     assert_eq!(os.lock().unwrap().writes, writes);
 
     // 解除すると、作ったリマインダーとリストが消える。タスクは残る
-    choose_in_menu(cx, window, "リマインダーとの連携を解除する");
+    press_in_settings(
+        cx,
+        window,
+        &view,
+        malakt_mahoz::state::CustomizeSection::Notices,
+        "reminders-switch",
+    );
     cx.run_until_parked();
     {
         let os = os.lock().unwrap();
@@ -4096,7 +4139,13 @@ fn reminders_refused_by_the_os_turn_back_off(cx: &mut TestAppContext) {
     });
     let (window, view) = open(cx, wide());
     cx.run_until_parked();
-    choose_in_menu(cx, window, "リマインダーと連携する");
+    press_in_settings(
+        cx,
+        window,
+        &view,
+        malakt_mahoz::state::CustomizeSection::Notices,
+        "reminders-switch",
+    );
     cx.run_until_parked();
     assert!(!store(cx, |s| s.reminders_enabled().unwrap()));
     cx.update(|cx| {
@@ -4194,13 +4243,19 @@ fn a_new_version_is_installed_when_the_app_closes(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn auto_update_can_be_turned_off(cx: &mut TestAppContext) {
     start(cx);
-    let (window, _) = open(cx, wide());
+    let (window, view) = open(cx, wide());
     let root = tempfile::tempdir().unwrap();
     let staged = staged_update(root.path());
     let (checked, installed) = updater(cx, Ok(Some(staged.clone())), Ok(()));
     assert!(has(cx, window, "update-now"));
 
-    choose_in_menu(cx, window, "自動アップデートを無効にする");
+    press_in_settings(
+        cx,
+        window,
+        &view,
+        malakt_mahoz::state::CustomizeSection::Update,
+        "auto-update-switch",
+    );
     assert!(!has(cx, window, "update-now"));
     assert!(!staged.dir.exists());
     cx.update(malakt_mahoz::update::install_on_quit);
@@ -4210,7 +4265,13 @@ fn auto_update_can_be_turned_off(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert_eq!(checked.lock().unwrap().len(), 1);
 
-    choose_in_menu(cx, window, "自動アップデートを有効にする");
+    press_in_settings(
+        cx,
+        window,
+        &view,
+        malakt_mahoz::state::CustomizeSection::Update,
+        "auto-update-switch",
+    );
     cx.run_until_parked();
     assert_eq!(checked.lock().unwrap().len(), 2);
     assert!(has(cx, window, "update-now"));
@@ -5732,7 +5793,7 @@ fn the_ai_shell_is_chosen_in_customize(cx: &mut TestAppContext) {
         view.update(cx, |v, cx| v.open_appearance(window, cx))
     });
     ui(cx, window, |window, cx| {
-        window.click(("customize-nav", 5usize), cx)
+        window.click(("customize-nav", 6usize), cx)
     });
     ui(cx, window, |window, cx| {
         assert!(window.find("shell-choice").visible());
