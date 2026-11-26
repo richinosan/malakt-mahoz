@@ -927,10 +927,21 @@ impl MainView {
 
     fn due_label(&self, task: &Todo, cx: &App) -> Div {
         let theme = cx.theme();
-        let Some(due) = &task.due else {
-            return div().text_color(theme.muted_foreground).child("—");
-        };
         let format = crate::theme::due_format(cx);
+        let Some(due) = &task.due else {
+            // 期限がなく開始だけなら「11/24～」
+            return match &task.start {
+                Some(start) => {
+                    let text = view::format_start_only(start, &self.today, format);
+                    div()
+                        .when(!task.status.is_open(), |d| {
+                            d.text_color(theme.muted_foreground)
+                        })
+                        .child(text)
+                }
+                None => div().text_color(theme.muted_foreground).child("—"),
+            };
+        };
         let relative = format == view::DueFormat::Relative;
         let text = view::format_due(task.start.as_deref(), due, &self.today, format);
         if !task.status.is_open() {
