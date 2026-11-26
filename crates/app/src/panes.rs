@@ -5,6 +5,7 @@
 
 use gpui_kit::base::TestSupportExt;
 use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::scroll::ScrollableElement;
 use gpui_kit::component::{ActiveTheme, Sizable};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
@@ -625,9 +626,9 @@ impl MainView {
                             .gap_x_6()
                             .gap_y_3()
                             .min_h_0()
-                            .overflow_y_scroll()
                             .child(app.test_support())
-                            .child(panes),
+                            .child(panes)
+                            .overflow_y_scrollbar(),
                     );
                 }
                 PaneOverlay::Presets => {

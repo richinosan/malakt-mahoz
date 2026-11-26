@@ -4,7 +4,8 @@
 use gpui_kit::base::TestSupportExt;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
-use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
+use gpui_kit::component::menu::PopupMenuItem;
+use gpui_kit::component::scroll::ScrollableElement;
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{ActiveTheme, Disableable, Selectable, Sizable};
 use gpui_kit::prelude::FluentBuilder;
@@ -16,6 +17,7 @@ use crate::ai::{self, GithubAccount, KeyState, Session, Watch, WATCH_MINUTES};
 use crate::ai_view::{appear, chip, icon_button};
 use crate::feel::{self, Lit};
 use crate::render::app_icon;
+use crate::scroll::Menus;
 use crate::shadow::{Elevate, Elevation};
 
 /// 参照する寸法を、画面全体の拡大率に合わせる。
@@ -420,7 +422,7 @@ impl AiSettings {
                     .outline()
                     .small()
                     .dropdown_caret(true)
-                    .dropdown_menu(move |mut menu, _, _| {
+                    .pop_menu(move |mut menu, _, _| {
                         let choices = std::iter::once((None, SharedString::from("今のモデル")))
                             .chain(
                                 models
@@ -688,7 +690,7 @@ impl AiSettings {
         let mut models = col()
             .id("ai-model-list")
             .max_h(px(260.))
-            .overflow_y_scroll()
+            .overflow_y_scrollbar()
             .p_1();
         let mut ix = 0usize;
         let groups = self.model_groups(cx);
@@ -828,7 +830,7 @@ impl AiSettings {
                     .child(div().flex_1().min_w_0().truncate().child(shown))
                     .child(app_icon("chevron-down").small().text_color(muted)),
             )
-            .dropdown_menu(move |mut menu, _, _| {
+            .pop_menu(move |mut menu, _, _| {
                 for (label, checked, id) in options.iter().cloned() {
                     let settings = settings.clone();
                     menu = menu.item(PopupMenuItem::new(label).checked(checked).on_click(
