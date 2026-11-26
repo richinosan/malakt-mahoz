@@ -16,4 +16,7 @@ runs:
     - name: rustfmt と clippy を入れる
       shell: bash
       run: mise exec -- rustup component add rustfmt clippy
+    # テストが落ちたときもビルドしたものを残す。残さないと、次も依存クレートを全部ビルドし直す
     - uses: Swatinem/rust-cache@v2
+      with:
+        cache-on-failure: true
