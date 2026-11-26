@@ -10,6 +10,7 @@ repository.workspace = true
 encoding_rs = "0.8"
 keyring = "4"
 malakt-core.workspace = true
+malakt-term.workspace = true
 serde_json.workspace = true
 ureq = { version = "3", features = ["json", "platform-verifier"] }
 

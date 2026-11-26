@@ -101,6 +101,7 @@ const MUST: &[&str] = &[
     "float-switch",
     "density",
     "feel",
+    "shell-choice",
 ];
 
 /// ロックを設定したときだけ出るもの。ロックは tests/ui.rs で確かめる。

@@ -4691,6 +4691,70 @@ impl MainView {
         div().absolute().inset_0().child(dialog)
     }
 
+    /// 「AI のシェル」の行。AI のタブで動かすシェルを、ターミナルで開けるシェルから選ぶ。
+    fn ai_shell_row(
+        &self,
+        label: Div,
+        reset: impl Fn(&'static str, bool) -> Button,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let terms = crate::term::shared(cx).read(cx);
+        let chosen = terms.ai_profile.clone();
+        let mut options: Vec<(SharedString, bool, Option<String>)> = vec![(
+            format!("標準（{}）", malakt_ai::shell::Shell::standard().name()).into(),
+            chosen.is_none(),
+            None,
+        )];
+        for profile in terms.profiles() {
+            options.push((
+                profile.name.clone().into(),
+                chosen.as_deref() == Some(profile.id.as_str()),
+                Some(profile.id.clone()),
+            ));
+        }
+        let shown = terms.ai_shell().name();
+        let muted = cx.theme().muted_foreground;
+        let view = cx.entity().downgrade();
+        // 押すと、選べるシェルのメニューが開く
+        let menu = Button::new("shell-choice")
+            .outline()
+            .h_8()
+            .child(
+                row()
+                    .min_w_0()
+                    .gap_2()
+                    .child(div().flex_1().min_w_0().truncate().child(shown))
+                    .child(app_icon("chevron-down").small().text_color(muted)),
+            )
+            .dropdown_menu(move |mut menu, _, _| {
+                for (label, checked, id) in options.iter().cloned() {
+                    let view = view.clone();
+                    menu = menu.item(PopupMenuItem::new(label).checked(checked).on_click(
+                        move |_, _, cx| {
+                            // ウィンドウを閉じたあとなら、反映する先がない
+                            let _ = view.update(cx, |_, cx| {
+                                crate::term::shared(cx)
+                                    .update(cx, |terms, cx| terms.set_ai_profile(id.as_deref(), cx))
+                            });
+                        },
+                    ));
+                }
+                menu
+            });
+        row()
+            .gap_2()
+            .child(label)
+            .child(div().flex_1().min_w_0().flex().child(menu))
+            .child(
+                reset("shell-choice-reset", chosen.is_some()).on_click(cx.listener(
+                    |_, _, _, cx| {
+                        crate::term::shared(cx)
+                            .update(cx, |terms, cx| terms.set_ai_profile(None, cx))
+                    },
+                )),
+            )
+    }
+
     /// 書体と色。書体の一覧は、この上にもう 1 枚重ねて出す。
     fn render_appearance(&self, cx: &mut Context<Self>) -> Div {
         let theme = cx.theme().clone();
@@ -4946,7 +5010,8 @@ impl MainView {
                         ),
                     )
                     .child(reset("float-reset", false)),
-            );
+            )
+            .child(self.ai_shell_row(label("AI のシェル"), reset, cx));
         let details = if !open {
             None
         } else if self.motion {

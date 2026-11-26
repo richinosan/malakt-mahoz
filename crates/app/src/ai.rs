@@ -10,7 +10,7 @@ use malakt_ai::ansi;
 use malakt_ai::github::{self, Link};
 use malakt_ai::keys::{self, KeyStore, Source};
 use malakt_ai::provider::{self, CatalogModel, Endpoint};
-use malakt_ai::shell::{self, Spec};
+use malakt_ai::shell::{self, Shell, Spec};
 use malakt_ai::slack;
 use malakt_ai::wire::{self, Reply, ToolCall, Turn, Wire};
 use malakt_ai::{clip_tail, tools, Effort, Provider, MAX_TOOL_OUTPUT_CHARS};
@@ -648,6 +648,8 @@ pub struct Session {
     pub own_command: bool,
     /// シェルのコマンドを、確認なしで実行する（このチャットの間）。
     pub allow_shell: bool,
+    /// AI のコマンドが動くシェル。メッセージを送るたびに、開いているタブから決めて AI に伝える。
+    pub turn_shell: Shell,
     /// オート実行。オンの間、コマンドの実行とタスクの削除を確認なしで行う。標準はオフ。
     pub auto_run: bool,
     /// 別ウィンドウに出したチャット。
@@ -930,6 +932,7 @@ impl Session {
             running: None,
             own_command: false,
             allow_shell: false,
+            turn_shell: Shell::standard(),
             auto_run,
             chat_window: None,
             shell_place: if ui.shell == "closed" {
@@ -3192,9 +3195,10 @@ impl Session {
         }
         self.busy = true;
         self.own_command = true;
+        let shell = crate::term::ai_shell(cx);
         self.task = Some(cx.spawn(async move |this, cx| {
             // 起動できなかったことは、シェルに出ている
-            let _ = Self::shell_line(&this, &command, cx).await;
+            let _ = Self::shell_line(&this, &command, &shell, cx).await;
             // チャットがなくなっていれば、知らせる先もない
             let _ = this.update(cx, |this, cx| {
                 this.finish();
@@ -3205,17 +3209,19 @@ impl Session {
         true
     }
 
-    /// シェルの 1 行を、今の場所で実行する。`cd` はシェルの場所を変える。
+    /// シェルの 1 行を、`shell` で今の場所で実行する。`cd` はシェルの場所を変える。
     async fn shell_line(
         this: &WeakEntity<Self>,
         command: &str,
+        shell: &Shell,
         cx: &mut AsyncApp,
     ) -> std::io::Result<Output> {
         let dropped = || std::io::Error::other("チャットが閉じられました");
-        let cwd = this
-            .read_with(cx, |s, _| s.cwd.clone())
+        let (cwd, ai_shell) = this
+            .read_with(cx, |s, cx| (s.cwd.clone(), crate::term::ai_shell(cx)))
             .map_err(|_| dropped())?;
-        if let Some(target) = cd_target(command) {
+        // WSL の中の場所は、アプリからは移れない。`cd` もシェルに任せる
+        if let Some(target) = cd_target(command).filter(|_| !shell.is_wsl()) {
             let next = resolve_dir(&cwd, target);
             let moved = next.as_ref().is_ok_and(|dir| dir.is_dir());
             let mut output = Output {
@@ -3224,7 +3230,7 @@ impl Session {
                 code: Some(if moved { 0 } else { 1 }),
             };
             this.update(cx, |s, cx| {
-                s.push_shell(LineKind::Command, &format!("$ {command}"));
+                s.push_shell(LineKind::Command, &format!("{} {command}", shell.mark()));
                 match next {
                     Ok(dir) if moved => {
                         output.all = format!("今の場所: {}", dir.display());
@@ -3240,10 +3246,14 @@ impl Session {
             .map_err(|_| dropped())?;
             return Ok(output);
         }
-        let mut spec = Spec::shell(command);
+        let mut spec = shell.spec(command);
         spec.cwd = Some(cwd);
+        // AI のタブと違うシェル（開いているターミナルのタブのシェル）なら、どのシェルかを出す
+        if *shell != ai_shell {
+            spec.mark = format!("[{}] {}", shell.label(), shell.mark());
+        }
         // シェルから起動した Claude Code などが、このアプリのコマンドとデータを見つけられるようにする
-        spec.env = crate::mcp::shell_env();
+        spec.env.extend(crate::mcp::shell_env());
         Self::run_command(this, spec, cx).await
     }
 
@@ -3318,6 +3328,10 @@ impl Session {
                 if let GithubAccount::Login(login) = &s.github {
                     extra = format!("{}\n{extra}", github::account_note(login));
                 }
+                // コマンドが動くシェルは、ユーザーが今開いているタブで決まる
+                let (shell, in_tab) = crate::term::command_shell(cx);
+                extra = format!("{}\n{extra}", tools::shell_note(&shell, in_tab));
+                s.turn_shell = shell;
                 let note = tools::turn_note(&malakt_core::view::now(), place, &extra);
                 if let Some(Turn::User(message)) = s.turns.last_mut() {
                     message.push_str(&note);
@@ -3541,7 +3555,12 @@ impl Session {
                     if s.auto_run || name == tools::RUN_SHELL && s.allow_shell {
                         return false;
                     }
-                    let text = tools::confirmation_text(&s.db.read(cx).store, name, &call.args);
+                    let text = tools::confirmation_text(
+                        &s.db.read(cx).store,
+                        name,
+                        &call.args,
+                        &s.turn_shell,
+                    );
                     s.pending = Some(Pending {
                         text: text.into(),
                         shell: name == tools::RUN_SHELL,
@@ -3570,7 +3589,10 @@ impl Session {
                 let Some(command) = call.args.get("command").and_then(Value::as_str) else {
                     return failed("command が必要です".into());
                 };
-                match Self::shell_line(this, command, cx).await {
+                let shell = this
+                    .read_with(cx, |s, _| s.turn_shell.clone())
+                    .map_err(gone)?;
+                match Self::shell_line(this, command, &shell, cx).await {
                     Ok(output) => Ok(Ok(format!(
                         "終了コード: {}\n{}",
                         output
@@ -3754,7 +3776,12 @@ impl Session {
         let dropped = || std::io::Error::other("チャットが閉じられました");
         let (tx, rx) = async_channel::unbounded();
         this.update(cx, |s, cx| {
-            s.push_shell(LineKind::Command, &format!("$ {}", spec.display));
+            let mark = if spec.mark.is_empty() {
+                "$"
+            } else {
+                &spec.mark
+            };
+            s.push_shell(LineKind::Command, &format!("{mark} {}", spec.display));
             cx.notify();
         })
         .map_err(|_| dropped())?;

@@ -137,12 +137,10 @@ pub fn unix_profiles(
     out
 }
 
-/// PATH から実行ファイルを探す。
+/// PATH から実行ファイルを探す。アプリを起動したあとに入れたものも見つける。
 #[cfg(windows)]
 fn on_path(name: &str) -> bool {
-    std::env::var_os("PATH")
-        .map(|path| std::env::split_paths(&path).any(|dir| dir.join(name).is_file()))
-        .unwrap_or(false)
+    crate::env_path::has(name)
 }
 
 #[cfg(windows)]

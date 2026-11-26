@@ -4495,6 +4495,7 @@ dependencies = [
  "encoding_rs",
  "keyring",
  "malakt-core",
+ "malakt-term",
  "serde_json",
  "tempfile",
  "ureq",

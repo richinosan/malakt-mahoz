@@ -5240,3 +5240,36 @@ fn notice_closes_after_three_minutes(cx: &mut TestAppContext) {
     });
     cx.update(|cx| assert!(view.read(cx).error.is_some()));
 }
+
+/// 「カスタマイズ」の詳細に「AI のシェル」があり、押すとシェルを選ぶメニューが開く。
+#[gpui_kit::test]
+fn the_ai_shell_is_chosen_in_customize(cx: &mut TestAppContext) {
+    start(cx);
+    let (window, view) = open(cx, wide());
+    cx.update(|cx| {
+        malakt_mahoz::term::shared(cx).update(cx, |terms, cx| {
+            terms.set_profiles(
+                vec![malakt_term::Profile {
+                    id: "dash".into(),
+                    name: "dash".into(),
+                    kind: malakt_term::profile::Kind::Shell,
+                    program: "/bin/sh".into(),
+                    args: Vec::new(),
+                }],
+                cx,
+            )
+        })
+    });
+    ui(cx, window, |window, cx| {
+        view.update(cx, |v, cx| v.open_appearance(window, cx))
+    });
+    ui(cx, window, |window, cx| window.click("details-toggle", cx));
+    ui(cx, window, |window, cx| {
+        assert!(window.find("shell-choice").visible());
+        assert!(window.try_find("shell-choice-reset").is_some());
+        window.click("shell-choice", cx)
+    });
+    ui(cx, window, |window, _| {
+        assert!(window.try_find("popup-menu").is_some());
+    });
+}
