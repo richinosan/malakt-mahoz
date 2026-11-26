@@ -219,7 +219,7 @@ pub fn definitions() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "set_panels",
-            description: "画面の部分を出す・隠す、幅を変える。sidebar は左のメニュー、chat は AI チャット、shell は AI のシェルとターミナル。幅は null で最初の幅。expanded は左のメニューのワークスペースを開く・閉じる（ID と true / false）。",
+            description: "画面の部分を出す・隠す、幅を変える。sidebar は左のメニュー、chat は AI チャット、shell はシェルの場所（AI のタブ、ターミナル、ブラウザのタブ）。幅は null で最初の幅。expanded は左のメニューのワークスペースを開く・閉じる（ID と true / false）。",
             schema: object(
                 json!({
                     "sidebar": {"type": "boolean"},

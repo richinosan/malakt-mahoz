@@ -1,5 +1,5 @@
 //! ターミナル。シェル（WSL、PowerShell、zsh など）をアプリの中で開き、`claude` や `vim` のような
-//! 画面全体を使うプログラムもそのまま動かす。AI のシェルと同じ場所に、タブとして並ぶ。
+//! 画面全体を使うプログラムもそのまま動かす。AI のタブと同じ場所に、タブとして並ぶ。
 
 use std::ops::Range;
 use std::path::PathBuf;
@@ -137,7 +137,7 @@ pub struct Terms {
     pub tabs: Vec<Tab>,
     /// アプリ内ブラウザのタブ。番号はターミナルと同じ数え方で、作った順に並ぶ。
     pub pages: Vec<crate::browser::Page>,
-    /// 見ているターミナルかブラウザのタブ。`None` なら AI のシェル。
+    /// 見ているターミナルかブラウザのタブ。`None` なら AI のタブ。
     pub active: Option<u64>,
     /// 開けるシェル。調べ終わるまでは `None`。
     profiles: Option<Vec<Profile>>,
@@ -299,7 +299,7 @@ impl Terms {
                 self.ai_profile = id.map(str::to_owned);
                 cx.notify();
             }
-            Err(e) => self.fail(format!("AI のシェルの選択を保存できませんでした: {e}"), cx),
+            Err(e) => self.fail(format!("AI のタブのシェルを保存できませんでした: {e}"), cx),
         }
     }
 
@@ -346,6 +346,23 @@ impl Terms {
 
     pub fn active_tab(&self) -> Option<&Tab> {
         self.active.and_then(|id| self.tab(id))
+    }
+
+    /// AI のタブに出す名前。動くシェルを添える。
+    pub fn ai_label(&self) -> SharedString {
+        format!("AI（{}）", self.ai_shell().name()).into()
+    }
+
+    /// 見ているタブの名前。タブの場所を別ウィンドウにしたときの、ウィンドウの名前にもなる。
+    pub fn active_label(&self) -> SharedString {
+        match self.active {
+            Some(id) => match (self.tab(id), self.page(id)) {
+                (Some(tab), _) => tab.label(),
+                (None, Some(page)) => page.label(),
+                (None, None) => self.ai_label(),
+            },
+            None => self.ai_label(),
+        }
     }
 
     pub fn activate(&mut self, id: Option<u64>, cx: &mut Context<Self>) {
@@ -537,7 +554,7 @@ impl Terms {
             self.remove_page(id, cx);
         }
         if self.active == Some(id) {
-            // 右どなり、なければ左どなり、それもなければ AI のシェルを見せる
+            // 右どなり、なければ左どなり、それもなければ AI のタブを見せる
             let next = order
                 .get(at + 1)
                 .or_else(|| at.checked_sub(1).and_then(|at| order.get(at)))
@@ -799,7 +816,7 @@ fn backgrounds(snapshot: &Snapshot, row: usize) -> Vec<(Range<usize>, u32)> {
     out
 }
 
-/// ターミナルの画面。AI のシェルと同じ場所に出す。
+/// ターミナルの画面。AI のタブと同じ場所に出す。
 pub struct TermPane {
     terms: Entity<Terms>,
     pub focus: FocusHandle,

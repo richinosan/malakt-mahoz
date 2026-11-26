@@ -2709,7 +2709,7 @@ impl MainView {
         self.sub_modal = None;
         // エディタ風のテーマが使う書体は、この PC に入っているものから決まる
         self.fonts = crate::theme::fonts(cx);
-        // 「AI のシェル」で選べるシェルの一覧
+        // 「AI のタブのシェル」で選べるシェルの一覧
         crate::term::shared(cx).update(cx, |terms, cx| terms.load_profiles(cx));
         self.preset_naming = None;
         self.appearance_section = CustomizeSection::Theme;
