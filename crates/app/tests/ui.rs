@@ -3063,6 +3063,51 @@ fn assignee_cell_wraps_without_cutting(cx: &mut TestAppContext) {
     assert!(cell <= row, "{cell:?} > {row:?}");
 }
 
+/// 表の値（状態・優先度・担当・期限）は、セルの左から並ぶ。列を狭めても、ボタンの左右の外へははみ出さない。
+#[gpui_kit::test]
+fn table_values_start_at_the_left_of_the_cell(cx: &mut TestAppContext) {
+    use malakt_mahoz::state::{Column, COLUMN_MIN};
+    start(cx);
+    let (window, view) = open(cx, wide());
+    ui(cx, window, |window, cx| {
+        window.click("nav-all", cx);
+        window.click("quick-add", cx);
+        window.input("会場を決める", cx);
+        window.press("enter", cx);
+    });
+    let scale = malakt_mahoz::UI_SCALE;
+    let check = |cx: &mut TestAppContext| {
+        ui(cx, window, |window, _| {
+            for id in ["status", "prio", "assignee", "due"] {
+                let button = window.find((id, 0usize)).bounds();
+                let value = window.within((id, 0usize)).find("value").bounds();
+                // ボタンの左の余白（px_2）だけ空けて、左から始まる
+                assert!(value.left() >= button.left(), "{id}: {value:?} {button:?}");
+                assert!(
+                    value.left() - button.left() <= px(12. * scale),
+                    "{id}: {value:?} {button:?}"
+                );
+                assert!(
+                    value.right() <= button.right(),
+                    "{id}: {value:?} {button:?}"
+                );
+            }
+        });
+    };
+    check(cx);
+    // 担当の列をいちばん狭くしても、「未割り当て」は真ん中から両側へはみ出さない
+    cx.update(|cx| {
+        view.update(cx, |v, cx| {
+            v.start_column_resize(Column::Assignee, 0., cx);
+            v.drag_column(9999., cx);
+            v.finish_column_resize(cx);
+            let width = v.columns.iter().find(|c| c.column == Column::Assignee);
+            assert_eq!(width.unwrap().width, COLUMN_MIN);
+        })
+    });
+    check(cx);
+}
+
 /// 左のメニューの矢印は、小さくても押しやすい大きさで押せる。
 #[gpui_kit::test]
 fn tree_caret_has_room_to_press(cx: &mut TestAppContext) {

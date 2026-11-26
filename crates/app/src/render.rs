@@ -446,6 +446,18 @@ fn status_badge(status: Status, cx: &App) -> Div {
         .child(status.label())
 }
 
+/// 表の値のボタンの中身。ボタンは中身を真ん中に寄せるので、幅いっぱいの行に入れて左から並べる。
+/// 列に入らない文字は、末尾を「…」にする。
+fn value_shown(shown: Div) -> impl IntoElement {
+    row()
+        .id("value")
+        .flex_1()
+        .min_w_0()
+        .overflow_hidden()
+        .child(shown.min_w_0().truncate())
+        .test_support()
+}
+
 /// 知らせの中に出す「元に戻す」ボタン。
 fn notice_undo(cx: &mut Context<MainView>) -> impl IntoElement {
     let theme = cx.theme();
@@ -2881,7 +2893,7 @@ impl MainView {
     fn assignee_cell(&self, ids: &[Id], table: bool, cx: &App) -> Div {
         let theme = cx.theme();
         if ids.is_empty() {
-            return row()
+            return div()
                 .text_sm()
                 .text_color(theme.muted_foreground)
                 .child("未割り当て");
@@ -2931,7 +2943,7 @@ impl MainView {
             .min_h_6()
             .py_0p5()
             .justify_start()
-            .child(shown)
+            .child(value_shown(shown))
             .dropdown_menu(move |mut menu, _, _| {
                 for (label, checked, value) in options.iter().cloned() {
                     let view = view.clone();
@@ -2961,7 +2973,7 @@ impl MainView {
             .ghost()
             .small()
             .justify_start()
-            .child(status_badge(current, cx))
+            .child(value_shown(status_badge(current, cx)))
             .dropdown_menu(move |menu, _, _| status_items(menu, &view, &task, current))
     }
 
