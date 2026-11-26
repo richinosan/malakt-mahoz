@@ -530,6 +530,15 @@ pub fn format_due(start: Option<&str>, due: &str, today: &str, format: DueFormat
     }
 }
 
+/// 期限のない、開始だけのタスクの表示。「11/24～」「11/24 10:00～」、相対なら「2 日前～」「明日 10:00～」。
+pub fn format_start_only(start: &str, today: &str, format: DueFormat) -> String {
+    let text = match format {
+        DueFormat::Date => format_date(start, today),
+        DueFormat::Relative => relative_day(start, today, false),
+    };
+    format!("{text}～")
+}
+
 /// `format_span` の相対の版。「明日」「あと 3 日」「2 日前～あと 3 日」「今日 17:00–18:00」。
 pub fn format_span_relative(start: Option<&str>, due: &str, today: &str) -> String {
     match span_of(start, due) {
@@ -1113,6 +1122,21 @@ mod tests {
             "今日 17:00–18:00"
         );
         assert_eq!(rel(Some("2026-11-29"), "2026-11-28"), "あと 3 日");
+        // 期限がなく開始だけなら「〜から」の形
+        let start_only = |start: &str, format| format_start_only(start, today, format);
+        assert_eq!(start_only("2026-11-24", DueFormat::Date), "11/24～");
+        assert_eq!(
+            start_only("2026-11-24 10:00", DueFormat::Date),
+            "11/24 10:00～"
+        );
+        assert_eq!(start_only("2027-01-04", DueFormat::Date), "2027/1/4～");
+        assert_eq!(start_only("2026-11-23", DueFormat::Relative), "2 日前～");
+        assert_eq!(start_only("2026-11-25", DueFormat::Relative), "今日～");
+        assert_eq!(
+            start_only("2026-11-26 10:00", DueFormat::Relative),
+            "明日 10:00～"
+        );
+        assert_eq!(start_only("2026-11-28", DueFormat::Relative), "3 日後～");
         // 日付として読めないものは、そのまま
         assert_eq!(rel(None, "bad"), "bad");
         // 日付の見せ方は、これまでどおり
