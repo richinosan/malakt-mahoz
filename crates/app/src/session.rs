@@ -338,6 +338,14 @@ impl MainView {
             )
         };
         self.window_place = Some(place(window));
+        // AI の画面の操作は、いちばん最近手前に出したウィンドウに届く
+        crate::ai_tools::register(window.window_handle(), cx.weak_entity(), cx);
+        cx.observe_window_activation(window, |_, window, cx| {
+            if window.is_window_active() {
+                crate::ai_tools::register(window.window_handle(), cx.weak_entity(), cx);
+            }
+        })
+        .detach();
         // 開いてすぐ、キーで操作できるようにする
         self.focus.focus(window, cx);
         cx.observe_window_bounds(window, move |this, window, cx| {

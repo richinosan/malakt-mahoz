@@ -1,7 +1,12 @@
 //! AI がタスクを読み書きするためのツール。
 
+use std::path::PathBuf;
+
 use malakt_core::view::Priority;
-use malakt_core::{Person, Role, Roles, Scope, Status, Store, Task, TaskDraft, TaskFilter};
+use malakt_core::{
+    when, Comment, DueRule, Person, Role, Roles, Scope, Status, Store, Task, TaskDraft, TaskFilter,
+    Workspace,
+};
 use serde_json::{json, Value};
 
 use crate::wire::ToolDef;
@@ -14,6 +19,41 @@ pub const SLACK_FETCH: &str = "slack_fetch";
 pub const RUN_SHELL: &str = "run_shell";
 
 const LIST_LIMIT: usize = 200;
+/// `get_task` で返す変更履歴の数。
+const CHANGES_LIMIT: usize = 30;
+
+/// ワークスペースごとの「AI に伝えること」の長さの上限。
+pub const MAX_WORKSPACE_CONTEXT_CHARS: usize = 2000;
+
+/// ワークスペースごとの「AI に伝えること」の保存先。
+pub fn workspace_context_key(workspace: &str) -> String {
+    format!("ai.context.ws.{workspace}")
+}
+
+/// 長すぎる「AI に伝えること」を断る文。
+pub fn workspace_context_error(text: &str) -> Option<String> {
+    let count = text.trim().chars().count();
+    (count > MAX_WORKSPACE_CONTEXT_CHARS).then(|| {
+        format!("AI に伝えることは {MAX_WORKSPACE_CONTEXT_CHARS} 文字までです（今は {count} 文字）")
+    })
+}
+
+/// ワークスペースごとの、ターミナルを始めるフォルダーの保存先。
+pub fn workspace_dir_key(workspace: &str) -> String {
+    format!("term.dir.{workspace}")
+}
+
+/// 設定に書いたフォルダーやファイル。先頭の `~` はホームに読み替える。
+pub fn expand_dir(text: &str) -> PathBuf {
+    let text = text.trim();
+    let rest = text
+        .strip_prefix('~')
+        .filter(|rest| rest.is_empty() || rest.starts_with(['/', '\\']));
+    match (rest, dirs::home_dir()) {
+        (Some(rest), Some(home)) => home.join(rest.trim_start_matches(['/', '\\'])),
+        _ => PathBuf::from(text),
+    }
+}
 
 fn object(properties: Value, required: &[&str]) -> Value {
     json!({
@@ -101,7 +141,7 @@ pub fn definitions() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "get_task",
-            description: "タスク 1 件の内容と、コメント、サブタスクを返す。",
+            description: "タスク 1 件の内容と、コメント、サブタスク、添付、変更履歴を返す。",
             schema: object(json!({"id": {"type": "string"}}), &["id"]),
         },
         ToolDef {
@@ -146,7 +186,12 @@ pub fn definitions() -> Vec<ToolDef> {
             name: "add_comment",
             description: COMMENT_TOOL,
             schema: object(
-                json!({"task_id": {"type": "string"}, "body": {"type": "string"}}),
+                json!({
+                    "task_id": {"type": "string"},
+                    "body": {"type": "string"},
+                    "reply_to": {"type": "string", "description": "返信するレビューのスレッドのルートのコメントの ID"},
+                    "review": {"type": "boolean", "description": "レビューコメント（返信と解決ができるスレッド）にする"},
+                }),
                 &["task_id", "body"],
             ),
         },
@@ -164,6 +209,156 @@ pub fn definitions() -> Vec<ToolDef> {
             schema: object(
                 json!({"name": {"type": "string"}, "workspace_id": {"type": "string"}}),
                 &["name"],
+            ),
+        },
+        ToolDef {
+            name: "update_workspace",
+            description: "ワークスペースの名前を変える、または別のワークスペースの中へ移す。parent_id が null なら、いちばん上に出す。渡した項目だけが変わる。",
+            schema: object(
+                json!({
+                    "id": {"type": "string"},
+                    "name": {"type": "string"},
+                    "parent_id": {"type": ["string", "null"]},
+                }),
+                &["id"],
+            ),
+        },
+        ToolDef {
+            name: "delete_workspace",
+            description: "ワークスペースを、サブワークスペースとタスクごと削除する。元に戻せないので、実行の前にユーザーに確認が出る。",
+            schema: object(json!({"id": {"type": "string"}}), &["id"]),
+        },
+        ToolDef {
+            name: "update_person",
+            description: "担当者の名前とメモを変える。workspace_ids で使うワークスペースを決める（空の配列で、すべてのワークスペースで使う）。渡した項目だけが変わる。",
+            schema: object(
+                json!({
+                    "id": {"type": "string"},
+                    "name": {"type": "string"},
+                    "note": {"type": "string"},
+                    "workspace_ids": {"type": "array", "items": {"type": "string"}},
+                }),
+                &["id"],
+            ),
+        },
+        ToolDef {
+            name: "delete_person",
+            description: "担当者を削除する（担当から外れるだけで、タスクは残る）。元に戻せないので、実行の前にユーザーに確認が出る。",
+            schema: object(json!({"id": {"type": "string"}}), &["id"]),
+        },
+        ToolDef {
+            name: "update_comment",
+            description: "コメントを書き直す、ピン留めする・外す、レビューのスレッドを解決済みにする・戻す。渡した項目だけが変わる。",
+            schema: object(
+                json!({
+                    "id": {"type": "string"},
+                    "body": {"type": "string"},
+                    "pinned": {"type": "boolean"},
+                    "resolved": {"type": "boolean", "description": "レビューのスレッドのルートのコメントだけ"},
+                }),
+                &["id"],
+            ),
+        },
+        ToolDef {
+            name: "delete_comment",
+            description: "コメントを削除する。元に戻せないので、実行の前にユーザーに確認が出る。",
+            schema: object(json!({"id": {"type": "string"}}), &["id"]),
+        },
+        ToolDef {
+            name: "link_task",
+            description: "タスクを、入っているワークスペースのほかのワークスペースにも出す（同期する）。linked が false なら、そのワークスペースから外す。",
+            schema: object(
+                json!({
+                    "id": {"type": "string"},
+                    "workspace_id": {"type": "string"},
+                    "linked": {"type": "boolean"},
+                }),
+                &["id", "workspace_id", "linked"],
+            ),
+        },
+        ToolDef {
+            name: "reorder_tasks",
+            description: "タスクを手動の順（並び順「手動の順」）で、渡した ID の順に並べる。",
+            schema: object(
+                json!({"ids": {"type": "array", "items": {"type": "string"}}}),
+                &["ids"],
+            ),
+        },
+        ToolDef {
+            name: "add_attachment",
+            description: "ユーザーの PC のファイルをタスクに添付する。path はファイルの絶対パス（先頭の ~ はホーム）。1 ファイル 10 MiB まで。",
+            schema: object(
+                json!({"task_id": {"type": "string"}, "path": {"type": "string"}}),
+                &["task_id", "path"],
+            ),
+        },
+        ToolDef {
+            name: "delete_attachment",
+            description: "添付を削除する。元に戻せないので、実行の前にユーザーに確認が出る。",
+            schema: object(json!({"id": {"type": "string"}}), &["id"]),
+        },
+        ToolDef {
+            name: "issue_ticket",
+            description: "タスクの完了チケット（ほかの人が malakt-mahoz redeem で完了を報告するための文字列）を発行して返す。person_id はだれの分として報告するか（省くと自分）。",
+            schema: object(
+                json!({"task_id": {"type": "string"}, "person_id": {"type": "string"}}),
+                &["task_id"],
+            ),
+        },
+        ToolDef {
+            name: "revoke_tickets",
+            description: "タスクの、まだ使われていない完了チケットをすべて取り消す。元に戻せないので、実行の前にユーザーに確認が出る。",
+            schema: object(json!({"task_id": {"type": "string"}}), &["task_id"]),
+        },
+        ToolDef {
+            name: "list_categories",
+            description: "タスクに使われているカテゴリの一覧を返す。",
+            schema: object(json!({}), &[]),
+        },
+        ToolDef {
+            name: "list_notices",
+            description: "通知（ベルの一覧）を新しい順に返す。",
+            schema: object(
+                json!({"limit": {"type": "integer", "minimum": 1, "maximum": 200}}),
+                &[],
+            ),
+        },
+        ToolDef {
+            name: "mark_notices_read",
+            description: "通知を既読にする。ids を省くと、すべて既読にする。",
+            schema: object(
+                json!({"ids": {"type": "array", "items": {"type": "string"}}}),
+                &[],
+            ),
+        },
+        ToolDef {
+            name: "get_workspace_settings",
+            description: "ワークスペースの基準日と、タスクを追加したときに入る値（既定値）を返す。",
+            schema: object(json!({"id": {"type": "string"}}), &["id"]),
+        },
+        ToolDef {
+            name: "update_workspace_settings",
+            description: "ワークスペースの基準日と、タスクを追加したときに入る値を変える。渡した項目だけが変わる。",
+            schema: object(
+                json!({
+                    "id": {"type": "string"},
+                    "date": {"type": ["string", "null"], "description": "基準日（開催日など）YYYY-MM-DD。null でなくす"},
+                    "assignee_ids": {"type": "array", "items": {"type": "string"}},
+                    "due": {"type": "string", "enum": ["none", "relative", "fixed"],
+                            "description": "期限の決め方。なし / 基準日からの日数 / 決まった日"},
+                    "due_days": {"type": "integer", "description": "due が relative のとき、基準日からの日数（負は前）"},
+                    "due_date": {"type": "string", "description": "due が fixed のときの日付 YYYY-MM-DD"},
+                    "due_time": {"type": "string", "description": "期限の時刻 HH:MM。空で日付だけ"},
+                    "priority": {"type": ["string", "null"], "enum": ["none", "high", "mid", "low", null],
+                                 "description": "null で指定なし"},
+                    "categories": {"type": "array", "items": {"type": "string"}},
+                    "description": {"type": "string", "description": "説明の雛形"},
+                    "link_workspace_ids": {"type": "array", "items": {"type": "string"},
+                                           "description": "追加したタスクを一緒に表示するワークスペース"},
+                    "ai_context": {"type": "string", "description": "このワークスペースを開いている間、AI に伝えること（2000 文字まで）。空で消す"},
+                    "terminal_dir": {"type": "string", "description": "このワークスペースのタスクでターミナルを開くフォルダー。空で消す"},
+                }),
+                &["id"],
             ),
         },
         ToolDef {
@@ -186,8 +381,43 @@ pub fn definitions() -> Vec<ToolDef> {
 
 /// 実行の前にユーザーの確認が要るツールか。
 pub fn needs_confirmation(name: &str) -> bool {
-    matches!(name, "delete_task" | RUN_SHELL)
+    matches!(
+        name,
+        "delete_task"
+            | "delete_workspace"
+            | "delete_person"
+            | "delete_comment"
+            | "delete_attachment"
+            | "revoke_tickets"
+            | RUN_SHELL
+    )
 }
+
+/// データベースを書き換えるツール。1 回の呼び出しを、元に戻す 1 つの段にする。
+pub const WRITES: &[&str] = &[
+    "create_task",
+    "update_task",
+    "set_assignee",
+    "move_task",
+    "delete_task",
+    "add_comment",
+    "create_workspace",
+    "create_person",
+    "update_workspace",
+    "delete_workspace",
+    "update_person",
+    "delete_person",
+    "update_comment",
+    "delete_comment",
+    "link_task",
+    "reorder_tasks",
+    "add_attachment",
+    "delete_attachment",
+    "issue_ticket",
+    "revoke_tickets",
+    "mark_notices_read",
+    "update_workspace_settings",
+];
 
 /// 確認に出す文。
 pub fn confirmation_text(store: &Store, name: &str, args: &Value) -> String {
@@ -197,6 +427,53 @@ pub fn confirmation_text(store: &Store, name: &str, args: &Value) -> String {
             match store.task(id) {
                 Ok(task) => format!("タスク「{}」を削除します。元に戻せません。", task.title),
                 Err(_) => format!("タスク（ID: {id}）を削除します。元に戻せません。"),
+            }
+        }
+        "delete_workspace" => {
+            let id = args.get("id").and_then(Value::as_str).unwrap_or_default();
+            match store.workspace(id) {
+                Ok(w) => format!(
+                    "ワークスペース「{}」を、サブワークスペースとタスクごと削除します。元に戻せません。",
+                    w.name
+                ),
+                Err(_) => format!("ワークスペース（ID: {id}）を削除します。元に戻せません。"),
+            }
+        }
+        "delete_person" => {
+            let id = args.get("id").and_then(Value::as_str).unwrap_or_default();
+            match person_by_id(store, id) {
+                Ok(p) => format!("担当者「{}」を削除します。元に戻せません。", p.name),
+                Err(_) => format!("担当者（ID: {id}）を削除します。元に戻せません。"),
+            }
+        }
+        "delete_comment" => {
+            let id = args.get("id").and_then(Value::as_str).unwrap_or_default();
+            match store.comment(id) {
+                Ok(c) => format!(
+                    "コメント「{}」を削除します。元に戻せません。",
+                    short(&c.body, 40)
+                ),
+                Err(_) => format!("コメント（ID: {id}）を削除します。元に戻せません。"),
+            }
+        }
+        "delete_attachment" => {
+            let id = args.get("id").and_then(Value::as_str).unwrap_or_default();
+            match store.attachment(id) {
+                Ok(a) => format!("添付「{}」を削除します。元に戻せません。", a.name),
+                Err(_) => format!("添付（ID: {id}）を削除します。元に戻せません。"),
+            }
+        }
+        "revoke_tickets" => {
+            let id = args
+                .get("task_id")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            match store.task(id) {
+                Ok(t) => format!(
+                    "タスク「{}」の、使われていない完了チケットをすべて取り消します。元に戻せません。",
+                    t.title
+                ),
+                Err(_) => format!("タスク（ID: {id}）の完了チケットを取り消します。元に戻せません。"),
             }
         }
         RUN_SHELL => {
@@ -220,6 +497,66 @@ fn optional<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
     args.get(key).and_then(Value::as_str)
 }
 
+fn parse_priority(v: &str) -> Result<u8, String> {
+    Ok(match v {
+        "none" => Priority::None,
+        "high" => Priority::High,
+        "mid" => Priority::Mid,
+        "low" => Priority::Low,
+        other => return Err(format!("priority が正しくありません: {other}")),
+    }
+    .value())
+}
+
+/// 文字列の配列。
+fn strings(v: &Value, key: &str) -> Result<Vec<String>, String> {
+    v.as_array()
+        .and_then(|a| a.iter().map(|s| s.as_str().map(str::to_owned)).collect())
+        .ok_or_else(|| format!("{key} が正しくありません: {v}"))
+}
+
+/// 先頭の `max` 文字。長ければ「…」を付ける。
+fn short(text: &str, max: usize) -> String {
+    let line = text.lines().next().unwrap_or_default();
+    let cut: String = line.chars().take(max).collect();
+    if cut.chars().count() < text.chars().count() {
+        format!("{cut}…")
+    } else {
+        cut
+    }
+}
+
+fn person_by_id(store: &Store, id: &str) -> Result<Person, String> {
+    store
+        .people()
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .find(|p| p.id == id)
+        .ok_or_else(|| format!("担当者が見つかりません: {id}"))
+}
+
+fn person_json(p: &Person) -> Value {
+    json!({"id": p.id, "name": p.name, "note": p.note, "is_self": p.is_self, "workspace_ids": p.workspace_ids})
+}
+
+fn workspace_json(w: &Workspace) -> Value {
+    json!({"id": w.id, "name": w.name, "parent_id": w.parent_id, "icon": w.icon, "color": w.color, "date": w.date})
+}
+
+fn comment_json(c: &Comment) -> Value {
+    json!({
+        "id": c.id,
+        "author_id": c.author_id,
+        "body": c.body,
+        "pinned": c.pinned,
+        "review": c.review,
+        "reply_to": c.reply_to,
+        "resolved": c.resolved_at.is_some(),
+        "status": c.status.map(Status::as_str),
+        "at": malakt_core::view::format_datetime(c.created_at),
+    })
+}
+
 /// 渡された項目だけを下書きに書き込む。
 fn apply_fields(draft: &mut TaskDraft, args: &Value) -> Result<(), String> {
     if let Some(v) = optional(args, "title") {
@@ -232,14 +569,7 @@ fn apply_fields(draft: &mut TaskDraft, args: &Value) -> Result<(), String> {
         draft.status = Status::parse(v).ok_or_else(|| format!("status が正しくありません: {v}"))?;
     }
     if let Some(v) = optional(args, "priority") {
-        draft.priority = match v {
-            "none" => Priority::None,
-            "high" => Priority::High,
-            "mid" => Priority::Mid,
-            "low" => Priority::Low,
-            other => return Err(format!("priority が正しくありません: {other}")),
-        }
-        .value();
+        draft.priority = parse_priority(v)?;
     }
     // 日付と親は、null か空の文字列で「なし」にできる
     // 日付は「2026-12-01T18:00」や「明日 14時」のような書き方も読む
@@ -456,6 +786,7 @@ fn task_json(task: &Task) -> Value {
         "due": task.due,
         "percent": task.percent,
         "workspace_id": task.workspace_id,
+        "linked_workspace_ids": task.linked_workspace_ids,
         "parent_id": task.parent_id,
         "assignee_ids": task.assignee_ids,
         "assignees": task.assignee_ids.iter().map(|id| json!({
@@ -492,13 +823,13 @@ pub fn execute(
             .workspaces()
             .map_err(core)?
             .iter()
-            .map(|w| json!({"id": w.id, "name": w.name, "parent_id": w.parent_id}))
+            .map(workspace_json)
             .collect(),
         "list_people" => store
             .people()
             .map_err(core)?
             .iter()
-            .map(|p| json!({"id": p.id, "name": p.name, "is_self": p.is_self, "workspace_ids": p.workspace_ids}))
+            .map(person_json)
             .collect(),
         "list_tasks" => {
             let filter = TaskFilter {
@@ -526,8 +857,30 @@ pub fn execute(
                 .comments(id)
                 .map_err(core)?
                 .iter()
-                .map(|c| json!({"author_id": c.author_id, "body": c.body, "pinned": c.pinned}))
+                .map(comment_json)
                 .collect();
+            task["attachments"] = store
+                .attachments(id)
+                .map_err(core)?
+                .iter()
+                .map(|a| json!({"id": a.id, "name": a.name, "size": a.size}))
+                .collect();
+            // 変更履歴は新しいものから
+            let changes = store.changes(id).map_err(core)?;
+            task["changes"] = changes
+                .iter()
+                .rev()
+                .take(CHANGES_LIMIT)
+                .map(|c| {
+                    json!({
+                        "field": c.field,
+                        "from": c.old_value,
+                        "to": c.new_value,
+                        "at": malakt_core::view::format_datetime(c.created_at),
+                    })
+                })
+                .collect();
+            task["active_tickets"] = json!(store.active_ticket_count(id).map_err(core)?);
             task["subtasks"] = store
                 .subtasks(id)
                 .map_err(core)?
@@ -583,7 +936,10 @@ pub fn execute(
                     if task.roles_of(&id).is_some() {
                         let mut draft = TaskDraft::from(&task);
                         draft.assignee_ids.retain(|p| *p != id);
-                        return Ok(task_json(&store.update_task(&task.id, &draft).map_err(core)?).to_string());
+                        return Ok(
+                            task_json(&store.update_task(&task.id, &draft).map_err(core)?)
+                                .to_string(),
+                        );
                     }
                 }
                 task_json(&task)
@@ -595,7 +951,11 @@ pub fn execute(
                     draft.assignee_ids.push(id.clone());
                     task = store.update_task(&task.id, &draft).map_err(core)?;
                 }
-                task_json(&store.set_assignee_roles(&task.id, &id, roles).map_err(core)?)
+                task_json(
+                    &store
+                        .set_assignee_roles(&task.id, &id, roles)
+                        .map_err(core)?,
+                )
             }
         }
         "move_task" => {
@@ -610,12 +970,16 @@ pub fn execute(
             json!({"deleted": id})
         }
         "add_comment" => {
+            let new = malakt_core::NewComment {
+                body: required(args, "body")?.to_owned(),
+                review: args.get("review").and_then(Value::as_bool) == Some(true),
+                reply_to: optional(args, "reply_to")
+                    .filter(|id| !id.is_empty())
+                    .map(str::to_owned),
+                ..Default::default()
+            };
             let comment = store
-                .add_comment(
-                    required(args, "task_id")?,
-                    author_id,
-                    required(args, "body")?,
-                )
+                .add_comment_with(required(args, "task_id")?, author_id, &new)
                 .map_err(core)?;
             json!({"id": comment.id})
         }
@@ -629,11 +993,356 @@ pub fn execute(
         "create_person" => {
             let name = required(args, "name")?;
             let p = match optional(args, "workspace_id").filter(|id| !id.is_empty()) {
-                Some(w) => store.create_local_person(name, w),
+                Some(workspace) => store.create_local_person(name, workspace),
                 None => store.create_person(name, false),
             }
             .map_err(core)?;
-            json!({"id": p.id, "name": p.name, "workspace_ids": p.workspace_ids})
+            person_json(&p)
+        }
+        "update_workspace" => {
+            let id = required(args, "id")?;
+            let before = store.workspace(id).map_err(core)?;
+            let name = optional(args, "name").map(str::trim);
+            if name == Some("") {
+                return Err("name が空です".into());
+            }
+            // 移す先を先に確かめて、名前だけ変わることがないようにする
+            let parent = match args.get("parent_id") {
+                None => None,
+                Some(Value::Null) => Some(None),
+                Some(Value::String(s)) if s.is_empty() => Some(None),
+                Some(Value::String(s)) => {
+                    let inside = store.workspace_subtree_ids(id).map_err(core)?;
+                    if inside.iter().any(|w| w == s) {
+                        return Err("ワークスペースを、自分かその中へは移せません".into());
+                    }
+                    store.workspace(s).map_err(core)?;
+                    Some(Some(s.as_str()))
+                }
+                Some(other) => return Err(format!("parent_id が正しくありません: {other}")),
+            };
+            if let Some(name) = name.filter(|n| *n != before.name) {
+                store.rename_workspace(id, name).map_err(core)?;
+            }
+            if let Some(parent) = parent.filter(|p| *p != before.parent_id.as_deref()) {
+                store.move_workspace(id, parent).map_err(core)?;
+            }
+            workspace_json(&store.workspace(id).map_err(core)?)
+        }
+        "delete_workspace" => {
+            let id = required(args, "id")?;
+            store.delete_workspace(id).map_err(core)?;
+            json!({"deleted": id})
+        }
+        "update_person" => {
+            let id = required(args, "id")?;
+            let person = person_by_id(store, id)?;
+            let name = optional(args, "name").unwrap_or(&person.name);
+            let note = optional(args, "note").unwrap_or(&person.note);
+            let workspaces = match args.get("workspace_ids") {
+                None => None,
+                Some(v) => Some(strings(v, "workspace_ids")?),
+            };
+            // 先に確かめて、名前だけ変わることがないようにする
+            if let Some(ids) = &workspaces {
+                if person.is_self && !ids.is_empty() {
+                    return Err("「自分」は、すべてのワークスペースで使います".into());
+                }
+                for w in ids {
+                    store.workspace(w).map_err(core)?;
+                }
+            }
+            if name.trim().is_empty() {
+                return Err("name が空です".into());
+            }
+            store.update_person(id, name, note).map_err(core)?;
+            if let Some(ids) = workspaces {
+                store.set_person_workspaces(id, &ids).map_err(core)?;
+            }
+            person_json(&person_by_id(store, id)?)
+        }
+        "delete_person" => {
+            let id = required(args, "id")?;
+            if person_by_id(store, id)?.is_self {
+                return Err("「自分」は削除できません".into());
+            }
+            store.delete_person(id).map_err(core)?;
+            json!({"deleted": id})
+        }
+        "update_comment" => {
+            let id = required(args, "id")?;
+            let comment = store.comment(id).map_err(core)?;
+            let body = optional(args, "body");
+            let flag = |key: &str| -> Result<Option<bool>, String> {
+                match args.get(key) {
+                    None => Ok(None),
+                    Some(Value::Bool(b)) => Ok(Some(*b)),
+                    Some(other) => Err(format!("{key} が正しくありません: {other}")),
+                }
+            };
+            let (pinned, resolved) = (flag("pinned")?, flag("resolved")?);
+            // 先に確かめて、一部だけ変わることがないようにする
+            if body.is_some_and(|b| b.trim().is_empty()) {
+                return Err("body が空です".into());
+            }
+            if resolved.is_some() && !comment.is_thread_root() {
+                return Err("解決済みにできるのはレビューコメントだけです".into());
+            }
+            if let Some(body) = body.filter(|b| *b != comment.body) {
+                store.update_comment(id, body).map_err(core)?;
+            }
+            if let Some(pinned) = pinned {
+                store.set_comment_pinned(id, pinned).map_err(core)?;
+            }
+            if let Some(resolved) = resolved {
+                store.set_comment_resolved(id, resolved).map_err(core)?;
+            }
+            comment_json(&store.comment(id).map_err(core)?)
+        }
+        "delete_comment" => {
+            let id = required(args, "id")?;
+            store.delete_comment(id).map_err(core)?;
+            json!({"deleted": id})
+        }
+        "link_task" => {
+            let id = required(args, "id")?;
+            let workspace = required(args, "workspace_id")?;
+            let linked = args
+                .get("linked")
+                .and_then(Value::as_bool)
+                .ok_or("linked が必要です")?;
+            let task = if linked {
+                store.link_task(id, workspace)
+            } else {
+                store.unlink_task(id, workspace)
+            }
+            .map_err(core)?;
+            task_json(&task)
+        }
+        "reorder_tasks" => {
+            let ids = strings(args.get("ids").unwrap_or(&Value::Null), "ids")?;
+            for id in &ids {
+                store.task(id).map_err(core)?;
+            }
+            store.set_task_order(&ids).map_err(core)?;
+            json!({"ordered": ids.len()})
+        }
+        "add_attachment" => {
+            let task_id = required(args, "task_id")?;
+            let path = expand_dir(required(args, "path")?);
+            let meta = std::fs::metadata(&path)
+                .map_err(|e| format!("ファイルを読めません（{}）: {e}", path.display()))?;
+            if !meta.is_file() {
+                return Err(format!("ファイルではありません: {}", path.display()));
+            }
+            if meta.len() > malakt_core::MAX_ATTACHMENT_BYTES {
+                return Err(format!(
+                    "添付できるのは 1 ファイル {} MiB までです（{} は {} MiB）",
+                    malakt_core::MAX_ATTACHMENT_BYTES / 1024 / 1024,
+                    path.display(),
+                    meta.len() / 1024 / 1024
+                ));
+            }
+            let bytes = std::fs::read(&path)
+                .map_err(|e| format!("ファイルを読めません（{}）: {e}", path.display()))?;
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let a = store
+                .add_attachment(task_id, author_id, &name, &bytes)
+                .map_err(core)?;
+            json!({"id": a.id, "name": a.name, "size": a.size})
+        }
+        "delete_attachment" => {
+            let id = required(args, "id")?;
+            store.delete_attachment(id).map_err(core)?;
+            json!({"deleted": id})
+        }
+        "issue_ticket" => {
+            let task_id = required(args, "task_id")?;
+            let person = optional(args, "person_id").filter(|id| !id.is_empty());
+            let ticket = store.issue_ticket(task_id, person).map_err(core)?;
+            json!({
+                "ticket": ticket.secret,
+                "person_id": ticket.person_id,
+                "whole_task": ticket.whole_task,
+                "usage": "malakt-mahoz redeem <ticket> --message \"完了報告\"",
+            })
+        }
+        "revoke_tickets" => {
+            let task_id = required(args, "task_id")?;
+            json!({"revoked": store.revoke_tickets(task_id).map_err(core)?})
+        }
+        "list_categories" => json!(store.categories().map_err(core)?),
+        "list_notices" => {
+            let limit = args
+                .get("limit")
+                .and_then(Value::as_u64)
+                .map_or(50, |n| n.clamp(1, 200) as usize);
+            store
+                .notices(limit)
+                .map_err(core)?
+                .iter()
+                .map(|n| {
+                    json!({
+                        "id": n.id,
+                        "text": n.headline(),
+                        "task_id": n.task_id,
+                        "excerpt": n.excerpt,
+                        "unread": n.is_unread(),
+                        "at": malakt_core::view::format_datetime(n.created_at),
+                    })
+                })
+                .collect()
+        }
+        "mark_notices_read" => match args.get("ids") {
+            None => json!({"read": store.mark_all_notices_read().map_err(core)?}),
+            Some(v) => {
+                let ids = strings(v, "ids")?;
+                for id in &ids {
+                    store.mark_notice_read(id).map_err(core)?;
+                }
+                json!({"read": ids.len()})
+            }
+        },
+        "get_workspace_settings" => {
+            let id = required(args, "id")?;
+            let workspace = store.workspace(id).map_err(core)?;
+            let defaults = store.task_defaults(id).map_err(core)?;
+            let (due, due_days, due_date) = match &defaults.due {
+                DueRule::None => ("none", None, None),
+                DueRule::Relative { days } => ("relative", Some(*days), None),
+                DueRule::Fixed { date } => ("fixed", None, Some(date.clone())),
+            };
+            json!({
+                "id": id,
+                "date": workspace.date,
+                "assignee_ids": defaults.assignee_ids,
+                "due": due,
+                "due_days": due_days,
+                "due_date": due_date,
+                "due_time": defaults.due_time,
+                "priority": defaults.priority.map(priority_name),
+                "categories": defaults.categories,
+                "description": defaults.description,
+                "link_workspace_ids": defaults.link_workspace_ids,
+                "ai_context": store.setting(&workspace_context_key(id)).map_err(core)?.unwrap_or_default(),
+                "terminal_dir": store.setting(&workspace_dir_key(id)).map_err(core)?.unwrap_or_default(),
+            })
+        }
+        "update_workspace_settings" => {
+            let id = required(args, "id")?;
+            store.workspace(id).map_err(core)?;
+            let mut defaults = store.task_defaults(id).map_err(core)?;
+            if let Some(v) = args.get("assignee_ids") {
+                defaults.assignee_ids = strings(v, "assignee_ids")?;
+            }
+            if let Some(v) = args.get("categories") {
+                defaults.categories = strings(v, "categories")?;
+            }
+            if let Some(v) = args.get("link_workspace_ids") {
+                defaults.link_workspace_ids = strings(v, "link_workspace_ids")?;
+            }
+            if let Some(v) = optional(args, "description") {
+                defaults.description = v.to_owned();
+            }
+            if let Some(v) = optional(args, "due_time") {
+                defaults.due_time = v.to_owned();
+            }
+            match args.get("priority") {
+                None => {}
+                Some(Value::Null) => defaults.priority = None,
+                Some(Value::String(s)) => defaults.priority = Some(parse_priority(s)?),
+                Some(other) => return Err(format!("priority が正しくありません: {other}")),
+            }
+            let now = malakt_core::view::now();
+            let days = args.get("due_days").map(|v| {
+                v.as_i64()
+                    .and_then(|n| i32::try_from(n).ok())
+                    .ok_or_else(|| format!("due_days が正しくありません: {v}"))
+            });
+            let date_of = |key: &str| optional(args, key).map(|d| when::resolve(d, &now, None));
+            match optional(args, "due") {
+                None => {
+                    // 決め方はそのままで、日数か日付だけを変える
+                    match &mut defaults.due {
+                        DueRule::Relative { days: d } => {
+                            if let Some(days) = days {
+                                *d = days?;
+                            }
+                        }
+                        DueRule::Fixed { date } => {
+                            if let Some(d) = date_of("due_date") {
+                                *date = d;
+                            }
+                        }
+                        DueRule::None => {}
+                    }
+                }
+                Some("none") => defaults.due = DueRule::None,
+                Some("relative") => {
+                    defaults.due = DueRule::Relative {
+                        days: days.transpose()?.unwrap_or(0),
+                    }
+                }
+                Some("fixed") => {
+                    defaults.due = DueRule::Fixed {
+                        date: date_of("due_date")
+                            .ok_or("due が fixed のときは due_date が必要です")?,
+                    }
+                }
+                Some(other) => return Err(format!("due が正しくありません: {other}")),
+            }
+            let date = match args.get("date") {
+                None => None,
+                Some(Value::Null) => Some(None),
+                Some(Value::String(s)) if s.trim().is_empty() => Some(None),
+                Some(Value::String(s)) => Some(Some(when::resolve(s, &now, None))),
+                Some(other) => return Err(format!("date が正しくありません: {other}")),
+            };
+            let context = optional(args, "ai_context").map(str::trim);
+            if let Some(error) = context.and_then(workspace_context_error) {
+                return Err(error);
+            }
+            let dir = optional(args, "terminal_dir").map(str::trim);
+            if let Some(dir) = dir.filter(|d| !d.is_empty()) {
+                if !expand_dir(dir).is_dir() {
+                    return Err(format!("フォルダーが見つかりません: {dir}"));
+                }
+            }
+            // 先に全部を確かめて、一部だけ保存されることがないようにする
+            malakt_core::defaults::clean(&defaults).map_err(core)?;
+            if let Some(Some(d)) = &date {
+                if !malakt_core::is_valid_date(d) {
+                    return Err(format!("date が正しくありません: {d}"));
+                }
+            }
+            if let Some(date) = date {
+                store
+                    .set_workspace_date(id, date.as_deref())
+                    .map_err(core)?;
+            }
+            store.set_task_defaults(&defaults).map_err(core)?;
+            if let Some(context) = context {
+                store
+                    .set_setting(
+                        &workspace_context_key(id),
+                        (!context.is_empty()).then_some(context),
+                    )
+                    .map_err(core)?;
+            }
+            if let Some(dir) = dir {
+                store
+                    .set_setting(&workspace_dir_key(id), (!dir.is_empty()).then_some(dir))
+                    .map_err(core)?;
+            }
+            return execute(
+                store,
+                author_id,
+                "get_workspace_settings",
+                &json!({"id": id}),
+            );
         }
         other => return Err(format!("{other} というツールはありません")),
     };
@@ -670,6 +1379,23 @@ pub fn summary(name: &str, args: &Value) -> String {
         "add_comment" => "コメントを追加".into(),
         "create_workspace" => format!("ワークスペースを作成: {}", arg("name")),
         "create_person" => format!("担当者を追加: {}", arg("name")),
+        "update_workspace" => "ワークスペースを更新".into(),
+        "delete_workspace" => "ワークスペースを削除".into(),
+        "update_person" => "担当者を更新".into(),
+        "delete_person" => "担当者を削除".into(),
+        "update_comment" => "コメントを更新".into(),
+        "delete_comment" => "コメントを削除".into(),
+        "link_task" => "タスクの同期を変更".into(),
+        "reorder_tasks" => "タスクを並べ替え".into(),
+        "add_attachment" => format!("ファイルを添付: {}", arg("path")),
+        "delete_attachment" => "添付を削除".into(),
+        "issue_ticket" => "完了チケットを発行".into(),
+        "revoke_tickets" => "完了チケットを取り消し".into(),
+        "list_categories" => "カテゴリ一覧を取得".into(),
+        "list_notices" => "通知を取得".into(),
+        "mark_notices_read" => "通知を既読にする".into(),
+        "get_workspace_settings" => "ワークスペースの設定を取得".into(),
+        "update_workspace_settings" => "ワークスペースの設定を変更".into(),
         GITHUB_FETCH => format!("GitHub から取得: {}", arg("url")),
         SLACK_FETCH => format!("Slack から取得: {}", arg("url")),
         RUN_SHELL => format!("コマンドを実行: {}", arg("command")),
@@ -719,10 +1445,13 @@ pub fn system_prompt(context: &str) -> String {
     };
     let prompt = format!(
         "あなたは、タスク管理アプリ malakt-mahoz の中で動くアシスタントです。\
-         ツールを使って、ユーザーのタスク、ワークスペース、担当者を読み書きできます。\n\
+         ツールを使って、ユーザーのタスク、ワークスペース、担当者、コメントを読み書きでき、\
+         画面（開く場所、一覧の絞り込みと並び順、表の列、パネル、ペイン）、カスタマイズ（テーマ、レイアウト、背景、色、書体、密度）、\
+         AI の設定、ロック、エクスポートとインポートも操作できます。\n\
+         - アプリでできる操作は、ユーザーに頼まれたら、どれもツールで実行してください。「できません」「ご自身で操作してください」と答える前に、使えるツールを確かめてください。今の値が要るときは get_screen、get_customization、get_ai_settings で読んでください。\n\
          - 日付は YYYY-MM-DD、時刻つきなら YYYY-MM-DD HH:MM で渡します。時刻が分かる期限には時刻も入れてください。今の日時と、ユーザーが今開いている画面は、ユーザーのメッセージの最後にアプリが添えます。
 \
-         - 頼まれた操作は、確認を取らずにツールで実行してください。タスクの削除とシェルのコマンドは、アプリが実行の前にユーザーへ確認を出します。\n\
+         - 頼まれた操作は、確認を取らずにツールで実行してください。削除のように元に戻せない操作とシェルのコマンドは、アプリが実行の前にユーザーへ確認を出します。\n\
          - ID はツールで調べてから使ってください。ID を作らないでください。\n\
          - 担当者は ID か名前で指定できます。登録されていない人の名前が出たら、聞き返さずにその名前で指定してください（アプリがその場で担当者に登録します）。担当者の役（RACI: {RACI}）は set_assignee か、create_task / update_task の assignees で付けてください。\n\
          - GitHub のリンクの中身は、必ず {GITHUB_FETCH} で取ってきてください（アプリが、ユーザーのログイン済みの gh で読みます）。{RUN_SHELL} で gh を呼ぶのは、{GITHUB_FETCH} で読めない種類のものだけにしてください。\n\
@@ -788,7 +1517,294 @@ mod tests {
             .map(|t| t.name)
             .filter(|n| needs_confirmation(n))
             .collect();
-        assert_eq!(asking, ["delete_task", "run_shell"]);
+        assert_eq!(
+            asking,
+            [
+                "delete_task",
+                "delete_workspace",
+                "delete_person",
+                "delete_comment",
+                "delete_attachment",
+                "revoke_tickets",
+                "run_shell"
+            ]
+        );
+        // 書き込みのツールは、どれも一覧にある
+        let names: Vec<_> = definitions().iter().map(|t| t.name).collect();
+        for name in WRITES {
+            assert!(names.contains(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn workspaces_people_and_comments_are_changed_and_removed() {
+        let mut store = Store::open_in_memory().unwrap();
+        let home = run(&mut store, "create_workspace", json!({"name": "家"}));
+        let work = run(&mut store, "create_workspace", json!({"name": "仕事"}));
+        // 名前を変えて、別のワークスペースの中へ移す
+        let moved = run(
+            &mut store,
+            "update_workspace",
+            json!({"id": work["id"], "name": "会社", "parent_id": home["id"]}),
+        );
+        assert_eq!(moved["name"], "会社");
+        assert_eq!(moved["parent_id"], home["id"]);
+        // 自分の中へは移せず、名前も変わらない
+        let err = execute(
+            &mut store,
+            None,
+            "update_workspace",
+            &json!({"id": home["id"], "name": "x", "parent_id": work["id"]}),
+        )
+        .unwrap_err();
+        assert!(err.contains("移せません"), "{err}");
+        assert_eq!(
+            store.workspace(home["id"].as_str().unwrap()).unwrap().name,
+            "家"
+        );
+        let top = run(
+            &mut store,
+            "update_workspace",
+            json!({"id": work["id"], "parent_id": null}),
+        );
+        assert_eq!(top["parent_id"], Value::Null);
+
+        // 担当者: そのワークスペースだけの人を作り、名前・メモ・使う場所を変える
+        let local = run(
+            &mut store,
+            "create_person",
+            json!({"name": "鈴木", "workspace_id": home["id"]}),
+        );
+        assert_eq!(local["workspace_ids"], json!([home["id"]]));
+        let changed = run(
+            &mut store,
+            "update_person",
+            json!({"id": local["id"], "name": "鈴木さん", "note": "経理", "workspace_ids": []}),
+        );
+        assert_eq!(changed["name"], "鈴木さん");
+        assert_eq!(changed["note"], "経理");
+        assert_eq!(changed["workspace_ids"], json!([]));
+        store.ensure_self().unwrap();
+        let me = store
+            .people()
+            .unwrap()
+            .into_iter()
+            .find(|p| p.is_self)
+            .unwrap();
+        assert!(
+            execute(&mut store, None, "delete_person", &json!({"id": me.id}))
+                .unwrap_err()
+                .contains("自分")
+        );
+        assert!(
+            confirmation_text(&store, "delete_person", &json!({"id": local["id"]}))
+                .contains("鈴木さん")
+        );
+        run(&mut store, "delete_person", json!({"id": local["id"]}));
+        assert_eq!(store.people().unwrap().len(), 1);
+
+        // コメント: 返信、書き直し、ピン留め、解決、削除
+        let task = run(
+            &mut store,
+            "create_task",
+            json!({"title": "見積もり", "workspace_id": home["id"]}),
+        );
+        let review = run(
+            &mut store,
+            "add_comment",
+            json!({"task_id": task["id"], "body": "金額を確認", "review": true}),
+        );
+        run(
+            &mut store,
+            "add_comment",
+            json!({"task_id": task["id"], "body": "OK です", "reply_to": review["id"]}),
+        );
+        let updated = run(
+            &mut store,
+            "update_comment",
+            json!({"id": review["id"], "body": "金額を再確認", "pinned": true, "resolved": true}),
+        );
+        assert_eq!(updated["body"], "金額を再確認");
+        assert_eq!(updated["pinned"], true);
+        assert_eq!(updated["resolved"], true);
+        let read = run(&mut store, "get_task", json!({"id": task["id"]}));
+        assert_eq!(read["comments"][1]["reply_to"], review["id"]);
+        run(
+            &mut store,
+            "delete_comment",
+            json!({"id": read["comments"][1]["id"]}),
+        );
+        assert_eq!(
+            store.comments(task["id"].as_str().unwrap()).unwrap().len(),
+            1
+        );
+
+        // 同期: ほかのワークスペースにも出し、外す
+        let linked = run(
+            &mut store,
+            "link_task",
+            json!({"id": task["id"], "workspace_id": work["id"], "linked": true}),
+        );
+        assert_eq!(linked["linked_workspace_ids"], json!([work["id"]]));
+        let unlinked = run(
+            &mut store,
+            "link_task",
+            json!({"id": task["id"], "workspace_id": work["id"], "linked": false}),
+        );
+        assert_eq!(unlinked["linked_workspace_ids"], json!([]));
+
+        // ワークスペースを消すと、中のタスクも消える
+        assert!(
+            confirmation_text(&store, "delete_workspace", &json!({"id": home["id"]}))
+                .contains("家")
+        );
+        run(&mut store, "delete_workspace", json!({"id": home["id"]}));
+        assert!(store.task(task["id"].as_str().unwrap()).is_err());
+        assert_eq!(
+            run(&mut store, "list_workspaces", json!({}))
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn workspace_settings_are_read_and_written_together() {
+        let mut store = Store::open_in_memory().unwrap();
+        let ws = run(&mut store, "create_workspace", json!({"name": "文化祭"}));
+        let other = run(&mut store, "create_workspace", json!({"name": "広報"}));
+        let p = run(&mut store, "create_person", json!({"name": "田中"}));
+        let dir = tempfile::tempdir().unwrap();
+        let saved = run(
+            &mut store,
+            "update_workspace_settings",
+            json!({
+                "id": ws["id"], "date": "2026-12-20", "due": "relative", "due_days": -7,
+                "due_time": "18:00", "priority": "high", "assignee_ids": [p["id"]],
+                "categories": ["準備"], "description": "やること:", "link_workspace_ids": [other["id"]],
+                "ai_context": "優先度は高にする", "terminal_dir": dir.path().display().to_string(),
+            }),
+        );
+        assert_eq!(saved["date"], "2026-12-20");
+        assert_eq!(saved["due"], "relative");
+        assert_eq!(saved["due_days"], -7);
+        assert_eq!(saved["priority"], "high");
+        assert_eq!(saved["ai_context"], "優先度は高にする");
+        // 決め方を変えずに日数だけ変える
+        let days = run(
+            &mut store,
+            "update_workspace_settings",
+            json!({"id": ws["id"], "due_days": -3}),
+        );
+        assert_eq!(days["due_days"], -3);
+        assert_eq!(days["due_time"], "18:00");
+        // 既定値が新しいタスクに入る
+        let draft = store.draft_for(ws["id"].as_str(), "受付").unwrap();
+        assert_eq!(draft.due.as_deref(), Some("2026-12-17 18:00"));
+        assert_eq!(
+            draft.assignee_ids,
+            vec![p["id"].as_str().unwrap().to_owned()]
+        );
+
+        // 1 つでも正しくなければ、何も変えない
+        for bad in [
+            json!({"id": ws["id"], "date": "あさって以降", "categories": ["x"]}),
+            json!({"id": ws["id"], "categories": ["x"], "terminal_dir": "/no/such/folder/here"}),
+            json!({"id": ws["id"], "categories": ["x"], "ai_context": "あ".repeat(MAX_WORKSPACE_CONTEXT_CHARS + 1)}),
+            json!({"id": ws["id"], "categories": ["x"], "due": "fixed"}),
+        ] {
+            assert!(
+                execute(&mut store, None, "update_workspace_settings", &bad).is_err(),
+                "{bad}"
+            );
+        }
+        let after = run(
+            &mut store,
+            "get_workspace_settings",
+            json!({"id": ws["id"]}),
+        );
+        assert_eq!(after["categories"], json!(["準備"]));
+        assert_eq!(after["date"], "2026-12-20");
+        let cleared = run(
+            &mut store,
+            "update_workspace_settings",
+            json!({"id": ws["id"], "date": null, "due": "none", "ai_context": "", "terminal_dir": ""}),
+        );
+        assert_eq!(cleared["date"], Value::Null);
+        assert_eq!(cleared["due"], "none");
+        assert_eq!(cleared["ai_context"], "");
+        assert_eq!(cleared["terminal_dir"], "");
+    }
+
+    #[test]
+    fn attachments_tickets_order_and_notices() {
+        let mut store = Store::open_in_memory().unwrap();
+        let a = run(&mut store, "create_task", json!({"title": "a"}));
+        let b = run(&mut store, "create_task", json!({"title": "b"}));
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("見積.txt");
+        std::fs::write(&file, "100 円").unwrap();
+        let added = run(
+            &mut store,
+            "add_attachment",
+            json!({"task_id": a["id"], "path": file.display().to_string()}),
+        );
+        assert_eq!(added["name"], "見積.txt");
+        let read = run(&mut store, "get_task", json!({"id": a["id"]}));
+        assert_eq!(read["attachments"][0]["id"], added["id"]);
+        assert!(
+            confirmation_text(&store, "delete_attachment", &json!({"id": added["id"]}))
+                .contains("見積.txt")
+        );
+        run(&mut store, "delete_attachment", json!({"id": added["id"]}));
+        assert!(store
+            .attachments(a["id"].as_str().unwrap())
+            .unwrap()
+            .is_empty());
+        assert!(execute(
+            &mut store,
+            None,
+            "add_attachment",
+            &json!({"task_id": a["id"], "path": dir.path().display().to_string()}),
+        )
+        .unwrap_err()
+        .contains("ファイルではありません"));
+
+        let ticket = run(&mut store, "issue_ticket", json!({"task_id": a["id"]}));
+        assert!(!ticket["ticket"].as_str().unwrap().is_empty());
+        assert_eq!(
+            run(&mut store, "get_task", json!({"id": a["id"]}))["active_tickets"],
+            1
+        );
+        assert_eq!(
+            run(&mut store, "revoke_tickets", json!({"task_id": a["id"]}))["revoked"],
+            1
+        );
+
+        // 手動の順に並べる
+        run(
+            &mut store,
+            "reorder_tasks",
+            json!({"ids": [b["id"], a["id"]]}),
+        );
+        let (pos_a, pos_b) = (
+            store.task(a["id"].as_str().unwrap()).unwrap().position,
+            store.task(b["id"].as_str().unwrap()).unwrap().position,
+        );
+        assert!(pos_b < pos_a, "{pos_a} {pos_b}");
+
+        run(
+            &mut store,
+            "update_task",
+            json!({"id": a["id"], "categories": ["買い物", "家"]}),
+        );
+        assert_eq!(
+            run(&mut store, "list_categories", json!({})),
+            json!(["家", "買い物"])
+        );
+        assert_eq!(run(&mut store, "list_notices", json!({})), json!([]));
+        assert_eq!(run(&mut store, "mark_notices_read", json!({}))["read"], 0);
     }
 
     #[test]
@@ -1175,6 +2191,9 @@ mod tests {
         // シェルの種類と、聞き返さない・言い訳しない決まり
         assert!(prompt.contains(shell_name()));
         assert!(prompt.contains("聞き返さずに実行"));
+        // アプリの操作は、言い訳せずにツールで行う
+        assert!(prompt.contains("どれもツールで実行"));
+        assert!(prompt.contains("get_customization"));
         assert!(prompt.contains("途中の失敗"));
         assert!(!prompt.contains("前提と指示"));
         let prompt = system_prompt(" PR は必ずレビューする \n");
