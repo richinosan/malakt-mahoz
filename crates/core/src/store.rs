@@ -1363,6 +1363,7 @@ impl Store {
             attachments: self.all_attachments()?,
             task_defaults: self.all_task_defaults()?,
             task_alerts: self.all_task_alerts()?,
+            ai_rules: self.all_ai_rules()?,
         })
     }
 
@@ -1449,6 +1450,9 @@ impl Store {
         }
         for a in &data.task_alerts {
             crate::alert::save(&tx, a)?;
+        }
+        for r in &data.ai_rules {
+            crate::rules::save(&tx, r)?;
         }
         for a in &data.attachments {
             let known: bool = tx
