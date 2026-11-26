@@ -14,7 +14,7 @@ use gpui_kit::{
 use malakt_core::panes::{Action, Dir};
 use malakt_core::view::Priority;
 use malakt_core::{NewComment, Scope, Status, Store, TaskDraft, TaskFilter};
-use malakt_mahoz::state::{Column, Editing};
+use malakt_mahoz::state::{Column, CustomizeSection, Editing};
 use malakt_mahoz::{db, MainView, Nav};
 
 /// 押せるものではない入れ物や入力欄。押しても何も変わらないのが正しい。
@@ -50,6 +50,7 @@ const NOT_BUTTONS: &[&str] = &[
     "dialog-under",
     "font-list",
     "font-search",
+    "customize-search",
     "history-list",
     "notices-scroll",
     "ws-settings-scroll",
@@ -86,7 +87,7 @@ const MUST: &[&str] = &[
     "own-preset",
     "own-preset-name",
     "own-preset-delete",
-    "details-toggle",
+    "customize-nav",
     "font-open",
     "font",
     "font-reset",
@@ -149,7 +150,43 @@ const QUIET: &[(&str, &str)] = &[
     ("font#0", "今選んでいるフォント"),
     ("scene#0", "今選んでいる背景の画像"),
     ("カスタマイズ > preset#0", "今選んでいるテーマ"),
-    ("カスタマイズの詳細 > preset#0", "今選んでいるテーマ"),
+    (
+        "カスタマイズで検索したところ > preset#0",
+        "今選んでいるテーマ",
+    ),
+    ("カスタマイズ > customize-nav#0", "今開いているカテゴリ"),
+    (
+        "カスタマイズ（自分のテーマあり） > customize-nav#0",
+        "今開いているカテゴリ",
+    ),
+    (
+        "カスタマイズのレイアウト > customize-nav#1",
+        "今開いているカテゴリ",
+    ),
+    (
+        "カスタマイズの背景 > customize-nav#2",
+        "今開いているカテゴリ",
+    ),
+    (
+        "背景の画像を出しているカスタマイズ > customize-nav#2",
+        "今開いているカテゴリ",
+    ),
+    (
+        "カスタマイズの色と書体 > customize-nav#3",
+        "今開いているカテゴリ",
+    ),
+    (
+        "カスタマイズを変えたところ > customize-nav#3",
+        "今開いているカテゴリ",
+    ),
+    (
+        "カスタマイズの表示 > customize-nav#4",
+        "今開いているカテゴリ",
+    ),
+    (
+        "カスタマイズの AI > customize-nav#5",
+        "今開いているカテゴリ",
+    ),
     (
         "カスタマイズ（自分のテーマあり） > preset#0",
         "今選んでいるテーマ",
@@ -714,12 +751,48 @@ fn screens() -> Vec<(&'static str, Size<Pixels>, Setup)> {
                 })
             },
         ),
-        ("カスタマイズの詳細", wide, |cx, w| {
+        ("カスタマイズのレイアウト", wide, |cx, w| {
             with_view(cx, w, |v, window, cx| {
                 v.open_appearance(window, cx);
-                v.toggle_appearance_details(cx);
+                v.show_appearance_section(CustomizeSection::Layout, window, cx);
             })
         }),
+        ("カスタマイズの背景", wide, |cx, w| {
+            with_view(cx, w, |v, window, cx| {
+                v.open_appearance(window, cx);
+                v.show_appearance_section(CustomizeSection::Backdrop, window, cx);
+            })
+        }),
+        ("カスタマイズの色と書体", wide, |cx, w| {
+            with_view(cx, w, |v, window, cx| {
+                v.open_appearance(window, cx);
+                v.show_appearance_section(CustomizeSection::Look, window, cx);
+            })
+        }),
+        ("カスタマイズの表示", wide, |cx, w| {
+            with_view(cx, w, |v, window, cx| {
+                v.open_appearance(window, cx);
+                v.show_appearance_section(CustomizeSection::Display, window, cx);
+            })
+        }),
+        ("カスタマイズの AI", wide, |cx, w| {
+            with_view(cx, w, |v, window, cx| {
+                v.open_appearance(window, cx);
+                v.show_appearance_section(CustomizeSection::Ai, window, cx);
+            })
+        }),
+        (
+            "カスタマイズで検索したところ",
+            wide,
+            |cx, w| {
+                with_view(cx, w, |v, window, cx| {
+                    v.open_appearance(window, cx);
+                    v.inputs
+                        .customize_search
+                        .update(cx, |s, cx| s.set_value("ガラス", window, cx));
+                })
+            },
+        ),
         ("カスタマイズを変えたところ", wide, |cx, w| {
             use malakt_mahoz::theme::{Color, Slot};
             with_view(cx, w, |v, window, cx| {
@@ -733,9 +806,20 @@ fn screens() -> Vec<(&'static str, Size<Pixels>, Setup)> {
                 }
                 v.set_scene(malakt_mahoz::theme::Scene::Sky, window, cx);
                 v.open_appearance(window, cx);
-                v.toggle_appearance_details(cx);
+                v.show_appearance_section(CustomizeSection::Look, window, cx);
             })
         }),
+        (
+            "背景の画像を出しているカスタマイズ",
+            wide,
+            |cx, w| {
+                with_view(cx, w, |v, window, cx| {
+                    v.set_scene(malakt_mahoz::theme::Scene::Sky, window, cx);
+                    v.open_appearance(window, cx);
+                    v.show_appearance_section(CustomizeSection::Backdrop, window, cx);
+                })
+            },
+        ),
         ("背景の画像の一覧", wide, |cx, w| {
             with_view(cx, w, |v, window, cx| {
                 v.open_appearance(window, cx);

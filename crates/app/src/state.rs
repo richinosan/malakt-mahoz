@@ -90,6 +90,58 @@ pub const NEW_WORKSPACE_NAME: &str = "新規ワークスペース";
 /// 保存したばかりのテーマの名前。同じ名前があれば、後ろの番号を増やす。
 pub const NEW_PRESET_NAME: &str = "マイテーマ";
 
+/// 「カスタマイズ」の左に並ぶカテゴリ。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CustomizeSection {
+    Theme,
+    Layout,
+    Backdrop,
+    Look,
+    Display,
+    Ai,
+}
+
+impl CustomizeSection {
+    pub const ALL: [CustomizeSection; 6] = [
+        CustomizeSection::Theme,
+        CustomizeSection::Layout,
+        CustomizeSection::Backdrop,
+        CustomizeSection::Look,
+        CustomizeSection::Display,
+        CustomizeSection::Ai,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            CustomizeSection::Theme => "テーマ",
+            CustomizeSection::Layout => "レイアウト",
+            CustomizeSection::Backdrop => "背景",
+            CustomizeSection::Look => "色と書体",
+            CustomizeSection::Display => "表示",
+            CustomizeSection::Ai => "シェル",
+        }
+    }
+
+    pub fn icon(self) -> &'static str {
+        match self {
+            CustomizeSection::Theme => "palette",
+            CustomizeSection::Layout => "layout-panel-left",
+            CustomizeSection::Backdrop => "image",
+            CustomizeSection::Look => "type",
+            CustomizeSection::Display => "rows-3",
+            CustomizeSection::Ai => "square-terminal",
+        }
+    }
+
+    /// 左に並べるときの見出し。
+    pub fn group(self) -> &'static str {
+        match self {
+            CustomizeSection::Ai => "AI",
+            _ => "見た目",
+        }
+    }
+}
+
 /// ダイアログの上に、もう 1 枚重ねて出すダイアログ。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SubModal {
@@ -151,6 +203,7 @@ pub struct Inputs {
     pub icon_search: Entity<InputState>,
     pub workspace_name: Entity<InputState>,
     pub font_search: Entity<InputState>,
+    pub customize_search: Entity<InputState>,
     pub preset_name: Entity<InputState>,
     pub name: Entity<InputState>,
     pub title: Entity<InputState>,
@@ -333,8 +386,8 @@ pub struct MainView {
     pub sub_modal: Option<SubModal>,
     /// ロック中に OS の通知を押したときの、その通知。解除したら開く。
     pub open_after_unlock: Option<Id>,
-    /// 「カスタマイズ」で、1 つずつ変える行（詳細）を開いている。
-    pub appearance_details: bool,
+    /// 「カスタマイズ」で開いているカテゴリ。
+    pub appearance_section: CustomizeSection,
     pub appearance_scroll: gpui_kit::ScrollHandle,
     /// 自分で保存したテーマ。
     pub own_presets: Vec<crate::theme::Preset>,
@@ -379,6 +432,7 @@ impl MainView {
             icon_search: input(window, cx, "アイコンを検索"),
             workspace_name: input(window, cx, "ワークスペース名"),
             font_search: input(window, cx, "フォントを検索"),
+            customize_search: input(window, cx, "設定を検索"),
             preset_name: input(window, cx, "テーマの名前"),
             name: input(window, cx, "名前"),
             title: input(window, cx, "タイトル"),
@@ -546,6 +600,17 @@ impl MainView {
             |this, _, event: &InputEvent, _, cx| {
                 if matches!(event, InputEvent::Change) {
                     this.font_scroll.scroll_to_item(0, ScrollStrategy::Top);
+                    cx.notify();
+                }
+            },
+        ));
+        subs.push(cx.subscribe_in(
+            &inputs.customize_search,
+            window,
+            |this, _, event: &InputEvent, _, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.appearance_scroll
+                        .set_offset(gpui_kit::Point::default());
                     cx.notify();
                 }
             },
@@ -739,7 +804,7 @@ impl MainView {
             pane_overlay: None,
             sub_modal: None,
             open_after_unlock: None,
-            appearance_details: false,
+            appearance_section: CustomizeSection::Theme,
             appearance_scroll: gpui_kit::ScrollHandle::new(),
             own_presets: Vec::new(),
             preset_naming: None,
@@ -2542,7 +2607,14 @@ impl MainView {
         // 「AI のシェル」で選べるシェルの一覧
         crate::term::shared(cx).update(cx, |terms, cx| terms.load_profiles(cx));
         self.preset_naming = None;
-        self.appearance_details = false;
+        self.appearance_section = CustomizeSection::Theme;
+        self.appearance_scroll
+            .set_offset(gpui_kit::Point::default());
+        // 開いたらすぐ、設定を探す文字を書ける
+        self.inputs.customize_search.update(cx, |s, cx| {
+            s.set_value("", window, cx);
+            s.focus(window, cx);
+        });
         self.modal = Modal::Appearance;
         match crate::theme::own_presets(cx) {
             Ok(presets) => self.own_presets = presets,
@@ -2579,12 +2651,20 @@ impl MainView {
         cx.notify();
     }
 
-    /// 1 つずつ変える行（詳細）を開く・閉じる。
-    pub fn toggle_appearance_details(&mut self, cx: &mut Context<Self>) {
-        self.appearance_details = !self.appearance_details;
-        if self.appearance_details {
-            // 開いた行が見える所まで送る
-            self.appearance_scroll.scroll_to_bottom();
+    /// 「カスタマイズ」の左で、カテゴリを選ぶ。検索していたら、検索をやめてそのカテゴリを出す。
+    pub fn show_appearance_section(
+        &mut self,
+        section: CustomizeSection,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.appearance_section = section;
+        self.appearance_scroll
+            .set_offset(gpui_kit::Point::default());
+        if !self.inputs.customize_search.read(cx).value().is_empty() {
+            self.inputs
+                .customize_search
+                .update(cx, |s, cx| s.set_value("", window, cx));
         }
         cx.notify();
     }

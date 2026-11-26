@@ -2042,7 +2042,9 @@ fn font_and_colors_are_chosen_in_settings(cx: &mut TestAppContext) {
     ui(cx, window, |window, cx| {
         view.update(cx, |v, cx| v.open_appearance(window, cx))
     });
-    ui(cx, window, |window, cx| window.click("details-toggle", cx));
+    ui(cx, window, |window, cx| {
+        window.click(("customize-nav", 3usize), cx)
+    });
     ui(cx, window, |window, cx| window.click("font-open", cx));
     cx.update(|cx| {
         view.update(cx, |v, cx| {
@@ -2077,7 +2079,9 @@ fn font_and_colors_are_chosen_in_settings(cx: &mut TestAppContext) {
     ui(cx, window, |window, cx| {
         view.update(cx, |v, cx| v.open_appearance(window, cx))
     });
-    ui(cx, window, |window, cx| window.click("details-toggle", cx));
+    ui(cx, window, |window, cx| {
+        window.click(("customize-nav", 3usize), cx)
+    });
     let pick = |cx: &mut TestAppContext, slot: usize, hex: &str| {
         let color = Color::parse(hex).unwrap();
         // 色の見本を押すと、色を選ぶところが開く
@@ -2177,7 +2181,9 @@ fn backdrop_and_cards_are_chosen_in_settings(cx: &mut TestAppContext) {
     ui(cx, window, |window, cx| {
         view.update(cx, |v, cx| v.open_appearance(window, cx))
     });
-    ui(cx, window, |window, cx| window.click("details-toggle", cx));
+    ui(cx, window, |window, cx| {
+        window.click(("customize-nav", 2usize), cx)
+    });
     ui(cx, window, |window, cx| {
         // 画像を出していないときは、透明度とぼかしは出ない
         assert!(window.try_find("clear-slider").is_none());
@@ -2221,12 +2227,15 @@ fn backdrop_and_cards_are_chosen_in_settings(cx: &mut TestAppContext) {
         })
     });
     assert_eq!(primary(cx), "#b3344f");
+    ui(cx, window, |window, cx| {
+        window.click(("customize-nav", 3usize), cx)
+    });
     ui(cx, window, |window, cx| window.click("accent-reset", cx));
     assert_eq!(primary(cx), "#1f6fd0");
 
-    // 透明度とぼかしの行が増えたので、下の行まで送る
-    ui(cx, window, |_, cx| {
-        view.read(cx).appearance_scroll.scroll_to_bottom()
+    // カードとパネルの行は「表示」にある
+    ui(cx, window, |window, cx| {
+        window.click(("customize-nav", 4usize), cx)
     });
     // カードで表示にすると、広い画面でも表の見出しがなくなる
     ui(cx, window, |window, cx| {
@@ -2317,6 +2326,9 @@ fn backdrop_and_cards_are_chosen_in_settings(cx: &mut TestAppContext) {
     assert!(cx.update(theme::take_failure).unwrap().contains("海.png"));
 
     // 標準に戻すと、画像も、画像に合わせた色もなくなる
+    ui(cx, window, |window, cx| {
+        window.click(("customize-nav", 2usize), cx)
+    });
     ui(cx, window, |window, cx| window.click("scene-reset", cx));
     assert_eq!(saved(cx, "scene"), None);
     assert!(cx.update(|cx| theme::backdrop(cx).is_none()));
@@ -2345,14 +2357,15 @@ fn themes_are_chosen_and_saved_in_settings(cx: &mut TestAppContext) {
     ui(cx, window, |window, cx| {
         view.update(cx, |v, cx| v.open_appearance(window, cx))
     });
-    // 1 つずつ変える行は、「詳細」を押すまで出ない
+    // 開くとテーマのカテゴリが出ている。ほかのカテゴリの行は、左で選ぶまで出ない
     ui(cx, window, |window, cx| {
         assert!(window.try_find("font-open").is_none());
-        window.click("details-toggle", cx)
+        window.click(("customize-nav", 3usize), cx)
     });
     ui(cx, window, |window, cx| {
         assert!(window.try_find("font-open").is_some());
-        window.click("details-toggle", cx)
+        assert!(window.try_find(("preset", 0usize)).is_none());
+        window.click(("customize-nav", 0usize), cx)
     });
 
     // ダークフォレスト: 森の画像、ダーク、浮かせたパネル
@@ -2488,11 +2501,18 @@ fn layouts_are_chosen_in_settings(cx: &mut TestAppContext) {
     ui(cx, window, |window, cx| {
         view.update(cx, |v, cx| v.open_appearance(window, cx))
     });
+    // テーマとレイアウトは、左のカテゴリで行き来する
+    let section = |cx: &mut TestAppContext, ix: usize| {
+        ui(cx, window, |window, cx| {
+            window.click(("customize-nav", ix), cx)
+        });
+    };
     let choose = |cx: &mut TestAppContext, name: &str| {
         let ix = Layout::PATTERNS
             .iter()
             .position(|l| l.name == name)
             .unwrap();
+        section(cx, 1);
         ui(cx, window, |window, cx| window.click(("layout", ix), cx));
         let chat = cx.update(|cx| view.read(cx).ai_docked(cx));
         assert!(
@@ -2506,6 +2526,7 @@ fn layouts_are_chosen_in_settings(cx: &mut TestAppContext) {
     assert_eq!(saved(cx, "panel.overlay").as_deref(), Some("1"));
     assert_eq!(list(cx), full);
     // テーマを選んでも、詳細の出し方は変わらない
+    section(cx, 0);
     ui(cx, window, |window, cx| {
         window.click(("preset", 1usize), cx)
     });
@@ -2539,6 +2560,90 @@ fn layouts_are_chosen_in_settings(cx: &mut TestAppContext) {
     cx.update(theme::init);
     assert_eq!(saved(cx, "panel.overlay").as_deref(), Some("1"));
     assert!(cx.update(|cx| theme::overlay(cx)));
+}
+
+/// 「カスタマイズ」は開くとすぐ設定を検索でき、合う設定だけがカテゴリごとに出る。
+/// 左のカテゴリを押すと検索をやめてそのカテゴリを出し、Esc で閉じる。
+#[gpui_kit::test]
+fn customize_settings_are_searched(cx: &mut TestAppContext) {
+    use malakt_mahoz::state::CustomizeSection;
+    start(cx);
+    let (window, view) = open(cx, wide());
+    ui(cx, window, |window, cx| {
+        view.update(cx, |v, cx| v.open_appearance(window, cx))
+    });
+    let nav =
+        |window: &gpui_kit::Window, ix: usize| window.try_find(("customize-nav", ix)).is_some();
+    ui(cx, window, |window, _| {
+        // 開いたときはテーマ。左にはカテゴリがすべて並ぶ
+        assert!(window.try_find(("preset", 0usize)).is_some());
+        assert!((0..CustomizeSection::ALL.len()).all(|ix| nav(window, ix)));
+    });
+
+    // 書いた言葉に合う設定だけが出る。補足の言葉でも当たる
+    ui(cx, window, |window, cx| window.input("行の間隔", cx));
+    ui(cx, window, |window, _| {
+        assert!(window.try_find(("density", 0usize)).is_some());
+        assert!(window.try_find(("feel", 0usize)).is_none());
+        assert!(window.try_find(("preset", 0usize)).is_none());
+        assert!(nav(window, 4) && !nav(window, 0));
+    });
+
+    // いくつものカテゴリに合うときは、カテゴリごとに並ぶ
+    ui(cx, window, |window, cx| {
+        view.update(cx, |v, cx| {
+            v.inputs
+                .customize_search
+                .update(cx, |s, cx| s.set_value("カード", window, cx))
+        })
+    });
+    ui(cx, window, |window, _| {
+        assert!(window.try_find("cards-switch").is_some());
+        assert!(window.try_find("float-switch").is_some());
+        // 「カード」というレイアウトがある
+        assert!(window.try_find(("layout", 0usize)).is_some());
+        assert!(window.try_find("font-open").is_none());
+    });
+
+    // 何にも合わなければ、そう出る
+    ui(cx, window, |window, cx| {
+        view.update(cx, |v, cx| {
+            v.inputs
+                .customize_search
+                .update(cx, |s, cx| s.set_value("存在しない設定", window, cx))
+        })
+    });
+    ui(cx, window, |window, _| {
+        assert!((0..CustomizeSection::ALL.len()).all(|ix| !nav(window, ix)));
+        assert!(window.try_find("cards-switch").is_none());
+    });
+
+    // カテゴリを押すと、検索をやめてそのカテゴリだけを出す
+    ui(cx, window, |window, cx| {
+        view.update(cx, |v, cx| {
+            v.inputs
+                .customize_search
+                .update(cx, |s, cx| s.set_value("シェル", window, cx))
+        })
+    });
+    ui(cx, window, |window, cx| {
+        assert!(!nav(window, 0));
+        window.click(("customize-nav", 5usize), cx)
+    });
+    assert!(cx.update(|cx| {
+        let v = view.read(cx);
+        v.appearance_section == CustomizeSection::Ai
+            && v.inputs.customize_search.read(cx).value().is_empty()
+    }));
+    ui(cx, window, |window, _| {
+        assert!(window.try_find("shell-choice").is_some());
+        assert!((0..CustomizeSection::ALL.len()).all(|ix| nav(window, ix)));
+    });
+
+    // 検索欄に書いている途中でも、Esc で閉じる
+    ui(cx, window, |window, cx| window.input("色", cx));
+    ui(cx, window, |window, cx| window.press("escape", cx));
+    assert!(cx.update(|cx| view.read(cx).modal == Modal::None));
 }
 
 /// 1920 幅の画面でも、3 カラムにすると一覧・詳細・AI チャットの 3 つが並ぶ。
@@ -2609,7 +2714,9 @@ fn density_and_editor_themes(cx: &mut TestAppContext) {
     ui(cx, window, |window, cx| {
         view.update(cx, |v, cx| v.open_appearance(window, cx))
     });
-    ui(cx, window, |window, cx| window.click("details-toggle", cx));
+    ui(cx, window, |window, cx| {
+        window.click(("customize-nav", 4usize), cx)
+    });
     ui(cx, window, |window, cx| {
         window.click(("density", 2usize), cx)
     });
@@ -2701,8 +2808,10 @@ fn hover_feel_follows_the_theme(cx: &mut TestAppContext) {
     assert_eq!(feel(cx), Feel::Standard);
     assert_eq!(saved(cx), None);
 
-    // 詳細の「ホバー」でも選べる
-    ui(cx, window, |window, cx| window.click("details-toggle", cx));
+    // 「表示」の「ホバー」でも選べる
+    ui(cx, window, |window, cx| {
+        window.click(("customize-nav", 4usize), cx)
+    });
     for (ix, key) in [(1usize, "glass"), (2, "crisp"), (3, "tint")] {
         ui(cx, window, |window, cx| window.click(("feel", ix), cx));
         assert_eq!(saved(cx).as_deref(), Some(key));
@@ -5344,7 +5453,9 @@ fn clicking_outside_closes_the_top_dialog(cx: &mut TestAppContext) {
     ui(cx, window, |window, cx| {
         view.update(cx, |v, cx| v.open_appearance(window, cx))
     });
-    ui(cx, window, |window, cx| window.click("details-toggle", cx));
+    ui(cx, window, |window, cx| {
+        window.click(("customize-nav", 3usize), cx)
+    });
     ui(cx, window, |window, cx| window.click("font-open", cx));
     cx.update(|cx| assert_eq!(view.read(cx).sub_modal, Some(SubModal::Font)));
     let outside = spot(cx, "dialog", false);
@@ -5573,7 +5684,9 @@ fn the_ai_shell_is_chosen_in_customize(cx: &mut TestAppContext) {
     ui(cx, window, |window, cx| {
         view.update(cx, |v, cx| v.open_appearance(window, cx))
     });
-    ui(cx, window, |window, cx| window.click("details-toggle", cx));
+    ui(cx, window, |window, cx| {
+        window.click(("customize-nav", 5usize), cx)
+    });
     ui(cx, window, |window, cx| {
         assert!(window.find("shell-choice").visible());
         assert!(window.try_find("shell-choice-reset").is_some());

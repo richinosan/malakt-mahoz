@@ -227,9 +227,64 @@ fn glass(color: Hsla, cx: &App) -> Hsla {
     }
 }
 
-/// 「カスタマイズ」のダイアログと、テーマの見本の幅。見本は 1 行に 5 つ並ぶ。
-const APPEARANCE_WIDTH: Pixels = px(680.);
+/// 「カスタマイズ」のダイアログの大きさと、テーマの見本の幅。見本は 1 行に 5 つ並ぶ。
+const APPEARANCE_WIDTH: Pixels = px(980.);
+const APPEARANCE_HEIGHT: Pixels = px(620.);
+/// 「カスタマイズ」の行の右に置く、一覧を開くボタンやスライダーの幅。
+const CONTROL_WIDTH: Pixels = px(220.);
 const PRESET_WIDTH: Pixels = px(124.);
+
+/// 「カスタマイズ」の設定 1 つ。
+struct Setting {
+    section: crate::state::CustomizeSection,
+    key: SettingKey,
+    name: &'static str,
+    note: Option<&'static str>,
+    /// 名前と補足のほかに、検索で当たる言葉（小文字）。
+    words: String,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum SettingKey {
+    Themes,
+    Layouts,
+    Scene,
+    Clear,
+    Blur,
+    Font,
+    Color(crate::theme::Slot),
+    Density,
+    Feel,
+    Cards,
+    Float,
+    Shell,
+}
+
+impl Setting {
+    fn new(
+        section: crate::state::CustomizeSection,
+        key: SettingKey,
+        name: &'static str,
+        note: Option<&'static str>,
+        words: String,
+    ) -> Self {
+        Setting {
+            section,
+            key,
+            name,
+            note,
+            words: words.to_lowercase(),
+        }
+    }
+
+    /// 検索の言葉（小文字）が、名前・補足・カテゴリ・言葉のどれかに入っている。
+    fn matches(&self, query: &str) -> bool {
+        self.name.to_lowercase().contains(query)
+            || self.note.is_some_and(|n| n.to_lowercase().contains(query))
+            || self.section.label().to_lowercase().contains(query)
+            || self.words.contains(query)
+    }
+}
 
 /// 浮かせたパネルのすき間。
 const FLOAT_GAP: Pixels = px(8.);
@@ -5022,6 +5077,19 @@ impl MainView {
         body: Div,
         cx: &mut Context<Self>,
     ) -> Div {
+        self.dialog_sized(id, width, None, title, body, cx)
+    }
+
+    /// 高さを決めたダイアログ。中身を切り替えても、大きさが変わらない。
+    pub(crate) fn dialog_sized(
+        &self,
+        id: &'static str,
+        width: Pixels,
+        height: Option<Pixels>,
+        title: impl Into<SharedString>,
+        body: Div,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let theme = cx.theme().clone();
         // 外側の暗い所。押して離すまでがここなら、いちばん上のダイアログを閉じる。
         // ダイアログの中で押し始めて外で離したときは閉じない
@@ -5049,6 +5117,7 @@ impl MainView {
                     .id(id)
                     .occlude()
                     .w(width)
+                    .when_some(height, |d, height| d.h(height))
                     .max_w(relative(0.94))
                     .max_h(relative(0.9))
                     .p_4()
@@ -5084,10 +5153,9 @@ impl MainView {
         div().absolute().inset_0().child(dialog)
     }
 
-    /// 「AI のシェル」の行。AI のタブで動かすシェルを、ターミナルで開けるシェルから選ぶ。
-    fn ai_shell_row(
+    /// 「AI のシェル」。AI のタブで動かすシェルを、ターミナルで開けるシェルから選ぶ。
+    fn ai_shell_choice(
         &self,
-        label: Div,
         reset: impl Fn(&'static str, bool) -> Button,
         cx: &mut Context<Self>,
     ) -> Div {
@@ -5111,6 +5179,7 @@ impl MainView {
         // 押すと、選べるシェルのメニューが開く
         let menu = Button::new("shell-choice")
             .outline()
+            .w_full()
             .h_8()
             .child(
                 row()
@@ -5135,9 +5204,8 @@ impl MainView {
                 menu
             });
         row()
-            .gap_2()
-            .child(label)
-            .child(div().flex_1().min_w_0().flex().child(menu))
+            .gap_1()
+            .child(div().w(CONTROL_WIDTH).flex().child(menu))
             .child(
                 reset("shell-choice-reset", chosen.is_some()).on_click(cx.listener(
                     |_, _, _, cx| {
@@ -5253,305 +5321,179 @@ impl MainView {
         self.dialog("ロック", body, cx)
     }
 
-    /// 書体と色。書体の一覧は、この上にもう 1 枚重ねて出す。
+    /// 「カスタマイズ」。左に検索とカテゴリ、右にそのカテゴリの設定をカードにまとめて出す。
+    /// 書体と背景の画像の一覧は、この上にもう 1 枚重ねて出す。
     fn render_appearance(&self, cx: &mut Context<Self>) -> Div {
+        use crate::state::CustomizeSection as Section;
         let theme = cx.theme().clone();
-        let look = crate::theme::look(cx);
-        let font = self.current_font(cx);
-        let reset = |id: &'static str, shown: bool| {
-            Button::new(id)
-                .icon(app_icon("rotate-ccw"))
-                .ghost()
-                .small()
-                .tooltip("標準に戻す")
-                // 場所は取っておき、標準のままのときは見せない
-                .when(!shown, |b| b.invisible().disabled(true))
-        };
-        let label = |text: &'static str| {
-            div()
-                .w(px(112.))
-                .flex_none()
-                .text_sm()
-                .text_color(theme.muted_foreground)
-                .child(text)
-        };
-        let presets = self.preset_tiles(cx);
-        let layouts = self.layout_tiles(cx);
-        let heading = |text: &'static str| {
-            div()
-                .px_1()
-                .text_sm()
-                .text_color(theme.muted_foreground)
-                .child(text)
-        };
-        let open = self.appearance_details;
-        let toggle = row()
-            .id("details-toggle")
-            .h_8()
-            .px_2()
-            .gap_2()
-            .rounded(feel::md())
-            .cursor_pointer()
-            .text_sm()
-            .text_color(theme.muted_foreground)
-            .lit(theme.accent, cx)
-            .sunk(theme.primary.opacity(0.4), cx)
-            .child(
-                app_icon(if open {
-                    "chevron-down"
-                } else {
-                    "chevron-right"
-                })
-                .small(),
-            )
-            .child("詳細")
-            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.toggle_appearance_details(cx)))
-            .test_support();
-        let mut body = col().gap_2().child(
-            row()
-                .gap_2()
-                .child(label("フォント"))
-                .child(
-                    row()
-                        .id("font-open")
-                        .flex_1()
-                        .min_w_0()
-                        .h_8()
-                        .px_3()
-                        .gap_2()
-                        .rounded(feel::md())
-                        .border_1()
-                        .border_color(theme.input)
-                        .cursor_pointer()
-                        .lit(theme.accent, cx)
-                        .sunk(theme.primary.opacity(0.4), cx)
-                        .child(div().flex_1().truncate().child(font))
-                        .child(
-                            app_icon("chevron-right")
-                                .small()
-                                .text_color(theme.muted_foreground),
-                        )
-                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                            this.open_font_picker(window, cx)
-                        }))
-                        .test_support(),
-                )
-                .child(
-                    reset("font-reset", look.font.is_some())
-                        .on_click(cx.listener(|this, _, _, cx| this.set_font(None, cx))),
-                ),
+        let query = self
+            .inputs
+            .customize_search
+            .read(cx)
+            .value()
+            .trim()
+            .to_lowercase();
+        let searching = !query.is_empty();
+        let items: Vec<Setting> = self
+            .customize_settings(cx)
+            .into_iter()
+            .filter(|item| !searching || item.matches(&query))
+            .collect();
+        let shown: Vec<Section> = Section::ALL
+            .into_iter()
+            .filter(|section| items.iter().any(|item| item.section == *section))
+            .collect();
+
+        // 左: 検索と、見出しでまとめたカテゴリ
+        let mut nav = col().gap_0p5().child(
+            div().pb_2().child(
+                Input::new(&self.inputs.customize_search)
+                    .id("customize-search")
+                    .aria_label("設定を検索")
+                    .prefix(app_icon("search").small()),
+            ),
         );
-        for (ix, slot) in crate::theme::Slot::ALL.into_iter().enumerate() {
-            let id = ["accent-reset", "light-reset", "dark-reset"][ix];
-            body = body.child(
-                row()
-                    .gap_2()
-                    .child(label(slot.label()))
-                    .child(
-                        div().flex_1().flex().child(
-                            div()
-                                .id(("color-open", ix))
-                                .child(
-                                    ColorPicker::new(&self.color_pickers[ix])
-                                        .accessibility_label(slot.label())
-                                        .small(),
-                                )
-                                .test_support(),
-                        ),
+        let mut group = "";
+        for (ix, section) in Section::ALL.into_iter().enumerate() {
+            if searching && !shown.contains(&section) {
+                continue;
+            }
+            if section.group() != group {
+                group = section.group();
+                nav = nav.child(
+                    div()
+                        .px_3()
+                        .pt_3()
+                        .pb_1()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(group),
+                );
+            }
+            let active = !searching && self.appearance_section == section;
+            nav = nav.child(
+                row().child(
+                    self.nav_link(
+                        ("customize-nav", ix),
+                        app_icon(section.icon()).small(),
+                        section.label(),
+                        active,
+                        cx,
                     )
-                    .child(reset(id, look.color(slot).is_some()).on_click(cx.listener(
-                        move |this, _, window, cx| this.set_color(slot, None, window, cx),
-                    ))),
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        this.show_appearance_section(section, window, cx)
+                    }))
+                    .test_support(),
+                ),
             );
         }
-        let scene = crate::theme::scene(cx);
-        let has_scene = scene != crate::theme::Scene::None;
-        let body = body
-            .child(
-                row()
-                    .gap_2()
-                    .child(label("背景の画像"))
-                    .child(
-                        row()
-                            .id("scene-open")
-                            .flex_1()
-                            .min_w_0()
-                            .h_8()
-                            .px_3()
-                            .gap_2()
-                            .rounded(feel::md())
-                            .border_1()
-                            .border_color(theme.input)
-                            .cursor_pointer()
-                            .lit(theme.accent, cx)
-                            .sunk(theme.primary.opacity(0.4), cx)
-                            .child(div().flex_1().truncate().child(scene.label()))
-                            .child(
-                                app_icon("chevron-right")
-                                    .small()
-                                    .text_color(theme.muted_foreground),
-                            )
-                            .on_click(
-                                cx.listener(|this, _: &ClickEvent, _, cx| {
-                                    this.open_scene_picker(cx)
-                                }),
-                            )
-                            .test_support(),
-                    )
-                    .child(reset("scene-reset", has_scene).on_click(cx.listener(
-                        |this, _, window, cx| this.set_scene(crate::theme::Scene::None, window, cx),
-                    ))),
-            )
-            // 透明度とぼかしは、背景の画像を出しているときだけ
-            .when(has_scene, |d| {
-                let slider = |id: &'static str, state: &Entity<SliderState>, name: &'static str| {
-                    div()
-                        .id(id)
-                        .flex_1()
-                        .child(Slider::new(state).accessibility_label(name))
-                        .test_support()
-                };
-                d.child(
-                    row()
-                        .gap_2()
-                        .child(label("透明度"))
-                        .child(slider("clear-slider", &self.clear_slider, "透明度"))
-                        .child(reset("clear-reset", false)),
-                )
-                .child(
-                    row()
-                        .gap_2()
-                        .child(label("ぼかし"))
-                        .child(slider("blur-slider", &self.blur_slider, "ぼかし"))
-                        .child(reset("blur-reset", false)),
-                )
-            })
-            .child(
-                row()
-                    .gap_2()
-                    .child(label("密度"))
-                    .child(
-                        row().flex_1().gap_1().children(
-                            crate::theme::Density::ALL.into_iter().enumerate().map(
-                                |(ix, density)| {
-                                    chip(
-                                        ("density", ix),
-                                        density.label(),
-                                        crate::theme::density(cx) == density,
-                                        cx,
-                                    )
-                                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                        this.set_density(density, cx)
-                                    }))
-                                    .test_support()
-                                },
-                            ),
-                        ),
-                    )
-                    .child(reset("density-reset", false)),
-            )
-            .child(
-                row()
-                    .gap_2()
-                    .child(label("ホバー"))
-                    .child(
-                        row().flex_1().gap_1().children(
-                            crate::theme::Feel::ALL
-                                .into_iter()
-                                .enumerate()
-                                .map(|(ix, feel)| {
-                                    chip(
-                                        ("feel", ix),
-                                        feel.label(),
-                                        crate::theme::feel(cx) == feel,
-                                        cx,
-                                    )
-                                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                        this.set_feel(feel, cx)
-                                    }))
-                                    .test_support()
-                                }),
-                        ),
-                    )
-                    .child(reset("feel-reset", false)),
-            )
-            .child(
-                row()
-                    .gap_2()
-                    .child(label("タスクの一覧"))
-                    .child(
-                        div().flex_1().flex().child(
-                            Switch::new("cards-switch")
-                                .label("カードで表示")
-                                .checked(crate::theme::cards(cx))
-                                .on_click(
-                                    cx.listener(|this, on: &bool, _, cx| this.set_cards(*on, cx)),
-                                ),
-                        ),
-                    )
-                    .child(reset("cards-reset", false)),
-            )
-            .child(
-                row()
-                    .gap_2()
-                    .child(label("パネル"))
-                    .child(
-                        div().flex_1().flex().child(
-                            Switch::new("float-switch")
-                                .label("カードにして浮かせる")
-                                .checked(crate::theme::floating(cx))
-                                .on_click(
-                                    cx.listener(|this, on: &bool, _, cx| {
-                                        this.set_floating(*on, cx)
-                                    }),
-                                ),
-                        ),
-                    )
-                    .child(reset("float-reset", false)),
-            )
-            .child(self.ai_shell_row(label("AI のシェル"), reset, cx));
-        let details = if !open {
-            None
-        } else if self.motion {
-            Some(
-                body.with_animation("details-in", appear(160), |d, t| d.opacity(t))
-                    .into_any_element(),
-            )
+        let nav = col()
+            .w(px(208.))
+            .flex_none()
+            .min_h_0()
+            .pr_3()
+            .border_r_1()
+            .border_color(theme.border)
+            .child(nav);
+
+        // 右: カテゴリごとに見出しとカード。検索中は、合う設定のあるカテゴリをすべて並べる
+        let sections: Vec<Section> = if searching {
+            shown.clone()
         } else {
-            Some(body.into_any_element())
+            vec![self.appearance_section]
         };
-        // 画面に入りきらないときは、ダイアログの中でスクロールする
-        let body = col()
+        let mut pages = col().gap_5();
+        for section in sections {
+            let mut card = col()
+                .px_4()
+                .rounded(feel::lg())
+                .bg(theme.popover)
+                .border_1()
+                .border_color(theme.border.opacity(0.6));
+            let mut first = true;
+            for item in items.iter().filter(|item| item.section == section) {
+                card = card.child(self.setting_row(item, first, cx));
+                first = false;
+            }
+            pages = pages.child(
+                col()
+                    .gap_2()
+                    .child(div().px_1().text_lg().child(section.label()))
+                    .child(card),
+            );
+        }
+        if searching && shown.is_empty() {
+            pages = pages.child(
+                div()
+                    .px_1()
+                    .text_sm()
+                    .text_color(theme.muted_foreground)
+                    .child("見つかりません。"),
+            );
+        }
+        let page_key = if searching {
+            Section::ALL.len()
+        } else {
+            Section::ALL
+                .iter()
+                .position(|s| *s == self.appearance_section)
+                .unwrap_or(0)
+        };
+        let pages = if self.motion {
+            pages
+                .with_animation(("customize-page", page_key), appear(160), |d, t| {
+                    d.opacity(t)
+                })
+                .into_any_element()
+        } else {
+            pages.into_any_element()
+        };
+        let content = col()
+            .flex_1()
+            .min_w_0()
             .min_h_0()
             .gap_2()
             .child(
                 col()
                     .relative()
+                    .flex_1()
                     .min_h_0()
                     .child(
-                        col()
+                        div()
                             .id("appearance-scroll")
-                            .min_h_0()
-                            .gap_2()
+                            .size_full()
+                            .pl_5()
                             // 右の端はスクロールバーの場所
                             .pr_4()
+                            .pb_2()
                             .track_scroll(&self.appearance_scroll)
                             .overflow_y_scroll()
-                            .child(heading("テーマ"))
-                            .child(presets)
-                            .child(heading("レイアウト"))
-                            .child(layouts)
-                            .child(toggle)
-                            .children(details),
+                            .child(pages),
                     )
                     .vertical_scrollbar(&self.appearance_scroll),
             )
             // 失敗の理由は、どこまでスクロールしていても見える所に出す
             .when_some(self.error.clone(), |d, error| {
-                d.child(div().text_sm().text_color(theme.danger).child(error))
+                d.child(div().pl_5().text_sm().text_color(theme.danger).child(error))
             });
+        let body = row()
+            .flex_1()
+            .min_h_0()
+            .items_stretch()
+            .child(nav)
+            .child(content);
+        let sized = |id: &'static str, body: Div, cx: &mut Context<Self>| {
+            self.dialog_sized(
+                id,
+                APPEARANCE_WIDTH,
+                Some(APPEARANCE_HEIGHT),
+                "カスタマイズ",
+                body,
+                cx,
+            )
+        };
         let (title, width, over) = match self.sub_modal {
-            None => return self.dialog_as("dialog", APPEARANCE_WIDTH, "カスタマイズ", body, cx),
+            None => return sized("dialog", body, cx),
             Some(SubModal::Font) => ("フォント", px(400.), self.font_picker(cx)),
             Some(SubModal::Scene) => ("背景の画像", px(680.), self.scene_picker(cx)),
         };
@@ -5565,8 +5507,322 @@ impl MainView {
         div()
             .absolute()
             .inset_0()
-            .child(self.dialog_as("dialog-under", APPEARANCE_WIDTH, "カスタマイズ", body, cx))
+            .child(sized("dialog-under", body, cx))
             .child(over)
+    }
+
+    /// 「カスタマイズ」に並ぶ設定。名前・補足・カテゴリの名前と、検索で使う言葉を持つ。
+    fn customize_settings(&self, cx: &App) -> Vec<Setting> {
+        use crate::state::CustomizeSection as Section;
+        let mut themes = String::from("プリセット 見本 保存");
+        for preset in crate::theme::Preset::recommended_with(&self.fonts)
+            .iter()
+            .chain(&self.own_presets)
+        {
+            themes.push(' ');
+            themes.push_str(&preset.name);
+        }
+        let mut layouts = String::from("並べ方 一覧 詳細 チャット");
+        for layout in crate::theme::Layout::PATTERNS {
+            layouts.push(' ');
+            layouts.push_str(layout.name);
+        }
+        let list = |items: &[&str]| items.join(" ");
+        let mut all = vec![
+            Setting::new(Section::Theme, SettingKey::Themes, "テーマ", None, themes),
+            Setting::new(
+                Section::Layout,
+                SettingKey::Layouts,
+                "レイアウト",
+                None,
+                layouts,
+            ),
+            Setting::new(
+                Section::Backdrop,
+                SettingKey::Scene,
+                "背景の画像",
+                None,
+                list(&["壁紙", "ガラス", "青い空", "森", "夕暮れ"]),
+            ),
+        ];
+        // 透明度とぼかしは、背景の画像を出しているときだけ
+        if crate::theme::scene(cx) != crate::theme::Scene::None {
+            all.push(Setting::new(
+                Section::Backdrop,
+                SettingKey::Clear,
+                "透明度",
+                Some("画像の上の面の透け方"),
+                list(&["ガラス", "透明"]),
+            ));
+            all.push(Setting::new(
+                Section::Backdrop,
+                SettingKey::Blur,
+                "ぼかし",
+                Some("背景の画像のぼかし"),
+                list(&["ガラス"]),
+            ));
+        }
+        all.push(Setting::new(
+            Section::Look,
+            SettingKey::Font,
+            "フォント",
+            None,
+            list(&["書体", "文字"]),
+        ));
+        for slot in crate::theme::Slot::ALL {
+            all.push(Setting::new(
+                Section::Look,
+                SettingKey::Color(slot),
+                slot.label(),
+                None,
+                list(&["色", "カラー"]),
+            ));
+        }
+        all.extend([
+            Setting::new(
+                Section::Display,
+                SettingKey::Density,
+                "密度",
+                Some("一覧の行の間隔"),
+                crate::theme::Density::ALL.map(|d| d.label()).join(" "),
+            ),
+            Setting::new(
+                Section::Display,
+                SettingKey::Feel,
+                "ホバー",
+                Some("乗せたとき・押したときの見え方"),
+                crate::theme::Feel::ALL.map(|f| f.label()).join(" "),
+            ),
+            Setting::new(
+                Section::Display,
+                SettingKey::Cards,
+                "カードで表示",
+                Some("タスクの一覧"),
+                list(&["カード"]),
+            ),
+            Setting::new(
+                Section::Display,
+                SettingKey::Float,
+                "パネルを浮かせる",
+                Some("パネルを角丸のカードにする"),
+                list(&["カード", "パネル"]),
+            ),
+            Setting::new(
+                Section::Ai,
+                SettingKey::Shell,
+                "AI のシェル",
+                Some("AI のタブで動かすシェル"),
+                list(&["ターミナル", "シェル"]),
+            ),
+        ]);
+        all
+    }
+
+    /// 設定 1 つ分の行。左に名前と補足、右に変えるもの。テーマとレイアウトは見本を並べる。
+    fn setting_row(&self, item: &Setting, first: bool, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let edge = |d: Div| {
+            d.when(!first, |d| {
+                d.border_t_1().border_color(theme.border.opacity(0.6))
+            })
+        };
+        match item.key {
+            SettingKey::Themes => {
+                return edge(div().py_3())
+                    .child(self.preset_tiles(cx))
+                    .into_any_element();
+            }
+            SettingKey::Layouts => {
+                return edge(div().py_3())
+                    .child(self.layout_tiles(cx))
+                    .into_any_element();
+            }
+            _ => {}
+        }
+        let look = crate::theme::look(cx);
+        let reset = |id: &'static str, shown: bool| {
+            Button::new(id)
+                .icon(app_icon("rotate-ccw"))
+                .ghost()
+                .small()
+                .tooltip("標準に戻す")
+                // 場所は取っておき、標準のままのときは見せない
+                .when(!shown, |b| b.invisible().disabled(true))
+        };
+        // 押すと一覧が重なって開くもの（書体、背景の画像）
+        let opener = |id: &'static str, text: String, cx: &mut Context<Self>| {
+            row()
+                .id(id)
+                .w(CONTROL_WIDTH)
+                .h_8()
+                .px_3()
+                .gap_2()
+                .rounded(feel::md())
+                .border_1()
+                .border_color(theme.input)
+                .cursor_pointer()
+                .text_sm()
+                .lit(theme.accent, cx)
+                .sunk(theme.primary.opacity(0.4), cx)
+                .child(div().flex_1().truncate().child(text))
+                .child(
+                    app_icon("chevron-right")
+                        .small()
+                        .text_color(theme.muted_foreground),
+                )
+        };
+        let slider = |id: &'static str, state: &Entity<SliderState>, name: &'static str| {
+            div()
+                .id(id)
+                .w(CONTROL_WIDTH)
+                .child(Slider::new(state).accessibility_label(name))
+                .test_support()
+        };
+        let control: AnyElement = match item.key {
+            SettingKey::Themes | SettingKey::Layouts => unreachable!(),
+            SettingKey::Scene => {
+                let scene = crate::theme::scene(cx);
+                let has_scene = scene != crate::theme::Scene::None;
+                row()
+                    .gap_1()
+                    .child(
+                        opener("scene-open", scene.label(), cx)
+                            .on_click(
+                                cx.listener(|this, _: &ClickEvent, _, cx| {
+                                    this.open_scene_picker(cx)
+                                }),
+                            )
+                            .test_support(),
+                    )
+                    .child(reset("scene-reset", has_scene).on_click(cx.listener(
+                        |this, _, window, cx| this.set_scene(crate::theme::Scene::None, window, cx),
+                    )))
+                    .into_any_element()
+            }
+            SettingKey::Clear => row()
+                .gap_1()
+                .child(slider("clear-slider", &self.clear_slider, "透明度"))
+                .child(reset("clear-reset", false))
+                .into_any_element(),
+            SettingKey::Blur => row()
+                .gap_1()
+                .child(slider("blur-slider", &self.blur_slider, "ぼかし"))
+                .child(reset("blur-reset", false))
+                .into_any_element(),
+            SettingKey::Font => row()
+                .gap_1()
+                .child(
+                    opener("font-open", self.current_font(cx), cx)
+                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                            this.open_font_picker(window, cx)
+                        }))
+                        .test_support(),
+                )
+                .child(
+                    reset("font-reset", look.font.is_some())
+                        .on_click(cx.listener(|this, _, _, cx| this.set_font(None, cx))),
+                )
+                .into_any_element(),
+            SettingKey::Color(slot) => {
+                let ix = crate::theme::Slot::ALL
+                    .iter()
+                    .position(|s| *s == slot)
+                    .unwrap_or(0);
+                let id = ["accent-reset", "light-reset", "dark-reset"][ix];
+                row()
+                    .gap_1()
+                    .child(
+                        div()
+                            .id(("color-open", ix))
+                            .child(
+                                ColorPicker::new(&self.color_pickers[ix])
+                                    .accessibility_label(slot.label())
+                                    .small(),
+                            )
+                            .test_support(),
+                    )
+                    .child(reset(id, look.color(slot).is_some()).on_click(cx.listener(
+                        move |this, _, window, cx| this.set_color(slot, None, window, cx),
+                    )))
+                    .into_any_element()
+            }
+            SettingKey::Density => row()
+                .gap_1()
+                .children(crate::theme::Density::ALL.into_iter().enumerate().map(
+                    |(ix, density)| {
+                        chip(
+                            ("density", ix),
+                            density.label(),
+                            crate::theme::density(cx) == density,
+                            cx,
+                        )
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            this.set_density(density, cx)
+                        }))
+                        .test_support()
+                    },
+                ))
+                .child(reset("density-reset", false))
+                .into_any_element(),
+            SettingKey::Feel => row()
+                .gap_1()
+                .children(
+                    crate::theme::Feel::ALL
+                        .into_iter()
+                        .enumerate()
+                        .map(|(ix, feel)| {
+                            chip(
+                                ("feel", ix),
+                                feel.label(),
+                                crate::theme::feel(cx) == feel,
+                                cx,
+                            )
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                this.set_feel(feel, cx)
+                            }))
+                            .test_support()
+                        }),
+                )
+                .child(reset("feel-reset", false))
+                .into_any_element(),
+            SettingKey::Cards => row()
+                .gap_1()
+                .child(
+                    Switch::new("cards-switch")
+                        .checked(crate::theme::cards(cx))
+                        .on_click(cx.listener(|this, on: &bool, _, cx| this.set_cards(*on, cx))),
+                )
+                .child(reset("cards-reset", false))
+                .into_any_element(),
+            SettingKey::Float => row()
+                .gap_1()
+                .child(
+                    Switch::new("float-switch")
+                        .checked(crate::theme::floating(cx))
+                        .on_click(cx.listener(|this, on: &bool, _, cx| this.set_floating(*on, cx))),
+                )
+                .child(reset("float-reset", false))
+                .into_any_element(),
+            SettingKey::Shell => self.ai_shell_choice(reset, cx).into_any_element(),
+        };
+        edge(row().py_3().gap_4())
+            .child(
+                col()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_0p5()
+                    .child(div().text_sm().child(item.name))
+                    .when_some(item.note, |d, note| {
+                        d.child(
+                            div()
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child(note),
+                        )
+                    }),
+            )
+            .child(control)
+            .into_any_element()
     }
 
     /// テーマの見本。おすすめ、自分で保存したもの、今のテーマを保存するボタンの順に並べる。
