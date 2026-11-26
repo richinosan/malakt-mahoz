@@ -9,6 +9,7 @@ use gpui_kit::base::TestSupportExt;
 use gpui_kit::component::ActiveTheme;
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
+use malakt_ai::shell::Shell;
 use malakt_term::{style, Action, Button as MouseKey, Caret, Key, Options, Profile, Snapshot};
 use malakt_term::{Select, Terminal};
 
@@ -18,6 +19,8 @@ use crate::db::{self, Db};
 pub const MAX_TERMS: usize = 8;
 /// 「＋」で開くシェルを覚える設定。
 const PROFILE_SETTING: &str = "term.profile";
+/// AI のタブで動かすシェル（「カスタマイズ」で選ぶ）。なければ標準のシェル。
+const AI_SHELL_SETTING: &str = "ai.shell";
 pub use malakt_ai::tools::{expand_dir, workspace_dir_key};
 
 /// WSL に渡す環境変数の名前を、今の `WSLENV` に足す。
@@ -63,6 +66,29 @@ pub struct TaskContext {
     pub workspace: String,
     /// 始めるフォルダー。
     pub dir: Option<PathBuf>,
+}
+
+/// 保存したシェルの名前（[`Profile::id`]）から、シェルを決める。シェルの一覧を調べる前に使う。
+fn shell_of_id(id: &str) -> Shell {
+    match id {
+        "pwsh" => Shell::PowerShell {
+            program: "pwsh.exe".into(),
+            legacy: false,
+        },
+        "powershell" => Shell::PowerShell {
+            program: "powershell.exe".into(),
+            legacy: true,
+        },
+        "cmd" => Shell::Cmd,
+        _ => match id.strip_prefix("wsl:") {
+            Some(distro) => Shell::Wsl {
+                distro: distro.to_owned(),
+            },
+            None => Shell::Unix {
+                program: id.to_owned(),
+            },
+        },
+    }
 }
 
 /// 開いているターミナル 1 つ。
@@ -115,6 +141,8 @@ pub struct Terms {
     profiles: Option<Vec<Profile>>,
     /// 「＋」で開くシェル。
     pub profile: Option<String>,
+    /// AI のタブで動かすシェル。`None` なら標準（[`Shell::standard`]）。
+    pub ai_profile: Option<String>,
     next: u64,
     pub error: Option<SharedString>,
     /// うまくいったことの知らせ。`NOTICE_LIFE` たつと閉じる。
@@ -140,6 +168,23 @@ pub struct SharedTerms(pub Entity<Terms>);
 
 impl Global for SharedTerms {}
 
+/// AI のコマンドが動くシェルと、それがターミナルのタブのシェルか（[`Terms::command_shell`]）。
+/// ターミナルをまだ用意していなければ、標準のシェル。
+pub fn command_shell(cx: &App) -> (Shell, bool) {
+    match cx.try_global::<SharedTerms>() {
+        Some(terms) => terms.0.read(cx).command_shell(),
+        None => (Shell::standard(), false),
+    }
+}
+
+/// AI のタブで動かすシェル（[`Terms::ai_shell`]）。
+pub fn ai_shell(cx: &App) -> Shell {
+    match cx.try_global::<SharedTerms>() {
+        Some(terms) => terms.0.read(cx).ai_shell(),
+        None => Shell::standard(),
+    }
+}
+
 pub fn init(cx: &mut App) {
     let db = db::shared(cx);
     let terms = cx.new(|cx| Terms::new(db, cx));
@@ -158,12 +203,18 @@ impl Terms {
             .store
             .setting(PROFILE_SETTING)
             .unwrap_or_default();
+        let ai_profile = db
+            .read(cx)
+            .store
+            .setting(AI_SHELL_SETTING)
+            .unwrap_or_default();
         Self {
             db,
             tabs: Vec::new(),
             active: None,
             profiles: None,
             profile,
+            ai_profile,
             next: 1,
             error: None,
             notice: None,
@@ -175,6 +226,44 @@ impl Terms {
             focus_wanted: false,
             register_mcp: false,
             registered: std::collections::HashSet::new(),
+        }
+    }
+
+    /// AI のタブで動かすシェル。「カスタマイズ」で選んだもの、選んでいなければ標準のシェル。
+    pub fn ai_shell(&self) -> Shell {
+        let Some(id) = self.ai_profile.as_deref() else {
+            return Shell::standard();
+        };
+        match self.profiles().iter().find(|p| p.id == id) {
+            Some(profile) => Shell::of_profile(profile),
+            // 一覧を調べ終わる前でも、保存した名前から分かる
+            None => shell_of_id(id),
+        }
+    }
+
+    /// AI のコマンドが動くシェルと、それがターミナルのタブのシェルか。
+    /// ターミナルのタブを見ていればそのタブのシェル、AI のタブなら [`Terms::ai_shell`]。
+    pub fn command_shell(&self) -> (Shell, bool) {
+        match self.active_tab() {
+            Some(tab) => (Shell::of_profile(&tab.profile), true),
+            None => (self.ai_shell(), false),
+        }
+    }
+
+    /// AI のタブで動かすシェルを選ぶ。`None` で標準に戻す。
+    pub fn set_ai_profile(&mut self, id: Option<&str>, cx: &mut Context<Self>) {
+        if self.ai_profile.as_deref() == id {
+            return;
+        }
+        let saved = self
+            .db
+            .update(cx, |db, _| db.store.set_setting(AI_SHELL_SETTING, id));
+        match saved {
+            Ok(()) => {
+                self.ai_profile = id.map(str::to_owned);
+                cx.notify();
+            }
+            Err(e) => self.fail(format!("AI のシェルの選択を保存できませんでした: {e}"), cx),
         }
     }
 

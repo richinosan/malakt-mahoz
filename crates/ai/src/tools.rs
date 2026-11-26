@@ -9,6 +9,7 @@ use malakt_core::{
 };
 use serde_json::{json, Value};
 
+use crate::shell::Shell;
 use crate::wire::ToolDef;
 
 /// GitHub のリンクの中身を取りに行くツール。実行は画面の側（シェルに出す）。
@@ -373,7 +374,7 @@ pub fn definitions() -> Vec<ToolDef> {
         },
         ToolDef {
             name: RUN_SHELL,
-            description: "ユーザーの PC のシェル（Windows は cmd.exe、ほかは sh）でコマンドを 1 つ実行し、出力を返す。実行の前にユーザーに確認が出る。",
+            description: "ユーザーの PC でコマンドを 1 つ実行し、終了コードと出力を返す。動くシェル（PowerShell、bash、WSL など）は、ユーザーのメッセージの最後にアプリが書く。そのシェルの書き方で書く。実行の前にユーザーに確認が出る。",
             schema: object(json!({"command": {"type": "string"}}), &["command"]),
         },
     ]
@@ -419,8 +420,8 @@ pub const WRITES: &[&str] = &[
     "update_workspace_settings",
 ];
 
-/// 確認に出す文。
-pub fn confirmation_text(store: &Store, name: &str, args: &Value) -> String {
+/// 確認に出す文。`shell` は、[`RUN_SHELL`] のコマンドが動くシェル。
+pub fn confirmation_text(store: &Store, name: &str, args: &Value, shell: &Shell) -> String {
     match name {
         "delete_task" => {
             let id = args.get("id").and_then(Value::as_str).unwrap_or_default();
@@ -481,7 +482,7 @@ pub fn confirmation_text(store: &Store, name: &str, args: &Value) -> String {
                 .get("command")
                 .and_then(Value::as_str)
                 .unwrap_or_default();
-            format!("次のコマンドを実行します。\n{command}")
+            format!("次のコマンドを {} で実行します。\n{command}", shell.label())
         }
         other => format!("{other} を実行します。"),
     }
@@ -1416,13 +1417,19 @@ pub fn turn_note(today: &str, place: &str, extra: &str) -> String {
     note
 }
 
-/// `run_shell` のコマンドが動くシェルの説明。
-pub fn shell_name() -> &'static str {
-    if cfg!(windows) {
-        "Windows の cmd.exe（コマンドは `&` や `&&` でつなぐ。`;` ではつなげない。sh や PowerShell の書き方は使えない）"
+/// [`turn_note`] に添える、[`RUN_SHELL`] のコマンドが動くシェルの説明。
+/// `in_tab` は、ユーザーが今開いているターミナルのタブのシェルか。
+pub fn shell_note(shell: &Shell, in_tab: bool) -> String {
+    let place = if in_tab {
+        "（ユーザーが今開いているターミナルのタブと同じシェル）"
     } else {
-        "sh"
-    }
+        " "
+    };
+    format!(
+        "{RUN_SHELL} のコマンドは {}{place}で動きます。{}",
+        shell.label(),
+        shell.guide()
+    )
 }
 
 /// AI への最初の指示。`context` は、ユーザーが設定に書いた、いつも伝える前提と指示。
@@ -1434,7 +1441,6 @@ pub const COMMENT_RULE: &str = "コメントは、あとでタスクを読む人
 const COMMENT_TOOL: &str = "タスクにコメントを書く。書くのは、あとでタスクを読む人に要る事実だけ（決まったこと、分かったこと、変わった状態、次にすること）。「確認しました」「レビューしました」のように作業をしたことだけを伝える文と、「まだ〜していません」のようにしていないことは書かない。書く事実がなければ呼ばない。";
 
 pub fn system_prompt(context: &str) -> String {
-    let shell = shell_name();
     let context = if context.trim().is_empty() {
         String::new()
     } else {
@@ -1456,7 +1462,7 @@ pub fn system_prompt(context: &str) -> String {
          - 担当者は ID か名前で指定できます。登録されていない人の名前が出たら、聞き返さずにその名前で指定してください（アプリがその場で担当者に登録します）。担当者の役（RACI: {RACI}）は set_assignee か、create_task / update_task の assignees で付けてください。\n\
          - GitHub のリンクの中身は、必ず {GITHUB_FETCH} で取ってきてください（アプリが、ユーザーのログイン済みの gh で読みます）。{RUN_SHELL} で gh を呼ぶのは、{GITHUB_FETCH} で読めない種類のものだけにしてください。\n\
          - Slack のメッセージへのリンクの中身は、必ず {SLACK_FETCH} で取ってきてください（アプリが、ユーザーの Slack CLI で読みます）。\n\
-         - {RUN_SHELL} のコマンドは {shell} で動きます。そのシェルの書き方で書いてください。\n\
+         - {RUN_SHELL} のコマンドが動くシェルは、ユーザーのメッセージの最後にアプリが書きます。そのシェルの書き方で書いてください。\n\
          - タスクの追加、書き換え、整理のように元に戻せる操作は、「〜しましょうか」と聞き返さずに実行し、結果だけを伝えてください。聞き返すのは、頼まれたことが 2 通り以上に読めて、どちらかで結果が大きく変わるときだけです。\n\
          - ツールが失敗したら、やり方を変えてやり直してください。返事には最後の結果だけを書き、途中の失敗、その原因、ツールやシェルの事情は書かないでください。どうしてもできなかったときだけ、できなかったことと、ユーザーにしてほしいことを 1 文で書いてください。\n\
          - {COMMENT_RULE}ユーザーが文面を決めてコメントを頼んだときは、その文面のまま書いてください。\n\
@@ -1596,10 +1602,13 @@ mod tests {
                 .unwrap_err()
                 .contains("自分")
         );
-        assert!(
-            confirmation_text(&store, "delete_person", &json!({"id": local["id"]}))
-                .contains("鈴木さん")
-        );
+        assert!(confirmation_text(
+            &store,
+            "delete_person",
+            &json!({"id": local["id"]}),
+            &Shell::Cmd
+        )
+        .contains("鈴木さん"));
         run(&mut store, "delete_person", json!({"id": local["id"]}));
         assert_eq!(store.people().unwrap().len(), 1);
 
@@ -1654,10 +1663,13 @@ mod tests {
         assert_eq!(unlinked["linked_workspace_ids"], json!([]));
 
         // ワークスペースを消すと、中のタスクも消える
-        assert!(
-            confirmation_text(&store, "delete_workspace", &json!({"id": home["id"]}))
-                .contains("家")
-        );
+        assert!(confirmation_text(
+            &store,
+            "delete_workspace",
+            &json!({"id": home["id"]}),
+            &Shell::Cmd
+        )
+        .contains("家"));
         run(&mut store, "delete_workspace", json!({"id": home["id"]}));
         assert!(store.task(task["id"].as_str().unwrap()).is_err());
         assert_eq!(
@@ -1753,10 +1765,13 @@ mod tests {
         assert_eq!(added["name"], "見積.txt");
         let read = run(&mut store, "get_task", json!({"id": a["id"]}));
         assert_eq!(read["attachments"][0]["id"], added["id"]);
-        assert!(
-            confirmation_text(&store, "delete_attachment", &json!({"id": added["id"]}))
-                .contains("見積.txt")
-        );
+        assert!(confirmation_text(
+            &store,
+            "delete_attachment",
+            &json!({"id": added["id"]}),
+            &Shell::Cmd
+        )
+        .contains("見積.txt"));
         run(&mut store, "delete_attachment", json!({"id": added["id"]}));
         assert!(store
             .attachments(a["id"].as_str().unwrap())
@@ -1911,7 +1926,10 @@ mod tests {
         );
         assert_eq!(run(&mut store, "list_people", json!({}))[0]["name"], "奏");
 
-        assert!(confirmation_text(&store, "delete_task", &json!({"id": id})).contains("牛乳を買う"));
+        assert!(
+            confirmation_text(&store, "delete_task", &json!({"id": id}), &Shell::Cmd)
+                .contains("牛乳を買う")
+        );
         run(&mut store, "delete_task", json!({"id": id}));
         assert!(store.task(&id).is_err());
     }
@@ -2179,17 +2197,41 @@ mod tests {
     #[test]
     fn confirmation_shows_the_command() {
         let store = Store::open_in_memory().unwrap();
-        let text = confirmation_text(&store, RUN_SHELL, &json!({"command": "ls -la"}));
-        assert!(text.ends_with("ls -la"));
-        assert!(confirmation_text(&store, "delete_task", &json!({"id": "x"})).contains("x"));
+        let wsl = Shell::Wsl {
+            distro: "Ubuntu".into(),
+        };
+        let text = confirmation_text(&store, RUN_SHELL, &json!({"command": "ls -la"}), &wsl);
+        assert_eq!(text, "次のコマンドを WSL の Ubuntu で実行します。\nls -la");
+        assert!(confirmation_text(&store, "delete_task", &json!({"id": "x"}), &wsl).contains("x"));
+    }
+
+    #[test]
+    fn the_shell_is_named_with_each_message() {
+        let pwsh = Shell::PowerShell {
+            program: "pwsh.exe".into(),
+            legacy: false,
+        };
+        let note = shell_note(&pwsh, false);
+        assert!(note.starts_with("run_shell のコマンドは PowerShell 7 で動きます。"));
+        assert!(note.contains("bash や cmd の書き方は使えません"));
+        let note = shell_note(
+            &Shell::Wsl {
+                distro: "Ubuntu".into(),
+            },
+            true,
+        );
+        assert!(note.contains(
+            "WSL の Ubuntu（ユーザーが今開いているターミナルのタブと同じシェル）で動きます"
+        ));
     }
 
     #[test]
     fn the_system_prompt_stays_the_same_between_requests() {
         let prompt = system_prompt("");
         assert!(prompt.contains("github_fetch"));
-        // シェルの種類と、聞き返さない・言い訳しない決まり
-        assert!(prompt.contains(shell_name()));
+        // シェルはメッセージごとに書くので、最初の指示には入れない。聞き返さない・言い訳しない決まり
+        assert!(prompt.contains("メッセージの最後にアプリが書きます"));
+        assert!(!prompt.contains("PowerShell"));
         assert!(prompt.contains("聞き返さずに実行"));
         // アプリの操作は、言い訳せずにツールで行う
         assert!(prompt.contains("どれもツールで実行"));

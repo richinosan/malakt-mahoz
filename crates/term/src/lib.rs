@@ -3,6 +3,7 @@
 
 pub mod console;
 pub mod drop;
+pub mod env_path;
 pub mod keys;
 pub mod profile;
 mod settle;
@@ -348,6 +349,11 @@ impl Terminal {
         env.insert("TERM".into(), "xterm-256color".into());
         env.insert("COLORTERM".into(), "truecolor".into());
         env.insert("TERM_PROGRAM".into(), "malakt-mahoz".into());
+        // アプリを起動したあとに入れたコマンドも見つかるように、PATH を読み直して渡す
+        if let Some(path) = env_path::fresh() {
+            env.entry("PATH".into())
+                .or_insert_with(|| path.to_string_lossy().into_owned());
+        }
         let pty = tty::new(
             &tty::Options {
                 shell: Some(tty::Shell::new(

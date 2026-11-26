@@ -11,7 +11,7 @@ use gpui_kit::{
     WindowBounds, WindowOptions,
 };
 use malakt_ai::keys::{KeyStore, MemoryKeys, Source};
-use malakt_ai::shell::Spec;
+use malakt_ai::shell::{Shell, Spec};
 use malakt_ai::{Effort, Provider};
 use malakt_core::{Scope, Status, Store, TaskDraft, TaskFilter};
 use malakt_mahoz::ai::{
@@ -20,6 +20,11 @@ use malakt_mahoz::ai::{
 };
 use malakt_mahoz::{db, AiConfig, AiPane, MainView};
 use serde_json::{json, Value};
+
+/// シェルに出るコマンドの行。標準のシェルの印（Windows は `PS>`、ほかは `$`）が頭に付く。
+fn cmd_line(command: &str) -> String {
+    format!("{} {command}", Shell::standard().mark())
+}
 
 /// 送られたリクエスト（URL、ヘッダー、本文）。
 /// 送ったリクエスト（URL、ヘッダー、本文）。
@@ -130,14 +135,9 @@ fn start_with(cx: &mut TestAppContext, store: Store) -> World {
         }),
         slack: Arc::new(move |link| {
             let state = slack.lock().unwrap().clone();
-            // cmd は引用符をそのまま出し、sh は引用符の中をそのまま出す
-            let echo = |json: String, exit: i32| {
-                Spec::shell(&if cfg!(windows) {
-                    format!("echo {json}& exit /b {exit}")
-                } else {
-                    format!("echo '{json}'; exit {exit}")
-                })
-            };
+            // PowerShell も sh も、一重引用符の中をそのまま出す
+            let echo =
+                |json: String, exit: i32| Spec::shell(&format!("echo '{json}'; exit {exit}"));
             let missing = Spec::direct("malakt-mahoz-no-such-program", Vec::new());
             match state.as_str() {
                 // Slack CLI が入っていない
@@ -508,7 +508,7 @@ fn shell_commands_run_after_confirmation(cx: &mut TestAppContext) {
     });
     let lines = read(cx, |s| s.shell.clone());
     assert_eq!(lines[0].kind, LineKind::Command);
-    assert_eq!(lines[0].text, "$ echo hello-shell");
+    assert_eq!(lines[0].text, cmd_line("echo hello-shell"));
     assert!(lines
         .iter()
         .any(|l| l.kind == LineKind::Out && l.text.trim() == "hello-shell"));
@@ -538,7 +538,7 @@ fn shell_commands_run_after_confirmation(cx: &mut TestAppContext) {
     ui(cx, window, |window, cx| window.click("ai-allow-always", cx));
     wait(cx, "2 つとも終わる", |s| !s.busy);
     let lines = read(cx, |s| s.shell.clone());
-    assert!(lines.iter().any(|l| l.text == "$ echo third"));
+    assert!(lines.iter().any(|l| l.text == cmd_line("echo third")));
     assert!(read(cx, |s| s.pending.is_none()));
     // 新しい会話にすると、また聞かれる
     ui(cx, window, |window, cx| window.click("ai-new-chat", cx));
@@ -667,7 +667,7 @@ fn github_links_are_fetched_before_sending(cx: &mut TestAppContext) {
     let lines = read(cx, |s| s.shell.clone());
     assert_eq!(
         lines[0].text,
-        "$ echo fetched https://github.com/o/r/issues/3"
+        cmd_line("echo fetched https://github.com/o/r/issues/3")
     );
     let sent = world.sent();
     let message = sent[0].2["messages"][0]["content"].as_str().unwrap();
@@ -1094,7 +1094,7 @@ fn changes_on_github_are_reflected_into_tasks(cx: &mut TestAppContext) {
     let lines = read(cx, |s| s.shell.clone());
     assert_eq!(
         lines[0].text,
-        "$ echo fetched https://github.com/o/r/issues/3"
+        cmd_line("echo fetched https://github.com/o/r/issues/3")
     );
     assert!(world.sent().is_empty());
     let status = read(cx, |s| s.watch_status.clone()).unwrap();
@@ -1389,7 +1389,7 @@ fn the_shell_runs_typed_commands_like_a_terminal(cx: &mut TestAppContext) {
     open_chat(cx, window, &view);
 
     type_line(cx, window, "echo hello");
-    assert_eq!(shell_texts(cx), ["$ echo hello", "hello"]);
+    assert_eq!(shell_texts(cx), [cmd_line("echo hello"), "hello".into()]);
     assert!(world.sent().is_empty(), "AI には送らない");
 
     // cd は次のコマンドにも続く
@@ -1409,7 +1409,10 @@ fn the_shell_runs_typed_commands_like_a_terminal(cx: &mut TestAppContext) {
     });
     wait(cx, "コマンドが終わる", |s| !s.busy);
     let texts = shell_texts(cx);
-    assert_eq!(&texts[texts.len() - 2..], ["$ echo hello", "hello"]);
+    assert_eq!(
+        &texts[texts.len() - 2..],
+        [cmd_line("echo hello"), "hello".into()]
+    );
     assert_eq!(
         read(cx, |s| s.history.clone()),
         [
@@ -1514,7 +1517,7 @@ fn a_new_task_is_arranged_by_the_ai(cx: &mut TestAppContext) {
 
     // gh が少しかかる間に、印を見る
     *world.github.lock().unwrap() = if cfg!(windows) {
-        " & ping -n 2 127.0.0.1 > NUL".into()
+        "; Start-Sleep -Milliseconds 500".into()
     } else {
         "; sleep 0.5".into()
     };
@@ -1795,11 +1798,7 @@ fn enter_sends_and_shift_enter_breaks_the_line(cx: &mut TestAppContext) {
 fn a_task_whose_link_cannot_be_read_is_left_alone(cx: &mut TestAppContext) {
     let world = start(cx);
     world.keys.set(Provider::Claude, "k").unwrap();
-    *world.github.lock().unwrap() = if cfg!(windows) {
-        " & exit 1".into()
-    } else {
-        "; exit 1".into()
-    };
+    *world.github.lock().unwrap() = "; exit 1".into();
     let task = new_task(cx, "https://github.com/o/r/pull/7");
     wait(cx, "理由が出る", |s| {
         !s.busy && !s.arrange_notes.is_empty()
@@ -2139,7 +2138,7 @@ fn automatic_runs_stay_out_of_the_chat(cx: &mut TestAppContext) {
 
     // gh が少しかかる間に、入力欄の上の表示を見る
     *world.github.lock().unwrap() = if cfg!(windows) {
-        " & ping -n 2 127.0.0.1 > NUL".into()
+        "; Start-Sleep -Milliseconds 500".into()
     } else {
         "; sleep 0.5".into()
     };
@@ -3121,4 +3120,137 @@ fn the_coordinator_model_is_chosen_in_settings(cx: &mut TestAppContext) {
     open_settings(cx, window, &pane);
     pick(cx, 1);
     assert_eq!(read(cx, |s| s.coordinator_model()), current);
+}
+
+/// AI のコマンドは、ユーザーが今開いているターミナルのタブと同じシェルで動く。
+/// どのシェルかは、AI へのメッセージと、確認の文と、シェルの行に出る。AI のタブなら標準のシェル。
+#[cfg(unix)]
+#[gpui_kit::test]
+fn commands_run_in_the_shell_of_the_open_tab(cx: &mut TestAppContext) {
+    use malakt_mahoz::term;
+    use malakt_term::profile::Kind;
+    use malakt_term::Profile;
+
+    let world = start(cx);
+    world.keys.set(Provider::Claude, "k").unwrap();
+    let (window, view) = open(cx, wide());
+    let pane = open_chat(cx, window, &view);
+    let dash = Profile {
+        id: "dash".into(),
+        name: "dash".into(),
+        kind: Kind::Shell,
+        program: "/bin/sh".into(),
+        args: Vec::new(),
+    };
+    cx.update(|cx| {
+        term::shared(cx).update(cx, |terms, cx| {
+            terms.set_profiles(vec![dash.clone()], cx);
+            terms
+                .open(Some("dash"), None, cx)
+                .expect("ターミナルを開く");
+        })
+    });
+
+    // ターミナルのタブを見ているときは、そのタブのシェル
+    world.reply(tool_reply(
+        "t1",
+        "run_shell",
+        json!({"command": "echo in-tab"}),
+    ));
+    world.reply(text_reply("動きました。"));
+    say(cx, window, &pane, "echo して");
+    let text = read(cx, |s| s.pending.as_ref().map(|p| p.text.clone())).expect("確認が出る");
+    assert_eq!(
+        text.as_ref(),
+        "次のコマンドを sh で実行します。\necho in-tab"
+    );
+    ui(cx, window, |window, cx| window.click("ai-allow", cx));
+    wait(cx, "コマンドが終わる", |s| !s.busy);
+    let message = world.sent()[0].2["messages"][0]["content"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        message.contains("run_shell のコマンドは sh（ユーザーが今開いているターミナルのタブと同じシェル）で動きます。POSIX の sh の書き方"),
+        "{message}"
+    );
+    let lines = shell_texts(cx);
+    let standard = Shell::standard();
+    // AI のタブ（標準のシェル）と違うので、どのシェルかを頭に出す
+    if standard.name() != "sh" {
+        assert_eq!(lines[0], "[sh] $ echo in-tab");
+    }
+    assert!(lines.iter().any(|l| l == "in-tab"));
+
+    // AI のタブに戻ると、標準のシェル
+    cx.update(|cx| term::shared(cx).update(cx, |terms, cx| terms.activate(None, cx)));
+    world.reply(tool_reply(
+        "t2",
+        "run_shell",
+        json!({"command": "echo on-ai"}),
+    ));
+    world.reply(text_reply("動きました。"));
+    say(cx, window, &pane, "もう一度");
+    let text = read(cx, |s| s.pending.as_ref().map(|p| p.text.clone())).expect("確認が出る");
+    assert_eq!(
+        text.to_string(),
+        format!(
+            "次のコマンドを {} で実行します。\necho on-ai",
+            standard.label()
+        )
+    );
+    ui(cx, window, |window, cx| window.click("ai-allow", cx));
+    wait(cx, "コマンドが終わる", |s| !s.busy);
+    assert!(shell_texts(cx).contains(&cmd_line("echo on-ai")));
+}
+
+/// 「カスタマイズ」で、AI のタブで動かすシェルを選べる。選んだシェルはタブの名前とプロンプトに出て、
+/// 自分で打ったコマンドもそのシェルで動き、アプリを開き直しても残る。
+#[cfg(unix)]
+#[gpui_kit::test]
+fn the_shell_of_the_ai_tab_can_be_chosen(cx: &mut TestAppContext) {
+    use malakt_mahoz::term;
+    use malakt_term::profile::Kind;
+    use malakt_term::Profile;
+
+    let _world = start(cx);
+    let (window, view) = open(cx, wide());
+    open_chat(cx, window, &view);
+    cx.update(|cx| {
+        term::shared(cx).update(cx, |terms, cx| {
+            terms.set_profiles(
+                vec![Profile {
+                    id: "dash".into(),
+                    name: "dash".into(),
+                    kind: Kind::Shell,
+                    program: "/bin/sh".into(),
+                    args: Vec::new(),
+                }],
+                cx,
+            )
+        })
+    });
+    let standard = Shell::standard();
+    assert_eq!(cx.update(|cx| term::ai_shell(cx)), standard);
+
+    cx.update(|cx| term::shared(cx).update(cx, |terms, cx| terms.set_ai_profile(Some("dash"), cx)));
+    let chosen = cx.update(|cx| term::ai_shell(cx));
+    assert_eq!(chosen.name(), "sh");
+    assert_eq!(chosen.prompt("~"), "~ $");
+    type_line(cx, window, "echo $0");
+    let lines = shell_texts(cx);
+    assert_eq!(lines[0], "$ echo $0");
+    assert_eq!(lines[1], "/bin/sh");
+    let saved = cx.update(|cx| {
+        malakt_mahoz::db::shared(cx)
+            .read(cx)
+            .store
+            .setting("ai.shell")
+            .unwrap()
+    });
+    assert_eq!(saved.as_deref(), Some("dash"));
+
+    // 標準に戻す
+    cx.update(|cx| term::shared(cx).update(cx, |terms, cx| terms.set_ai_profile(None, cx)));
+    assert_eq!(cx.update(|cx| term::ai_shell(cx)), standard);
 }

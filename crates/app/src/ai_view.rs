@@ -2725,7 +2725,9 @@ impl AiPane {
         let theme = cx.theme().clone();
         let session = self.session.read(cx);
         let running = session.command_running();
-        let prompt: SharedString = format!("{} $", short_path(&session.cwd_label())).into();
+        let prompt: SharedString = term::ai_shell(cx)
+            .prompt(&short_path(&session.cwd_label()))
+            .into();
         let count = self.shell_rows.len();
         let detached = self.mode == PaneMode::ShellWindow;
         let pane = cx.entity();
@@ -3065,7 +3067,8 @@ impl AiPane {
             tab(
                 "term-tab-ai".into(),
                 "sparkles",
-                "AI".into(),
+                // AI のタブで動くシェルを、名前に出す
+                format!("AI（{}）", terms.ai_shell().name()).into(),
                 active.is_none(),
             )
             .pr_2()
