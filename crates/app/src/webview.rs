@@ -81,6 +81,53 @@ const ZOOM_SCRIPT: &str = r#"(() => {
   }, true);
 })();"#;
 
+/// ページの中のリンクをホイールで押したら、新しいタブではなく小さなウィンドウで開くよう、アプリに知らせる。
+/// 部品によって `auxclick` と `click` のどちらか、または両方が届くので、両方を受けて 1 回だけ知らせる。
+/// ページが自分でホイールの押下を使うとき（`preventDefault` したもの）はそのまま渡す。
+/// 中の枠（iframe）からは、いちばん外のページを通して知らせる。
+const POPUP_SCRIPT: &str = r#"(() => {
+  const top = window.top === window;
+  const send = (url) => {
+    try {
+      if (top) window.ipc.postMessage("popup:" + url);
+      else window.top.postMessage({ malaktPopup: url }, "*");
+    } catch (_) {}
+  };
+  if (top) {
+    window.addEventListener("message", (e) => {
+      const url = e.data && e.data.malaktPopup;
+      if (typeof url === "string") send(url);
+    });
+  }
+  const link = (e) => {
+    const path = e.composedPath ? e.composedPath() : [e.target];
+    for (const el of path) {
+      if (!el || !el.matches || !el.matches("a[href], area[href]")) continue;
+      return typeof el.href === "string" ? el.href : null;
+    }
+    return null;
+  };
+  let last = 0;
+  const middle = (e) => {
+    if (e.button !== 1 || e.defaultPrevented) return;
+    const url = link(e);
+    if (!url || !/^https?:/i.test(url)) return;
+    e.preventDefault();
+    const now = Date.now();
+    if (now - last < 400) return;
+    last = now;
+    send(url);
+  };
+  window.addEventListener("auxclick", middle);
+  window.addEventListener("click", middle);
+})();"#;
+
+/// ページから届いた、小さなウィンドウで開くリンク。
+fn popup_url(body: &str) -> Option<&str> {
+    body.strip_prefix("popup:")
+        .filter(|url| crate::browser::is_web(url))
+}
+
 /// ページの文字を読むスクリプト。AI に渡す。
 const READ_SCRIPT: &str = r#"(() => JSON.stringify({
   url: location.href,
@@ -399,6 +446,7 @@ pub fn create(window: &mut Window, setup: Setup) -> Result<Rc<dyn Engine>, Strin
             .with_hotkeys_zoom(false)
             .with_initialization_script(FOCUS_SCRIPT)
             .with_initialization_script_for_main_only(ZOOM_SCRIPT, false)
+            .with_initialization_script_for_main_only(POPUP_SCRIPT, false)
             .with_ipc_handler({
                 let send = send.clone();
                 move |request| {
@@ -410,6 +458,8 @@ pub fn create(window: &mut Window, setup: Setup) -> Result<Rc<dyn Engine>, Strin
                         _ => {
                             if let Some(step) = Zoom::parse(body) {
                                 send(Event::Zoom(step));
+                            } else if let Some(url) = popup_url(body) {
+                                send(Event::Popup(url.to_owned()));
                             }
                         }
                     }
@@ -429,7 +479,8 @@ pub fn create(window: &mut Window, setup: Setup) -> Result<Rc<dyn Engine>, Strin
             .with_new_window_req_handler({
                 let send = send.clone();
                 move |url, _| {
-                    // 新しいウィンドウではなく、アプリの新しいタブで開く
+                    // 新しいウィンドウではなく、アプリの新しいタブで開く。ホイールで押したリンクは、
+                    // POPUP_SCRIPT が小さなウィンドウで開く（止められなかった分は browser が捨てる）
                     send(Event::NewTab(url));
                     NewWindowResponse::Deny
                 }
@@ -464,6 +515,14 @@ pub fn pump() {
     linux::pump();
 }
 
+/// 捨てたページの後片付けを、ウィンドウを閉じる前に済ませる。
+/// Linux では、GTK がページの X のウィンドウを消す頼みを、親のウィンドウが消える前に X サーバーへ届ける
+/// （親が先に消えると BadWindow になり、アプリが落ちる）。
+pub fn settle() {
+    #[cfg(target_os = "linux")]
+    linux::settle();
+}
+
 #[cfg(target_os = "linux")]
 mod linux {
     pub fn init() -> Result<(), String> {
@@ -480,6 +539,17 @@ mod linux {
         while gtk::events_pending() {
             gtk::main_iteration_do(false);
         }
+    }
+
+    pub fn settle() {
+        if !gtk::is_initialized_main_thread() {
+            return;
+        }
+        pump();
+        if let Some(display) = gtk::gdk::Display::default() {
+            display.sync();
+        }
+        pump();
     }
 
     /// cairo の画像（ARGB32。リトルエンディアンでは B, G, R, A の順）を、gpui の画像にする。
@@ -513,7 +583,18 @@ mod linux {
 
 #[cfg(test)]
 mod tests {
-    use super::stays_inside;
+    use super::{popup_url, stays_inside};
+
+    #[test]
+    fn only_web_links_open_in_a_small_window() {
+        assert_eq!(
+            popup_url("popup:https://github.com/a"),
+            Some("https://github.com/a")
+        );
+        assert_eq!(popup_url("popup:javascript:alert(1)"), None);
+        assert_eq!(popup_url("popup:file:///etc/passwd"), None);
+        assert_eq!(popup_url("zoom:in"), None);
+    }
 
     #[test]
     fn only_web_pages_stay_inside() {

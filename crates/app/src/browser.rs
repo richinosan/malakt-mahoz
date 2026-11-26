@@ -28,8 +28,11 @@ use crate::feel;
 use crate::render::app_icon;
 use crate::term::{self, Terms};
 
-/// 一度に開けるページの数。
+/// 一度に開けるページの数。小さなウィンドウのページも数える。
 pub const MAX_PAGES: usize = 12;
+/// ホイールで押したリンクを小さなウィンドウで開いたあと、同じリンクの「新しいタブで開く」を捨てる時間。
+/// ホイールでの押下を止められない部品では、両方が届く。
+const POPUP_ECHO: Duration = Duration::from_secs(1);
 /// 何も開いていないページ。
 pub const BLANK: &str = "about:blank";
 /// 開いているページの場所を残す設定。次に起動したときに、同じタブを並べる。
@@ -116,6 +119,8 @@ pub enum Event {
     Title(String),
     /// ページが新しいウィンドウで開こうとした。アプリの新しいタブで開く。
     NewTab(String),
+    /// ページの中のリンクをホイールで押した。小さなウィンドウで開く。
+    Popup(String),
     /// アプリの中で開かないリンク（mailto: など）。OS に渡す。
     External(String),
     /// ページを押した、ページの中に入力が移った。
@@ -189,6 +194,10 @@ pub struct Page {
     pub can_forward: bool,
     /// 開けなかった理由。
     pub error: Option<SharedString>,
+    /// タブではなく、小さなウィンドウで開いている。タブの並びには出さない。
+    pub popup: bool,
+    /// 小さなウィンドウ。開き終わるまでは `None`。
+    pub(crate) popup_window: Option<AnyWindowHandle>,
     pub(crate) engine: Option<Rc<dyn Engine>>,
     /// ページを置いているウィンドウ。
     pub(crate) window: Option<WindowId>,
@@ -231,6 +240,8 @@ impl Page {
             can_back: false,
             can_forward: false,
             error: None,
+            popup: false,
+            popup_window: None,
             engine: None,
             window: None,
             shown: false,
@@ -303,6 +314,7 @@ impl Page {
             "title": self.title.as_ref().map(|t| t.to_string()),
             "loading": self.loading,
             "shown": active,
+            "window": self.popup,
             "zoom": zoom_label(self.zoom),
         })
     }
@@ -366,7 +378,7 @@ impl Terms {
         self.pages.iter().find(|page| page.id == id)
     }
 
-    fn page_mut(&mut self, id: u64) -> Option<&mut Page> {
+    pub(crate) fn page_mut(&mut self, id: u64) -> Option<&mut Page> {
         self.pages.iter_mut().find(|page| page.id == id)
     }
 
@@ -383,7 +395,8 @@ impl Terms {
         }
         let url = normalize(url);
         if url != BLANK {
-            if let Some(id) = self.pages.iter().find(|p| p.url == url).map(|p| p.id) {
+            let same = self.pages.iter().find(|p| !p.popup && p.url == url);
+            if let Some(id) = same.map(|p| p.id) {
                 self.activate(Some(id), cx);
                 return Some(id);
             }
@@ -407,6 +420,70 @@ impl Terms {
         self.save_pages(cx);
         cx.notify();
         Some(id)
+    }
+
+    /// ページを小さなウィンドウ用に作る。タブの並びには出さず、場所も残さない。
+    /// ウィンドウは [`crate::browser_popup::open`] が開く。
+    pub(crate) fn open_popup_page(&mut self, url: &str, cx: &mut Context<Self>) -> Option<u64> {
+        self.error = None;
+        if !self.db.read(cx).unlocked {
+            return None;
+        }
+        if self.pages.len() >= MAX_PAGES {
+            self.fail(
+                format!(
+                    "ブラウザのページは {MAX_PAGES} 個までです。タブか小さなウィンドウを閉じてから開いてください。"
+                ),
+                cx,
+            );
+            return None;
+        }
+        let id = self.next;
+        self.next += 1;
+        let mut page = Page::new(id, normalize(url));
+        page.popup = true;
+        self.pages.push(page);
+        cx.notify();
+        Some(id)
+    }
+
+    /// 小さなウィンドウのページを、ブラウザのタブに移して見せる。ウィンドウは閉じる。
+    /// 戻すウィンドウは `None`。開いていたウィンドウ（閉じたあとに呼んだときは `None`）を返す。
+    pub(crate) fn dock_popup(
+        &mut self,
+        id: u64,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyWindowHandle> {
+        let page = self.page_mut(id).filter(|p| p.popup)?;
+        page.popup = false;
+        let window = page.popup_window.take();
+        // ウィンドウを閉じる前に部品を捨てる。タブで見せるときに、そのウィンドウで作り直す
+        page.engine = None;
+        page.window = None;
+        page.shown = false;
+        page.focused = false;
+        page.bounds = None;
+        page.forget_shot();
+        self.activate(Some(id), cx);
+        self.save_pages(cx);
+        cx.notify();
+        window
+    }
+
+    /// ウィンドウを閉じる前に、そこに置いたページの部品を捨てる。
+    /// タブのページは、ほかのウィンドウで見せるときに作り直す。
+    pub(crate) fn drop_engines_in(&mut self, window: WindowId) {
+        for page in &mut self.pages {
+            if page.window != Some(window) {
+                continue;
+            }
+            page.engine = None;
+            page.window = None;
+            page.shown = false;
+            page.focused = false;
+            page.bounds = None;
+            page.forget_shot();
+        }
     }
 
     /// 見ているページか、`id` のページ。
@@ -537,6 +614,7 @@ impl Terms {
         let urls: Vec<&str> = self
             .pages
             .iter()
+            .filter(|p| !p.popup)
             .map(|p| p.url.as_str())
             .filter(|url| *url != BLANK && is_web(url))
             .collect();
@@ -584,7 +662,23 @@ impl Terms {
     pub(crate) fn on_page_event(&mut self, id: u64, event: Event, cx: &mut Context<Self>) {
         match event {
             Event::NewTab(url) => {
-                self.open_page(&url, cx);
+                let echo = self
+                    .popup_sent
+                    .take()
+                    .is_some_and(|(sent, at)| sent == url && at.elapsed() < POPUP_ECHO);
+                if !echo {
+                    self.open_page(&url, cx);
+                }
+                return;
+            }
+            Event::Popup(url) => {
+                if !is_web(&url) {
+                    return;
+                }
+                self.popup_sent = Some((url.clone(), Instant::now()));
+                let from = self.page(id).and_then(|p| p.window);
+                // ウィンドウを開くと、その中の画面がこの一覧を読むので、更新を終えてから開く
+                cx.defer(move |cx| crate::browser_popup::open(&url, from, cx));
                 return;
             }
             Event::External(url) => {
@@ -661,6 +755,7 @@ impl Terms {
                 page.forget_shot();
             }
             Event::NewTab(_)
+            | Event::Popup(_)
             | Event::External(_)
             | Event::Zoom(_)
             | Event::Pointer(_)
@@ -1109,7 +1204,7 @@ impl BrowserPane {
 }
 
 /// 場所の欄の右に出す、ページの拡大率。押すと 100% に戻す。
-struct ZoomBadge {
+pub(crate) struct ZoomBadge {
     zoom: f64,
     turn: u64,
     /// 出てきたばかり。
@@ -1121,7 +1216,18 @@ struct ZoomBadge {
 }
 
 impl ZoomBadge {
-    fn render(
+    /// ページの拡大率の表示。出さないときは `None`。
+    pub(crate) fn of(page: &Page) -> Option<Self> {
+        page.zoom_badge().then_some(ZoomBadge {
+            zoom: page.zoom,
+            turn: page.zoom_turn,
+            entering: page.zoom_turn == page.zoom_entered,
+            recent: page.zoom_recent,
+            leaving: page.zoom_leaving,
+        })
+    }
+
+    pub(crate) fn render(
         self,
         still: bool,
         accent: Hsla,
@@ -1182,8 +1288,52 @@ impl ZoomBadge {
     }
 }
 
+/// ページを置く場所。描くたびに、OS の部品をここに合わせる。
+/// 撮った画像はページの下に置く。メニューやダイアログでページを隠している間だけ見える。
+pub(crate) fn page_view(id: u64, shot: Option<Arc<RenderImage>>, background: Hsla) -> AnyElement {
+    div()
+        .id("browser-page")
+        .relative()
+        .flex_1()
+        .min_h_0()
+        .w_full()
+        .bg(background)
+        .children(shot.map(|shot| {
+            img(shot)
+                .id("browser-shot")
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .object_fit(ObjectFit::Fill)
+                .test_support()
+        }))
+        .child(
+            canvas(
+                move |bounds, window, cx| {
+                    let terms = term::shared(cx);
+                    terms.update(cx, |terms, cx| terms.place_page(id, bounds, window, cx));
+                },
+                |_, _, _, _| {},
+            )
+            .size_full(),
+        )
+        .test_support()
+        .into_any_element()
+}
+
+/// ウィンドウを閉じる前に呼ぶ。そこに置いたページの部品を、ウィンドウより先に捨てる。
+pub fn window_closing(window: &Window, cx: &mut App) {
+    if cx.try_global::<term::SharedTerms>().is_none() {
+        return;
+    }
+    let here = window.window_handle().window_id();
+    term::shared(cx).update(cx, |terms, _| terms.drop_engines_in(here));
+    crate::webview::settle();
+}
+
 /// ページを読み込んでいる間、上の端を流れる線。
-fn loading_line(color: Hsla) -> AnyElement {
+pub(crate) fn loading_line(color: Hsla) -> AnyElement {
     div()
         .relative()
         .h(gpui_kit::px(2.))
@@ -1225,13 +1375,7 @@ impl Render for BrowserPane {
                     p.error.clone(),
                     elsewhere,
                     p.shot.clone(),
-                    p.zoom_badge().then_some(ZoomBadge {
-                        zoom: p.zoom,
-                        turn: p.zoom_turn,
-                        entering: p.zoom_turn == p.zoom_entered,
-                        recent: p.zoom_recent,
-                        leaving: p.zoom_leaving,
-                    }),
+                    ZoomBadge::of(p),
                 )
             });
             (page, terms.focus_bar)
@@ -1257,7 +1401,6 @@ impl Render for BrowserPane {
             self.terms.update(cx, |terms, _| terms.focus_bar = false);
             self.bar.update(cx, |bar, cx| bar.focus(window, cx));
         }
-        let pane = cx.entity();
         let tool = |id: &'static str, icon: &str, tip: &'static str| {
             Button::new(id)
                 .icon(app_icon(icon))
@@ -1382,36 +1525,7 @@ impl Render for BrowserPane {
                 ))
                 .into_any_element()
         } else {
-            div()
-                .id("browser-page")
-                .relative()
-                .flex_1()
-                .min_h_0()
-                .w_full()
-                .bg(theme.background)
-                // 撮った画像はページの下に置く。メニューやダイアログでページを隠している間だけ見える
-                .children(shot.map(|shot| {
-                    img(shot)
-                        .id("browser-shot")
-                        .absolute()
-                        .top_0()
-                        .left_0()
-                        .size_full()
-                        .object_fit(ObjectFit::Fill)
-                        .test_support()
-                }))
-                .child(
-                    canvas(
-                        move |bounds, window, cx| {
-                            let terms = pane.read(cx).terms.clone();
-                            terms.update(cx, |terms, cx| terms.place_page(id, bounds, window, cx));
-                        },
-                        |_, _, _, _| {},
-                    )
-                    .size_full(),
-                )
-                .test_support()
-                .into_any_element()
+            page_view(id, shot, theme.background)
         };
         div()
             .id("browser")
@@ -1492,6 +1606,16 @@ pub fn run_tool(args: &Value, reveal: &mut bool, cx: &mut App) -> Result<Value, 
         }
         "show" => {
             let id = target(cx)?;
+            // 小さなウィンドウのページは、そのウィンドウを手前に出す
+            if let Some(popup) = terms.read(cx).page(id).filter(|p| p.popup) {
+                let shown = popup
+                    .popup_window
+                    .and_then(|w| w.update(cx, |_, window, _| window.activate_window()).ok());
+                return match shown {
+                    Some(()) => Ok(json!({"tab": id, "window": true})),
+                    None => Err(format!("タブ {id} の小さなウィンドウを開いていません")),
+                };
+            }
             terms.update(cx, |terms, cx| terms.activate(Some(id), cx));
             *reveal = true;
             Ok(json!({"tab": id}))
