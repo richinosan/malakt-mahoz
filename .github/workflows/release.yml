@@ -19,6 +19,7 @@ jobs:
   check:
     name: 公開するか決める
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     outputs:
       version: ${{ steps.version.outputs.version }}
       release: ${{ steps.version.outputs.release }}
@@ -46,6 +47,8 @@ jobs:
     needs: check
     if: needs.check.outputs.release == 'true'
     runs-on: ${{ matrix.os }}
+    # ふだんは 20 分ほど（リリースビルドは lto と codegen-units = 1 で遅い）
+    timeout-minutes: 40
     strategy:
       fail-fast: true
       matrix:
@@ -77,6 +80,7 @@ jobs:
     name: 公開する
     needs: [check, build]
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4

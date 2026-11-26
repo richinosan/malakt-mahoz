@@ -17,6 +17,7 @@ pub mod mcp;
 pub mod mcp_register;
 pub mod panes;
 pub mod passkey;
+mod press;
 pub mod reminders;
 mod render;
 pub mod scroll;
