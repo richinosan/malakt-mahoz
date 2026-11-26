@@ -1776,17 +1776,29 @@ fn dialogs_fade_in_and_out(cx: &mut TestAppContext) {
     start(cx);
     let (window, view) = open(cx, wide());
     cx.update(|cx| view.update(cx, |v, _| v.motion = true));
-    ui(cx, window, |window, cx| window.click("open-settings", cx));
+    // 動いている間は次の描画が続けて来るので、待つ（run_until_parked）前に見る
+    let press = |cx: &mut TestAppContext, id: &'static str| {
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.click(id, cx);
+            window.render_frame(cx);
+        })
+        .unwrap();
+    };
+    press(cx, "open-settings");
     cx.update(|cx| assert!(view.read(cx).dialog_t.get() < 1.));
+    cx.run_until_parked();
     std::thread::sleep(std::time::Duration::from_millis(250));
     ui(cx, window, |_, _| {});
     cx.update(|cx| assert_eq!(view.read(cx).dialog_t.get(), 1.));
 
-    ui(cx, window, |window, cx| window.click("dialog-close", cx));
+    press(cx, "dialog-close");
     cx.update(|cx| assert_eq!(view.read(cx).modal, Modal::None));
-    ui(cx, window, |window, _| {
+    cx.update_window(window, |_, window, _| {
         assert!(window.try_find("dialog-closing").is_some())
-    });
+    })
+    .unwrap();
+    cx.run_until_parked();
     std::thread::sleep(std::time::Duration::from_millis(200));
     ui(cx, window, |_, _| {});
     ui(cx, window, |window, _| {

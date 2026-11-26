@@ -138,7 +138,8 @@ fn start_with(cx: &mut TestAppContext, store: Store) -> World {
         }),
         gh: Arc::new(move |link| {
             let state = github.lock().unwrap().clone();
-            Spec::shell(&format!("echo fetched {}{state}", link.url()))
+            // PowerShell の echo は、引数を 1 行ずつに分けて出すので、一重引用符でまとめる
+            Spec::shell(&format!("echo 'fetched {}'{state}", link.url()))
         }),
         slack: Arc::new(move |link| {
             let state = slack.lock().unwrap().clone();
@@ -764,7 +765,7 @@ fn github_links_are_fetched_before_sending(cx: &mut TestAppContext) {
     let lines = read(cx, |s| s.shell.clone());
     assert_eq!(
         lines[0].text,
-        cmd_line("echo fetched https://github.com/o/r/issues/3")
+        cmd_line("echo 'fetched https://github.com/o/r/issues/3'")
     );
     let sent = world.sent();
     let message = sent[0].2["messages"][0]["content"].as_str().unwrap();
