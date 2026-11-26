@@ -15,8 +15,9 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::press::button;
 use gpui_kit::base::TestSupportExt;
-use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::button::ButtonVariants;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
 use gpui_kit::component::{ActiveTheme, Disableable, Placement, Sizable};
@@ -1606,7 +1607,7 @@ impl Render for FindBar {
             .unwrap_or(false);
         let query_empty = self.input.read(cx).value().is_empty();
         let tool = |id: &'static str, icon: &str, tip: &'static str| {
-            Button::new(id)
+            button(id)
                 .icon(app_icon(icon))
                 .tooltip(tip)
                 // ページは下に重なるので、名前はボタンの上に出す
@@ -1715,7 +1716,7 @@ impl ZoomBadge {
         } else {
             "zoom-in"
         };
-        let button = Button::new("browser-zoom")
+        let button = button("browser-zoom")
             .icon(app_icon(icon))
             .label(zoom_label(self.zoom))
             .tooltip("100% に戻す")
@@ -1895,7 +1896,7 @@ impl Render for BrowserPane {
             self.bar.update(cx, |bar, cx| bar.focus(window, cx));
         }
         let tool = |id: &'static str, icon: &str, tip: &'static str| {
-            Button::new(id)
+            button(id)
                 .icon(app_icon(icon))
                 .tooltip(tip)
                 // ページは上に重なるので、名前はボタンの上に出す
@@ -1968,7 +1969,7 @@ impl Render for BrowserPane {
                 .text_color(theme.danger)
                 .child(div().id("browser-error").child(error).test_support())
                 .child(feel::gloss(
-                    Button::new("browser-retry")
+                    button("browser-retry")
                         .icon(app_icon("rotate-cw"))
                         .label("もう一度開く")
                         .ghost()
@@ -1998,7 +1999,7 @@ impl Render for BrowserPane {
                         .child(title.unwrap_or_else(|| url.clone().into())),
                 )
                 .child(feel::gloss(
-                    Button::new("browser-here")
+                    button("browser-here")
                         .icon(app_icon("monitor"))
                         .label("このウィンドウに表示")
                         .ghost()

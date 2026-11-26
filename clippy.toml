@@ -1,0 +1,5 @@
+# ボタンは crate::press::button で作る。押したときの処理（on_click か pop_menu）を付けないと
+# 画面に置けないので、押しても何も起きないボタンはビルドが通らない
+disallowed-methods = [
+  { path = "gpui_component::button::Button::new", reason = "crate::press::button を使う（押したときの処理がないボタンを作れなくする）" },
+]

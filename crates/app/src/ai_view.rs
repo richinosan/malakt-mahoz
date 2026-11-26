@@ -3,8 +3,9 @@
 use std::ops::Range;
 use std::time::Duration;
 
+use crate::press::{button, Unpressed};
 use gpui_kit::base::TestSupportExt;
-use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::button::ButtonVariants;
 use gpui_kit::component::input::{
     Copy as CopyText, Input, InputEvent, InputState, MoveDown, MoveUp, Textarea, TextareaState,
 };
@@ -139,12 +140,8 @@ pub fn run_details(run: &Run, theme: &gpui_kit::component::Theme) -> Div {
     body
 }
 
-pub(crate) fn icon_button(id: &'static str, icon: &str, tip: &'static str) -> Button {
-    Button::new(id)
-        .icon(app_icon(icon))
-        .tooltip(tip)
-        .ghost()
-        .small()
+pub(crate) fn icon_button(id: &'static str, icon: &str, tip: &'static str) -> Unpressed {
+    button(id).icon(app_icon(icon)).tooltip(tip).ghost().small()
 }
 
 /// チャットを右に置いても、タスクの画面に残す幅。これより狭いと、タスクの画面は
@@ -946,7 +943,7 @@ impl AiPane {
                             .child(format!("続き: {}", one_line(text))),
                     )
                     .child(feel::gloss(
-                        Button::new(("ai-queued-remove", ix))
+                        button(("ai-queued-remove", ix))
                             .icon(app_icon("x"))
                             .ghost()
                             .xsmall()
@@ -1006,7 +1003,7 @@ impl AiPane {
                     .text_color(theme.muted_foreground)
                     .child(body.test_support())
                     .child(feel::gloss(
-                        Button::new(("ai-parallel-dismiss", ix))
+                        button(("ai-parallel-dismiss", ix))
                             .icon(app_icon("x"))
                             .ghost()
                             .xsmall()
@@ -1059,7 +1056,7 @@ impl AiPane {
                             .test_support(),
                     )
                     .child(feel::gloss(
-                        Button::new(("ai-failed-retry", ix))
+                        button(("ai-failed-retry", ix))
                             .icon(app_icon("refresh-cw"))
                             .ghost()
                             .xsmall()
@@ -1069,7 +1066,7 @@ impl AiPane {
                             })),
                     ))
                     .child(feel::gloss(
-                        Button::new(("ai-failed-dismiss", ix))
+                        button(("ai-failed-dismiss", ix))
                             .icon(app_icon("x"))
                             .ghost()
                             .xsmall()
@@ -1156,7 +1153,7 @@ impl AiPane {
                             .test_support(),
                     )
                     .child(feel::gloss(
-                        Button::new(("ai-chat-delete", ix))
+                        button(("ai-chat-delete", ix))
                             .icon(app_icon("trash"))
                             .ghost()
                             .xsmall()
@@ -1263,7 +1260,7 @@ impl AiPane {
                         )
                         .when(failed, |d| {
                             d.child(feel::gloss(
-                                Button::new(("ai-run-retry", ix))
+                                button(("ai-run-retry", ix))
                                     .icon(app_icon("refresh-cw"))
                                     .ghost()
                                     .xsmall()
@@ -1275,7 +1272,7 @@ impl AiPane {
                         })
                         .when_some(task.filter(|_| self.main.is_some()), |d, task| {
                             d.child(feel::gloss(
-                                Button::new(("ai-run-task", ix))
+                                button(("ai-run-task", ix))
                                     .icon(app_icon("list-todo"))
                                     .ghost()
                                     .xsmall()
@@ -1582,7 +1579,7 @@ impl AiPane {
         let pane = cx.entity().downgrade();
         let labels: Vec<SharedString> = models.iter().map(|m| session.model_label(m)).collect();
         let pill = |id: &'static str, label: SharedString, tip: SharedString| {
-            Button::new(id)
+            button(id)
                 .ghost()
                 .small()
                 .label(label)
@@ -1872,7 +1869,7 @@ impl AiPane {
                 // 押すと、そのまま送る
                 for (ix, text) in SUGGESTIONS.into_iter().enumerate() {
                     start = start.child(feel::gloss(
-                        Button::new(("ai-suggest", ix))
+                        button(("ai-suggest", ix))
                             .label(text)
                             .outline()
                             .small()
@@ -1884,7 +1881,7 @@ impl AiPane {
                 }
             } else {
                 start = start.child(feel::gloss(
-                    Button::new("ai-empty-key")
+                    button("ai-empty-key")
                         .icon(app_icon("settings"))
                         .label("API キーを設定")
                         .outline()
@@ -1962,18 +1959,16 @@ impl AiPane {
                         .gap_2()
                         .flex_wrap()
                         .child(feel::gloss(
-                            Button::new("ai-allow")
-                                .label("許可")
-                                .primary()
-                                .small()
-                                .on_click(cx.listener(|this, _, _, cx| {
+                            button("ai-allow").label("許可").primary().small().on_click(
+                                cx.listener(|this, _, _, cx| {
                                     this.session
                                         .update(cx, |s, cx| s.answer(Decision::Allow, cx));
-                                })),
+                                }),
+                            ),
                         ))
                         .when(pending.shell, |d| {
                             d.child(feel::gloss(
-                                Button::new("ai-allow-always")
+                                button("ai-allow-always")
                                     .label("このチャットでは常に許可")
                                     .small()
                                     .on_click(cx.listener(|this, _, _, cx| {
@@ -1984,7 +1979,7 @@ impl AiPane {
                             ))
                         })
                         .child(feel::gloss(
-                            Button::new("ai-deny")
+                            button("ai-deny")
                                 .label("拒否")
                                 .small()
                                 .on_click(cx.listener(|this, _, _, cx| {
@@ -2093,7 +2088,7 @@ impl AiPane {
                                             .child(app_icon("list-todo").size_3().flex_none())
                                             .child(div().min_w_0().truncate().child(title.clone()))
                                             .child(feel::gloss(
-                                                Button::new(("ai-attached-remove", ix))
+                                                button(("ai-attached-remove", ix))
                                                     .icon(app_icon("x"))
                                                     .ghost()
                                                     .xsmall()
@@ -2546,7 +2541,7 @@ impl AiPane {
                         })
                         .child(div().flex_1().min_w_0().child(error))
                         .child(feel::gloss(
-                            Button::new("term-error-close")
+                            button("term-error-close")
                                 .icon(app_icon("x"))
                                 .tooltip("閉じる")
                                 .ghost()
@@ -2784,7 +2779,7 @@ impl AiPane {
             .gap_0p5()
             .child(tabs)
             .child(feel::gloss(
-                Button::new("term-new")
+                button("term-new")
                     .icon(app_icon("plus"))
                     .tooltip(new_tip)
                     .ghost()
@@ -2799,7 +2794,7 @@ impl AiPane {
                     }),
             ))
             .child(feel::gloss(
-                Button::new("browser-new")
+                button("browser-new")
                     .icon(app_icon("globe"))
                     .tooltip("新しいブラウザのタブ")
                     .ghost()

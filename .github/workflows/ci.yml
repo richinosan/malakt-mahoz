@@ -14,9 +14,12 @@ permissions:
   contents: read
 
 jobs:
+  # タイムアウトは、ふだんかかる時間（キャッシュが冷えたときを含む）の 1.5〜2 倍にしている。
+  # 止まったテストで何十分も回り続けないようにする
   lint:
     name: 書式と clippy
     runs-on: ubuntu-latest
+    timeout-minutes: 8
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/setup
@@ -25,6 +28,8 @@ jobs:
   test:
     name: テスト（${{ matrix.os }}）
     runs-on: ${{ matrix.os }}
+    # ふだんは 4〜5 分、キャッシュが冷えた macOS で 9 分ほど
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -35,7 +40,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/setup
-      # ユニットテストと、core・画面のシナリオテストをまとめて実行する
+      # ユニットテストと、core・画面のシナリオテストをまとめて実行する。
+      # 全ボタンを押すテストは重いので外している（mise run test-buttons）
       - run: mise run test
       # 配布用のアーカイブを組み立てられることを確かめる。中身は、テストのときにできたデバッグビルド。
       # cargo build し直すと、テスト用の機能を外した gpui を全部ビルドし直すことになる
@@ -51,6 +57,7 @@ jobs:
   bench:
     name: ベンチマーク
     runs-on: ubuntu-latest
+    timeout-minutes: 6
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/setup

@@ -2,7 +2,8 @@
 
 use std::collections::HashMap;
 
-use gpui_kit::component::button::{Button, ButtonVariants};
+use crate::press::button;
+use gpui_kit::component::button::ButtonVariants;
 use gpui_kit::component::scroll::ScrollableElement;
 use gpui_kit::component::{ActiveTheme, Sizable};
 use gpui_kit::prelude::FluentBuilder;
@@ -247,7 +248,7 @@ impl MainView {
                     )
                     .when(event.opens_history, |d| {
                         d.child(feel::gloss(
-                            Button::new(("event-history", ix))
+                            button(("event-history", ix))
                                 .icon(app_icon("history"))
                                 .label("変更履歴")
                                 .ghost()

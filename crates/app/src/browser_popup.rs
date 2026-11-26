@@ -4,8 +4,9 @@
 //! ページの題名、戻る、拡大率、タブで開く、ブラウザで開くを並べる。ページはタブと同じ一覧
 //! （[`Terms::pages`]）に入るので、ログインの情報もタブと同じものを使う。タブの並びには出さない。
 
+use crate::press::button;
 use gpui_kit::base::TestSupportExt;
-use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::button::ButtonVariants;
 use gpui_kit::component::{ActiveTheme, Disableable, Placement, Sizable};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
@@ -234,7 +235,7 @@ impl PopupView {
         let own_bar = true;
         // ページは下に重なるので、名前はボタンの横に出す
         let tool = |id: &'static str, icon: &str, tip: &'static str, placement: Placement| {
-            Button::new(id)
+            button(id)
                 .icon(app_icon(icon))
                 .tooltip(tip)
                 .tooltip_placement(placement)
@@ -439,7 +440,7 @@ impl Render for PopupView {
                 .text_color(theme.danger)
                 .child(div().id("popup-error").child(error).test_support())
                 .child(feel::gloss(
-                    Button::new("popup-retry")
+                    button("popup-retry")
                         .icon(app_icon("rotate-cw"))
                         .label("もう一度開く")
                         .ghost()

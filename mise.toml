@@ -17,6 +17,10 @@ run = "cargo build --release --locked -p malakt-mahoz"
 description = "ユニットテストとシナリオテストをすべて実行する"
 run = "cargo test --workspace --locked"
 
+[tasks.test-buttons]
+description = "画面のボタンを全部押して、押したら何かが変わることを確かめる（重いので手で回す）"
+run = "cargo test --locked -p malakt-mahoz --test buttons -- --ignored"
+
 [tasks.lint]
 description = "書式と clippy を確かめる"
 run = [

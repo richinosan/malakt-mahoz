@@ -1,8 +1,9 @@
 //! AI の設定。「設定」のウィンドウ（モデル・動作・GitHub のカテゴリ）と、AI チャットのペインの
 //! 設定の両方に、同じ行を出す。どちらも自分の入力欄を持つので、1 つずつ作る。
 
+use crate::press::button;
 use gpui_kit::base::TestSupportExt;
-use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::button::ButtonVariants;
 use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_kit::component::menu::PopupMenuItem;
 use gpui_kit::component::scroll::ScrollableElement;
@@ -17,7 +18,6 @@ use crate::ai::{self, GithubAccount, KeyState, Session, Watch, WATCH_MINUTES};
 use crate::ai_view::{appear, chip, icon_button};
 use crate::feel::{self, Lit};
 use crate::render::app_icon;
-use crate::scroll::Menus;
 use crate::shadow::{Elevate, Elevation};
 
 mod rules;
@@ -392,7 +392,7 @@ impl AiSettings {
             AiRow::Model => {
                 let model_open = self.model_open;
                 let button = feel::gloss(
-                    Button::new("ai-model-open")
+                    button("ai-model-open")
                         .outline()
                         .small()
                         .w_full()
@@ -454,7 +454,7 @@ impl AiSettings {
                     .iter()
                     .map(|m| (m.to_string(), session.model_label(m)))
                     .collect();
-                Button::new("ai-coordinator")
+                button("ai-coordinator")
                     .label(shown)
                     .outline()
                     .small()
@@ -836,7 +836,7 @@ impl AiSettings {
         let muted = cx.theme().muted_foreground;
         let settings = cx.entity().downgrade();
         // 押すと、選べるシェルのメニューが開く
-        let menu = Button::new("shell-choice")
+        let menu = button("shell-choice")
             .outline()
             .w_full()
             .h_8()
@@ -866,7 +866,7 @@ impl AiSettings {
             .gap_1()
             .child(div().w(CONTROL_WIDTH).flex().child(menu))
             .child(
-                Button::new("shell-choice-reset")
+                button("shell-choice-reset")
                     .icon(app_icon("rotate-ccw"))
                     .ghost()
                     .small()

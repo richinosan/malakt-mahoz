@@ -3,8 +3,9 @@
 //! ウィンドウの `MainView` が 1 つ目のペインの中身を兼ね、分けて増えたペインは、
 //! それぞれ別の `MainView`（`embedded`）が中身を持つ。どのペインも別々の場所・絞り込み・詳細を持つ。
 
+use crate::press::button;
 use gpui_kit::base::TestSupportExt;
-use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::button::ButtonVariants;
 use gpui_kit::component::scroll::ScrollableElement;
 use gpui_kit::component::{ActiveTheme, Sizable};
 use gpui_kit::prelude::FluentBuilder;
@@ -407,7 +408,7 @@ impl MainView {
             };
             let on = id == focus;
             let button = |name: &'static str, icon: &'static str, label: &'static str| {
-                Button::new((name, id as usize))
+                button((name, id as usize))
                     .icon(app_icon(icon))
                     .ghost()
                     .xsmall()
@@ -611,7 +612,7 @@ impl MainView {
         for scheme in Keys::ALL {
             let on = self.pane_keys == scheme;
             keys = keys.child(feel::gloss(
-                Button::new(("pane-keys", scheme as usize))
+                button(("pane-keys", scheme as usize))
                     .label(scheme.label())
                     .xsmall()
                     .when(on, |b| b.primary())
@@ -660,7 +661,7 @@ impl MainView {
             PaneOverlay::Presets => {
                 for (n, (name, text)) in PRESETS.into_iter().enumerate() {
                     body = body.child(feel::gloss(
-                        Button::new(("pane-preset", n))
+                        button(("pane-preset", n))
                             .label(name)
                             .ghost()
                             .on_click(cx.listener(move |this, _, window, cx| {
@@ -675,18 +676,15 @@ impl MainView {
                             .flex_row()
                             .items_center()
                             .gap_1()
-                            .child(
-                                div().flex_1().flex().flex_col().child(feel::gloss(
-                                    Button::new(("pane-preset-own", n))
-                                        .label(name)
-                                        .ghost()
-                                        .on_click(cx.listener(move |this, _, window, cx| {
-                                            this.apply_pane_layout(&text, window, cx)
-                                        })),
-                                )),
-                            )
+                            .child(div().flex_1().flex().flex_col().child(feel::gloss(
+                                button(("pane-preset-own", n)).label(name).ghost().on_click(
+                                    cx.listener(move |this, _, window, cx| {
+                                        this.apply_pane_layout(&text, window, cx)
+                                    }),
+                                ),
+                            )))
                             .child(feel::gloss(
-                                Button::new(("pane-preset-delete", n))
+                                button(("pane-preset-delete", n))
                                     .icon(app_icon("trash"))
                                     .ghost()
                                     .xsmall()
@@ -698,7 +696,7 @@ impl MainView {
                     );
                 }
                 body = body.child(feel::gloss(
-                    Button::new("pane-preset-save")
+                    button("pane-preset-save")
                         .icon(app_icon("plus"))
                         .label("今の配置を保存")
                         .on_click(cx.listener(|this, _, _, cx| this.save_pane_preset(cx))),

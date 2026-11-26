@@ -3,6 +3,10 @@
 //! 画面ごとに、見えている押せるものをすべて拾い、1 つずつ新しい状態から押す。押して開いた
 //! メニューやダイアログの中のものも、同じように 1 つずつ押す。画面もデータも変わらなかった
 //! ものを「反応しないボタン」として並べ、1 つでもあれば失敗にする。
+//!
+//! 押したときの処理がないボタンは、`crate::press::button` の型でビルドの時点で止めている。
+//! このテストは画面を全部開いて押すので重く、macOS の CI では止まったまま終わらなかった。
+//! そのため `mise run test` と pre-commit からは外し、手で回す: `mise run test-buttons`
 
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1203,6 +1207,7 @@ fn pool<T: Sync, R: Send>(items: &[T], work: fn(&mut TestAppContext, &T) -> R) -
 /// どれを押すか（同じ名前の中のボタンは、前の画面までに押していれば押さない）と結果のまとめは、
 /// 画面の順に 1 つのスレッドで決める。
 #[test]
+#[ignore = "重いので手で回す: mise run test-buttons"]
 fn every_button_responds() {
     let screens = screens();
     let quiet = |screen: &str, id: &ElementId| {
@@ -1343,8 +1348,16 @@ fn finish(
     ]
     .concat();
     let mut missed: Vec<&str> = Vec::new();
-    for (at, _) in source.match_indices("Button::new(") {
-        let rest = source[at + "Button::new(".len()..].trim_start();
+    for (at, _) in source.match_indices("button(") {
+        // `icon_button(` などのほかの関数は数えない
+        if source[..at]
+            .chars()
+            .next_back()
+            .is_some_and(|c| c.is_alphanumeric() || c == '_')
+        {
+            continue;
+        }
+        let rest = source[at + "button(".len()..].trim_start();
         let rest = rest.strip_prefix('(').unwrap_or(rest).trim_start();
         if let Some(name) = rest.strip_prefix('"').and_then(|r| r.split('"').next()) {
             if !pressed.contains(name)

@@ -3,8 +3,9 @@
 //! 「＋」で「新規ルール」を足し、その場で名前を書く。行を押すと開き、名前と本文をその場で書ける。
 //! 名前は Enter かほかの場所を押すと、本文はほかの場所を押すと保存し、Esc で書きかけを捨てて閉じる。
 
+use crate::press::button;
 use gpui_kit::base::TestSupportExt;
-use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::button::ButtonVariants;
 use gpui_kit::component::input::{Input, Textarea};
 use gpui_kit::component::menu::PopupMenuItem;
 use gpui_kit::component::switch::Switch;
@@ -17,7 +18,6 @@ use malakt_core::{Store, Workspace};
 use super::{col, px, row, AiSettings, CONTROL_WIDTH};
 use crate::feel::{self, Lit};
 use crate::render::app_icon;
-use crate::scroll::Menus;
 
 /// ワークスペースを、左のメニューと同じ親子の順に並べる。深さも返す。
 fn workspace_tree(all: &[Workspace]) -> Vec<(Workspace, usize)> {
@@ -239,7 +239,7 @@ impl AiSettings {
                 .into(),
         };
         let settings = cx.entity().downgrade();
-        let scope_menu = Button::new("ai-rules-scope")
+        let scope_menu = button("ai-rules-scope")
             .outline()
             .w(CONTROL_WIDTH)
             .h_8()
@@ -281,7 +281,7 @@ impl AiSettings {
                 }
             });
         let add = feel::gloss(
-            Button::new("ai-rule-add")
+            button("ai-rule-add")
                 .icon(app_icon("plus"))
                 .tooltip("ルールを追加")
                 .ghost()
@@ -390,7 +390,7 @@ impl AiSettings {
             .test_support();
         let settings = cx.entity().downgrade();
         let current = rule.apply;
-        let apply = Button::new(("ai-rule-apply", ix))
+        let apply = button(("ai-rule-apply", ix))
             .ghost()
             .xsmall()
             .label(current.label())
@@ -444,7 +444,7 @@ impl AiSettings {
                     )
                 }
             }));
-        let delete = Button::new(("ai-rule-delete", ix))
+        let delete = button(("ai-rule-delete", ix))
             .icon(app_icon("trash"))
             .tooltip("削除")
             .ghost()
