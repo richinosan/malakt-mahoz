@@ -2157,7 +2157,8 @@ impl AiPane {
 
     /// 別ウィンドウの上の細いバー。ウィンドウの名前と、最小化・最大化・閉じるのボタンを出す。
     /// 空いているところを掴むと、ウィンドウを動かせる。右に置いているときは出さない。
-    fn render_title_bar(&self, window: &Window, cx: &mut Context<Self>) -> Option<Div> {
+    /// 右クリックで、ウィンドウのメニュー（ロック・最小化・閉じるなど）が開く。
+    fn render_title_bar(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let title: SharedString = match self.mode {
             // タブの場所だけのウィンドウは、見ているタブの名前
             PaneMode::ShellWindow => term::shared(cx).read(cx).active_label(),
@@ -2236,7 +2237,13 @@ impl AiPane {
                 false,
                 window,
                 cx,
-            ))),
+            )))
+            .debug_selector(|| "window-header".into())
+            .right_menu({
+                let main = self.main.clone();
+                move |menu, window, cx| crate::render::window_menu(menu, main.clone(), window, cx)
+            })
+            .into_any_element(),
         )
     }
 

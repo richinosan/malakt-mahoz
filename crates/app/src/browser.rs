@@ -129,6 +129,8 @@ pub enum Event {
     },
     /// ページの上で Ctrl+ホイールや Ctrl++ / Ctrl+- / Ctrl+0 を押した。
     Zoom(Zoom),
+    /// ページの上でロックのキー（Ctrl+Shift+L / ⇧⌘L）を押した。
+    Lock,
 }
 
 /// 開いているページを動かす口。本物は [`crate::webview`]、テストでは差し替える。
@@ -595,6 +597,12 @@ impl Terms {
                 self.zoom_page(id, step, cx);
                 return;
             }
+            // ページに入力が移っているとキーはアプリに届かないので、ページから知らせを受ける
+            Event::Lock => {
+                // 設定を開くときはこの一覧も読むので、更新を終えてから
+                cx.defer(crate::lock_now_or_settings);
+                return;
+            }
             _ => {}
         }
         let events = self.page_events.clone();
@@ -663,6 +671,7 @@ impl Terms {
             Event::NewTab(_)
             | Event::External(_)
             | Event::Zoom(_)
+            | Event::Lock
             | Event::Pointer(_)
             | Event::Snapshot { .. } => {}
         }

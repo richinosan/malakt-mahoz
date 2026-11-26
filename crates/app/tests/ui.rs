@@ -472,6 +472,95 @@ fn lock_now_while_disabled_does_nothing(cx: &mut TestAppContext) {
     cx.update(|cx| assert!(view.read(cx).unlocked(cx)));
 }
 
+/// 上のバーを右クリックすると、ウィンドウのメニューが出る。「ロックする」は、ロックが無効なら
+/// ロックの設定を開き、有効ならロックする。ロック中は「ロックする」を押せない。
+#[gpui_kit::test]
+fn header_menu_locks_the_app(cx: &mut TestAppContext) {
+    start(cx);
+    let (window, view) = open(cx, wide());
+    // バーの、ボタンのない所（今の画面の名前のあたり）を右クリックする
+    let mut at = None;
+    ui(cx, window, |window, _| {
+        let menu = window.find("toggle-sidebar").bounds();
+        at = Some(menu.center() + gpui_kit::point(px(300.), px(0.)));
+    });
+    let at = at.unwrap();
+    let right_click_header = |cx: &mut TestAppContext| {
+        let mut v = gpui_kit::VisualTestContext::from_window(window, cx);
+        v.simulate_mouse_down(at, MouseButton::Right, Modifiers::default());
+        v.simulate_mouse_up(at, MouseButton::Right, Modifiers::default());
+        v.run_until_parked();
+    };
+
+    right_click_header(cx);
+    ui(cx, window, |window, _| {
+        for label in ["ロックする", "新しいウィンドウ", "設定", "全画面", "閉じる"]
+        {
+            assert!(window.try_find_by_label(label).is_some(), "{label} がない");
+        }
+    });
+    // ロックが無効なら、ロックを有効にする設定を開く
+    pick(cx, window, "ロックする");
+    cx.update(|cx| {
+        let view = view.read(cx);
+        assert!(view.unlocked(cx));
+        assert_eq!(view.modal, Modal::Appearance);
+        assert_eq!(
+            view.appearance_section,
+            malakt_mahoz::state::CustomizeSection::Lock
+        );
+    });
+    ui(cx, window, |window, cx| window.press("escape", cx));
+
+    enable_lock(cx);
+    right_click_header(cx);
+    pick(cx, window, "ロックする");
+    cx.update(|cx| assert!(!view.read(cx).unlocked(cx)));
+
+    // ロック中のメニューは、ウィンドウの操作だけ
+    right_click_header(cx);
+    ui(cx, window, |window, _| {
+        assert!(window.try_find_by_label("閉じる").is_some());
+        assert!(window.try_find_by_label("設定").is_none());
+    });
+    pick(cx, window, "ロックする");
+    cx.update(|cx| assert_eq!(view.read(cx).modal, Modal::None));
+}
+
+/// ロックのキー（Ctrl+Shift+L / ⇧⌘L）は、ロックが無効ならロックの設定を開き、有効ならロックする。
+/// Ctrl+L だけではロックしない（シェルやターミナルの「画面を消す」）。
+#[gpui_kit::test]
+fn lock_key_locks_or_opens_the_lock_setting(cx: &mut TestAppContext) {
+    start(cx);
+    let (window, view) = open(cx, wide());
+    enable_lock(cx);
+    ui(cx, window, |window, cx| window.press("ctrl-l", cx));
+    cx.update(|cx| assert!(view.read(cx).unlocked(cx)));
+    ui(cx, window, |window, cx| {
+        window.press("secondary-shift-l", cx)
+    });
+    cx.update(|cx| assert!(!view.read(cx).unlocked(cx)));
+}
+
+/// ロックが無効なときにロックのキーを押すと、ロックの設定を開く。
+#[gpui_kit::test]
+fn lock_key_without_lock_opens_the_setting(cx: &mut TestAppContext) {
+    start(cx);
+    let (window, view) = open(cx, wide());
+    ui(cx, window, |window, cx| {
+        window.press("secondary-shift-l", cx)
+    });
+    cx.update(|cx| {
+        let view = view.read(cx);
+        assert!(view.unlocked(cx));
+        assert_eq!(view.modal, Modal::Appearance);
+        assert_eq!(
+            view.appearance_section,
+            malakt_mahoz::state::CustomizeSection::Lock
+        );
+    });
+}
+
 /// 書き出したものを、空の別のアプリに取り込める。
 #[gpui_kit::test]
 fn export_then_import(cx: &mut TestAppContext) {

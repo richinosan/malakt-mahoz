@@ -152,12 +152,13 @@ pub fn init_with(store: malakt_core::Store, ai: AiConfig, cx: &mut App) {
         KeyBinding::new("cmd-q", Quit, None),
         #[cfg(not(target_os = "macos"))]
         KeyBinding::new("ctrl-q", Quit, None),
+        // ロックは Shift も一緒に押す。Ctrl+L はシェルとターミナルの「画面を消す」なので、
+        // どの画面（ターミナル・ブラウザのページを含む）でも同じキーでロックできるようにする
         #[cfg(target_os = "macos")]
-        KeyBinding::new("cmd-l", LockNow, None),
+        KeyBinding::new("cmd-shift-l", LockNow, None),
         #[cfg(not(target_os = "macos"))]
-        KeyBinding::new("ctrl-l", LockNow, None),
-        // シェルの中では、Ctrl+L は画面を消す。場所を決めていない割り当て（ロック）は
-        // いちばん深い場所と同じ強さなので、入力行の中の分も、ロックより後に置く
+        KeyBinding::new("ctrl-shift-l", LockNow, None),
+        // シェルの中では、Ctrl+L は画面を消す
         KeyBinding::new("ctrl-l", ClearShell, Some("AiShell")),
         KeyBinding::new("ctrl-l", ClearShell, Some("AiShell > Input")),
         KeyBinding::new("escape", Dismiss, Some("MainView")),
@@ -173,7 +174,7 @@ pub fn init_with(store: malakt_core::Store, ai: AiConfig, cx: &mut App) {
         update::install_on_quit(cx);
         cx.quit()
     });
-    cx.on_action(|_: &LockNow, cx| db::lock_now(cx));
+    cx.on_action(|_: &LockNow, cx| lock_now_or_settings(cx));
     cx.set_menus([Menu {
         name: APP_NAME.into(),
         items: vec![
@@ -332,6 +333,78 @@ pub fn quit_when_main_closes(cx: &mut App) {
         cx.quit();
     })
     .detach();
+}
+
+/// 「ロックする」。ロックが無効なときは、ロックを有効にする設定を開く。
+pub(crate) fn lock_now_or_settings(cx: &mut App) {
+    if db::lock_enabled(cx) {
+        db::lock_now(cx);
+    } else {
+        open_settings_in(None, Some(state::CustomizeSection::Lock), cx);
+    }
+}
+
+/// ウィンドウの中のタスクの画面。タスクの画面のウィンドウでなければ `None`。
+fn main_view_in(handle: AnyWindowHandle, cx: &mut App) -> Option<Entity<MainView>> {
+    handle
+        .update(cx, |root, _, cx| {
+            let root = root.downcast::<gpui_kit::base::Root>().ok()?;
+            let view = root.read(cx).view().clone();
+            view.downcast::<MainView>().ok()
+        })
+        .ok()
+        .flatten()
+}
+
+/// 設定を開いて、そのウィンドウを手前に出す。`section` があれば、その見出しまでスクロールする。
+/// `main` がない（閉じた）ときは、今のウィンドウのタスクの画面、なければメインのウィンドウに開く。
+pub(crate) fn open_settings_in(
+    main: Option<&WeakEntity<MainView>>,
+    section: Option<state::CustomizeSection>,
+    cx: &mut App,
+) {
+    // キーやメニューから呼ぶときは、そのウィンドウを更新している最中なので、終わってから開く
+    let main = main.cloned();
+    cx.defer(move |cx| open_settings_now(main.as_ref(), section, cx));
+}
+
+fn open_settings_now(
+    main: Option<&WeakEntity<MainView>>,
+    section: Option<state::CustomizeSection>,
+    cx: &mut App,
+) {
+    let mut windows = cx.windows();
+    // 今のウィンドウ、メインのウィンドウの順に探す
+    for first in [session::main_window(cx), cx.active_window()]
+        .into_iter()
+        .flatten()
+    {
+        if let Some(ix) = windows.iter().position(|w| *w == first) {
+            let window = windows.remove(ix);
+            windows.insert(0, window);
+        }
+    }
+    let wanted = main.and_then(WeakEntity::upgrade);
+    let found = windows.into_iter().find_map(|handle| {
+        let view = main_view_in(handle, cx)?;
+        match &wanted {
+            Some(wanted) if *wanted != view => None,
+            _ => Some((handle, view)),
+        }
+    });
+    let Some((handle, view)) = found else {
+        return;
+    };
+    // 探したあとに閉じたウィンドウなら、開く先がない
+    let _ = handle.update(cx, |_, window, cx| {
+        window.activate_window();
+        view.update(cx, |this, cx| {
+            this.open_appearance(window, cx);
+            if let Some(section) = section {
+                this.show_appearance_section(section, window, cx);
+            }
+        });
+    });
 }
 
 /// 別ウィンドウの名前。中身の名前のあとに、アプリの名前を付ける。
