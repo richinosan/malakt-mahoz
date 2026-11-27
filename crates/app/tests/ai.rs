@@ -4346,3 +4346,40 @@ fn a_stopped_repeat_keeps_its_instruction_for_a_retry(cx: &mut TestAppContext) {
         .unwrap()
         .is_empty()));
 }
+
+/// やり直している最中に、同じ記録の「やり直す」をもう一度押しても、止めたあとに勝手に動き出さない。
+#[gpui_kit::test]
+fn retrying_a_running_repeat_does_not_restart_it_after_a_stop(cx: &mut TestAppContext) {
+    let world = start(cx);
+    world.keys.set(Provider::Claude, "k").unwrap();
+    let session = session(cx);
+    cx.update(|cx| session.update(cx, |s, cx| s.refresh_key(cx)));
+    cx.run_until_parked();
+    repeated_copy(cx, "先週のまとめを下書きする");
+    cx.update(|cx| session.update(cx, |s, cx| s.stop(cx)));
+    cx.run_until_parked();
+    let run = read(cx, |s| s.runs.last().cloned().unwrap());
+
+    // やり直す → 実行中にもう一度やり直す → 止める
+    cx.update(|cx| {
+        session.update(cx, |s, cx| {
+            s.retry_run(&run.id, cx);
+            assert!(s.busy, "やり直しが始まっている");
+            s.retry_run(&run.id, cx);
+            s.stop(cx);
+        })
+    });
+    cx.run_until_parked();
+    assert!(read(cx, |s| !s.busy), "止めたまま");
+    let jobs = cx.update(|cx| db::shared(cx).read(cx).store.repeat_ai_jobs().unwrap());
+    assert_eq!(jobs.len(), 1);
+    assert!(jobs[0].failed, "もう一度頼まれるまで動かない");
+    assert_eq!(
+        read(cx, |s| s
+            .runs
+            .iter()
+            .filter(|r| r.kind == RunKind::Repeat)
+            .count()),
+        2
+    );
+}
