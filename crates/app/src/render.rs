@@ -571,6 +571,16 @@ pub(crate) fn md_style() -> TextViewStyle {
     TextViewStyle::default().table_cell(StyleRefinement::default().px(px(12. * crate::UI_SCALE)))
 }
 
+/// ドラッグで選んで Ctrl+C（⌘C）でコピーできる、Markdown にしない文字。選んだ所の色は
+/// AI の返答（TextView）と同じ。チャットの発言、知らせ、エラーのように、読むだけの文に使う。
+pub(crate) fn selectable_text(
+    id: impl Into<ElementId>,
+    text: impl Into<SharedString>,
+    cx: &App,
+) -> gpui_kit::base::SelectableText {
+    gpui_kit::base::SelectableText::new(id, text).selection_color(cx.theme().selection)
+}
+
 fn chip(
     id: impl Into<ElementId>,
     label: impl Into<SharedString>,
@@ -4276,6 +4286,7 @@ impl MainView {
                     d.child(
                         TextView::markdown(("comment-body", ix), self.md_text(&body))
                             .style(md_style())
+                            .selectable(true)
                             .on_link_click(crate::browser::on_link),
                     )
                 })
@@ -5552,6 +5563,7 @@ impl MainView {
                                 div().text_sm().child(
                                     TextView::markdown(("pinned-body", i), self.md_text(&c.body))
                                         .style(md_style())
+                                        .selectable(true)
                                         .on_link_click(crate::browser::on_link),
                                 )
                             })),

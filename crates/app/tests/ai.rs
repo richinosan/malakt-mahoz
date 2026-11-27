@@ -3840,3 +3840,66 @@ fn shell_output_can_be_selected_and_copied(cx: &mut TestAppContext) {
     ui(cx, window, |window, cx| window.press("ctrl-c", cx));
     assert_eq!(clipboard(cx).as_deref(), Some("before"));
 }
+
+/// 自分の発言、知らせ、エラーの文も、AI の返答と同じようにドラッグで選んで Ctrl+C でコピーできる。
+#[gpui_kit::test]
+fn own_messages_can_be_selected_and_copied(cx: &mut TestAppContext) {
+    use gpui_kit::base::TextSelection;
+    use gpui_kit::{point, Modifiers, MouseButton, VisualTestContext};
+
+    let _world = start(cx);
+    let (window, view) = open(cx, wide());
+    let _pane = open_chat(cx, window, &view);
+    let session = session(cx);
+    cx.update(|cx| {
+        session.update(cx, |s, cx| {
+            s.items.push(Item::User("自分の発言をコピーする".into()));
+            s.items.push(Item::Notice("AI を止めました".into()));
+            s.items.push(Item::Error("通信に失敗しました".into()));
+            cx.notify();
+        })
+    });
+    ui(cx, window, |_, _| {});
+
+    // 枠の中の文字を、左の端（枠の余白 `pad` の内側）から右の端までドラッグする
+    let drag_across = |cx: &mut TestAppContext, id: (&'static str, usize), pad: f32| {
+        let mut bounds = None;
+        ui(cx, window, |window, _| {
+            bounds = Some(window.find(id).bounds())
+        });
+        let b = bounds.unwrap();
+        let (from, to) = (
+            point(b.left() + px(pad + 1.), b.center().y),
+            point(b.right() - px(2.), b.center().y),
+        );
+        let mut v = VisualTestContext::from_window(window, cx);
+        v.simulate_mouse_down(from, MouseButton::Left, Modifiers::default());
+        v.update(|window, cx| window.render_frame(cx));
+        v.simulate_mouse_move(to, MouseButton::Left, Modifiers::default());
+        v.update(|window, cx| window.render_frame(cx));
+        v.simulate_mouse_up(to, MouseButton::Left, Modifiers::default());
+        v.run_until_parked();
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            TextSelection::selected_text(window, cx)
+        })
+        .unwrap()
+    };
+
+    // 入力欄にフォーカスがあるまま選んでも、Ctrl+C は選んだ文字のコピーになる
+    ui(cx, window, |window, cx| window.click("ai-input", cx));
+    let picked = drag_across(cx, ("ai-user", 0), 15.);
+    assert_eq!(picked.trim(), "自分の発言をコピーする");
+    ui(cx, window, |window, cx| window.press("ctrl-c", cx));
+    let copied = cx.update(|cx| cx.read_from_clipboard().and_then(|i| i.text()));
+    assert_eq!(copied.as_deref(), Some("自分の発言をコピーする"));
+
+    assert_eq!(
+        drag_across(cx, ("ai-notice", 1), 15.).trim(),
+        "AI を止めました"
+    );
+    assert_eq!(
+        drag_across(cx, ("ai-error", 2), 10.).trim(),
+        "通信に失敗しました"
+    );
+}

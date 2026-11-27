@@ -4,7 +4,7 @@ use std::ops::Range;
 use std::time::Duration;
 
 use crate::press::{button, Unpressed};
-use gpui_kit::base::TestSupportExt;
+use gpui_kit::base::{TestSupportExt, TextSelection};
 use gpui_kit::component::button::ButtonVariants;
 use gpui_kit::component::input::{
     Copy as CopyText, Input, InputEvent, InputState, MoveDown, MoveUp, Textarea, TextareaState,
@@ -40,6 +40,16 @@ const SHELL_ROW: Pixels = px(20.);
 const TITLE_BAR_HEIGHT: Pixels = px(30.);
 const TERM_PAD: Pixels = px(12.);
 /// ターミナルの文字の大きさ。画面の文字の大きさ（テーマ）に対する比で決める。
+/// ウィンドウの中で選んでいる文字（会話の発言や返答）をクリップボードに写す。選んでいなければ何もしない。
+fn copy_chat_selection(window: &mut Window, cx: &mut App) -> bool {
+    let text = TextSelection::selected_text(window, cx).trim().to_owned();
+    if text.is_empty() {
+        return false;
+    }
+    cx.write_to_clipboard(ClipboardItem::new_string(text));
+    true
+}
+
 fn term_font(cx: &App) -> Pixels {
     cx.theme().font_size * (13. / 16.)
 }
@@ -635,6 +645,17 @@ impl AiPane {
     }
 
     /// 選んでいる文字をコピーする。選んでいなければ `false`。
+    /// 会話の中を押したとき。入力欄にフォーカスがあれば、チャットへ移す。
+    /// 返答（TextView）のように自分でフォーカスを取るものを押したときは、そのままにする。
+    fn leave_input_for_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.shell_sel.take().is_some() {
+            cx.notify();
+        }
+        if self.input.read(cx).focus_handle(cx).is_focused(window) {
+            window.focus(&self.focus, cx);
+        }
+    }
+
     fn copy_selection(&mut self, cx: &mut Context<Self>) -> bool {
         match self.shell_selection(cx) {
             Some(text) => {
@@ -1368,7 +1389,11 @@ impl AiPane {
                         .text_color(theme.primary_foreground)
                         .elevate(Elevation::Low, cx)
                         .text_sm()
-                        .child(text.clone())
+                        // ドラッグで選んでコピーできる。地の色の上でも選んだ所が見えるように
+                        .child(
+                            crate::render::selectable_text(("ai-user-text", ix), text.clone(), cx)
+                                .selection_color(theme.primary_foreground.opacity(0.35)),
+                        )
                         .test_support(),
                 )
                 .into_any_element(),
@@ -1423,10 +1448,21 @@ impl AiPane {
                         row()
                             .gap_2()
                             .child(div().flex_none().text_color(color).child(mark))
-                            .child(div().flex_1().min_w_0().child(summary.clone())),
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .child(crate::render::selectable_text(
+                                        ("ai-tool-text", ix),
+                                        summary.clone(),
+                                        cx,
+                                    )),
+                            ),
                     )
                     .when_some(detail, |d, detail| {
-                        d.child(div().pl_5().text_color(color).child(detail))
+                        d.child(div().pl_5().text_color(color).child(
+                            crate::render::selectable_text(("ai-tool-detail", ix), detail, cx),
+                        ))
                     })
                     .test_support()
                     .into_any_element()
@@ -1445,7 +1481,11 @@ impl AiPane {
                         .border_color(theme.border)
                         .text_xs()
                         .text_color(theme.muted_foreground)
-                        .child(text.clone())
+                        .child(crate::render::selectable_text(
+                            ("ai-notice-text", ix),
+                            text.clone(),
+                            cx,
+                        ))
                         .test_support(),
                 )
                 .into_any_element(),
@@ -1457,7 +1497,10 @@ impl AiPane {
                 .bg(theme.danger)
                 .text_color(theme.danger_foreground)
                 .text_sm()
-                .child(text.clone())
+                .child(
+                    crate::render::selectable_text(("ai-error-text", ix), text.clone(), cx)
+                        .selection_color(theme.danger_foreground.opacity(0.35)),
+                )
                 .test_support()
                 .into_any_element(),
         }
@@ -2020,7 +2063,13 @@ impl AiPane {
         col()
             .id("ai-chat")
             .key_context("AiChat")
-            .on_action(cx.listener(|this, _: &StopAi, _, cx| this.stop(cx)))
+            .on_action(cx.listener(|this, _: &StopAi, window, cx| {
+                // 会話の文字を選んでいれば、Ctrl+C はコピーにする（macOS のコピーは ⌘C のまま）
+                if cfg!(not(target_os = "macos")) && copy_chat_selection(window, cx) {
+                    return;
+                }
+                this.stop(cx)
+            }))
             .flex_1()
             .min_w_0()
             .min_h_0()
@@ -2059,6 +2108,15 @@ impl AiPane {
                             .size_full()
                             .overflow_y_scroll()
                             .track_scroll(&self.chat_scroll)
+                            // 会話の文字を選び始めたら、Ctrl+C（⌘C）がその文字のコピーになるようにする。
+                            // 入力欄にフォーカスがあると入力欄が Ctrl+C を受けるので、フォーカスを
+                            // チャットへ移す。シェルで選んでいた所は外す
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                                    this.leave_input_for_chat(window, cx)
+                                }),
+                            )
                             .child(list),
                     )
                     .child(scroll::bar("ai-messages", &self.chat_scroll)),
@@ -2504,9 +2562,11 @@ impl AiPane {
             // 入力行にいても、コマンドが動いている間の Ctrl+C は強制終了にする
             // 出力を選んでいれば、Ctrl+C（macOS は ⌘C）はコピーにする。選んでいないときに
             // コマンドが動いていれば、入力行にいても強制終了にする
-            .capture_action(cx.listener(|this, _: &CopyText, _, cx| {
+            .capture_action(cx.listener(|this, _: &CopyText, window, cx| {
                 if this.copy_selection(cx) {
                     cx.stop_propagation();
+                } else if TextSelection::has_selection(window, cx) {
+                    // 会話の文字を選んでいれば、コマンドが動いていてもコピーにする
                 } else if this.session.read(cx).command_running() {
                     this.stop(cx);
                     cx.stop_propagation();
