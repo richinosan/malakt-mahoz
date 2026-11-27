@@ -7125,3 +7125,83 @@ fn history_shows_who_changed_what(cx: &mut TestAppContext) {
     let copied = cx.update(|cx| cx.read_from_clipboard().and_then(|i| i.text()));
     assert_eq!(copied.as_deref(), Some("下見の段取り"));
 }
+
+/// 詳細の「繰り返し」をその場のメニューで選び、時刻と AI への指示を付ける。
+/// 時刻が来ると次の回が一覧に出て、繰り返しは新しい回へ移る。Ctrl+Z で設定を戻せる。
+#[gpui_kit::test]
+fn repeat_is_chosen_in_place_and_makes_the_next_copy(cx: &mut TestAppContext) {
+    start(cx);
+    // 2099-11-30 は月曜
+    let task = cx.update(|cx| {
+        db::shared(cx).update(cx, |db, _| {
+            let draft = malakt_core::TaskDraft {
+                title: "週次定例の報告".into(),
+                due: Some("2099-11-30 10:00".into()),
+                ..Default::default()
+            };
+            db.store.create_task(None, &draft).unwrap()
+        })
+    });
+    let (window, view) = open(cx, wide());
+    ui(cx, window, |window, cx| window.click("nav-all", cx));
+    ui(cx, window, |window, cx| window.click(("title", 0usize), cx));
+    let repeat = |cx: &mut TestAppContext| store(cx, |s| s.repeat(&task.id).unwrap());
+    assert!(repeat(cx).is_none());
+
+    ui(cx, window, |window, cx| window.click("task-repeat", cx));
+    pick(cx, window, "毎週 月");
+    let r = repeat(cx).unwrap();
+    assert_eq!(r.rule.label(), "毎週 月");
+    assert_eq!(r.next_at, "2099-12-07 00:00");
+    ui(cx, window, |window, _| {
+        assert!(window.find_by_label("繰り返し: 毎週 月").visible());
+    });
+
+    // 時刻は、メニューの「時刻」から
+    ui(cx, window, |window, cx| window.click("task-repeat", cx));
+    pick(cx, window, "時刻");
+    pick(cx, window, "9:00");
+    assert_eq!(repeat(cx).unwrap().rule.label(), "毎週 月 9:00");
+    assert_eq!(repeat(cx).unwrap().next_at, "2099-12-07 09:00");
+
+    // AI への指示は、その場で書いて Enter
+    ui(cx, window, |window, cx| window.click("repeat-ai-add", cx));
+    ui(cx, window, |window, cx| {
+        window.input("先週のまとめを下書きする", cx);
+        window.press("enter", cx);
+    });
+    assert_eq!(repeat(cx).unwrap().ai, "先週のまとめを下書きする");
+    ui(cx, window, |window, _| {
+        assert!(window.find("repeat-ai-text").visible());
+    });
+
+    // Ctrl+Z で、指示を書く前に戻る
+    ui(cx, window, |window, cx| window.press("secondary-z", cx));
+    assert_eq!(repeat(cx).unwrap().ai, "");
+
+    // 時刻が来ると次の回ができ、繰り返しはそちらへ移る
+    cx.update(|cx| {
+        db::shared(cx).update(cx, |db, cx| {
+            assert!(db.sweep_repeats("2099-12-07 09:00"));
+            cx.notify();
+        })
+    });
+    cx.run_until_parked();
+    let tasks = all_tasks(cx);
+    assert_eq!(tasks.len(), 2);
+    let copy = tasks.iter().find(|t| t.id != task.id).unwrap();
+    assert_eq!(copy.due.as_deref(), Some("2099-12-07 10:00"));
+    assert_eq!(copy.created_by, malakt_core::Actor::Repeat);
+    assert!(repeat(cx).is_none());
+    // 開いている前の回は「なし」に戻る
+    ui(cx, window, |window, _| {
+        assert!(window.find_by_label("繰り返し: なし").visible());
+    });
+    // 外す
+    ui(cx, window, |window, cx| {
+        view.update(cx, |v, cx| v.open_panel(&copy.id, window, cx))
+    });
+    ui(cx, window, |window, cx| window.click("task-repeat", cx));
+    pick(cx, window, "なし");
+    assert!(store(cx, |s| s.repeat(&copy.id).unwrap()).is_none());
+}

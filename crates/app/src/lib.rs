@@ -20,6 +20,7 @@ pub mod passkey;
 mod press;
 pub mod reminders;
 mod render;
+mod repeat_view;
 pub mod scroll;
 pub mod session;
 pub mod shadow;

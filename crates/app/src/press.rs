@@ -76,6 +76,11 @@ impl Unpressed {
         Self(self.0.label(label))
     }
 
+    /// 読み上げとテストで使う名前。見えている文字が値だけのときに付ける。
+    pub fn accessibility_label(self, label: impl Into<SharedString>) -> Self {
+        Self(self.0.accessibility_label(label))
+    }
+
     pub fn icon(self, icon: impl Into<Icon>) -> Self {
         Self(self.0.icon(icon.into()))
     }

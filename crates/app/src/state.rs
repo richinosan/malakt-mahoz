@@ -245,6 +245,8 @@ pub enum Editing {
     Description,
     /// タイトルの下の欄に、URL を足している
     Url,
+    /// 繰り返しの、回を作ったときに AI に頼むこと
+    RepeatAi,
 }
 
 /// 「書く」「プレビュー」を切り替えられる、Markdown の入力欄。
@@ -280,6 +282,8 @@ pub struct Detail {
     pub parent: Option<Todo>,
     /// コメントに貼ったリンクが指すタスク。
     pub linked: Vec<Todo>,
+    /// タスクに付いている繰り返し。
+    pub repeat: Option<malakt_core::repeat::Repeat>,
 }
 
 /// ワークスペースのツリーの 1 行。
@@ -302,6 +306,8 @@ pub struct Inputs {
     pub title: Entity<InputState>,
     /// タスクに足す URL。
     pub url: Entity<InputState>,
+    /// 繰り返しの、回を作ったときに AI に頼むこと。
+    pub repeat_ai: Entity<InputState>,
     pub subtask: Entity<InputState>,
     pub start: Entity<InputState>,
     pub start_time: Entity<InputState>,
@@ -341,6 +347,8 @@ pub struct MainView {
     pub workspaces: Vec<Workspace>,
     pub tree: Vec<TreeRow>,
     pub open_counts: HashMap<Id, u32>,
+    /// 繰り返しが付いているタスク。一覧に印を出す。
+    pub repeating: HashSet<Id>,
     pub people: Vec<Person>,
     pub self_id: Option<Id>,
     pub categories: Vec<String>,
@@ -567,6 +575,7 @@ impl MainView {
             name: input(window, cx, "名前"),
             title: input(window, cx, "タイトル"),
             url: input(window, cx, "https://"),
+            repeat_ai: input(window, cx, "AI への指示"),
             subtask: input(window, cx, "サブタスクを追加…"),
             start: input(window, cx, "日付"),
             start_time: input(window, cx, "時刻"),
@@ -679,6 +688,16 @@ impl MainView {
             |this, _, event: &InputEvent, window, cx| {
                 if matches!(event, InputEvent::Blur) && this.editing == Some(Editing::Url) {
                     this.save_url(window, cx);
+                }
+            },
+        ));
+        on_enter!(repeat_ai, save_repeat_ai);
+        subs.push(cx.subscribe_in(
+            &inputs.repeat_ai,
+            window,
+            |this, _, event: &InputEvent, window, cx| {
+                if matches!(event, InputEvent::Blur) && this.editing == Some(Editing::RepeatAi) {
+                    this.save_repeat_ai(window, cx);
                 }
             },
         ));
@@ -860,6 +879,7 @@ impl MainView {
             workspaces: Vec::new(),
             tree: Vec::new(),
             open_counts: HashMap::new(),
+            repeating: HashSet::new(),
             people: Vec::new(),
             self_id: None,
             categories: Vec::new(),
@@ -1053,6 +1073,9 @@ impl MainView {
         if let Err(error) = result {
             self.error = Some(error.to_string().into());
         }
+        if let Some(error) = self.db.read(cx).repeat_error.clone() {
+            self.error = Some(error.into());
+        }
         let description = self
             .detail
             .as_ref()
@@ -1078,6 +1101,7 @@ impl MainView {
         }
         self.tree = build_tree(&self.workspaces, &self.collapsed);
         self.open_counts = store.open_task_counts()?;
+        self.repeating = store.repeating_task_ids()?;
         self.people = store.people()?;
         self.self_id = self.people.iter().find(|p| p.is_self).map(|p| p.id.clone());
         self.categories = store.categories()?;
@@ -1123,6 +1147,7 @@ impl MainView {
                     attachments: store.attachments(id)?,
                     changes: store.changes(id)?,
                     subtasks: store.subtasks(id)?,
+                    repeat: store.repeat(id)?,
                     parent: task.parent_id.as_deref().and_then(|p| store.task(p).ok()),
                     task,
                 }),
@@ -1601,6 +1626,17 @@ impl MainView {
                     s.focus(window, cx);
                 });
             }
+            Editing::RepeatAi => {
+                let text = detail
+                    .repeat
+                    .as_ref()
+                    .map(|r| r.ai.clone())
+                    .unwrap_or_default();
+                self.inputs.repeat_ai.update(cx, |s, cx| {
+                    s.set_value(text, window, cx);
+                    s.focus(window, cx);
+                });
+            }
         }
         self.editing = Some(what);
         cx.notify();
@@ -1772,6 +1808,45 @@ impl MainView {
         Self::take(&self.inputs.url.clone(), window, cx);
         self.leave_input(&self.inputs.url.clone(), window, cx);
         cx.notify();
+    }
+
+    /// 詳細のタスクの繰り返しを変える。`None` で外す。
+    pub fn set_repeat(&mut self, rule: Option<malakt_core::repeat::Rule>, cx: &mut Context<Self>) {
+        let Some(id) = self.panel.clone() else { return };
+        let now = view::now();
+        self.write(cx, |s| s.set_repeat(&id, rule.as_ref(), &now));
+    }
+
+    /// 繰り返しを変えるときの元。付いていれば今の繰り返し、なければタスクの日から作る毎日。
+    pub fn repeat_base(&self) -> Option<malakt_core::repeat::Rule> {
+        let detail = self.detail.as_ref()?;
+        Some(match &detail.repeat {
+            Some(r) => r.rule.clone(),
+            None => malakt_core::repeat::Rule::daily(&malakt_core::repeat::anchor(
+                &detail.task,
+                &view::now(),
+            )),
+        })
+    }
+
+    /// 書いた AI への指示を保存する。空にすると頼まない。
+    pub fn save_repeat_ai(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.editing != Some(Editing::RepeatAi) {
+            return;
+        }
+        let Some(id) = self.panel.clone() else { return };
+        let text = self.inputs.repeat_ai.read(cx).value().to_string();
+        if self.write(cx, |s| s.set_repeat_ai(&id, &text)).is_none() {
+            return;
+        }
+        self.editing = None;
+        self.leave_input(&self.inputs.repeat_ai.clone(), window, cx);
+        cx.notify();
+    }
+
+    pub fn clear_repeat_ai(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.panel.clone() else { return };
+        self.write(cx, |s| s.set_repeat_ai(&id, ""));
     }
 
     pub fn remove_url(&mut self, url: &str, cx: &mut Context<Self>) {

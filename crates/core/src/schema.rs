@@ -264,6 +264,31 @@ pub(crate) const MIGRATIONS: &[&str] = &[
         PRIMARY KEY (task_id, position)
     ) STRICT, WITHOUT ROWID;
     "#,
+    // 17: 繰り返し（`repeat`）。task_id は今の回。repeat_last は最後に作った回の日、
+    //     repeat_ai は回を作ったあと AI に頼むことの待ち行列（どちらも元に戻す相手にしない）
+    r#"
+    CREATE TABLE task_repeats (
+        id TEXT PRIMARY KEY NOT NULL,
+        task_id TEXT NOT NULL UNIQUE REFERENCES tasks(id) ON DELETE CASCADE,
+        rule TEXT NOT NULL,
+        ai TEXT NOT NULL DEFAULT '',
+        at TEXT NOT NULL,
+        next_at TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+    ) STRICT;
+    CREATE INDEX task_repeats_next ON task_repeats(next_at);
+    CREATE TABLE repeat_last (
+        repeat_id TEXT PRIMARY KEY NOT NULL,
+        at TEXT NOT NULL
+    ) STRICT, WITHOUT ROWID;
+    CREATE TABLE repeat_ai (
+        task_id TEXT PRIMARY KEY NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        prompt TEXT NOT NULL,
+        failed INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL
+    ) STRICT, WITHOUT ROWID;
+    "#,
 ];
 
 pub(crate) fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {

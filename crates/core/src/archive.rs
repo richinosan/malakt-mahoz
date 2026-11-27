@@ -61,6 +61,8 @@ pub struct Data {
     pub task_alerts: Vec<crate::alert::TaskAlerts>,
     /// AI のルール（グローバルとワークスペースごと）。
     pub ai_rules: Vec<crate::rules::AiRule>,
+    /// タスクに付けた繰り返し。
+    pub repeats: Vec<crate::repeat::Repeat>,
 }
 
 impl Data {
@@ -170,6 +172,16 @@ impl Data {
                 r.name
             )));
         }
+        if let Some(r) = self
+            .repeats
+            .iter()
+            .find(|r| !self.tasks.iter().any(|t| t.id == r.task_id))
+        {
+            return Err(Error::Invalid(format!(
+                "繰り返しの、タスク {} がありません",
+                r.task_id
+            )));
+        }
         if let Some(a) = self
             .task_alerts
             .iter()
@@ -245,6 +257,7 @@ pub fn export<W: Write + Seek>(store: &Store, out: W) -> Result<Manifest> {
         serde_json::to_vec(&data.attachments)?,
     )?;
     put("data/ai_rules.json", serde_json::to_vec(&data.ai_rules)?)?;
+    put("data/repeats.json", serde_json::to_vec(&data.repeats)?)?;
     for (name, png) in &data.icons {
         put(&icon_entry(name), png.clone())?;
     }
@@ -330,6 +343,11 @@ fn read_zip<R: Read + Seek>(zip: &mut ZipArchive<R>) -> Result<(Manifest, Data)>
         .iter()
         .map(crate::rules::clean)
         .collect::<Result<_>>()?;
+    let repeats: Vec<crate::repeat::Repeat> = read_optional(zip, "data/repeats.json")?;
+    let repeats = repeats
+        .iter()
+        .map(crate::repeat::clean_repeat)
+        .collect::<Result<_>>()?;
     let workspaces: Vec<Workspace> = read_json(zip, "data/workspaces.json")?;
     let mut icons: Vec<(String, Vec<u8>)> = Vec::new();
     for w in &workspaces {
@@ -360,6 +378,7 @@ fn read_zip<R: Read + Seek>(zip: &mut ZipArchive<R>) -> Result<(Manifest, Data)>
         task_defaults,
         task_alerts,
         ai_rules,
+        repeats,
     };
     data.normalize();
     data.validate()?;

@@ -1486,6 +1486,7 @@ impl Store {
             task_defaults: self.all_task_defaults()?,
             task_alerts: self.all_task_alerts()?,
             ai_rules: self.all_ai_rules()?,
+            repeats: self.all_repeats()?,
         })
     }
 
@@ -1577,6 +1578,14 @@ impl Store {
         }
         for r in &data.ai_rules {
             crate::rules::save(&tx, r)?;
+        }
+        for r in &data.repeats {
+            // 同じタスクに別の繰り返しがあれば、取り込む側にする
+            tx.execute(
+                "DELETE FROM task_repeats WHERE task_id = ?1 AND id <> ?2",
+                params![r.task_id, r.id],
+            )?;
+            crate::repeat::save(&tx, r)?;
         }
         for a in &data.attachments {
             let known: bool = tx
@@ -1737,7 +1746,7 @@ fn put_person_workspaces(conn: &Connection, p: &Person) -> rusqlite::Result<()> 
     Ok(())
 }
 
-fn insert_task(conn: &Connection, t: &Task) -> rusqlite::Result<()> {
+pub(crate) fn insert_task(conn: &Connection, t: &Task) -> rusqlite::Result<()> {
     conn.prepare_cached(
         "INSERT INTO tasks(id, workspace_id, title, description, status, priority, due, \
          position, created_at, updated_at, completed_at, start, percent, parent_id, \
@@ -1891,7 +1900,7 @@ pub(crate) fn touch(
 
 /// 作ったことを変更履歴に残す。作ったときの値（空でないもの）は、項目の名前と値の JSON にして
 /// 同じ行に入れる（[`crate::history::created_values`] で読む）。
-fn record_created(conn: &Connection, t: &Task, actor: &Actor) -> rusqlite::Result<()> {
+pub(crate) fn record_created(conn: &Connection, t: &Task, actor: &Actor) -> rusqlite::Result<()> {
     let number = |n: u8| if n == 0 { String::new() } else { n.to_string() };
     let fields = [
         ("title", t.title.clone()),
