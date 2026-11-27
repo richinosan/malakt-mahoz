@@ -225,6 +225,10 @@ pub enum SubModal {
     Rules,
     /// アプリ内ブラウザのデータを消す前の確認
     ClearBrowser,
+    /// ほかの人の完了を知らせる担当者を選ぶ
+    DonePeople,
+    /// ほかの人の完了を知らせるワークスペースを選ぶ
+    DoneWorkspaces,
 }
 
 /// 詳細で日付と時刻を入れる 2 つの項目。
@@ -3684,6 +3688,61 @@ impl MainView {
         saved
     }
 
+    // ---- ほかの人の完了の通知 ----
+
+    /// ほかの人が完了にしたときに知らせるかの設定。
+    pub fn done_notices(&self, cx: &App) -> malakt_core::done_notice::DoneNotices {
+        self.db.read(cx).store.done_notices().unwrap_or_default()
+    }
+
+    pub fn set_done_notices(
+        &mut self,
+        notices: &malakt_core::done_notice::DoneNotices,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let saved = self.write(cx, |s| s.set_done_notices(notices)).is_some();
+        cx.notify();
+        saved
+    }
+
+    /// 完了にした人の役で、`role` を入れる・外す。最後の 1 つは外さない。
+    pub fn toggle_done_role(&mut self, role: malakt_core::Role, cx: &mut Context<Self>) -> bool {
+        let mut notices = self.done_notices(cx);
+        let roles = if notices.roles.contains(role) {
+            notices.roles.without(role)
+        } else {
+            notices.roles.with(role)
+        };
+        if roles.is_empty() {
+            return false;
+        }
+        notices.roles = roles;
+        self.set_done_notices(&notices, cx)
+    }
+
+    /// その担当者の完了を、知らせる・知らせないを切り替える。
+    pub fn toggle_done_person(&mut self, id: &str, cx: &mut Context<Self>) -> bool {
+        let mut notices = self.done_notices(cx);
+        toggle_id(&mut notices.muted_people, id);
+        self.set_done_notices(&notices, cx)
+    }
+
+    /// そのワークスペースのタスクの完了を、知らせる・知らせないを切り替える。
+    pub fn toggle_done_workspace(&mut self, id: &str, cx: &mut Context<Self>) -> bool {
+        let mut notices = self.done_notices(cx);
+        toggle_id(&mut notices.muted_workspaces, id);
+        self.set_done_notices(&notices, cx)
+    }
+
+    pub fn open_done_picker(&mut self, people: bool, cx: &mut Context<Self>) {
+        self.sub_modal = Some(if people {
+            SubModal::DonePeople
+        } else {
+            SubModal::DoneWorkspaces
+        });
+        cx.notify();
+    }
+
     // ---- 期限の通知 ----
 
     /// 期限をいつ知らせるかの、全体の標準。
@@ -5242,6 +5301,14 @@ impl AssetSource for Assets {
 }
 
 /// 並びに `value` がなければ入れ、あれば外す。
+fn toggle_id(ids: &mut Vec<Id>, id: &str) {
+    if let Some(ix) = ids.iter().position(|v| v == id) {
+        ids.remove(ix);
+    } else {
+        ids.push(id.to_owned());
+    }
+}
+
 fn toggle_value(values: &mut Vec<u32>, value: u32) {
     if let Some(ix) = values.iter().position(|v| *v == value) {
         values.remove(ix);
