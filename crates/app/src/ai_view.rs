@@ -22,7 +22,7 @@ use malakt_ai::{Effort, Provider};
 use crate::ai::{self, Decision, Item, KeyState, LineKind, Run, Session, ShellPlace, ToolState};
 use crate::db::{self, Db};
 use crate::feel::{self, Grip, Lit};
-use crate::render::app_icon;
+use crate::render::{app_icon, remove_x};
 use crate::scroll::{self, Menus};
 use crate::shadow::{Elevate, Elevation};
 use crate::shell_keys;
@@ -2105,20 +2105,19 @@ impl AiPane {
                                             .text_xs()
                                             .child(app_icon("list-todo").size_3().flex_none())
                                             .child(div().min_w_0().truncate().child(title.clone()))
-                                            .child(feel::gloss(
-                                                button(("ai-attached-remove", ix))
-                                                    .icon(app_icon("x"))
-                                                    .ghost()
-                                                    .xsmall()
-                                                    .tooltip("外す")
-                                                    .on_click(cx.listener(
-                                                        move |this, _, _, cx| {
-                                                            this.session.update(cx, |s, cx| {
-                                                                s.detach_task(&id, cx)
-                                                            });
-                                                        },
-                                                    )),
-                                            ))
+                                            .child(
+                                                remove_x(
+                                                    ("ai-attached-remove", ix),
+                                                    "タスクを外す",
+                                                    cx.listener(move |this, _, _, cx| {
+                                                        this.session.update(cx, |s, cx| {
+                                                            s.detach_task(&id, cx)
+                                                        });
+                                                    }),
+                                                    cx,
+                                                )
+                                                .test_support(),
+                                            )
                                             .test_support()
                                     }),
                                 ))
