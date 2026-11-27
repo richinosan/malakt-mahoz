@@ -592,6 +592,7 @@ impl Store {
             ],
             assignee_ids: draft.assignee_ids,
             categories: draft.categories,
+            urls: draft.urls,
             linked_workspace_ids: Vec::new(),
             position,
             created_at: now,
@@ -630,6 +631,12 @@ impl Store {
             "SELECT category FROM task_categories WHERE task_id = ?1 ORDER BY category",
         )?;
         task.categories = stmt
+            .query_map(params![id], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT url FROM task_urls WHERE task_id = ?1 ORDER BY position")?;
+        task.urls = stmt
             .query_map(params![id], |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?;
         let mut stmt = self.conn.prepare_cached(
@@ -744,7 +751,7 @@ impl Store {
         Ok(tasks)
     }
 
-    /// 担当者とカテゴリをまとめて埋める（タスクごとに問い合わせない）。
+    /// 担当者・カテゴリ・URL をまとめて埋める（タスクごとに問い合わせない）。
     fn fill_links(&self, tasks: &mut [Task]) -> Result<()> {
         if tasks.is_empty() {
             return Ok(());
@@ -782,6 +789,19 @@ impl Store {
                 }
             }
         }
+        let mut urls: Vec<(usize, String)> = Vec::new();
+        {
+            let mut stmt = self
+                .conn
+                .prepare_cached("SELECT task_id, url FROM task_urls ORDER BY task_id, position")?;
+            let mut rows = stmt.query([])?;
+            while let Some(row) = rows.next()? {
+                let task_id = row.get_ref(0)?.as_str().map_err(rusqlite::Error::from)?;
+                if let Some(&i) = index.get(task_id) {
+                    urls.push((i, row.get(1)?));
+                }
+            }
+        }
         let mut links: Vec<(usize, Id)> = Vec::new();
         {
             let mut stmt = self.conn.prepare_cached(
@@ -807,6 +827,9 @@ impl Store {
         }
         for (i, category) in categories {
             tasks[i].categories.push(category);
+        }
+        for (i, url) in urls {
+            tasks[i].urls.push(url);
         }
         Ok(())
     }
@@ -880,6 +903,7 @@ impl Store {
             old.categories.join(","),
             draft.categories.join(","),
         )?;
+        record("urls", old.urls.join("\n"), draft.urls.join("\n"))?;
         if !changed {
             drop(tx);
             return Ok(old);
@@ -938,6 +962,10 @@ impl Store {
                 params![id],
             )?;
             insert_categories(&tx, id, &draft.categories)?;
+        }
+        if old.urls != draft.urls {
+            tx.execute("DELETE FROM task_urls WHERE task_id = ?1", params![id])?;
+            insert_urls(&tx, id, &draft.urls)?;
         }
         trim_changes(&tx, id)?;
         tx.commit()?;
@@ -1520,6 +1548,7 @@ impl Store {
                 params![t.id],
             )?;
             tx.execute("DELETE FROM task_links WHERE task_id = ?1", params![t.id])?;
+            tx.execute("DELETE FROM task_urls WHERE task_id = ?1", params![t.id])?;
             insert_task(&tx, t)?;
         }
         for c in &data.comments {
@@ -1634,6 +1663,7 @@ fn clean_draft(draft: &TaskDraft) -> Result<TaskDraft> {
         .collect();
     categories.sort_unstable();
     categories.dedup();
+    let urls = crate::weblink::clean_all(&draft.urls).map_err(Error::Invalid)?;
     Ok(TaskDraft {
         title,
         description: normalize(&draft.description),
@@ -1650,6 +1680,7 @@ fn clean_draft(draft: &TaskDraft) -> Result<TaskDraft> {
         parent_id: draft.parent_id.clone().filter(|p| !p.is_empty()),
         assignee_ids,
         categories,
+        urls,
     })
 }
 
@@ -1749,7 +1780,17 @@ fn insert_task(conn: &Connection, t: &Task) -> rusqlite::Result<()> {
             crate::links::insert(conn, &t.id, workspace_id, t.updated_at)?;
         }
     }
-    insert_categories(conn, &t.id, &t.categories)
+    insert_categories(conn, &t.id, &t.categories)?;
+    insert_urls(conn, &t.id, &t.urls)
+}
+
+fn insert_urls(conn: &Connection, task_id: &str, urls: &[String]) -> rusqlite::Result<()> {
+    let mut stmt =
+        conn.prepare_cached("INSERT INTO task_urls(task_id, position, url) VALUES (?1, ?2, ?3)")?;
+    for (position, url) in urls.iter().enumerate() {
+        stmt.execute(params![task_id, position as i64, url])?;
+    }
+    Ok(())
 }
 
 fn insert_categories(
@@ -1863,6 +1904,7 @@ fn record_created(conn: &Connection, t: &Task, actor: &Actor) -> rusqlite::Resul
         ("parent", t.parent_id.clone().unwrap_or_default()),
         ("assignees", t.assignee_ids.join(",")),
         ("categories", t.categories.join(",")),
+        ("urls", t.urls.join("\n")),
         ("workspace", t.workspace_id.clone().unwrap_or_default()),
     ];
     let values: serde_json::Map<String, serde_json::Value> = fields
@@ -1956,6 +1998,7 @@ fn task_from_row(r: &Row<'_>) -> rusqlite::Result<Task> {
         assignee_roles: Vec::new(),
         assignee_done: Vec::new(),
         categories: Vec::new(),
+        urls: Vec::new(),
         linked_workspace_ids: Vec::new(),
         position: r.get(7)?,
         created_at: r.get(8)?,
@@ -2752,6 +2795,72 @@ mod extra_tests {
         // 親を消すとサブタスクは残り、親なしになる
         s.delete_task(&parent.id).unwrap();
         assert_eq!(s.task(&child.id).unwrap().parent_id, None);
+    }
+
+    #[test]
+    fn urls_keep_their_order_and_are_recorded() {
+        let mut s = Store::open_in_memory().unwrap();
+        let w = s.create_workspace(None, "W").unwrap();
+        let mut d = draft("t");
+        d.urls = vec![
+            "https://b.example.jp/x".into(),
+            " github.com/acme/app/pull/7 ".into(),
+            "https://b.example.jp/x".into(),
+            "".into(),
+        ];
+        let t = s.create_task(Some(&w.id), &d).unwrap();
+        assert_eq!(
+            t.urls,
+            [
+                "https://b.example.jp/x",
+                "https://github.com/acme/app/pull/7"
+            ]
+        );
+        assert_eq!(s.task(&t.id).unwrap(), t);
+        assert_eq!(s.tasks(&w.id, &TaskFilter::default()).unwrap()[0], t);
+
+        // 足す・外す・並べ替えは変更履歴に残る
+        let mut d = TaskDraft::from(&t);
+        d.urls.insert(0, "https://a.example.jp/".into());
+        d.urls.retain(|u| !u.contains("b.example"));
+        let u = s.update_task(&t.id, &d).unwrap();
+        assert_eq!(
+            u.urls,
+            [
+                "https://a.example.jp/",
+                "https://github.com/acme/app/pull/7"
+            ]
+        );
+        let edit = &s.edits(&t.id).unwrap()[0];
+        assert_eq!(edit.field, "urls");
+        assert_eq!(
+            edit.old_value,
+            "https://b.example.jp/x\nhttps://github.com/acme/app/pull/7"
+        );
+
+        // URL でないものがあれば、何も変えずに失敗する
+        let mut bad = TaskDraft::from(&u);
+        bad.urls.push("メモ".into());
+        assert!(matches!(
+            s.update_task(&t.id, &bad),
+            Err(Error::Invalid(m)) if m.contains("「メモ」")
+        ));
+        assert_eq!(s.task(&t.id).unwrap().urls, u.urls);
+
+        // 元に戻せる。タスクを消すと URL も消える
+        s.undo_mark().unwrap();
+        let mut d = TaskDraft::from(&u);
+        d.urls.clear();
+        s.update_task(&t.id, &d).unwrap();
+        s.undo_mark().unwrap();
+        assert!(s.undo().unwrap());
+        assert_eq!(s.task(&t.id).unwrap().urls, u.urls);
+        s.delete_task(&t.id).unwrap();
+        let left: i64 = s
+            .conn
+            .query_row("SELECT COUNT(*) FROM task_urls", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(left, 0);
     }
 
     #[test]

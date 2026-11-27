@@ -65,7 +65,7 @@ Windows のアプリは、起動のときに黒い窓を出さないように作
 | `list_workspaces` / `list_people` | ワークスペース、担当者の一覧 |
 | `list_tasks` | タスクの一覧（ワークスペース、文字で絞り込み。完了・中止は `include_done`） |
 | `get_task` | タスク 1 件と、コメント、サブタスク、添付、変更履歴 |
-| `create_task` / `update_task` / `move_task` / `delete_task` | タスクを作る、書き換える、移す、削除する。`assignees` で担当者と役（RACI）をまとめて決められる |
+| `create_task` / `update_task` / `move_task` / `delete_task` | タスクを作る、書き換える、移す、削除する。`assignees` で担当者と役（RACI）をまとめて決められる。URL は `urls`（全部を置き換える）、`add_urls`、`remove_urls` |
 | `set_assignee` | タスクの担当者 1 人の役（R 実行責任者・A 説明責任者・C 相談先・I 報告先）を決める。担当でない人は担当に加え、役を空にすると担当から外す |
 | `link_task` / `reorder_tasks` | タスクをほかのワークスペースにも出す・外す、手動の順に並べる |
 | `add_comment` | コメントを書く（書き手は自分。返信とレビューコメントも）。書くのは、あとでタスクを読む人に要る事実だけ。作業をしたことだけを伝える文と、していないことは書かない |

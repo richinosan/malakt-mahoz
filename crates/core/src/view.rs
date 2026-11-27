@@ -660,6 +660,7 @@ mod tests {
             assignee_roles: vec![],
             assignee_done: vec![],
             categories: vec![],
+            urls: vec![],
             position: 0,
             created_at: 0,
             updated_at: 0,

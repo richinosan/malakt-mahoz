@@ -49,6 +49,7 @@ pub mod text;
 pub mod ticket;
 pub mod undo;
 pub mod view;
+pub mod weblink;
 pub mod when;
 
 pub use actor::Actor;
