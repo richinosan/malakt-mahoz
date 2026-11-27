@@ -455,6 +455,14 @@ pub struct MainView {
     pub dropped: bool,
     /// この画面が描いた、タスクを落とせる場所。
     pub drops: Rc<crate::drops::Surface>,
+    /// 左のメニューでドラッグしているワークスペース。
+    pub ws_drag: Option<crate::ws_drag::WsDrag>,
+    /// ワークスペースを落とした直後。マウスを離したことを、クリックとして扱わない。
+    pub ws_dropped: bool,
+    /// 左のメニューに描いたワークスペースの行の位置。
+    pub ws_rows: Rc<crate::ws_drag::Rows>,
+    /// ドラッグで置いたばかりのワークスペースと、置いた回数（動きを毎回始めから見せる）。
+    pub ws_landed: Option<(Id, usize)>,
     /// 詳細で、担当者と役を選ぶところを開いている。
     pub assignee_picker: bool,
     /// ダイアログの上に重ねて出しているダイアログ。
@@ -878,6 +886,10 @@ impl MainView {
             task_drop: None,
             dropped: false,
             drops,
+            ws_drag: None,
+            ws_dropped: false,
+            ws_rows: Default::default(),
+            ws_landed: None,
             layout: Default::default(),
             primary: 0,
             children: HashMap::new(),
@@ -4492,7 +4504,8 @@ impl MainView {
     pub fn dismiss(&mut self, cx: &mut Context<Self>) {
         self.error = None;
         cx.notify();
-        if self.sub_modal.take().is_some() {
+        // ドラッグ中のワークスペースは、元の場所のまま
+        if self.cancel_ws_drag(cx) || self.sub_modal.take().is_some() {
         } else if self.pane_overlay.is_some() {
             self.pane_overlay = None;
         } else if self.pane_prefix || self.pane_resize {

@@ -31,6 +31,7 @@ use crate::state::{
     Column, CommentMode, Detail, DropTarget, Editing, MainView, Modal, Nav, SubModal, When,
     RAIL_WIDTH,
 };
+use crate::ws_drag::{Spot as WsSpot, Zone as WsZone};
 use crate::{Dismiss, LockNow, NewWindow, PanePrefix, ToggleAi};
 use malakt_core::{Id, Person};
 
@@ -1158,6 +1159,80 @@ impl MainView {
         )
     }
 
+    /// ワークスペースをドラッグしている間、ウィンドウに届くマウスの動きをすべて受ける。
+    fn ws_drag_listener(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        self.ws_drag.as_ref()?;
+        let view = cx.entity().downgrade();
+        Some(
+            canvas(
+                |_, _, _| {},
+                move |_, _, window, _| {
+                    let moved = view.clone();
+                    window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
+                        if phase != DispatchPhase::Capture {
+                            return;
+                        }
+                        // 閉じた画面のドラッグは、もう続かない
+                        let _ = moved.update(cx, |this, cx| {
+                            if event.pressed_button == Some(MouseButton::Left) {
+                                this.drag_ws_at(event.position, cx);
+                            } else {
+                                this.finish_ws_drag(cx);
+                            }
+                        });
+                    });
+                    let released = view.clone();
+                    window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
+                        if phase != DispatchPhase::Capture || event.button != MouseButton::Left {
+                            return;
+                        }
+                        // 閉じた画面のドラッグは、もう続かない
+                        let _ = released.update(cx, |this, cx| this.finish_ws_drag(cx));
+                    });
+                },
+            )
+            .absolute()
+            .size_0(),
+        )
+    }
+
+    /// マウスに付いて動く、ドラッグ中のワークスペース。
+    fn ws_drag_ghost(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let drag = self.ws_drag.as_ref().filter(|d| d.moved)?;
+        let ws = self.workspaces.iter().find(|w| w.id == drag.id)?;
+        let theme = cx.theme();
+        let ghost = row()
+            .id("ws-drag-ghost")
+            .absolute()
+            .left(drag.at.x + px(10.))
+            .top(drag.at.y + px(10.))
+            .max_w(px(280.))
+            .gap_2()
+            .px_3()
+            .py_2()
+            .rounded(feel::md())
+            .border_1()
+            .border_color(theme.primary)
+            .bg(theme.popover)
+            .elevate(Elevation::High, cx)
+            .text_sm()
+            .child(workspace_icon(
+                ws.icon.as_deref(),
+                ws.color.as_deref(),
+                NAV_ICON_SIZE,
+                cx,
+            ))
+            .child(div().min_w_0().truncate().child(ws.name.clone()))
+            .test_support();
+        Some(if self.motion {
+            ghost
+                .with_animation("ws-ghost-in", appear(140), |d, t| d.opacity(t))
+                .into_any_element()
+        } else {
+            ghost.into_any_element()
+        })
+    }
+
     /// マウスに付いて動く、ドラッグ中のタスクのタイトル。
     fn task_drag_ghost(&self, cx: &mut Context<Self>) -> Option<Div> {
         let own = self
@@ -1257,10 +1332,40 @@ impl MainView {
             .border_l_1()
             .border_color(theme.sidebar_border)
             .gap_0p5();
+        self.ws_rows.begin();
+        let ws_over = self
+            .ws_drag
+            .as_ref()
+            .filter(|d| d.moved)
+            .and_then(|d| d.over.clone());
+        let ws_dragged = self
+            .ws_drag
+            .as_ref()
+            .filter(|d| d.moved)
+            .map(|d| d.id.clone());
         for (ix, node) in self.tree.iter().enumerate() {
             let ws = &self.workspaces[node.index];
             let id = ws.id.clone();
             let collapsed = self.collapsed.contains(&ws.id);
+            // ドラッグ中のワークスペースを落とすと入るところ
+            let line = match &ws_over {
+                Some(WsSpot::Row(over, zone)) if *over == ws.id => match zone {
+                    WsZone::Before => Some((true, node.depth)),
+                    WsZone::After => Some((
+                        false,
+                        node.depth
+                            + usize::from(crate::ws_drag::expanded(
+                                &self.workspaces,
+                                &self.collapsed,
+                                &ws.id,
+                            )),
+                    )),
+                    WsZone::Into => None,
+                },
+                _ => None,
+            };
+            let nest = ws_over == Some(WsSpot::Row(ws.id.clone(), WsZone::Into));
+            let lifted = ws_dragged.as_ref() == Some(&ws.id);
             let caret = if !node.has_children {
                 div().w_4().flex_none().into_any_element()
             } else {
@@ -1314,13 +1419,56 @@ impl MainView {
                     let menu = menu.clone();
                     move |m, _, _| menu(m)
                 });
-            tree = tree.child(
-                self.drop_zone(
+            let landed = self
+                .ws_landed
+                .as_ref()
+                .filter(|(landed, _)| self.motion && *landed == ws.id)
+                .map(|(_, turn)| *turn);
+            let drag_id = id.clone();
+            let row_el = self
+                .drop_zone(
                     row().id(("ws-row", ix)).group(group),
                     DropTarget::Workspace(Some(ws.id.clone())),
                     cx,
                 )
                 .pl(px(12.) * node.depth as f32)
+                .child(self.ws_rows.mark(ws.id.clone()))
+                .when(lifted, |d| d.opacity(0.4))
+                .when(nest, |d| {
+                    d.rounded(feel::md()).bg(theme.primary.opacity(0.25)).child(
+                        div()
+                            .id(("ws-nest", ix))
+                            .absolute()
+                            .inset_0()
+                            .rounded(feel::md())
+                            .border_1()
+                            .border_color(theme.primary)
+                            .test_support(),
+                    )
+                })
+                .when_some(line, |d, (above, depth)| {
+                    let bar = div()
+                        .id(("ws-line", ix))
+                        .absolute()
+                        .left(px(12.) * depth as f32)
+                        .right_0()
+                        .h(px(2.))
+                        .rounded_full()
+                        .bg(theme.primary)
+                        .when(above, |d| d.top(px(-2.)))
+                        .when(!above, |d| d.bottom(px(-2.)))
+                        .test_support();
+                    d.child(if self.motion {
+                        bar.with_animation(
+                            ("ws-line-in", ix * 2 + usize::from(above)),
+                            appear(140),
+                            |d, t| d.opacity(t),
+                        )
+                        .into_any_element()
+                    } else {
+                        bar.into_any_element()
+                    })
+                })
                 .child(caret)
                 .child(if naming {
                     // その場で名前を書く。文字の大きさも位置も、読むときと同じ。
@@ -1358,19 +1506,74 @@ impl MainView {
                         )
                         .into_any_element()
                 } else {
-                    self.nav_item(
+                    let nav = Nav::Workspace(id);
+                    // 押したまま動かすと、ワークスペースを並べ替えたり入れ子にしたりできる
+                    self.nav_link(
                         ("ws", ix),
                         workspace_icon(ws.icon.as_deref(), ws.color.as_deref(), NAV_ICON_SIZE, cx),
                         ws.name.clone(),
-                        Nav::Workspace(id),
+                        self.shown_nav(cx) == nav,
                         cx,
                     )
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                            this.start_ws_drag(&drag_id, event.position, cx)
+                        }),
+                    )
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        // ドラッグの終わりは、クリックにしない
+                        if this.dragging_ws() {
+                            return;
+                        }
+                        this.go(nav.clone(), cx)
+                    }))
+                    .test_support()
+                    .into_any_element()
                 })
                 .child(more)
                 // 右クリックでも同じメニューを出す
-                .right_menu(move |m, _, _| menu(m)),
-            );
+                .right_menu(move |m, _, _| menu(m));
+            tree = tree.child(match landed {
+                // 置いたばかりの行を、少しの間だけ光らせる
+                Some(turn) => row_el
+                    .with_animation(
+                        ("ws-landed", turn),
+                        Animation::new(std::time::Duration::from_millis(700))
+                            .with_easing(ease_out_quint()),
+                        {
+                            let glow = theme.primary;
+                            move |d, t| d.rounded(feel::md()).bg(glow.opacity(0.3 * (1. - t)))
+                        },
+                    )
+                    .into_any_element(),
+                None => row_el.into_any_element(),
+            });
         }
+        // 一覧の下の空いたところ。落とすと最上位の末尾に入る
+        let end_line = ws_over == Some(WsSpot::End);
+        let ws_end = div()
+            .id("ws-end")
+            .relative()
+            .flex_1()
+            .min_h(px(40.))
+            .ml_5()
+            .pl_2()
+            .child(self.ws_rows.mark_end())
+            .when(end_line, |d| {
+                d.child(
+                    div()
+                        .id("ws-line-end")
+                        .absolute()
+                        .top(px(2.))
+                        .left_2()
+                        .right_0()
+                        .h(px(2.))
+                        .rounded_full()
+                        .bg(theme.primary)
+                        .test_support(),
+                )
+            });
 
         let unread = self.unread_notices;
         let view = cx.entity().downgrade();
@@ -1474,7 +1677,7 @@ impl MainView {
                                     })),
                             )),
                     )
-                    .when(!self.workspaces.is_empty(), |d| d.child(tree)),
+                    .when(!self.workspaces.is_empty(), |d| d.child(tree).child(ws_end)),
             )
             // 何もないところの右クリックで、ワークスペースを足せる
             .right_menu(move |menu, _, _| {
@@ -8770,6 +8973,8 @@ impl Render for MainView {
             .children(self.task_drag_listener(cx))
             // ドラッグ中のタスクは、マウスに付いて動く
             .children(self.task_drag_ghost(cx))
+            .children(self.ws_drag_listener(cx))
+            .children(self.ws_drag_ghost(cx))
             .children(self.panel_drag_layer(cx))
             .children(self.render_pane_overlay(cx))
             .children(self.render_modal(cx))

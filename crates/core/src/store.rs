@@ -223,6 +223,51 @@ impl Store {
         Ok(())
     }
 
+    /// 親 `parent_id`（`None` なら最上位）の下の、`index` 番目に置く。
+    /// `index` は自分を除いた兄弟の中での位置で、多すぎるときは末尾になる。自分や子孫の中には移せない。
+    pub fn place_workspace(
+        &mut self,
+        id: &str,
+        parent_id: Option<&str>,
+        index: usize,
+    ) -> Result<()> {
+        self.workspace(id)?;
+        if let Some(p) = parent_id {
+            self.workspace(p)?;
+            if self.workspace_subtree_ids(id)?.iter().any(|d| d == p) {
+                return Err(Error::Cycle);
+            }
+        }
+        let tx = self.conn.transaction()?;
+        let mut siblings: Vec<Id> = {
+            let mut stmt = tx.prepare_cached(
+                "SELECT id FROM workspaces WHERE parent_id IS ?1 AND id <> ?2 \
+                 ORDER BY position, id",
+            )?;
+            let rows = stmt.query_map(params![parent_id, id], |r| r.get(0))?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        siblings.insert(index.min(siblings.len()), id.to_owned());
+        let now = now_ms();
+        for (position, sibling) in siblings.iter().enumerate() {
+            if sibling == id {
+                tx.execute(
+                    "UPDATE workspaces SET parent_id = ?2, position = ?3, updated_at = ?4 \
+                     WHERE id = ?1",
+                    params![id, parent_id, position as i64, now],
+                )?;
+            } else {
+                // 番号が変わらない兄弟は書き直さない（元に戻す履歴を増やさない）
+                tx.execute(
+                    "UPDATE workspaces SET position = ?2 WHERE id = ?1 AND position <> ?2",
+                    params![sibling, position as i64],
+                )?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     /// 子孫のワークスペースと、その中のタスクもすべて消す。
     /// ほかのワークスペースにも表示しているタスクは消さず、そちらに残す。
     pub fn delete_workspace(&mut self, id: &str) -> Result<()> {
@@ -2066,6 +2111,91 @@ mod tests {
         // 同じ親に移し直しても、自分の分で番号が増えない
         s.move_workspace(&c.id, Some(&a.id)).unwrap();
         assert_eq!(s.workspace(&c.id).unwrap().position, 1);
+    }
+
+    fn order(s: &Store, parent: Option<&str>) -> Vec<String> {
+        let mut list: Vec<Workspace> = s
+            .workspaces()
+            .unwrap()
+            .into_iter()
+            .filter(|w| w.parent_id.as_deref() == parent)
+            .collect();
+        list.sort_by_key(|w| w.position);
+        list.into_iter().map(|w| w.name).collect()
+    }
+
+    #[test]
+    fn place_workspace_reorders_and_nests() {
+        let mut s = store();
+        let a = s.create_workspace(None, "A").unwrap();
+        let b = s.create_workspace(None, "B").unwrap();
+        let c = s.create_workspace(None, "C").unwrap();
+        // 同じ親の中で前へ
+        s.place_workspace(&c.id, None, 0).unwrap();
+        assert_eq!(order(&s, None), ["C", "A", "B"]);
+        // 同じ親の中で後ろへ。番号は自分を除いた位置
+        s.place_workspace(&c.id, None, 2).unwrap();
+        assert_eq!(order(&s, None), ["A", "B", "C"]);
+        // 多すぎる番号は末尾
+        s.place_workspace(&a.id, None, 99).unwrap();
+        assert_eq!(order(&s, None), ["B", "C", "A"]);
+        // サブワークスペースにする（子孫ごと移る）
+        let a1 = s.create_workspace(Some(&a.id), "A1").unwrap();
+        s.place_workspace(&a.id, Some(&b.id), 0).unwrap();
+        assert_eq!(order(&s, None), ["B", "C"]);
+        assert_eq!(order(&s, Some(&b.id)), ["A"]);
+        assert_eq!(
+            s.workspace(&a1.id).unwrap().parent_id.as_deref(),
+            Some(a.id.as_str())
+        );
+        // 兄弟の間に入れる
+        let d = s.create_workspace(None, "D").unwrap();
+        s.place_workspace(&d.id, Some(&b.id), 0).unwrap();
+        assert_eq!(order(&s, Some(&b.id)), ["D", "A"]);
+        // 外して最上位の先頭へ
+        s.place_workspace(&a.id, None, 0).unwrap();
+        assert_eq!(order(&s, None), ["A", "B", "C"]);
+        assert_eq!(order(&s, Some(&b.id)), ["D"]);
+    }
+
+    #[test]
+    fn place_workspace_refuses_cycles_and_unknown_ids() {
+        let mut s = store();
+        let a = s.create_workspace(None, "A").unwrap();
+        let b = s.create_workspace(Some(&a.id), "B").unwrap();
+        assert!(matches!(
+            s.place_workspace(&a.id, Some(&a.id), 0),
+            Err(Error::Cycle)
+        ));
+        assert!(matches!(
+            s.place_workspace(&a.id, Some(&b.id), 0),
+            Err(Error::Cycle)
+        ));
+        assert!(matches!(
+            s.place_workspace("nope", None, 0),
+            Err(Error::NotFound(_))
+        ));
+        assert!(matches!(
+            s.place_workspace(&b.id, Some("nope"), 0),
+            Err(Error::NotFound(_))
+        ));
+        // 断ったときは何も変わらない
+        assert_eq!(
+            s.workspace(&b.id).unwrap().parent_id.as_deref(),
+            Some(a.id.as_str())
+        );
+    }
+
+    #[test]
+    fn place_workspace_undoes_in_one_step() {
+        let mut s = store();
+        let a = s.create_workspace(None, "A").unwrap();
+        let b = s.create_workspace(None, "B").unwrap();
+        s.undo_mark().unwrap();
+        s.place_workspace(&b.id, Some(&a.id), 0).unwrap();
+        s.undo_mark().unwrap();
+        s.undo().unwrap();
+        assert_eq!(order(&s, None), ["A", "B"]);
     }
 
     #[test]
