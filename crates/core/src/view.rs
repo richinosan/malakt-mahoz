@@ -242,6 +242,48 @@ pub fn apply_named(
     hits
 }
 
+/// 最上位からそのワークスペースまでの道筋（ワークスペースの並びの中の位置）。見つからなければ空。
+/// 親が見つからない所で止まり、親が輪になっていても同じワークスペースを 2 度は入れない。
+pub fn workspace_path(workspaces: &[Workspace], id: &str) -> Vec<usize> {
+    let mut path = Vec::new();
+    let mut current = workspaces.iter().position(|w| w.id == id);
+    while let Some(at) = current {
+        if path.contains(&at) {
+            break;
+        }
+        path.push(at);
+        current = workspaces[at]
+            .parent_id
+            .as_deref()
+            .and_then(|p| workspaces.iter().position(|w| w.id == p));
+    }
+    path.reverse();
+    path
+}
+
+/// パンくずの 1 段。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Crumb {
+    /// 道筋の中の位置。
+    At(usize),
+    /// 畳んだ段（道筋の中の位置、上から順）。「…」で出し、押すと選べる。
+    More(Vec<usize>),
+}
+
+/// `len` 段の道筋を、多くても `max` 段（「…」を含む）に畳む。最上位と、今いる所に近い段を残し、
+/// 間を 1 つの「…」にまとめる。`max` は 3 より小さくしない（最上位・「…」・今いる所）。
+pub fn crumbs(len: usize, max: usize) -> Vec<Crumb> {
+    let max = max.max(3);
+    if len <= max {
+        return (0..len).map(Crumb::At).collect();
+    }
+    // 最上位と「…」の分を引いた残りを、今いる所の側に出す
+    let tail = max - 2;
+    let mut out = vec![Crumb::At(0), Crumb::More((1..len - tail).collect())];
+    out.extend((len - tail..len).map(Crumb::At));
+    out
+}
+
 /// 一覧の 1 行。タスクか、サブワークスペースの見出し。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ListRow {
@@ -745,6 +787,39 @@ mod tests {
             in_space("t5", "b"),
         ];
         (tasks, spaces)
+    }
+
+    #[test]
+    fn workspace_path_runs_from_the_top() {
+        let all = vec![
+            space("c", Some("b"), 0),
+            space("a", None, 0),
+            space("b", Some("a"), 0),
+        ];
+        assert_eq!(workspace_path(&all, "c"), vec![1, 2, 0]);
+        assert_eq!(workspace_path(&all, "a"), vec![1]);
+        assert!(workspace_path(&all, "nope").is_empty());
+        // 親が消えていたら、そこで止まる
+        let orphan = vec![space("x", Some("gone"), 0)];
+        assert_eq!(workspace_path(&orphan, "x"), vec![0]);
+        // 親が輪になっていても止まる
+        let ring = vec![space("p", Some("q"), 0), space("q", Some("p"), 0)];
+        assert_eq!(workspace_path(&ring, "p"), vec![1, 0]);
+    }
+
+    #[test]
+    fn crumbs_fold_the_middle() {
+        use Crumb::*;
+        assert_eq!(crumbs(0, 4), vec![]);
+        assert_eq!(crumbs(2, 4), vec![At(0), At(1)]);
+        assert_eq!(crumbs(4, 4), vec![At(0), At(1), At(2), At(3)]);
+        assert_eq!(crumbs(5, 4), vec![At(0), More(vec![1, 2]), At(3), At(4)]);
+        assert_eq!(
+            crumbs(7, 4),
+            vec![At(0), More(vec![1, 2, 3, 4]), At(5), At(6)]
+        );
+        // 3 より小さい max は 3 として扱う
+        assert_eq!(crumbs(4, 1), vec![At(0), More(vec![1, 2]), At(3)]);
     }
 
     #[test]
