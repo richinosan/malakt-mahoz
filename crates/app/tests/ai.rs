@@ -4307,3 +4307,42 @@ fn a_repeat_without_a_key_fails_and_can_be_retried(cx: &mut TestAppContext) {
     assert_eq!(comments_of(cx, &copy), vec!["下書き".to_owned()]);
     assert_eq!(read(cx, |s| s.runs.last().unwrap().error.clone()), None);
 }
+
+/// 定期実行を途中で止めても、指示はなくならない。記録の「やり直す」で、もう一度実行できる。
+#[gpui_kit::test]
+fn a_stopped_repeat_keeps_its_instruction_for_a_retry(cx: &mut TestAppContext) {
+    let world = start(cx);
+    world.keys.set(Provider::Claude, "k").unwrap();
+    let session = session(cx);
+    cx.update(|cx| session.update(cx, |s, cx| s.refresh_key(cx)));
+    cx.run_until_parked();
+    // 回を作ると、すぐに実行が始まる。返事を待っている間に止める
+    let copy = repeated_copy(cx, "先週のまとめを下書きする");
+    assert!(read(cx, |s| s.busy), "実行が始まっている");
+    cx.update(|cx| session.update(cx, |s, cx| s.stop(cx)));
+    cx.run_until_parked();
+    let run = read(cx, |s| s.runs.last().cloned().unwrap());
+    assert_eq!(run.kind, RunKind::Repeat);
+    assert_eq!(run.error.as_deref(), Some("中止しました"));
+    let jobs = cx.update(|cx| db::shared(cx).read(cx).store.repeat_ai_jobs().unwrap());
+    assert_eq!(jobs.len(), 1, "止めた指示は残る");
+    assert!(jobs[0].failed, "頼まれるまで動かない");
+
+    world.reply(tool_reply(
+        "t1",
+        "add_comment",
+        json!({"task_id": copy, "body": "下書き"}),
+    ));
+    world.reply(text_reply("書きました。"));
+    cx.update(|cx| session.update(cx, |s, cx| s.retry_run(&run.id, cx)));
+    wait(cx, "やり直しが終わる", |s| {
+        s.runs.iter().filter(|r| r.kind == RunKind::Repeat).count() == 2
+    });
+    assert_eq!(comments_of(cx, &copy), vec!["下書き".to_owned()]);
+    assert!(cx.update(|cx| db::shared(cx)
+        .read(cx)
+        .store
+        .repeat_ai_jobs()
+        .unwrap()
+        .is_empty()));
+}

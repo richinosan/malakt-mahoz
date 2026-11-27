@@ -370,7 +370,7 @@ pub struct AiJob {
     pub task_id: Id,
     pub title: String,
     pub prompt: String,
-    /// 前に失敗した（もう一度頼まれるまで実行しない）。
+    /// 実行中か、前に失敗した・止めた（もう一度頼まれるまで実行しない）。
     pub failed: bool,
 }
 
@@ -711,16 +711,25 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    /// 待ち行列から、失敗していない 1 件を取り出す（行列から消す）。
+    /// 待ち行列から、失敗していない 1 件を取り出す。行列には失敗の印を付けて残し、
+    /// 終わったら [`Store::finish_repeat_ai`] で消す。途中で止めたり、アプリが落ちたりしても、
+    /// 指示はなくならず、やり直せる。
     pub fn take_repeat_ai(&mut self) -> Result<Option<AiJob>> {
         let Some(job) = self.repeat_ai_jobs()?.into_iter().find(|j| !j.failed) else {
             return Ok(None);
         };
         self.conn.execute(
-            "DELETE FROM repeat_ai WHERE task_id = ?1",
+            "UPDATE repeat_ai SET failed = 1 WHERE task_id = ?1",
             params![job.task_id],
         )?;
         Ok(Some(job))
+    }
+
+    /// 最後まで実行できた指示を、待ち行列から消す。
+    pub fn finish_repeat_ai(&mut self, task_id: &str) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM repeat_ai WHERE task_id = ?1", params![task_id])?;
+        Ok(())
     }
 
     /// 失敗した実行を、行列に戻す。もう一度頼まれるまで実行しない。
@@ -1193,6 +1202,10 @@ mod tests {
             (made[0].as_str(), "下書き")
         );
         assert!(store.take_repeat_ai().unwrap().is_none());
+        // 実行している間も行列に残る。途中で止まったら、そのままやり直せる
+        assert!(store.repeat_ai_jobs().unwrap()[0].failed);
+        assert!(store.retry_repeat_ai(&job.task_id).unwrap());
+        let job = store.take_repeat_ai().unwrap().unwrap();
         store.fail_repeat_ai(&job.task_id, &job.prompt).unwrap();
         // 失敗したものは、頼まれるまで取り出さない
         assert!(store.take_repeat_ai().unwrap().is_none());
@@ -1202,6 +1215,11 @@ mod tests {
             store.take_repeat_ai().unwrap().unwrap().task_id,
             job.task_id
         );
+        // 最後まで実行できたら消える
+        store.finish_repeat_ai(&job.task_id).unwrap();
+        assert!(store.repeat_ai_jobs().unwrap().is_empty());
+        assert!(!store.retry_repeat_ai(&job.task_id).unwrap());
+        store.fail_repeat_ai(&job.task_id, &job.prompt).unwrap();
         // 消えたタスクの分は戻さない
         store.delete_task(&job.task_id).unwrap();
         store.fail_repeat_ai(&job.task_id, "下書き").unwrap();

@@ -2507,8 +2507,22 @@ impl Session {
             let result = Self::repeat_run(&this, &job, cx).await;
             // チャットがなくなっていれば、知らせる先もない
             let _ = this.update(cx, |this, cx| {
-                if let Err(error) = result {
-                    this.repeat_failed(&job, error, cx);
+                match result {
+                    Err(error) => this.repeat_failed(&job, error, cx),
+                    Ok(()) => {
+                        if let Err(e) = this
+                            .db
+                            .update(cx, |db, _| db.store.finish_repeat_ai(&job.task_id))
+                        {
+                            this.error = Some(
+                                format!(
+                                    "「{}」の実行済みの AI への指示を消せませんでした: {e}",
+                                    job.title
+                                )
+                                .into(),
+                            );
+                        }
+                    }
                 }
                 this.finish();
                 cx.notify();
