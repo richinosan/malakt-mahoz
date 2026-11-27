@@ -39,6 +39,24 @@ const FOCUS_SCRIPT: &str = r#"(() => {
   window.addEventListener("mouseout", (e) => { if (!e.relatedTarget) post("leave"); }, true);
 })();"#;
 
+/// ページを読み込まずに場所が変わったこと（`history.pushState` / `replaceState`、戻る・進む、`#` の移動）を、
+/// アプリに知らせる。GitHub などは読み込みの知らせなしに場所を変えるので、これがないと URL の欄が古いまま残る。
+/// 場所そのものは送らない（ページが好きな URL を書けてしまう）。アプリが OS の部品から読む。
+const MOVE_SCRIPT: &str = r#"(() => {
+  const tell = () => { try { window.ipc.postMessage("moved"); } catch (_) {} };
+  for (const name of ["pushState", "replaceState"]) {
+    const original = history[name];
+    if (typeof original !== "function") continue;
+    history[name] = function (...args) {
+      const result = original.apply(this, args);
+      tell();
+      return result;
+    };
+  }
+  window.addEventListener("popstate", tell);
+  window.addEventListener("hashchange", tell);
+})();"#;
+
 /// ページの上の Ctrl+ホイールと Ctrl++ / Ctrl+- / Ctrl+0、ロックのキー（Ctrl+Shift+L / ⇧⌘L）を、アプリに知らせる。
 /// 拡大率はアプリが変えて、場所の欄の右に出す（OS の部品に任せると、今の拡大率が分からない）。
 /// 中の枠（iframe）からは、いちばん外のページを通して知らせる。
@@ -547,6 +565,7 @@ pub fn create(window: &mut Window, setup: Setup) -> Result<Rc<dyn Engine>, Strin
             // 拡大縮小は ZOOM_SCRIPT で受けて、アプリが変える
             .with_hotkeys_zoom(false)
             .with_initialization_script(FOCUS_SCRIPT)
+            .with_initialization_script_for_main_only(MOVE_SCRIPT, true)
             .with_initialization_script_for_main_only(ZOOM_SCRIPT, false)
             .with_initialization_script_for_main_only(POPUP_SCRIPT, false)
             .with_initialization_script_for_main_only(key_script(), false)
@@ -559,6 +578,7 @@ pub fn create(window: &mut Window, setup: Setup) -> Result<Rc<dyn Engine>, Strin
                         "enter" => send(Event::Pointer(true)),
                         "leave" => send(Event::Pointer(false)),
                         "lock" => send(Event::Lock),
+                        "moved" => send(Event::Moved),
                         _ => {
                             if let Some(step) = Zoom::parse(body) {
                                 send(Event::Zoom(step));
