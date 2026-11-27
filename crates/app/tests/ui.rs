@@ -6733,4 +6733,49 @@ fn history_shows_who_changed_what(cx: &mut TestAppContext) {
         window.click(("event-history", 2usize), cx)
     });
     cx.update(|cx| assert_eq!(view.read(cx).modal, Modal::History));
+
+    // 差分の文字は、ドラッグで選んで Ctrl+C でコピーできる
+    let ids: Vec<String> = cx
+        .update_window(window, |_, window, _| {
+            ["history-1-0-after", "history-1-0-0-after"]
+                .into_iter()
+                .filter(|id| window.try_find(*id).is_some())
+                .map(String::from)
+                .collect()
+        })
+        .unwrap();
+    let added = ids.first().expect("説明を足した差分の枠がある").clone();
+    let mut bounds = None;
+    ui(cx, window, |window, _| {
+        bounds = Some(
+            window
+                .find(gpui_kit::SharedString::from(added.clone()))
+                .bounds(),
+        )
+    });
+    let b = bounds.unwrap();
+    // ダイアログを開いている間も、フォーカスはタスクの画面にある
+    cx.update_window(window, |_, window, cx| {
+        let focus = view.read(cx).focus.clone();
+        window.focus(&focus, cx)
+    })
+    .unwrap();
+    {
+        use gpui_kit::{point, Modifiers, MouseButton, VisualTestContext};
+        // 枠の余白（左右 0.625rem）の内側から、右の端まで
+        let (from, to) = (
+            point(b.left() + px(13.5), b.center().y),
+            point(b.right() - px(2.), b.center().y),
+        );
+        let mut v = VisualTestContext::from_window(window, cx);
+        v.simulate_mouse_down(from, MouseButton::Left, Modifiers::default());
+        v.update(|window, cx| window.render_frame(cx));
+        v.simulate_mouse_move(to, MouseButton::Left, Modifiers::default());
+        v.update(|window, cx| window.render_frame(cx));
+        v.simulate_mouse_up(to, MouseButton::Left, Modifiers::default());
+        v.run_until_parked();
+    }
+    ui(cx, window, |window, cx| window.press("ctrl-c", cx));
+    let copied = cx.update(|cx| cx.read_from_clipboard().and_then(|i| i.text()));
+    assert_eq!(copied.as_deref(), Some("下見の段取り"));
 }

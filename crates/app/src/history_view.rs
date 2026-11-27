@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 
 use crate::press::button;
+use gpui_kit::base::TestSupportExt;
 use gpui_kit::component::button::ButtonVariants;
 use gpui_kit::component::scroll::ScrollableElement;
 use gpui_kit::component::{ActiveTheme, Sizable};
@@ -275,8 +276,8 @@ impl MainView {
         };
         let entries = history::entries(&detail.changes);
         let mut list = col().gap_3();
-        for entry in entries.iter().rev() {
-            list = list.child(self.render_entry(entry, &names, cx));
+        for (n, entry) in entries.iter().rev().enumerate() {
+            list = list.child(self.render_entry(n, entry, &names, cx));
         }
         let body = if entries.is_empty() {
             div()
@@ -307,12 +308,12 @@ impl MainView {
         )
     }
 
-    fn render_entry(&self, entry: &Entry, names: &ViewNames<'_>, cx: &App) -> Div {
+    fn render_entry(&self, n: usize, entry: &Entry, names: &ViewNames<'_>, cx: &App) -> Div {
         let theme = cx.theme().clone();
         let changes = history::field_changes(entry, names);
         let mut fields = col().gap_2();
-        for change in &changes {
-            fields = fields.child(field_card(change, cx));
+        for (f, change) in changes.iter().enumerate() {
+            fields = fields.child(field_card(&format!("history-{n}-{f}"), change, cx));
         }
         col()
             .gap_1p5()
@@ -355,7 +356,8 @@ impl MainView {
 }
 
 /// 1 つの項目の差分。追加・削除・変更の印と項目名、変更前（赤）と変更後（緑）の枠。
-fn field_card(change: &FieldChange, cx: &App) -> Div {
+/// `key` は枠の文字を選ぶための名前の頭で、履歴の中で重ならない。
+fn field_card(key: &str, change: &FieldChange, cx: &App) -> Div {
     let theme = cx.theme().clone();
     let (fg, bg) = match change.kind {
         Kind::Added => (theme.success, theme.success.opacity(0.15)),
@@ -391,21 +393,31 @@ fn field_card(change: &FieldChange, cx: &App) -> Div {
         .child(head);
     let plain = |text: &str, kind: PartKind| vec![Part::new(kind, text)];
     if !change.hunks.is_empty() {
-        for hunk in &change.hunks {
-            card = card.children(hunk_blocks(hunk, cx));
+        for (h, hunk) in change.hunks.iter().enumerate() {
+            card = card.children(hunk_blocks(&format!("{key}-{h}"), hunk, cx));
         }
     } else {
         match change.kind {
             Kind::Changed => {
                 card = card
-                    .child(block(&[&change.before_parts], false, cx))
-                    .child(block(&[&change.after_parts], true, cx));
+                    .child(block(key, &[&change.before_parts], false, cx))
+                    .child(block(key, &[&change.after_parts], true, cx));
             }
             Kind::Added => {
-                card = card.child(block(&[&plain(&change.after, PartKind::Equal)], true, cx));
+                card = card.child(block(
+                    key,
+                    &[&plain(&change.after, PartKind::Equal)],
+                    true,
+                    cx,
+                ));
             }
             Kind::Removed => {
-                card = card.child(block(&[&plain(&change.before, PartKind::Equal)], false, cx));
+                card = card.child(block(
+                    key,
+                    &[&plain(&change.before, PartKind::Equal)],
+                    false,
+                    cx,
+                ));
             }
         }
     }
@@ -413,7 +425,7 @@ fn field_card(change: &FieldChange, cx: &App) -> Div {
 }
 
 /// 行ごとの差分の 1 まとまり。変更前の行と変更後の行を、それぞれ 1 つの枠にする。
-fn hunk_blocks(hunk: &Hunk, cx: &App) -> Vec<Div> {
+fn hunk_blocks(key: &str, hunk: &Hunk, cx: &App) -> Vec<AnyElement> {
     let before: Vec<&Vec<Part>> = hunk
         .lines
         .iter()
@@ -428,16 +440,17 @@ fn hunk_blocks(hunk: &Hunk, cx: &App) -> Vec<Div> {
         .collect();
     let mut out = Vec::new();
     if !before.is_empty() {
-        out.push(block(&before, false, cx));
+        out.push(block(key, &before, false, cx));
     }
     if !after.is_empty() {
-        out.push(block(&after, true, cx));
+        out.push(block(key, &after, true, cx));
     }
     out
 }
 
 /// 変更前（赤）か変更後（緑）の枠。消えた・増えたところを濃くする。
-fn block(lines: &[&Vec<Part>], after: bool, cx: &App) -> Div {
+/// 中の文字はドラッグで選んでコピーできる。
+fn block(key: &str, lines: &[&Vec<Part>], after: bool, cx: &App) -> AnyElement {
     let theme = cx.theme().clone();
     let tone = if after { theme.success } else { theme.danger };
     let mut text = String::new();
@@ -461,7 +474,9 @@ fn block(lines: &[&Vec<Part>], after: bool, cx: &App) -> Div {
             }
         }
     }
+    let id = SharedString::from(format!("{key}-{}", if after { "after" } else { "before" }));
     div()
+        .id(id.clone())
         .px_2p5()
         .py_1p5()
         .min_w_0()
@@ -471,5 +486,7 @@ fn block(lines: &[&Vec<Part>], after: bool, cx: &App) -> Div {
         .bg(tone.opacity(0.05))
         .text_xs()
         .text_color(theme.foreground)
-        .child(StyledText::new(text).with_highlights(highlights))
+        .child(crate::render::selectable_text(id, text, cx).highlights(highlights))
+        .test_support()
+        .into_any_element()
 }
