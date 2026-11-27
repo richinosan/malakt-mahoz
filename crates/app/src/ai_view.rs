@@ -22,7 +22,7 @@ use malakt_ai::{Effort, Provider};
 use crate::ai::{self, Decision, Item, KeyState, LineKind, Run, Session, ShellPlace, ToolState};
 use crate::db::{self, Db};
 use crate::feel::{self, Grip, Lit};
-use crate::render::{app_icon, remove_x};
+use crate::render::{app_icon, remove_x, workspace_icon};
 use crate::scroll::{self, Menus};
 use crate::shadow::{Elevate, Elevation};
 use crate::shell_keys;
@@ -1350,11 +1350,12 @@ impl AiPane {
             .into_any_element()
     }
 
-    /// 入力欄に貼られたタスクのリンクを、ドラッグしたときと同じように入力欄に添える。
-    /// リンクの文字は入力欄から消す。タスクが見つからないリンクは、文字のまま残す。
+    /// 入力欄に貼られたタスクやワークスペースのリンクを、ドラッグしたときと同じように入力欄に添える。
+    /// リンクの文字は入力欄から消す。見つからないリンクは、文字のまま残す。
     fn absorb_task_links(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let text = self.input.read(cx).value().to_string();
         let mut found: Vec<(String, SharedString)> = Vec::new();
+        let mut workspaces: Vec<(String, SharedString)> = Vec::new();
         {
             let store = &self.db.read(cx).store;
             for id in malakt_core::tasklink::find(&text) {
@@ -1362,22 +1363,36 @@ impl AiPane {
                     found.push((id.to_owned(), task.title.into()));
                 }
             }
+            for id in malakt_core::wslink::find(&text) {
+                if let Ok(ws) = store.workspace(id) {
+                    workspaces.push((id.to_owned(), ws.name.into()));
+                }
+            }
         }
-        if found.is_empty() {
+        if found.is_empty() && workspaces.is_empty() {
             return;
         }
-        // 長い ID から消すと、頭が同じ別の ID のリンクを壊さない
-        let mut rest = text;
-        let mut by_length = found.clone();
-        by_length.sort_by_key(|(id, _)| std::cmp::Reverse(id.len()));
-        for (id, _) in &by_length {
-            rest = rest.replace(&malakt_core::tasklink::url(id), "");
-        }
-        self.session.update(cx, |s, cx| {
-            for (id, title) in found {
-                s.attach_task(&id, title, cx);
-            }
+        // 添えられたものだけリンクの文字を消す。上限で添えられなかったものは、文字のまま残す
+        let (tasks, workspaces) = self.session.update(cx, |s, cx| {
+            let tasks: Vec<String> = found
+                .into_iter()
+                .filter(|(id, title)| s.attach_task(id, title.clone(), cx))
+                .map(|(id, _)| malakt_core::tasklink::url(&id))
+                .collect();
+            let workspaces: Vec<String> = workspaces
+                .into_iter()
+                .filter(|(id, name)| s.attach_workspace(id, name.clone(), cx))
+                .map(|(id, _)| malakt_core::wslink::url(&id))
+                .collect();
+            (tasks, workspaces)
         });
+        // 長いリンクから消すと、頭が同じ別の ID のリンクを壊さない
+        let mut links: Vec<String> = tasks.into_iter().chain(workspaces).collect();
+        links.sort_by_key(|link| std::cmp::Reverse(link.len()));
+        let mut rest = text;
+        for link in &links {
+            rest = rest.replace(link.as_str(), "");
+        }
         let rest = rest.trim().to_owned();
         self.input.update(cx, |s, cx| s.set_value(rest, window, cx));
         cx.notify();
@@ -2078,8 +2093,21 @@ impl AiPane {
         let tray = self.render_tray(cx);
         let pills = self.render_pills(cx);
         let attached = self.session.read(cx).attached.clone();
+        // 添えたワークスペースは、左のメニューと同じアイコンで出す。消えたものは、ふつうのアイコンで
+        let attached_ws: Vec<(String, SharedString, Option<String>, Option<String>)> = {
+            let store = &self.db.read(cx).store;
+            self.session
+                .read(cx)
+                .attached_workspaces
+                .iter()
+                .map(|(id, name)| match store.workspace(id) {
+                    Ok(ws) => (id.clone(), name.clone(), ws.icon, ws.color),
+                    Err(_) => (id.clone(), name.clone(), None, None),
+                })
+                .collect()
+        };
         let dropping = self.main.as_ref().is_some_and(|main| {
-            main.read_with(cx, |main, _| main.drop_over() == Some(&DropTarget::Chat))
+            main.read_with(cx, |main, _| main.dropping_on_chat())
                 .unwrap_or(false)
         });
 
@@ -2169,39 +2197,95 @@ impl AiPane {
                             .elevate(Elevation::Mid, cx)
                             .p_1()
                             .gap_1()
-                            .when(!attached.is_empty(), |d| {
-                                d.child(row().gap_1().flex_wrap().px_1().pt_1().children(
-                                    attached.iter().enumerate().map(|(ix, (id, title))| {
-                                        let id = id.clone();
-                                        row()
-                                            .id(("ai-attached", ix))
-                                            .max_w_full()
-                                            .gap_1()
-                                            .pl_2()
-                                            .pr_0p5()
-                                            .h_6()
-                                            .items_center()
-                                            .rounded(feel::md())
-                                            .bg(theme.secondary)
-                                            .text_xs()
-                                            .child(app_icon("list-todo").size_3().flex_none())
-                                            .child(div().min_w_0().truncate().child(title.clone()))
-                                            .child(
-                                                remove_x(
-                                                    ("ai-attached-remove", ix),
-                                                    "タスクを外す",
-                                                    cx.listener(move |this, _, _, cx| {
-                                                        this.session.update(cx, |s, cx| {
-                                                            s.detach_task(&id, cx)
-                                                        });
-                                                    }),
-                                                    cx,
-                                                )
-                                                .test_support(),
-                                            )
-                                            .test_support()
-                                    }),
-                                ))
+                            .when(!attached.is_empty() || !attached_ws.is_empty(), |d| {
+                                d.child(
+                                    row()
+                                        .gap_1()
+                                        .flex_wrap()
+                                        .px_1()
+                                        .pt_1()
+                                        .children(attached.iter().enumerate().map(
+                                            |(ix, (id, title))| {
+                                                let id = id.clone();
+                                                row()
+                                                    .id(("ai-attached", ix))
+                                                    .max_w_full()
+                                                    .gap_1()
+                                                    .pl_2()
+                                                    .pr_0p5()
+                                                    .h_6()
+                                                    .items_center()
+                                                    .rounded(feel::md())
+                                                    .bg(theme.secondary)
+                                                    .text_xs()
+                                                    .child(
+                                                        app_icon("list-todo").size_3().flex_none(),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .min_w_0()
+                                                            .truncate()
+                                                            .child(title.clone()),
+                                                    )
+                                                    .child(
+                                                        remove_x(
+                                                            ("ai-attached-remove", ix),
+                                                            "タスクを外す",
+                                                            cx.listener(move |this, _, _, cx| {
+                                                                this.session.update(cx, |s, cx| {
+                                                                    s.detach_task(&id, cx)
+                                                                });
+                                                            }),
+                                                            cx,
+                                                        )
+                                                        .test_support(),
+                                                    )
+                                                    .test_support()
+                                            },
+                                        ))
+                                        .children(attached_ws.iter().enumerate().map(
+                                            |(ix, (id, name, icon, color))| {
+                                                let id = id.clone();
+                                                row()
+                                                    .id(("ai-attached-ws", ix))
+                                                    .max_w_full()
+                                                    .gap_1()
+                                                    .pl_2()
+                                                    .pr_0p5()
+                                                    .h_6()
+                                                    .items_center()
+                                                    .rounded(feel::md())
+                                                    .bg(theme.secondary)
+                                                    .text_xs()
+                                                    .child(workspace_icon(
+                                                        icon.as_deref(),
+                                                        color.as_deref(),
+                                                        px(12.),
+                                                        cx,
+                                                    ))
+                                                    .child(
+                                                        div()
+                                                            .min_w_0()
+                                                            .truncate()
+                                                            .child(name.clone()),
+                                                    )
+                                                    .child(
+                                                        remove_x(
+                                                            ("ai-attached-ws-remove", ix),
+                                                            "ワークスペースを外す",
+                                                            cx.listener(move |this, _, _, cx| {
+                                                                this.session.update(cx, |s, cx| {
+                                                                    s.detach_workspace(&id, cx)
+                                                                });
+                                                            }),
+                                                            cx,
+                                                        )
+                                                        .test_support(),
+                                                    )
+                                                    .test_support()
+                                            },
+                                        )),
+                                )
                             })
                             .child(
                                 // 入力欄と送信を 1 行に置く

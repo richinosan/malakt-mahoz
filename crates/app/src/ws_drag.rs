@@ -2,6 +2,7 @@
 //!
 //! 行の上の 1/4 に落とすとその行の前、下の 1/4 なら後ろ、真ん中ならその行のサブワークスペースの末尾に入る。
 //! 一覧の下の空いたところに落とすと、最上位の末尾に入る。
+//! AI チャットの上に落とすと、並びは変えずに、チャットの入力欄に添える。
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -10,7 +11,7 @@ use std::time::Duration;
 use gpui_kit::*;
 use malakt_core::{Id, Workspace};
 
-use crate::state::MainView;
+use crate::state::{DropTarget, MainView};
 
 /// 押してからこれだけ動かすまでは、ただのクリックとして扱う。
 const SLOP: f32 = 6.;
@@ -217,6 +218,8 @@ pub struct WsDrag {
     pub over: Option<Spot>,
     /// 閉じた行を開くのを待っている回。乗せ直すと数が変わる。
     pub wait: usize,
+    /// 上にある AI チャットの画面。落とすと、そのチャットに添える。
+    pub chat: Option<WeakEntity<MainView>>,
 }
 
 impl MainView {
@@ -232,6 +235,7 @@ impl MainView {
             moved: false,
             over: None,
             wait: 0,
+            chat: None,
         });
         cx.notify();
     }
@@ -241,10 +245,54 @@ impl MainView {
         self.ws_dropped || self.ws_drag.as_ref().is_some_and(|d| d.moved)
     }
 
-    /// ドラッグ中のマウスの位置から、落とし先を探す。
-    pub fn drag_ws_at(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
-        let spot = self.ws_rows.at(at);
+    /// ドラッグ中のマウスの位置から、落とし先を探す。AI チャットの上なら、チャットが落とし先になる。
+    pub fn drag_ws_at(&mut self, at: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        let me = cx.entity().downgrade();
+        let chat = crate::drops::hit(&me, at, window, cx)
+            .and_then(|hit| hit.zone)
+            .filter(|(_, target)| *target == DropTarget::Chat)
+            .map(|(owner, _)| owner);
+        let spot = match chat {
+            Some(_) => None,
+            None => self.ws_rows.at(at),
+        };
         self.drag_ws_to(at, spot, cx);
+        self.drag_ws_chat(chat, cx);
+    }
+
+    /// ドラッグ中のワークスペースが上にある AI チャットの画面。動かし始める前は何もしない。
+    pub fn drag_ws_chat(&mut self, chat: Option<WeakEntity<MainView>>, cx: &mut Context<Self>) {
+        let Some(drag) = self.ws_drag.as_mut().filter(|d| d.moved) else {
+            return;
+        };
+        if drag.chat == chat {
+            return;
+        }
+        let old = std::mem::replace(&mut drag.chat, chat.clone());
+        self.show_ws_chat(old, false, cx);
+        self.show_ws_chat(chat, true, cx);
+        cx.notify();
+    }
+
+    /// チャットの画面に、ワークスペースが上にあることを見せる・消す。
+    fn show_ws_chat(
+        &mut self,
+        view: Option<WeakEntity<MainView>>,
+        on: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(view) = view else {
+            return;
+        };
+        if view == cx.entity().downgrade() {
+            self.ws_chat_drop = on;
+            return;
+        }
+        // 閉じた画面には、見せる先がない
+        let _ = view.update(cx, |view, cx| {
+            view.ws_chat_drop = on;
+            cx.notify();
+        });
     }
 
     /// `spot` はマウスの下の行と行の中の位置（`Some(None)` は一覧の下の空いたところ）。
@@ -303,7 +351,9 @@ impl MainView {
 
     /// ドラッグをやめる（Esc）。何も動かさない。
     pub fn cancel_ws_drag(&mut self, cx: &mut Context<Self>) -> bool {
-        let moved = self.ws_drag.take().is_some_and(|d| d.moved);
+        let drag = self.ws_drag.take();
+        let moved = drag.as_ref().is_some_and(|d| d.moved);
+        self.show_ws_chat(drag.and_then(|d| d.chat), false, cx);
         if moved {
             self.suppress_ws_click(cx);
         }
@@ -327,10 +377,18 @@ impl MainView {
             return;
         };
         cx.notify();
+        self.show_ws_chat(drag.chat.clone(), false, cx);
         if !drag.moved {
             return;
         }
         self.suppress_ws_click(cx);
+        if drag.chat.is_some() {
+            // チャットに落とした。並びは変えない
+            let name = self.workspace_name(Some(&drag.id));
+            self.ai_session
+                .update(cx, |s, cx| s.attach_workspace(&drag.id, name, cx));
+            return;
+        }
         let Some(spot) = drag.over else {
             return;
         };

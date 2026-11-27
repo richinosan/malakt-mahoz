@@ -53,6 +53,7 @@ pub mod undo;
 pub mod view;
 pub mod weblink;
 pub mod when;
+pub mod wslink;
 
 pub use actor::Actor;
 pub use error::{Error, Result};

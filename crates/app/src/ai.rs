@@ -151,6 +151,7 @@ pub struct Queued {
     pub text: String,
     place: String,
     attached: Vec<(String, SharedString)>,
+    attached_workspaces: Vec<(String, SharedString)>,
 }
 
 /// 並列で動かしている、別の会話。
@@ -290,6 +291,8 @@ pub fn arrange_note_label(note: &str) -> &'static str {
 
 /// 入力欄に添えられるタスクの数。
 pub const MAX_ATTACHED_TASKS: usize = 10;
+/// 入力欄に添えられるワークスペースの数。1 つでタスクの一覧ごと渡すので、タスクより少なくする。
+pub const MAX_ATTACHED_WORKSPACES: usize = 3;
 
 /// 新しいタスクを AI が整えるとき、1 回で扱うタスクの数。
 const MAX_ARRANGE_TASKS: usize = 5;
@@ -722,6 +725,8 @@ pub struct Session {
     pub place: String,
     /// 入力欄に添えたタスク（ID と題）。送るときに、中身を AI に渡す。
     pub attached: Vec<(String, SharedString)>,
+    /// 入力欄に添えたワークスペース（ID と名前）。送るときに、サブワークスペースとタスクを AI に渡す。
+    pub attached_workspaces: Vec<(String, SharedString)>,
     /// ユーザーが今開いているワークスペース。画面が書き込む。
     pub workspace: Option<String>,
     /// 並列の会話を動かすための、裏の会話。保存も自動の処理もしない。
@@ -1027,6 +1032,7 @@ impl Session {
             window_bounds: ui.bounds,
             place: String::new(),
             attached: Vec::new(),
+            attached_workspaces: Vec::new(),
             workspace: None,
             worker,
             coordinators,
@@ -1069,6 +1075,9 @@ impl Session {
                     let mut next = this.queued.remove(0);
                     next.attached.append(&mut this.attached);
                     this.attached = next.attached;
+                    next.attached_workspaces
+                        .append(&mut this.attached_workspaces);
+                    this.attached_workspaces = next.attached_workspaces;
                     if !this.send(&next.text, next.place, cx) && this.error.is_none() {
                         this.error = Some(
                             format!("「{}」を送れませんでした", clip_chars(&next.text, 20)).into(),
@@ -1423,6 +1432,7 @@ impl Session {
                 w.model_names,
             ) = copy;
             w.attached = queued.attached.clone();
+            w.attached_workspaces = queued.attached_workspaces.clone();
             w
         });
         let sent = worker.update(cx, |w, cx| w.send(&queued.text, queued.place.clone(), cx));
@@ -3067,6 +3077,7 @@ impl Session {
         self.items.clear();
         self.allow_shell = false;
         self.attached.clear();
+        self.attached_workspaces.clear();
         self.conversation = malakt_core::new_id();
         self.chat_task = None;
         self.error = None;
@@ -3148,22 +3159,52 @@ impl Session {
         }
     }
 
-    /// タスクを入力欄に添える。同じタスクは 1 つだけ。
-    pub fn attach_task(&mut self, id: &str, title: SharedString, cx: &mut Context<Self>) {
+    /// タスクを入力欄に添える。同じタスクは 1 つだけ。添えてあれば（前から添えてあったものも）`true`。
+    pub fn attach_task(&mut self, id: &str, title: SharedString, cx: &mut Context<Self>) -> bool {
         if self.attached.iter().any(|(have, _)| have == id) {
-            return;
+            return true;
         }
-        if self.attached.len() >= MAX_ATTACHED_TASKS {
-            self.error = Some(format!("添えられるタスクは {MAX_ATTACHED_TASKS} 件までです").into());
-        } else {
+        let room = self.attached.len() < MAX_ATTACHED_TASKS;
+        if room {
             self.attached.push((id.to_owned(), title));
+        } else {
+            self.error = Some(format!("添えられるタスクは {MAX_ATTACHED_TASKS} 件までです").into());
         }
         cx.notify();
+        room
     }
 
     /// 添えたタスクを外す。
     pub fn detach_task(&mut self, id: &str, cx: &mut Context<Self>) {
         self.attached.retain(|(have, _)| have != id);
+        cx.notify();
+    }
+
+    /// ワークスペースを入力欄に添える。同じワークスペースは 1 つだけ。添えてあれば（前から添えてあったものも）`true`。
+    pub fn attach_workspace(
+        &mut self,
+        id: &str,
+        name: SharedString,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.attached_workspaces.iter().any(|(have, _)| have == id) {
+            return true;
+        }
+        let room = self.attached_workspaces.len() < MAX_ATTACHED_WORKSPACES;
+        if room {
+            self.attached_workspaces.push((id.to_owned(), name));
+        } else {
+            self.error = Some(
+                format!("添えられるワークスペースは {MAX_ATTACHED_WORKSPACES} 件までです").into(),
+            );
+        }
+        cx.notify();
+        room
+    }
+
+    /// 添えたワークスペースを外す。
+    pub fn detach_workspace(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.attached_workspaces.retain(|(have, _)| have != id);
         cx.notify();
     }
 
@@ -3179,6 +3220,7 @@ impl Session {
                 text,
                 place,
                 attached: std::mem::take(&mut self.attached),
+                attached_workspaces: std::mem::take(&mut self.attached_workspaces),
             };
             // 自動の処理やシェルのコマンドの間、Cursor のときは、終わるのを待って送る
             if self.auto || self.own_command || self.provider == Provider::Cursor {
@@ -3217,7 +3259,25 @@ impl Session {
                 }
             }
         }
+        // 添えたワークスペースは、サブワークスペースとタスクの一覧ごと渡す（多いときは一部と件数）
+        for (id, name) in &self.attached_workspaces {
+            let read = tools::workspace_context(&self.db.read(cx).store, id, false);
+            match read {
+                Ok(context) => {
+                    extra.push_str(&format!("\n\n[添えたワークスペース「{name}」]\n{context}"));
+                    shown.push_str(&format!("「{name}」\n"));
+                }
+                Err(error) => {
+                    self.error = Some(
+                        format!("添えたワークスペース「{name}」を読めませんでした: {error}").into(),
+                    );
+                    cx.notify();
+                    return false;
+                }
+            }
+        }
         self.attached.clear();
+        self.attached_workspaces.clear();
         self.busy = true;
         self.error = None;
         self.items.push(Item::User(format!("{shown}{text}").into()));
