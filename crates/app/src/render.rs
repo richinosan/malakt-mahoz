@@ -1027,6 +1027,23 @@ fn appear(ms: u64) -> Animation {
     Animation::new(std::time::Duration::from_millis(ms)).with_easing(ease_out_quint())
 }
 
+/// ダイアログが閉じてから消えるまでの長さ（ミリ秒）。
+const DIALOG_CLOSE_MS: u64 = 150;
+
+/// タスクの詳細が出てくる動きと消える動きの長さ（ミリ秒）。ベースのサイドパネルと同じ。
+const PANEL_MOTION_MS: u64 = 200;
+
+/// 出入りの途中のタスクの詳細。`t` が 0 で右に 48px ずれて消えていて、1 で出きっている。
+fn panel_shift(panel: Div, t: f32) -> Div {
+    // 浮かせたパネルの中では、右のすき間の分だけ内側で止まる
+    let rest = if crate::theme::floating_now() {
+        FLOAT_GAP
+    } else {
+        px(0.)
+    };
+    panel.right(rest + px(-48.) * (1. - t)).opacity(t)
+}
+
 fn section_title(text: &'static str) -> Div {
     div().font_weight(FontWeight::BOLD).child(text)
 }
@@ -4935,6 +4952,48 @@ impl MainView {
     }
 
     /// タスクの詳細。`width` があれば一覧の右に並ぶカラム、なければ全面のシート。
+    /// タスクの詳細に、出入りの動きを付けて描く。開くと右から入り、閉じると右へ抜けながら
+    /// 薄くなって消える（どちらも 200ms）。消えるまでの間は閉じた詳細の上を覆い、
+    /// そのボタンは押せない。
+    fn render_panel_motion(
+        &mut self,
+        width: Option<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if let Some(panel) = self.render_panel(width, cx) {
+            if !self.motion {
+                return Some(panel.into_any_element());
+            }
+            return Some(
+                panel
+                    .with_animation("panel-in", appear(PANEL_MOTION_MS), panel_shift)
+                    .into_any_element(),
+            );
+        }
+        let (at, last) = self.panel_closing.take()?;
+        let progress = at.elapsed().as_millis() as f32 / PANEL_MOTION_MS as f32;
+        if !self.motion || progress >= 1. {
+            return None;
+        }
+        window.request_animation_frame();
+        // 閉じる前の中身で描く。描いたら元の閉じた状態に戻す
+        let editing = self.editing.take();
+        self.detail = Some(last);
+        let panel = self.render_panel(width, cx);
+        if let Some(last) = self.detail.take() {
+            self.panel_closing = Some((at, last));
+        }
+        self.editing = editing;
+        Some(
+            panel_shift(panel?, 1. - ease_out_quint()(progress))
+                .id("panel-closing")
+                .child(div().absolute().inset_0().occlude())
+                .test_support()
+                .into_any_element(),
+        )
+    }
+
     fn render_panel(&self, width: Option<Pixels>, cx: &mut Context<Self>) -> Option<Div> {
         let sheet = width.is_none();
         let detail = self.detail.as_ref()?;
@@ -6410,7 +6469,7 @@ impl MainView {
                 cx,
             )
         };
-        let (title, width, over) = match self.sub_modal {
+        let (title, width, over) = match self.sub_shown().map(|(sub, _)| sub) {
             None | Some(SubModal::Rules) => return sized("dialog", body, cx),
             Some(SubModal::Font) => ("フォント", px(400.), self.font_picker(cx)),
             Some(SubModal::Scene) => ("背景の画像", px(680.), self.scene_picker(cx)),
@@ -6449,12 +6508,7 @@ impl MainView {
             }
         };
         let over = self.dialog_as("dialog", width, title, over, cx);
-        let over = if self.motion {
-            over.with_animation("sub-modal-in", appear(140), |d, t| d.opacity(t))
-                .into_any_element()
-        } else {
-            over.into_any_element()
-        };
+        let over = self.sub_motion(over);
         div()
             .absolute()
             .inset_0()
@@ -7943,7 +7997,7 @@ impl MainView {
     fn tick_dialog_motion(&mut self, window: &mut Window) {
         use std::time::{Duration, Instant};
         const OPEN: Duration = Duration::from_millis(200);
-        const CLOSE: Duration = Duration::from_millis(150);
+        const CLOSE: Duration = Duration::from_millis(DIALOG_CLOSE_MS);
         let shown = (self.modal != Modal::None || self.pane_overlay.is_some())
             .then(|| (self.modal.clone(), self.pane_overlay));
         let now = Instant::now();
@@ -7959,10 +8013,30 @@ impl MainView {
             _ => {}
         }
         self.modal_seen = shown;
+        // 重ねたダイアログだけを閉じたときは、下のダイアログの上で薄くなって消える
+        match (self.sub_seen.take(), self.sub_modal) {
+            (Some(last), None) if self.modal != Modal::None => {
+                self.sub_closing = Some((now, last));
+            }
+            (_, Some(_)) => self.sub_closing = None,
+            _ => {}
+        }
+        self.sub_seen = self.sub_modal;
+        if self.modal == Modal::None {
+            self.sub_closing = None;
+        }
         self.dialog_t.set(1.);
         if !self.motion {
             self.modal_closing = None;
+            self.sub_closing = None;
             return;
+        }
+        if let Some((at, _)) = self.sub_closing {
+            if now.duration_since(at) >= CLOSE {
+                self.sub_closing = None;
+            } else {
+                window.request_animation_frame();
+            }
         }
         if let Some(at) = self.modal_opened {
             let progress = now.duration_since(at).as_secs_f32() / OPEN.as_secs_f32();
@@ -7980,11 +8054,45 @@ impl MainView {
         }
     }
 
+    /// 重ねて出しているダイアログと、その濃さ（出ているときは 1）。閉じたばかりなら、
+    /// 消える動きの間だけそれを返し、濃さは 1 から 0 へ下がる。
+    fn sub_shown(&self) -> Option<(SubModal, f32)> {
+        if let Some(sub) = self.sub_modal {
+            return Some((sub, 1.));
+        }
+        let (at, sub) = self.sub_closing?;
+        let progress = at.elapsed().as_millis() as f32 / DIALOG_CLOSE_MS as f32;
+        (progress < 1.).then(|| (sub, 1. - ease_out_quint()(progress)))
+    }
+
+    /// 重ねたダイアログに出入りの動きを付ける。出るときは薄い所から浮かび、閉じたあとは
+    /// 薄くなって消える。消えるまでの間は上を覆い、閉じたダイアログのボタンは押せない。
+    fn sub_motion(&self, over: Div) -> AnyElement {
+        if !self.motion {
+            return over.into_any_element();
+        }
+        match self.sub_shown() {
+            Some((_, fade)) if self.sub_modal.is_none() => over
+                .opacity(fade)
+                .child(
+                    div()
+                        .id("sub-modal-closing")
+                        .absolute()
+                        .inset_0()
+                        .occlude()
+                        .test_support(),
+                )
+                .into_any_element(),
+            _ => over
+                .with_animation("sub-modal-in", appear(140), |d, t| d.opacity(t))
+                .into_any_element(),
+        }
+    }
+
     /// 閉じたばかりのダイアログ。薄くしながら描き、上を覆って押せないようにする。
     fn render_closing_dialog(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        const CLOSE: f32 = 0.15;
         let (at, modal, overlay) = self.modal_closing.clone()?;
-        let progress = (at.elapsed().as_secs_f32() / CLOSE).min(1.);
+        let progress = (at.elapsed().as_millis() as f32 / DIALOG_CLOSE_MS as f32).min(1.);
         let open = self.dialog_t.replace(1. - ease_out_quint()(progress));
         let dialog = match overlay {
             Some(overlay) => Some(self.pane_overlay_dialog(overlay, cx)),
@@ -8887,7 +8995,7 @@ impl MainView {
                             )),
                     );
                 let title = format!("「{}」の設定", self.workspace_name(Some(id)));
-                if self.sub_modal != Some(SubModal::Rules) {
+                if self.sub_shown().map(|(sub, _)| sub) != Some(SubModal::Rules) {
                     return Some(self.dialog(title, body, cx));
                 }
                 // AI のルールは、設定の上にもう 1 枚重ねる
@@ -8901,12 +9009,7 @@ impl MainView {
                     col().child(rules),
                     cx,
                 );
-                let over = if self.motion {
-                    over.with_animation("sub-modal-in", appear(140), |d, t| d.opacity(t))
-                        .into_any_element()
-                } else {
-                    over.into_any_element()
-                };
+                let over = self.sub_motion(over);
                 div()
                     .absolute()
                     .inset_0()
@@ -9110,7 +9213,7 @@ impl MainView {
     }
 
     /// ほかのウィンドウの中のペインとして出す。左のメニューと上のバーは出さない。
-    fn render_embedded(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_embedded(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         self.arm_notice(cx);
         self.drops.begin(crate::drops::PANE);
         let theme = cx.theme().clone();
@@ -9150,7 +9253,7 @@ impl MainView {
                     .w(list_width)
                     .child(main),
             )
-            .children(self.render_panel(panel_width, cx))
+            .children(self.render_panel_motion(panel_width, window, cx))
             .children(self.panel_drag_layer(cx))
             .children(self.task_drag_listener(cx))
             .children(self.render_modal(cx))
@@ -9213,7 +9316,7 @@ impl Render for MainView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.tick_dialog_motion(window);
         if self.embedded {
-            return self.render_embedded(cx);
+            return self.render_embedded(window, cx);
         }
         self.arm_notice(cx);
         // 落とせる場所を覚え直す。描かれなかったペインと AI チャットの場所は残さない
@@ -9243,6 +9346,8 @@ impl Render for MainView {
             self.sidebar_open && self.panel.is_none()
         };
         if !unlocked {
+            // ロックの画面に、閉じかけの詳細は出さない
+            self.panel_closing = None;
             return col()
                 .size_full()
                 .bg(theme.background)
@@ -9301,23 +9406,8 @@ impl Render for MainView {
             }
         };
 
-        // 詳細は右から入り、ダイアログはふわっと出る
-        let panel = self.render_panel(panel_width, cx).map(|panel| {
-            if !self.motion {
-                return panel.into_any_element();
-            }
-            panel
-                .with_animation("panel-in", appear(180), |panel, t| {
-                    // 浮かせたパネルの中では、右のすき間の分だけ内側で止まる
-                    let rest = if crate::theme::floating_now() {
-                        FLOAT_GAP
-                    } else {
-                        px(0.)
-                    };
-                    panel.right(rest + px(-48.) * (1. - t)).opacity(t)
-                })
-                .into_any_element()
-        });
+        // 詳細は右から入って右へ抜け、ダイアログはふわっと出る
+        let panel = self.render_panel_motion(panel_width, window, cx);
         // 幅が足りないときは、AI チャットを上のバーの下で、タスクの画面の右に重ねる
         let (ai_beside, ai_over) = if ai_width.is_some() {
             (ai, None)
