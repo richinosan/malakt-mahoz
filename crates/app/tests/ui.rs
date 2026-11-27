@@ -6734,7 +6734,7 @@ fn history_shows_who_changed_what(cx: &mut TestAppContext) {
     });
     cx.update(|cx| assert_eq!(view.read(cx).modal, Modal::History));
 
-    // 差分の文字は、ドラッグで選んで Ctrl+C でコピーできる
+    // 差分の文字は、ドラッグで選んで Ctrl+C（macOS は ⌘C）でコピーできる
     let ids: Vec<String> = cx
         .update_window(window, |_, window, _| {
             ["history-1-0-after", "history-1-0-0-after"]
@@ -6775,7 +6775,7 @@ fn history_shows_who_changed_what(cx: &mut TestAppContext) {
         v.simulate_mouse_up(to, MouseButton::Left, Modifiers::default());
         v.run_until_parked();
     }
-    ui(cx, window, |window, cx| window.press("ctrl-c", cx));
+    ui(cx, window, |window, cx| window.press("secondary-c", cx));
     let copied = cx.update(|cx| cx.read_from_clipboard().and_then(|i| i.text()));
     assert_eq!(copied.as_deref(), Some("下見の段取り"));
 }

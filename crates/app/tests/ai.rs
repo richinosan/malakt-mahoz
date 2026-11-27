@@ -3815,6 +3815,7 @@ fn shell_output_can_be_selected_and_copied(cx: &mut TestAppContext) {
         point(out.left() + px(1.), out.center().y),
         point(out.left() + px(400.), out.center().y),
     );
+    // シェルの出力は、どの OS も Ctrl+C でコピーできる（macOS の ⌘C も）
     ui(cx, window, |window, cx| window.press("ctrl-c", cx));
     assert_eq!(clipboard(cx).as_deref(), Some("hello-copy"));
 
@@ -3837,6 +3838,7 @@ fn shell_output_can_be_selected_and_copied(cx: &mut TestAppContext) {
     cx.update(|cx| cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string("before".into())));
     let at = point(out.left() + px(30.), out.center().y);
     drag(cx, at, at);
+    // どの OS も Ctrl+C でコピーする所だが、選んでいなければコピーしない
     ui(cx, window, |window, cx| window.press("ctrl-c", cx));
     assert_eq!(clipboard(cx).as_deref(), Some("before"));
 }
@@ -3886,11 +3888,11 @@ fn own_messages_can_be_selected_and_copied(cx: &mut TestAppContext) {
         .unwrap()
     };
 
-    // 入力欄にフォーカスがあるまま選んでも、Ctrl+C は選んだ文字のコピーになる
+    // 入力欄にフォーカスがあるまま選んでも、Ctrl+C（macOS は ⌘C）は選んだ文字のコピーになる
     ui(cx, window, |window, cx| window.click("ai-input", cx));
     let picked = drag_across(cx, ("ai-user", 0), 15.);
     assert_eq!(picked.trim(), "自分の発言をコピーする");
-    ui(cx, window, |window, cx| window.press("ctrl-c", cx));
+    ui(cx, window, |window, cx| window.press("secondary-c", cx));
     let copied = cx.update(|cx| cx.read_from_clipboard().and_then(|i| i.text()));
     assert_eq!(copied.as_deref(), Some("自分の発言をコピーする"));
 
