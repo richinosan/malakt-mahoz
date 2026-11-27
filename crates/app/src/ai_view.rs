@@ -1372,26 +1372,27 @@ impl AiPane {
         if found.is_empty() && workspaces.is_empty() {
             return;
         }
-        // 長い ID から消すと、頭が同じ別の ID のリンクを壊さない
-        let mut rest = text;
-        let mut by_length = found.clone();
-        by_length.sort_by_key(|(id, _)| std::cmp::Reverse(id.len()));
-        for (id, _) in &by_length {
-            rest = rest.replace(&malakt_core::tasklink::url(id), "");
-        }
-        let mut by_length = workspaces.clone();
-        by_length.sort_by_key(|(id, _)| std::cmp::Reverse(id.len()));
-        for (id, _) in &by_length {
-            rest = rest.replace(&malakt_core::wslink::url(id), "");
-        }
-        self.session.update(cx, |s, cx| {
-            for (id, title) in found {
-                s.attach_task(&id, title, cx);
-            }
-            for (id, name) in workspaces {
-                s.attach_workspace(&id, name, cx);
-            }
+        // 添えられたものだけリンクの文字を消す。上限で添えられなかったものは、文字のまま残す
+        let (tasks, workspaces) = self.session.update(cx, |s, cx| {
+            let tasks: Vec<String> = found
+                .into_iter()
+                .filter(|(id, title)| s.attach_task(id, title.clone(), cx))
+                .map(|(id, _)| malakt_core::tasklink::url(&id))
+                .collect();
+            let workspaces: Vec<String> = workspaces
+                .into_iter()
+                .filter(|(id, name)| s.attach_workspace(id, name.clone(), cx))
+                .map(|(id, _)| malakt_core::wslink::url(&id))
+                .collect();
+            (tasks, workspaces)
         });
+        // 長いリンクから消すと、頭が同じ別の ID のリンクを壊さない
+        let mut links: Vec<String> = tasks.into_iter().chain(workspaces).collect();
+        links.sort_by_key(|link| std::cmp::Reverse(link.len()));
+        let mut rest = text;
+        for link in &links {
+            rest = rest.replace(link.as_str(), "");
+        }
         let rest = rest.trim().to_owned();
         self.input.update(cx, |s, cx| s.set_value(rest, window, cx));
         cx.notify();

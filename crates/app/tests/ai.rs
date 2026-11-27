@@ -4161,3 +4161,32 @@ fn the_message_menu_copies_the_selection_or_the_whole_message(cx: &mut TestAppCo
         Some("下見は来週の火曜にしましょう")
     );
 }
+
+/// 上限で添えられなかったワークスペースのリンクは、入力欄に文字のまま残る。
+#[gpui_kit::test]
+fn a_workspace_link_over_the_limit_stays_in_the_input(cx: &mut TestAppContext) {
+    let world = start(cx);
+    world.keys.set(Provider::Claude, "k").unwrap();
+    let s = session(cx);
+    cx.update(|cx| s.update(cx, |s, cx| s.set_arrange(false, cx)));
+    let ids: Vec<String> = (0..=ai::MAX_ATTACHED_WORKSPACES)
+        .map(|i| new_workspace(cx, None, &format!("場所{i}")))
+        .collect();
+    let (window, view) = open(cx, wide());
+    let pane = open_chat(cx, window, &view);
+    let links: Vec<String> = ids.iter().map(|id| malakt_core::wslink::url(id)).collect();
+    world.reply(text_reply("見ました。"));
+    say(cx, window, &pane, &links.join(" "));
+    wait(cx, "返事が来る", |s| !s.busy && s.items.len() >= 2);
+    let over = &links[ai::MAX_ATTACHED_WORKSPACES];
+    assert_eq!(
+        read(cx, |s| s.items[0].clone()),
+        Item::User(format!("「場所0」\n「場所1」\n「場所2」\n{over}").into())
+    );
+    let message = last_message(&world);
+    assert!(message.starts_with(over.as_str()), "{message}");
+    assert!(
+        !message.contains("[添えたワークスペース「場所3」]"),
+        "{message}"
+    );
+}

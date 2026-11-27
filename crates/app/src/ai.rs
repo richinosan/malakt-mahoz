@@ -3159,17 +3159,19 @@ impl Session {
         }
     }
 
-    /// タスクを入力欄に添える。同じタスクは 1 つだけ。
-    pub fn attach_task(&mut self, id: &str, title: SharedString, cx: &mut Context<Self>) {
+    /// タスクを入力欄に添える。同じタスクは 1 つだけ。添えてあれば（前から添えてあったものも）`true`。
+    pub fn attach_task(&mut self, id: &str, title: SharedString, cx: &mut Context<Self>) -> bool {
         if self.attached.iter().any(|(have, _)| have == id) {
-            return;
+            return true;
         }
-        if self.attached.len() >= MAX_ATTACHED_TASKS {
-            self.error = Some(format!("添えられるタスクは {MAX_ATTACHED_TASKS} 件までです").into());
-        } else {
+        let room = self.attached.len() < MAX_ATTACHED_TASKS;
+        if room {
             self.attached.push((id.to_owned(), title));
+        } else {
+            self.error = Some(format!("添えられるタスクは {MAX_ATTACHED_TASKS} 件までです").into());
         }
         cx.notify();
+        room
     }
 
     /// 添えたタスクを外す。
@@ -3178,19 +3180,26 @@ impl Session {
         cx.notify();
     }
 
-    /// ワークスペースを入力欄に添える。同じワークスペースは 1 つだけ。
-    pub fn attach_workspace(&mut self, id: &str, name: SharedString, cx: &mut Context<Self>) {
+    /// ワークスペースを入力欄に添える。同じワークスペースは 1 つだけ。添えてあれば（前から添えてあったものも）`true`。
+    pub fn attach_workspace(
+        &mut self,
+        id: &str,
+        name: SharedString,
+        cx: &mut Context<Self>,
+    ) -> bool {
         if self.attached_workspaces.iter().any(|(have, _)| have == id) {
-            return;
+            return true;
         }
-        if self.attached_workspaces.len() >= MAX_ATTACHED_WORKSPACES {
+        let room = self.attached_workspaces.len() < MAX_ATTACHED_WORKSPACES;
+        if room {
+            self.attached_workspaces.push((id.to_owned(), name));
+        } else {
             self.error = Some(
                 format!("添えられるワークスペースは {MAX_ATTACHED_WORKSPACES} 件までです").into(),
             );
-        } else {
-            self.attached_workspaces.push((id.to_owned(), name));
         }
         cx.notify();
+        room
     }
 
     /// 添えたワークスペースを外す。
