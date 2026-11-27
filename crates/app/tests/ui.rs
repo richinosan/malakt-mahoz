@@ -5854,6 +5854,75 @@ fn sub_workspaces_fold_inside_the_task_list(cx: &mut TestAppContext) {
     });
 }
 
+/// サブワークスペースの一覧の上に、最上位からのパンくずが出る。押すとその段のワークスペースへ移る。
+/// 深いときは間を「…」にまとめ、そこから選べる。最上位では出さない。
+#[gpui_kit::test]
+fn breadcrumbs_lead_to_upper_workspaces(cx: &mut TestAppContext) {
+    start(cx);
+    let (top, hall, setup, desk, chair) = cx.update(|cx| {
+        db::shared(cx).update(cx, |db, _| {
+            let s = &mut db.store;
+            let top = s.create_workspace(None, "文化祭").unwrap();
+            let hall = s.create_workspace(Some(&top.id), "会場").unwrap();
+            let setup = s.create_workspace(Some(&hall.id), "設営").unwrap();
+            let desk = s.create_workspace(Some(&setup.id), "机").unwrap();
+            let chair = s.create_workspace(Some(&desk.id), "椅子").unwrap();
+            (top.id, hall.id, setup.id, desk.id, chair.id)
+        })
+    });
+    let (window, view) = open(cx, wide());
+    let go = |cx: &mut TestAppContext, id: &str| {
+        let id = id.to_owned();
+        cx.update(|cx| view.update(cx, |v, cx| v.go(Nav::Workspace(id), cx)));
+        cx.run_until_parked();
+    };
+    let crumb = |cx: &mut TestAppContext, id: &str| {
+        cx.update(|cx| {
+            let v = view.read(cx);
+            (
+                "crumb",
+                v.workspaces.iter().position(|w| w.id == id).unwrap(),
+            )
+        })
+    };
+
+    // 最上位では出さない
+    go(cx, &top);
+    assert!(!has(cx, window, "crumbs"));
+
+    // 3 段目では、上の 2 段と今いる所が並ぶ
+    go(cx, &setup);
+    assert!(has(cx, window, "crumbs"));
+    for id in [&top, &hall, &setup] {
+        let at = crumb(cx, id);
+        assert!(has_id(cx, window, at), "{id}");
+    }
+    assert!(!has(cx, window, "crumb-more"));
+
+    // 段を押すと、そのワークスペースへ移る
+    let at = crumb(cx, &hall);
+    ui(cx, window, |window, cx| window.click(at, cx));
+    cx.update(|cx| assert_eq!(view.read(cx).nav, Nav::Workspace(hall.clone())));
+
+    // 今いる所は押しても移らない
+    go(cx, &setup);
+    let at = crumb(cx, &setup);
+    ui(cx, window, |window, cx| window.click(at, cx));
+    cx.update(|cx| assert_eq!(view.read(cx).nav, Nav::Workspace(setup.clone())));
+
+    // 5 段目では、最上位・「…」・上の 1 段・今いる所の 4 つにまとめる
+    go(cx, &chair);
+    for id in [&top, &desk, &chair] {
+        let at = crumb(cx, id);
+        assert!(has_id(cx, window, at), "{id}");
+    }
+    for id in [&hall, &setup] {
+        let at = crumb(cx, id);
+        assert!(!has_id(cx, window, at), "{id}");
+    }
+    assert!(has(cx, window, "crumb-more"));
+}
+
 fn has_id(
     cx: &mut TestAppContext,
     window: AnyWindowHandle,

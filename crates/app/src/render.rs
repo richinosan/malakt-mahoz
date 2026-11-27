@@ -999,6 +999,20 @@ fn workspace_icon(icon: Option<&str>, color: Option<&str>, size: Pixels, cx: &Ap
 
 /// 左のメニューの行に出すアイコンの大きさ。
 const NAV_ICON_SIZE: Pixels = px(14.);
+/// パンくずに並べる段の数の上限（「…」を含む）。
+const MAX_CRUMBS: usize = 4;
+/// パンくずの 1 段の、名前のほかの幅（アイコン・すき間・左右の余白、rem）。
+const CRUMB_CHROME: f32 = 2.;
+
+/// パンくずの名前を縮めるときの、いちばん狭い幅（rem）。名前の幅の見積もり（text_sm で、英数字は 0.7 字、
+/// ほかは 1 字）と `cap` の小さいほう。
+fn crumb_min(name: &str, cap: f32) -> f32 {
+    let em: f32 = name
+        .chars()
+        .map(|c| if c.is_ascii() { 0.7 } else { 1. })
+        .sum();
+    (em * 0.875).min(cap)
+}
 /// 畳んだ左のメニューの、アイコンの大きさと押せる四角の大きさ（拡大率を掛ける前の値）。
 const RAIL_ICON_SIZE: Pixels = px(18.);
 const RAIL_BUTTON: f32 = 36.;
@@ -2619,23 +2633,13 @@ impl MainView {
             Nav::Home => "ホーム".into(),
             Nav::All => "すべてのタスク".into(),
             Nav::Unfiled => "未所属のタスク".into(),
-            Nav::Workspace(id) => {
-                // 最上位からの道筋を「親 › 子」で出す
-                let mut names = Vec::new();
-                let mut current = self.workspaces.iter().find(|w| &w.id == id);
-                while let Some(w) = current {
-                    names.push(w.name.as_str());
-                    current = w
-                        .parent_id
-                        .as_ref()
-                        .and_then(|p| self.workspaces.iter().find(|x| &x.id == p));
-                    if names.len() > 64 {
-                        break;
-                    }
-                }
-                names.reverse();
-                names.join(" › ").into()
-            }
+            // 上の段への道筋は、一覧の上のパンくずに出す
+            Nav::Workspace(id) => self
+                .workspaces
+                .iter()
+                .find(|w| &w.id == id)
+                .map(|w| SharedString::from(w.name.clone()))
+                .unwrap_or_default(),
         }
     }
 
@@ -2998,19 +3002,32 @@ impl MainView {
                 .find(|w| &w.id == id)
                 .and_then(|w| w.date.clone())
         });
-        header = header.child(
-            // 基準日が入らない幅では、右のボタンを次の行へ送る
-            row()
-                .flex_1()
-                .flex_shrink_0()
-                .whitespace_nowrap()
-                .gap_2()
-                .text_sm()
-                .when_some(date, |d, date| {
-                    d.child(div().text_color(theme.muted_foreground).child("基準日"))
-                        .child(view::format_date(&date, &self.today))
-                }),
-        );
+        // パンくずは、狭いときは名前を省いて縮む（右のボタンを押し出さない）
+        let crumbs = self.render_crumbs(cx);
+        let has_crumbs = crumbs.is_some();
+        header = header
+            .children(crumbs.map(|c| {
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .overflow_hidden()
+                    .text_sm()
+                    .child(c)
+            }))
+            .child(
+                // 基準日が入らない幅では、右のボタンを次の行へ送る
+                row()
+                    .when(!has_crumbs, |d| d.flex_1())
+                    .flex_shrink_0()
+                    .whitespace_nowrap()
+                    .gap_2()
+                    .text_sm()
+                    .when_some(date, |d, date| {
+                        d.child(div().text_color(theme.muted_foreground).child("基準日"))
+                            .child(view::format_date(&date, &self.today))
+                    }),
+            );
         if let Some(id) = workspace_id.clone() {
             let (c, d) = (id.clone(), id.clone());
             header = header
@@ -3580,6 +3597,115 @@ impl MainView {
     }
 
     /// サブワークスペースの見出しの行。左の矢印で開く・閉じる。行を押すと、そのワークスペースへ移る。
+    /// 一覧の上のパンくず（最上位 › … › 今いる所）。押すとそのワークスペースへ移り、タスクを落とすとそこへ移す。
+    /// 最上位のワークスペースでは出さない（上のバーの名前と同じになる）。
+    fn render_crumbs(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let Nav::Workspace(id) = &self.nav else {
+            return None;
+        };
+        let path = view::workspace_path(&self.workspaces, id);
+        if path.len() < 2 {
+            return None;
+        }
+        let theme = cx.theme().clone();
+        let last = path.len() - 1;
+        let mut bar = row().id("crumbs").min_w_0().gap_0p5();
+        for (i, crumb) in view::crumbs(path.len(), MAX_CRUMBS).into_iter().enumerate() {
+            if i > 0 {
+                bar = bar.child(
+                    div()
+                        .flex_none()
+                        .text_color(theme.muted_foreground)
+                        .child(app_icon("chevron-right").small()),
+                );
+            }
+            bar = bar.child(match crumb {
+                view::Crumb::At(at) => self.render_crumb(path[at], at == last, cx),
+                view::Crumb::More(hidden) => {
+                    let view = cx.entity().downgrade();
+                    let hidden: Vec<(Id, SharedString)> = hidden
+                        .into_iter()
+                        .map(|at| {
+                            let w = &self.workspaces[path[at]];
+                            (w.id.clone(), w.name.clone().into())
+                        })
+                        .collect();
+                    button("crumb-more")
+                        .icon(app_icon("ellipsis"))
+                        .ghost()
+                        .small()
+                        .tooltip("上の階層")
+                        .pop_menu(move |mut menu, _, _| {
+                            for (id, name) in &hidden {
+                                let (view, id) = (view.clone(), id.clone());
+                                menu = menu.item(PopupMenuItem::new(name.clone()).on_click(
+                                    move |_, _, cx| {
+                                        // ウィンドウを閉じたあとなら、反映する先がない
+                                        let _ = view.update(cx, |this, cx| {
+                                            this.go_here(Nav::Workspace(id.clone()), cx)
+                                        });
+                                    },
+                                ));
+                            }
+                            menu
+                        })
+                        .into_any_element()
+                }
+            });
+        }
+        Some(bar.test_support().into_any_element())
+    }
+
+    /// パンくずの 1 段。長い名前は省いて、乗せると全体を出す。今いる所は押せない。
+    fn render_crumb(&self, workspace: usize, current: bool, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let ws = &self.workspaces[workspace];
+        let name: SharedString = ws.name.clone().into();
+        let tip = name.clone();
+        let go = ws.id.clone();
+        let el = row()
+            .id(("crumb", workspace))
+            // 狭いときは長い名前から縮む。短い名前と今いる所は、なるべく省かない
+            .min_w(rems(
+                crumb_min(&ws.name, if current { 8. } else { 4. }) + CRUMB_CHROME,
+            ))
+            .gap_1p5()
+            .px_1p5()
+            .py_0p5()
+            .rounded(feel::md())
+            // 乗せたとき・押している間の面は、名前より奥に敷く（先に付ける）
+            .when(!current, |d| {
+                d.cursor_pointer()
+                    .text_color(theme.muted_foreground)
+                    .hover(|s| s.text_color(theme.foreground))
+                    .lit(theme.accent, cx)
+                    .sunk(theme.primary.opacity(0.4), cx)
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        // ドラッグの終わりは、クリックにしない
+                        if this.dragging_task() {
+                            return;
+                        }
+                        this.go_here(Nav::Workspace(go.clone()), cx);
+                    }))
+            })
+            .child(div().flex_none().child(workspace_icon(
+                ws.icon.as_deref(),
+                ws.color.as_deref(),
+                NAV_ICON_SIZE,
+                cx,
+            )))
+            .child(div().min_w_0().max_w(px(240.)).truncate().child(name))
+            .tooltip(move |window, cx| {
+                gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
+            });
+        if current {
+            return el.test_support().into_any_element();
+        }
+        self.drop_zone(el, DropTarget::Workspace(Some(ws.id.clone())), cx)
+            .test_support()
+            .into_any_element()
+    }
+
     fn render_folder_row(
         &self,
         at: usize,
