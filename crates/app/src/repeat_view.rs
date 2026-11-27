@@ -4,7 +4,7 @@
 use crate::press::button;
 use gpui_kit::base::TestSupportExt;
 use gpui_kit::component::button::ButtonVariants;
-use gpui_kit::component::input::Input;
+use gpui_kit::component::input::Textarea;
 use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
 use gpui_kit::component::{ActiveTheme, Sizable};
 use gpui_kit::prelude::FluentBuilder;
@@ -223,13 +223,13 @@ impl MainView {
             // Enter かほかの場所を押すと保存、Esc で取り消し
             return Some(
                 div()
-                    .w_full()
+                    .flex_1()
+                    .min_w_0()
                     .on_mouse_down_out(cx.listener(|this, _, window, cx| {
                         this.save_repeat_ai(window, cx);
                     }))
                     .child(
-                        Input::new(&self.inputs.repeat_ai)
-                            .id("repeat-ai-input")
+                        Textarea::new(&self.inputs.repeat_ai)
                             .aria_label("AI への指示")
                             .small()
                             .bg(theme.background)
@@ -252,7 +252,10 @@ impl MainView {
             );
         }
         Some(
+            // 欄の幅に収め、長い指示は折り返して全部出す
             row()
+                .flex_1()
+                .min_w_0()
                 .gap_1()
                 .items_start()
                 .child(
