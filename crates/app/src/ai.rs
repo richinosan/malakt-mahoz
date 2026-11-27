@@ -1605,6 +1605,14 @@ impl Session {
             }
             RunKind::Repeat => {
                 for (task, title) in &run.tasks {
+                    // 今まさに実行している指示は、そのまま。止めたあとに勝手に動き出さない
+                    let running = self.busy
+                        && self.auto
+                        && self.auto_kind == RunKind::Repeat
+                        && self.auto_tasks.iter().any(|(id, _)| id == task);
+                    if running {
+                        continue;
+                    }
                     match self.db.update(cx, |db, _| db.store.retry_repeat_ai(task)) {
                         Ok(true) => {}
                         Ok(false) => {
