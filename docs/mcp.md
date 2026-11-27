@@ -78,6 +78,7 @@ Windows のアプリは、起動のときに黒い窓を出さないように作
 | `create_person` / `update_person` / `delete_person` | 担当者を作る、名前・メモ・使うワークスペースを変える、削除する。`create_person` に `workspace_id` を渡すと、そのワークスペースの担当者になる |
 | `list_categories` / `list_notices` / `mark_notices_read` | カテゴリの一覧、通知の一覧、通知を既読にする |
 | `get_due_alerts` / `set_due_alerts` | 期限をいつ知らせるか（全体の標準と、タスクごとの上書き） |
+| `set_repeat` | タスクに繰り返し（毎日・毎週◯曜・毎月◯日・毎年、何日・何週間ごと、次の回を作る時刻）を付ける・変える・外す。`ai_instruction` で、回を作ったときにアプリの AI に頼むことを書く（[docs/repeat.md](repeat.md)）。今の繰り返しは `get_task` の `repeat` |
 | `undo` / `redo` | このサーバーからの変更を 1 つ元に戻す、やり直す |
 
 - 担当者は ID でも名前でも指定できます。登録されていない名前は、タスクのワークスペースの担当者としてその場で登録します（どこにも入っていないタスクでは、すべてのワークスペースの担当者）

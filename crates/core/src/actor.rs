@@ -28,6 +28,8 @@ pub enum Actor {
     Command,
     /// OS のリマインダーで完了にした・戻した自分。
     Reminders,
+    /// 繰り返しで、アプリが次の回を作った。
+    Repeat,
 }
 
 /// 名前から、改行などの制御文字を除き、長すぎる分を切る。
@@ -66,6 +68,7 @@ impl Actor {
             Actor::Agent(name) => format!("mcp:{name}"),
             Actor::Command => "cli".into(),
             Actor::Reminders => "reminders".into(),
+            Actor::Repeat => "repeat".into(),
         }
     }
 
@@ -76,6 +79,7 @@ impl Actor {
                 "me" => Actor::Me,
                 "cli" => Actor::Command,
                 "reminders" => Actor::Reminders,
+                "repeat" => Actor::Repeat,
                 _ => Actor::Unknown,
             },
             Some(("ticket", person)) => {
@@ -101,7 +105,10 @@ impl Actor {
 
     /// 人ではなく、AI や外のエージェント、コマンドか。
     pub fn is_machine(&self) -> bool {
-        matches!(self, Actor::Ai { .. } | Actor::Agent(_) | Actor::Command)
+        matches!(
+            self,
+            Actor::Ai { .. } | Actor::Agent(_) | Actor::Command | Actor::Repeat
+        )
     }
 
     /// 人として名前を出すときの担当者。自分なら `self_id`、完了チケットならその人。
@@ -121,6 +128,7 @@ impl Actor {
             Actor::Agent(name) if name.is_empty() => Some("外部エージェント".into()),
             Actor::Agent(name) => Some(name.clone()),
             Actor::Command => Some("コマンド".into()),
+            Actor::Repeat => Some("繰り返し".into()),
             _ => None,
         }
     }
@@ -142,6 +150,7 @@ impl Actor {
         match self {
             Actor::Ai { .. } => "bot",
             Actor::Agent(_) => "plug",
+            Actor::Repeat => "repeat",
             _ => "terminal",
         }
     }
@@ -193,6 +202,7 @@ mod tests {
             Actor::agent(""),
             Actor::Command,
             Actor::Reminders,
+            Actor::Repeat,
         ];
         for actor in all {
             assert_eq!(Actor::parse(&actor.as_string()), actor, "{actor:?}");

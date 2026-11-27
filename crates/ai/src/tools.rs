@@ -404,6 +404,29 @@ pub fn definitions() -> Vec<ToolDef> {
             ),
         },
         ToolDef {
+            name: "set_repeat",
+            description: "タスクに繰り返しを付ける・変える・外す。繰り返しのあるタスクは、次の回の時刻になるとアプリがタスクを写して次の回を作り、繰り返しは新しい回へ移る（開始日と期限は回の日に合わせてずれる）。ai_instruction を付けると、回を作ったときにアプリの AI がその指示を実行して、結果をその回のタスクにコメントする（例: 週次の報告の下書き）。アプリが動いている間だけ動く。渡した項目だけが変わる。",
+            schema: object(
+                json!({
+                    "task_id": {"type": "string"},
+                    "repeat": {
+                        "type": ["object", "null"],
+                        "description": "null で繰り返しを外す",
+                        "properties": {
+                            "unit": {"type": "string", "enum": ["day", "week", "month", "year"]},
+                            "every": {"type": "integer", "minimum": 1, "maximum": malakt_core::repeat::MAX_EVERY, "description": "何日・何週間・何か月・何年ごとか（標準は 1）"},
+                            "weekdays": {"type": "array", "items": {"type": "integer", "minimum": 0, "maximum": 6}, "description": "unit が week のときの曜日。0 = 月 … 6 = 日。省くと起点の曜日"},
+                            "from": {"type": "string", "description": "数え始めの日 YYYY-MM-DD。毎月・毎年の日付になる。省くとタスクの開始日か期限（なければ今日）"},
+                            "time": {"type": "string", "description": "次の回を作る時刻 HH:MM。空で 0:00"},
+                        },
+                        "required": ["unit"],
+                    },
+                    "ai_instruction": {"type": "string", "description": "回を作ったときに AI に頼むこと。空で頼まない"},
+                }),
+                &["task_id"],
+            ),
+        },
+        ToolDef {
             name: GITHUB_FETCH,
             description: "GitHub のリンク（issue、プルリクエスト、リポジトリ、ファイル、コミット）の中身を gh コマンドで取ってくる。",
             schema: object(json!({"url": {"type": "string"}}), &["url"]),
@@ -462,6 +485,7 @@ pub const WRITES: &[&str] = &[
     "create_ai_rule",
     "update_ai_rule",
     "delete_ai_rule",
+    "set_repeat",
 ];
 
 /// 確認に出す文。`shell` は、[`RUN_SHELL`] のコマンドが動くシェル。
@@ -937,6 +961,25 @@ fn due_alerts_json(store: &Store, task_id: Option<&str>) -> Result<Value, String
     Ok(out)
 }
 
+/// タスクの繰り返し。なければ null。
+fn repeat_json(store: &Store, task_id: &str) -> Result<Value, String> {
+    use malakt_core::repeat;
+    let Some(r) = store.repeat(task_id).map_err(|e| e.to_string())? else {
+        return Ok(Value::Null);
+    };
+    Ok(json!({
+        "unit": r.rule.unit.as_str(),
+        "every": r.rule.every,
+        "weekdays": r.rule.weekdays,
+        "from": r.rule.from,
+        "time": r.rule.time,
+        "text": r.rule.label(),
+        "next_at": r.next_at,
+        "next_text": repeat::next_label(&r.next_at),
+        "ai_instruction": r.ai,
+    }))
+}
+
 fn task_row(task: &Task) -> Value {
     let mut row = task_json(task);
     if let Some(map) = row.as_object_mut() {
@@ -1021,6 +1064,7 @@ pub fn execute(
                 .collect();
             task["active_tickets"] = json!(store.active_ticket_count(id).map_err(core)?);
             task["due_alerts"] = due_alerts_json(store, Some(id))?;
+            task["repeat"] = repeat_json(store, id)?;
             task["subtasks"] = store
                 .subtasks(id)
                 .map_err(core)?
@@ -1347,6 +1391,95 @@ pub fn execute(
             }
         },
         "get_due_alerts" => due_alerts_json(store, optional(args, "task_id"))?,
+        "set_repeat" => {
+            use malakt_core::repeat::{self, Rule, Unit};
+            let id = required(args, "task_id")?;
+            let task = store.task(id).map_err(core)?;
+            let old = store.repeat(id).map_err(core)?;
+            let now = malakt_core::view::now();
+            // 先に全部の値を確かめ、1 つでも正しくなければ何も変えない
+            let rule = match args.get("repeat") {
+                None => None,
+                Some(Value::Null) => Some(None),
+                Some(v) => {
+                    let unit = v
+                        .get("unit")
+                        .and_then(Value::as_str)
+                        .and_then(Unit::parse)
+                        .ok_or("repeat.unit は day・week・month・year のどれかです")?;
+                    let every = match v.get("every") {
+                        None | Some(Value::Null) => 1,
+                        Some(n) => n
+                            .as_u64()
+                            .and_then(|n| u32::try_from(n).ok())
+                            .ok_or_else(|| format!("repeat.every は 1 以上の整数です: {n}"))?,
+                    };
+                    let weekdays = match v.get("weekdays") {
+                        None | Some(Value::Null) => Vec::new(),
+                        Some(Value::Array(days)) => days
+                            .iter()
+                            .map(|d| {
+                                d.as_u64()
+                                    .and_then(|n| u8::try_from(n).ok())
+                                    .ok_or_else(|| format!("repeat.weekdays は 0〜6 です: {d}"))
+                            })
+                            .collect::<Result<_, String>>()?,
+                        Some(d) => return Err(format!("repeat.weekdays は整数の並びです: {d}")),
+                    };
+                    let from = match v.get("from").and_then(Value::as_str) {
+                        Some(from) if !from.trim().is_empty() => from.trim().to_owned(),
+                        // 変えるときは、今の起点のまま
+                        _ => old
+                            .as_ref()
+                            .map_or_else(|| repeat::anchor(&task, &now), |r| r.rule.from.clone()),
+                    };
+                    let time = v
+                        .get("time")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|t| !t.is_empty())
+                        .map(str::to_owned);
+                    let rule = Rule {
+                        unit,
+                        every,
+                        weekdays,
+                        from,
+                        time,
+                    }
+                    .clean()
+                    .map_err(core)?;
+                    Some(Some(rule))
+                }
+            };
+            let ai = optional(args, "ai_instruction");
+            if rule.is_none() && ai.is_none() {
+                return Err("repeat か ai_instruction のどちらかを渡してください".into());
+            }
+            if let Some(text) = ai {
+                if text.trim().chars().count() > repeat::MAX_AI_CHARS {
+                    return Err(format!(
+                        "AI への指示は {} 文字までです",
+                        repeat::MAX_AI_CHARS
+                    ));
+                }
+                let will_repeat = match &rule {
+                    Some(rule) => rule.is_some(),
+                    None => old.is_some(),
+                };
+                if !will_repeat && !text.trim().is_empty() {
+                    return Err("AI への指示は、繰り返しのあるタスクにだけ付けられます".into());
+                }
+            }
+            if let Some(rule) = &rule {
+                store.set_repeat(id, rule.as_ref(), &now).map_err(core)?;
+            }
+            if let Some(text) = ai {
+                if store.repeat(id).map_err(core)?.is_some() {
+                    store.set_repeat_ai(id, text).map_err(core)?;
+                }
+            }
+            json!({"task_id": id, "repeat": repeat_json(store, id)?})
+        }
         "set_due_alerts" => {
             let task_id = optional(args, "task_id");
             let list = |key: &str| -> Result<Option<Option<Vec<u32>>>, String> {
@@ -1674,6 +1807,10 @@ pub fn summary(name: &str, args: &Value) -> String {
         "create_ai_rule" => format!("AI のルールを追加: {}", arg("name")),
         "update_ai_rule" => "AI のルールを変更".into(),
         "delete_ai_rule" => "AI のルールを削除".into(),
+        "set_repeat" => match args.get("repeat") {
+            Some(Value::Null) => "繰り返しを外す".into(),
+            _ => "繰り返しを設定".into(),
+        },
         GITHUB_FETCH => format!("GitHub から取得: {}", arg("url")),
         SLACK_FETCH => format!("Slack から取得: {}", arg("url")),
         RUN_SHELL => format!("コマンドを実行: {}", arg("command")),
@@ -1793,6 +1930,7 @@ pub fn system_prompt(rules: &str) -> String {
          - タスクの追加、書き換え、整理のように元に戻せる操作は、「〜しましょうか」と聞き返さずに実行し、結果だけを伝えてください。聞き返すのは、頼まれたことが 2 通り以上に読めて、どちらかで結果が大きく変わるときだけです。\n\
          - ツールが失敗したら、やり方を変えてやり直してください。返事には最後の結果だけを書き、途中の失敗、その原因、ツールやシェルの事情は書かないでください。どうしてもできなかったときだけ、できなかったことと、ユーザーにしてほしいことを 1 文で書いてください。\n\
          - {COMMENT_RULE}ユーザーが文面を決めてコメントを頼んだときは、その文面のまま書いてください。\n\
+         - 「毎週」「毎朝」のように、決まった間隔でするタスクを頼まれたら、set_repeat でタスクに繰り返しを付けてください。回を作ったときに AI にしてほしい作業（報告の下書きなど）は、set_repeat の ai_instruction に書いてください。\n\
          - ユーザーに「これからはこうして」「いつも〜して」のように、これから先も続けてほしいことを頼まれたら、list_ai_rules で今のルールを読み、create_ai_rule か update_ai_rule でルールにしてください。あるワークスペースだけのことなら、そのワークスペースのルールにしてください。\n\
          - 返事は短く、ユーザーの言葉（ふつうは日本語）で書いてください。記法は使わず、ふつうの文章で書いてください。"
     );
@@ -1805,6 +1943,86 @@ mod tests {
 
     fn run(store: &mut Store, name: &str, args: Value) -> Value {
         serde_json::from_str(&execute(store, None, name, &args).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn repeats_are_set_changed_and_removed() {
+        let mut store = Store::open_in_memory().unwrap();
+        let task = run(
+            &mut store,
+            "create_task",
+            // 2099-11-30 は月曜
+            json!({"title": "週次定例の報告", "due": "2099-11-30 10:00"}),
+        );
+        let id = task["id"].as_str().unwrap();
+        // 繰り返しのないタスクには、AI への指示だけを付けられない
+        let err = execute(
+            &mut store,
+            None,
+            "set_repeat",
+            &json!({"task_id": id, "ai_instruction": "下書きを書く"}),
+        )
+        .unwrap_err();
+        assert!(err.contains("繰り返しのある"), "{err}");
+        let set = run(
+            &mut store,
+            "set_repeat",
+            json!({
+                "task_id": id,
+                "repeat": {"unit": "week", "time": "09:00"},
+                "ai_instruction": "先週のコメントから報告の下書きを書く",
+            }),
+        );
+        let repeat = &set["repeat"];
+        assert_eq!(repeat["text"], "毎週 月 9:00");
+        assert_eq!(repeat["from"], "2099-11-30");
+        assert_eq!(repeat["next_at"], "2099-12-07 09:00");
+        assert_eq!(
+            repeat["ai_instruction"],
+            "先週のコメントから報告の下書きを書く"
+        );
+        // 渡した項目だけが変わる
+        let changed = run(
+            &mut store,
+            "set_repeat",
+            json!({"task_id": id, "repeat": {"unit": "week", "every": 2, "weekdays": [0, 3]}}),
+        );
+        assert_eq!(changed["repeat"]["text"], "2 週間ごと 月・木");
+        assert_eq!(
+            changed["repeat"]["ai_instruction"],
+            "先週のコメントから報告の下書きを書く"
+        );
+        assert_eq!(
+            run(&mut store, "get_task", json!({"id": id}))["repeat"]["text"],
+            "2 週間ごと 月・木"
+        );
+        // 正しくない値は、何も変えない
+        for bad in [
+            json!({"task_id": id, "repeat": {"unit": "hour"}}),
+            json!({"task_id": id, "repeat": {"unit": "day", "every": 0}}),
+            json!({"task_id": id, "repeat": {"unit": "week", "weekdays": [7]}}),
+            json!({"task_id": id, "repeat": null, "ai_instruction": "x"}),
+            json!({"task_id": id}),
+        ] {
+            assert!(
+                execute(&mut store, None, "set_repeat", &bad).is_err(),
+                "{bad}"
+            );
+        }
+        assert_eq!(
+            run(&mut store, "get_task", json!({"id": id}))["repeat"]["text"],
+            "2 週間ごと 月・木"
+        );
+        let removed = run(
+            &mut store,
+            "set_repeat",
+            json!({"task_id": id, "repeat": null}),
+        );
+        assert!(removed["repeat"].is_null());
+        assert_eq!(
+            summary("set_repeat", &json!({"repeat": null})),
+            "繰り返しを外す"
+        );
     }
 
     #[test]

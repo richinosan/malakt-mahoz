@@ -34,6 +34,7 @@ const TABLES: &[&str] = &[
     "task_links",
     "tickets",
     "ai_rules",
+    "task_repeats",
 ];
 
 /// 1 回の操作の記録（`undo_log` の行の範囲）。
@@ -123,6 +124,15 @@ impl Store {
             let dropped = std::mem::take(&mut self.history.redo);
             self.undo_forget(&dropped)?;
             self.undo_trim()?;
+        }
+        Ok(())
+    }
+
+    /// 前の区切りからの変更を、元に戻す相手にしない（アプリが自動でした変更）。
+    pub(crate) fn undo_skip(&mut self) -> Result<()> {
+        if let Some(step) = self.undo_tail()? {
+            self.undo_forget(&[step])?;
+            self.history.marked = step.last;
         }
         Ok(())
     }

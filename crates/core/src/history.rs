@@ -139,13 +139,15 @@ pub fn field_label(field: &str) -> &'static str {
         "urls" => "URL",
         "workspace" => "ワークスペース",
         "link" => "表示するワークスペース",
+        crate::repeat::FIELD => "繰り返し",
+        crate::repeat::AI_FIELD => "繰り返しの AI への指示",
         _ => "その他",
     }
 }
 
 /// 項目の並び順（タイトルが先、説明はあと）。
 fn field_order(field: &str) -> usize {
-    const ORDER: [&str; 15] = [
+    const ORDER: [&str; 17] = [
         "title",
         "urls",
         "status",
@@ -160,6 +162,8 @@ fn field_order(field: &str) -> usize {
         "percent",
         "workspace",
         "link",
+        crate::repeat::FIELD,
+        crate::repeat::AI_FIELD,
         "description",
     ];
     ORDER

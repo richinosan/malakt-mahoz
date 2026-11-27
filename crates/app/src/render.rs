@@ -3722,6 +3722,17 @@ impl MainView {
                     .child(format!("同期 {}", task.linked_workspace_ids.len() + 1)),
             );
         }
+        // 繰り返しのあるタスク（今の回）には、タイトルの横に印を添える。行の高さは変えない
+        let repeating = self.repeating.contains(&task.id).then(|| {
+            div()
+                .id(("repeating", ix))
+                .flex_none()
+                .text_color(theme.muted_foreground)
+                .child(app_icon("repeat").xsmall())
+                .tooltip(|window, cx| {
+                    gpui_kit::component::tooltip::Tooltip::new("繰り返し").build(window, cx)
+                })
+        });
         let title = {
             let id = id.clone();
             col()
@@ -3731,39 +3742,46 @@ impl MainView {
                 .pl(LIST_INDENT * depth as f32
                     + px(if task.parent_id.is_some() { 16. } else { 0. }))
                 .child(
-                    div()
-                        .id(("title", ix))
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        // AI が整えている間は、タイトルの前で印が回る
-                        .when(arranging, |d| {
-                            d.child(
-                                div()
-                                    .id(("ai-working", ix))
-                                    .flex_none()
-                                    .child(Spinner::new().small())
-                                    .test_support(),
-                            )
-                        })
-                        .truncate()
-                        .text_sm()
-                        .font_weight(FontWeight::BOLD)
-                        .cursor_pointer()
-                        .hover(|s| s.text_color(theme.primary))
-                        .active(|s| s.opacity(0.6))
-                        .when(closed, |d| {
-                            d.text_color(theme.muted_foreground).line_through()
-                        })
-                        .child(task.title.clone())
-                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                            // ドラッグの終わりは、クリックにしない
-                            if this.dragging_task() {
-                                return;
-                            }
-                            this.open_panel(&id, window, cx)
-                        }))
-                        .test_support(),
+                    row()
+                        .min_w_0()
+                        .gap_1p5()
+                        .child(
+                            div()
+                                .id(("title", ix))
+                                .min_w_0()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                // AI が整えている間は、タイトルの前で印が回る
+                                .when(arranging, |d| {
+                                    d.child(
+                                        div()
+                                            .id(("ai-working", ix))
+                                            .flex_none()
+                                            .child(Spinner::new().small())
+                                            .test_support(),
+                                    )
+                                })
+                                .truncate()
+                                .text_sm()
+                                .font_weight(FontWeight::BOLD)
+                                .cursor_pointer()
+                                .hover(|s| s.text_color(theme.primary))
+                                .active(|s| s.opacity(0.6))
+                                .when(closed, |d| {
+                                    d.text_color(theme.muted_foreground).line_through()
+                                })
+                                .child(task.title.clone())
+                                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                                    // ドラッグの終わりは、クリックにしない
+                                    if this.dragging_task() {
+                                        return;
+                                    }
+                                    this.open_panel(&id, window, cx)
+                                }))
+                                .test_support(),
+                        )
+                        .children(repeating),
                 )
                 .when(has_chips, |d| d.child(chips))
         };
@@ -5589,6 +5607,13 @@ impl MainView {
                             self.task_alert_menu(&task.id, task.due.as_deref(), cx),
                             |d, menu| d.child(self.property("通知", cx).child(menu)),
                         )
+                        .child(
+                            self.property("繰り返し", cx)
+                                .child(self.repeat_property(detail, cx)),
+                        )
+                        .when_some(self.repeat_ai_property(detail, cx), |d, ai| {
+                            d.child(self.property("AI への指示", cx).child(ai))
+                        })
                         .child(self.property("進捗", cx).child(percent))
                         .child(self.property("カテゴリ", cx).child(categories))
                         .child(self.property("親タスク", cx).child(parent))

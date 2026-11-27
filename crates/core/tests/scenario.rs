@@ -45,6 +45,11 @@ fn plan_work_and_move_to_another_device() {
         .unwrap();
     a.set_comment_pinned(&pin.id, true).unwrap();
     a.set_task_status(&flyer.id, Status::Completed).unwrap();
+    // 繰り返しも一緒に移す
+    let weekly = malakt_core::repeat::Rule::weekly("2026-12-20");
+    a.set_repeat(&desk.id, Some(&weekly), "2026-11-27 12:00")
+        .unwrap();
+    a.set_repeat_ai(&desk.id, "借りる机の数を確かめる").unwrap();
     // AI のルールも一緒に移す
     let global = a
         .create_ai_rule(None, "言葉づかい", "敬語で答える")
@@ -110,6 +115,14 @@ fn plan_work_and_move_to_another_device() {
         a.ai_rules(Some(&venue.id)).unwrap()
     );
     assert_eq!(b.ai_rule(&local.id).unwrap().apply, Apply::Auto);
+    let repeat = b.repeat(&desk.id).unwrap().unwrap();
+    assert_eq!(Some(repeat.clone()), a.repeat(&desk.id).unwrap());
+    assert_eq!(repeat.rule.label(), "毎週 日");
+    assert_eq!(repeat.ai, "借りる机の数を確かめる");
+    // 取り込んだ先でも、次の回が作られる
+    let made = b.sweep_repeats(&repeat.next_at).unwrap();
+    assert_eq!(made.len(), 1);
+    assert_eq!(b.task(&made[0]).unwrap().due.as_deref(), Some("2026-12-27"));
 }
 
 /// 2 台で別々に進めたあと取り込むと、同じものは上書き、ないものは追加になる。
@@ -362,6 +375,7 @@ fn archive_layout_is_portable() {
             "data/changes.json",
             "data/comments.json",
             "data/people.json",
+            "data/repeats.json",
             "data/task_alerts.json",
             "data/task_defaults.json",
             "data/tasks.json",

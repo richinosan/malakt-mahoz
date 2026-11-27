@@ -12,6 +12,7 @@
 //! - `links`: 1 つのタスクを複数のワークスペースに表示する
 //! - `notice`: 通知（期限が近い、ほかの人からの変更）
 //! - `remind`: OS のリマインダーとの連携（何を作り・直し・消すかの判断）
+//! - `repeat`: 繰り返すタスク（決まった時刻に次の回を作り、AI に頼むこともできる）
 //! - `rules`: AI のルール（グローバルとワークスペースごと）
 //! - `ticket`: 完了チケット（画面で発行し、コマンドで完了報告する）
 //! - `undo`: 元に戻す・やり直し（上限つきの記録）
@@ -41,6 +42,7 @@ pub mod model;
 pub mod notice;
 pub mod panes;
 pub mod remind;
+pub mod repeat;
 pub mod rules;
 mod schema;
 pub mod store;

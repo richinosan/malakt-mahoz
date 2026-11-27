@@ -3903,3 +3903,120 @@ fn own_messages_can_be_selected_and_copied(cx: &mut TestAppContext) {
         "通信に失敗しました"
     );
 }
+
+/// 繰り返しのタスクに AI への指示を書き、次の回を作る。返すのは作った回のタスク。
+fn repeated_copy(cx: &mut TestAppContext, instruction: &str) -> String {
+    use malakt_core::repeat::Rule;
+    // 元のタスクは AI の整理に回さない。作った回が整理に回らないことは、整理をオンにして確かめる
+    let arrange = session(cx);
+    cx.update(|cx| arrange.update(cx, |s, cx| s.set_arrange(false, cx)));
+    let task = new_task(cx, "週次定例の報告");
+    cx.update(|cx| arrange.update(cx, |s, cx| s.set_arrange(true, cx)));
+    cx.run_until_parked();
+    cx.update(|cx| {
+        db::shared(cx).update(cx, |db, cx| {
+            db.store
+                .set_repeat(&task, Some(&Rule::weekly("2099-11-30")), "2099-11-27 12:00")
+                .unwrap();
+            db.store.set_repeat_ai(&task, instruction).unwrap();
+            // 時刻が来た（アプリの見張りと同じ入口）
+            assert!(db.sweep_repeats("2099-12-07 00:00"));
+            let copy = db.store.repeat_ai_jobs().unwrap()[0].task_id.clone();
+            cx.notify();
+            copy
+        })
+    })
+}
+
+/// 繰り返しで次の回を作ると、AI が指示を実行して、結果をその回のタスクにコメントする。
+/// 会話には混ぜず、実行の記録に残す。
+#[gpui_kit::test]
+fn a_repeat_runs_its_ai_instruction_on_the_new_copy(cx: &mut TestAppContext) {
+    let world = start(cx);
+    world.keys.set(Provider::Claude, "k").unwrap();
+    let draft = "## 先週の進み\n- ログインを直した";
+    // 作った回の ID は、作るまで分からない。AI の返事は、行列の先頭のタスクに書く
+    let replies = world.replies.clone();
+    let copy = {
+        let copy = repeated_copy(cx, "先週のまとめを下書きする");
+        replies.lock().unwrap().push_back(Ok(tool_reply(
+            "t1",
+            "add_comment",
+            json!({"task_id": copy, "body": draft}),
+        )));
+        world.reply(text_reply("下書きをコメントしました。"));
+        copy
+    };
+    // 返事を用意してから、AI が動き出す
+    cx.update(|cx| db::shared(cx).update(cx, |_, cx| cx.notify()));
+    wait(cx, "定期実行が終わる", |s| {
+        s.runs.iter().any(|r| r.kind == RunKind::Repeat)
+    });
+    let message = world.sent()[0].2["messages"][0]["content"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        message.contains("指示: 先週のまとめを下書きする"),
+        "{message}"
+    );
+    assert!(message.contains(&format!("（id: {copy}）")), "{message}");
+    assert_eq!(comments_of(cx, &copy), vec![draft.to_owned()]);
+    let actor = cx.update(|cx| {
+        db::shared(cx).read(cx).store.comments(&copy).unwrap()[0]
+            .actor
+            .clone()
+    });
+    assert_eq!(actor.badge().as_deref(), Some("定期実行"));
+    let run = read(cx, |s| s.runs.last().cloned().unwrap());
+    assert_eq!(run.tasks, vec![(copy.clone(), "週次定例の報告".into())]);
+    assert_eq!(run.error, None);
+    assert!(read(cx, |s| s.items.is_empty()), "チャットには何も足さない");
+    // 行列は空になり、もう一度は動かない
+    assert!(cx.update(|cx| db::shared(cx)
+        .read(cx)
+        .store
+        .repeat_ai_jobs()
+        .unwrap()
+        .is_empty()));
+}
+
+/// API キーがなければ通信せず、失敗として残す。キーを入れてやり直すと実行する。
+#[gpui_kit::test]
+fn a_repeat_without_a_key_fails_and_can_be_retried(cx: &mut TestAppContext) {
+    let world = start(cx);
+    let copy = repeated_copy(cx, "先週のまとめを下書きする");
+    wait(cx, "失敗が残る", |s| {
+        s.runs.iter().any(|r| r.kind == RunKind::Repeat)
+    });
+    assert!(world.sent().is_empty());
+    let run = read(cx, |s| s.runs.last().cloned().unwrap());
+    let error = run.error.clone().unwrap();
+    assert!(error.contains("API キーが設定されていない"), "{error}");
+    assert!(!run.seen, "チャットの上に赤く残る");
+    let jobs = cx.update(|cx| db::shared(cx).read(cx).store.repeat_ai_jobs().unwrap());
+    assert!(jobs[0].failed);
+
+    world.keys.set(Provider::Claude, "k").unwrap();
+    world.reply(tool_reply(
+        "t1",
+        "add_comment",
+        json!({"task_id": copy, "body": "下書き"}),
+    ));
+    world.reply(text_reply("書きました。"));
+    let session = session(cx);
+    cx.update(|cx| {
+        session.update(cx, |s, cx| {
+            s.refresh_key(cx);
+        })
+    });
+    cx.run_until_parked();
+    // 失敗したものは、頼まれるまで動かない
+    assert!(world.sent().is_empty());
+    cx.update(|cx| session.update(cx, |s, cx| s.retry_run(&run.id, cx)));
+    wait(cx, "やり直しが終わる", |s| {
+        s.runs.iter().filter(|r| r.kind == RunKind::Repeat).count() == 2
+    });
+    assert_eq!(comments_of(cx, &copy), vec!["下書き".to_owned()]);
+    assert_eq!(read(cx, |s| s.runs.last().unwrap().error.clone()), None);
+}

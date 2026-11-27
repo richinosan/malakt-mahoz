@@ -181,6 +181,8 @@ pub enum RunKind {
     Arrange,
     Track,
     Watch,
+    /// 繰り返しのタスクの回を作ったときに、AI に頼んだこと。
+    Repeat,
 }
 
 impl RunKind {
@@ -189,6 +191,7 @@ impl RunKind {
             Self::Arrange => "タスクの整理",
             Self::Track => "コメントからの更新",
             Self::Watch => "GitHub の定期チェック",
+            Self::Repeat => "定期実行",
         }
     }
 
@@ -197,6 +200,7 @@ impl RunKind {
             Self::Arrange => "arrange",
             Self::Track => "track",
             Self::Watch => "watch",
+            Self::Repeat => "repeat",
         }
     }
 }
@@ -304,6 +308,8 @@ struct NewTask {
     /// タスクの URL の欄。
     urls: Vec<String>,
     links: Vec<Fetch>,
+    /// 繰り返しで作った回（前の回を写しただけなので、整えない）。
+    copied: bool,
 }
 
 /// AI が中身を取りに行くリンク。
@@ -353,6 +359,7 @@ fn task_links(store: &malakt_core::Store) -> Result<Vec<(NewTask, bool)>, String
         .map(|task| {
             let links = find_sources(&link_text(&task));
             let open = task.status.is_open();
+            let copied = task.created_by == malakt_core::Actor::Repeat;
             (
                 NewTask {
                     id: task.id,
@@ -360,6 +367,7 @@ fn task_links(store: &malakt_core::Store) -> Result<Vec<(NewTask, bool)>, String
                     description: task.description,
                     urls: task.urls,
                     links,
+                    copied,
                 },
                 open,
             )
@@ -909,6 +917,7 @@ impl Session {
                     kind: match v["kind"].as_str() {
                         Some("track") => RunKind::Track,
                         Some("watch") => RunKind::Watch,
+                        Some("repeat") => RunKind::Repeat,
                         _ => RunKind::Arrange,
                     },
                     tasks: v["tasks"]
@@ -1055,6 +1064,7 @@ impl Session {
             cx.observe(&this.db.clone(), |this, _, cx| {
                 this.tasks_changed(cx);
                 this.comments_changed(cx);
+                this.repeat_jobs(cx);
             }),
             cx.observe_self(|this, cx| this.persist(cx)),
             cx.observe_self(|this, cx| {
@@ -1082,6 +1092,7 @@ impl Session {
                     this.track_flush(cx);
                 }
             }),
+            cx.observe_self(|this, cx| this.repeat_jobs(cx)),
         ];
         if let Some(chat) = chat {
             this.load_chat(&chat);
@@ -1582,6 +1593,24 @@ impl Session {
             RunKind::Watch => {
                 self.check_github(cx);
             }
+            RunKind::Repeat => {
+                for (task, title) in &run.tasks {
+                    match self.db.update(cx, |db, _| db.store.retry_repeat_ai(task)) {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            self.error = Some(
+                                format!("「{title}」の AI への指示は、もう残っていません").into(),
+                            )
+                        }
+                        Err(e) => {
+                            self.error = Some(
+                                format!("「{title}」の AI への指示を読めませんでした: {e}").into(),
+                            )
+                        }
+                    }
+                }
+                self.repeat_jobs(cx);
+            }
         }
     }
 
@@ -1836,6 +1865,12 @@ impl Session {
         };
         // 消えたタスクの分は忘れるので、増え続けない
         known.retain(|id, _| all.iter().any(|(task, _)| task.id == *id));
+        // 繰り返しで作った回は、前の回のリンクを写しただけなので、もう見たものにする
+        for (task, _) in all.iter().filter(|(task, _)| task.copied) {
+            known
+                .entry(task.id.clone())
+                .or_insert_with(|| task.links.iter().map(Fetch::url).collect());
+        }
         let mut tasks = self.new_tasks(all);
         tasks.truncate(MAX_ARRANGE_TASKS);
         let before = self.arrange_notes.len();
@@ -2402,6 +2437,129 @@ impl Session {
             self.answer(Decision::Allow, cx);
         }
         cx.notify();
+    }
+
+    // ---- 繰り返しのタスクの、AI への指示 ----
+
+    /// 繰り返しで作った回に AI への指示があれば、手が空いているときに 1 件ずつ実行する。
+    /// ロック中も動く。API キーがなければ通信せず、失敗として記録に残す（やり直せる）。
+    fn repeat_jobs(&mut self, cx: &mut Context<Self>) {
+        if self.busy {
+            return;
+        }
+        let waiting = match self.db.read(cx).store.repeat_ai_jobs() {
+            Ok(jobs) => jobs.iter().any(|job| !job.failed),
+            Err(e) => {
+                let text: SharedString = format!("AI に頼むことを読めませんでした: {e}").into();
+                if self.error.as_ref() != Some(&text) {
+                    self.error = Some(text);
+                    cx.notify();
+                }
+                return;
+            }
+        };
+        if !waiting {
+            return;
+        }
+        if self.key == KeyState::Unknown {
+            // 調べ終わったら、もう一度ここに来る
+            self.refresh_key(cx);
+            return;
+        }
+        let job = match self.db.update(cx, |db, _| db.store.take_repeat_ai()) {
+            Ok(Some(job)) => job,
+            Ok(None) => return,
+            Err(e) => {
+                self.error = Some(format!("AI に頼むことを読めませんでした: {e}").into());
+                cx.notify();
+                return;
+            }
+        };
+        self.begin_auto(
+            RunKind::Repeat,
+            vec![(job.task_id.clone(), job.title.clone().into())],
+        );
+        let missing = match &self.key {
+            KeyState::Present { .. } => None,
+            KeyState::Failed(e) => Some(format!("API キーを読めませんでした: {e}")),
+            _ => Some(format!(
+                "{} の API キーが設定されていないので、AI への指示を実行できませんでした",
+                self.provider.label()
+            )),
+        };
+        if let Some(error) = missing {
+            self.repeat_failed(&job, error, cx);
+            self.finish();
+            cx.notify();
+            return;
+        }
+        self.task = Some(cx.spawn(async move |this, cx| {
+            let result = Self::repeat_run(&this, &job, cx).await;
+            // チャットがなくなっていれば、知らせる先もない
+            let _ = this.update(cx, |this, cx| {
+                if let Err(error) = result {
+                    this.repeat_failed(&job, error, cx);
+                }
+                this.finish();
+                cx.notify();
+            });
+        }));
+        cx.notify();
+    }
+
+    /// 実行できなかった指示を記録に残し、やり直せるように待ち行列に戻す。
+    fn repeat_failed(
+        &mut self,
+        job: &malakt_core::repeat::AiJob,
+        error: String,
+        cx: &mut Context<Self>,
+    ) {
+        let note: SharedString = format!("「{}」の定期実行: {error}", job.title).into();
+        self.auto_error = Some(note.clone());
+        self.items.push(Item::Error(note));
+        if let Err(e) = self.db.update(cx, |db, _| {
+            db.store.fail_repeat_ai(&job.task_id, &job.prompt)
+        }) {
+            self.error =
+                Some(format!("「{}」の AI への指示を残せませんでした: {e}", job.title).into());
+        }
+    }
+
+    async fn repeat_run(
+        this: &WeakEntity<Self>,
+        job: &malakt_core::repeat::AiJob,
+        cx: &mut AsyncApp,
+    ) -> Result<(), String> {
+        let config = this.read_with(cx, |s, _| s.config.clone()).map_err(gone)?;
+        let message = format!(
+            "（アプリの定期実行からの自動のメッセージです）\n\
+             繰り返しのタスク「{title}」（id: {id}）の新しい回を、アプリが作りました。\
+             次の指示を実行して、結果を add_comment でこのタスクにコメントしてください。\
+             タスクの中身は get_task で、前の回は list_tasks で同じタイトルを探して読めます。\n\n\
+             指示: {prompt}\n",
+            title = job.title,
+            id = job.task_id,
+            prompt = job.prompt,
+        );
+        this.update(cx, |s, cx| {
+            s.items.push(Item::Notice(
+                format!(
+                    "繰り返しのタスク「{}」の回を作りました。AI が指示を実行します。",
+                    job.title
+                )
+                .into(),
+            ));
+            s.turns.push(Turn::User(message));
+            cx.notify();
+        })
+        .map_err(gone)?;
+        Self::converse(
+            this,
+            &config,
+            "定期実行（ユーザーは画面を見ていないことがあります）",
+            cx,
+        )
+        .await
     }
 
     // ---- GitHub の定期チェック ----

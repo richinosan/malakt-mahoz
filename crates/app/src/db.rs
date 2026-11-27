@@ -19,6 +19,8 @@ pub struct Db {
     pub last_input: i64,
     /// 次に期限を知らせる時刻（UNIX 秒）。この時刻が来たら、全ウィンドウを読み直させて通知を作る。
     pub next_alert: Option<i64>,
+    /// 繰り返しの次の回を作れなかった理由。画面がエラーとして出す。
+    pub repeat_error: Option<String>,
 }
 
 /// 解除の印を書き直す間隔（秒）。[`lock::OPEN_FOR`] より十分短くする。
@@ -61,6 +63,24 @@ impl Db {
             open_mark: None,
             last_input: unix_now(),
             next_alert: None,
+            repeat_error: None,
+        }
+    }
+
+    /// 時刻が来た繰り返しの、次の回を作る。作ったら `true`。
+    /// 作れなかったときは、その理由を [`Db::repeat_error`] に入れる（次に作れたら消す）。
+    pub fn sweep_repeats(&mut self, now: &str) -> bool {
+        match self.store.sweep_repeats(now) {
+            Ok(made) => {
+                let cleared = self.repeat_error.take().is_some();
+                !made.is_empty() || cleared
+            }
+            Err(error) => {
+                let text = format!("繰り返しの次の回を作れませんでした: {error}");
+                let changed = self.repeat_error.as_deref() != Some(text.as_str());
+                self.repeat_error = Some(text);
+                changed
+            }
         }
     }
 
@@ -240,6 +260,7 @@ const WATCH_EVERY: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// 外からの変更と日付の変わり目、期限を知らせる時刻を見張る。2 秒ごとに確かめ、変わっていたら
 /// 全ウィンドウを読み直させる（読み直しのときに、期限の通知も作られる）。
+/// 時刻が来た繰り返しは、次の回を作る（ロック中も）。
 /// 操作がないまま決めた時間が過ぎたら、ロックする。
 pub fn watch(cx: &mut App) {
     cx.spawn(async move |cx| {
@@ -253,7 +274,8 @@ pub fn watch(cx: &mut App) {
                 shared(cx).update(cx, |db, cx| {
                     db.sync_open_mark(unix_now());
                     let alert_due = db.next_alert.is_some_and(|at| unix_now() >= at);
-                    if db.changed_outside() || new_day || alert_due {
+                    let repeated = db.sweep_repeats(&malakt_core::view::now());
+                    if db.changed_outside() || new_day || alert_due || repeated {
                         cx.notify();
                     }
                 })
