@@ -198,9 +198,12 @@ pub fn apply_named(
         })
         .map(|(i, _)| i)
         .collect();
-    // 優先度なし（0）と期限なしは最後に回す
+    // 優先度なし（0）と、期限も開始日もないものは最後に回す
     let prio = |t: &Task| if t.priority == 0 { u8::MAX } else { t.priority };
-    let due = |t: &Task| (t.due.is_none(), t.due.clone());
+    fn due(t: &Task) -> (bool, Option<&str>) {
+        let when = due_key(t);
+        (when.is_none(), when)
+    }
     // 担当順の比べる名前。担当の並びどおりに、小文字にして持つ
     let people: HashMap<usize, Vec<String>> = if query.sort == Sort::Assignee {
         hits.iter()
@@ -240,6 +243,11 @@ pub fn apply_named(
         .then_with(|| a.id.cmp(&b.id))
     });
     hits
+}
+
+/// 期限で並べるときに比べる日付。期限がなければ開始日。
+pub fn due_key(task: &Task) -> Option<&str> {
+    task.due.as_deref().or(task.start.as_deref())
 }
 
 /// 最上位からそのワークスペースまでの道筋（ワークスペースの並びの中の位置）。見つからなければ空。
@@ -1090,6 +1098,72 @@ mod tests {
         assert_eq!(ids(&tasks, &reversed, None), ["e", "a", "b", "c", "d"]);
         assert_eq!(Sort::ALL.map(Sort::label).len(), 8);
         assert_eq!(Sort::Due.label(), "期限が近い順");
+    }
+
+    #[test]
+    fn due_sort_uses_start_when_there_is_no_due() {
+        let mk = |id: &str, start: Option<&str>, due: Option<&str>, prio: u8| {
+            let mut t = task(id, Status::NeedsAction);
+            t.start = start.map(str::to_owned);
+            t.due = due.map(str::to_owned);
+            t.priority = prio;
+            t
+        };
+        let tasks = [
+            mk("none", None, None, 1),
+            mk("due-3", Some("2026-11-20"), Some("2026-12-03"), 0),
+            mk("start-2", Some("2026-12-02"), None, 0),
+            mk("due-1", None, Some("2026-12-01T10:00"), 0),
+            mk("start-1", Some("2026-12-01"), None, 0),
+            mk("start-1-high", Some("2026-12-01"), None, 1),
+            mk("start-4", Some("2026-12-04T09:00"), None, 0),
+        ];
+        // 期限があれば期限、なければ開始日で比べる。同じ日は優先度、どちらもないものは最後
+        let query = |sort, descending| ListQuery {
+            sort,
+            descending,
+            ..Default::default()
+        };
+        assert_eq!(
+            ids(&tasks, &query(Sort::Due, false), None),
+            [
+                "start-1-high",
+                "start-1",
+                "due-1",
+                "start-2",
+                "due-3",
+                "start-4",
+                "none"
+            ]
+        );
+        assert_eq!(
+            ids(&tasks, &query(Sort::Due, true), None),
+            [
+                "none",
+                "start-4",
+                "due-3",
+                "start-2",
+                "due-1",
+                "start-1",
+                "start-1-high"
+            ]
+        );
+        // 優先度順の中の並びも同じ日付で比べる
+        assert_eq!(
+            ids(&tasks, &query(Sort::Priority, false), None),
+            [
+                "start-1-high",
+                "none",
+                "start-1",
+                "due-1",
+                "start-2",
+                "due-3",
+                "start-4"
+            ]
+        );
+        assert_eq!(due_key(&tasks[1]), Some("2026-12-03"));
+        assert_eq!(due_key(&tasks[2]), Some("2026-12-02"));
+        assert_eq!(due_key(&tasks[0]), None);
     }
 
     #[test]
