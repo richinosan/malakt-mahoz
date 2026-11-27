@@ -715,6 +715,21 @@ mod tests {
         }
     }
 
+    /// 印を捨てたあと、ロックが外れたと見えるまで待つ（2 秒まで）。
+    /// ほかのテストのスレッドがプロセスを起動していると、起動の途中の子プロセスがファイルを
+    /// 一瞬だけ持つ（fork から exec まで）。その間はロックが外れないので、すぐには見えないことがある。
+    /// MCP サーバーは 300 ミリ秒ごとに確かめるので、アプリでも同じように少しあとで見える。
+    fn lets_go(db: &Path) -> bool {
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while app_running(db) {
+            if std::time::Instant::now() > until {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        true
+    }
+
     #[test]
     fn the_running_mark_is_seen_until_the_app_lets_go() {
         let dir = tempfile::tempdir().unwrap();
@@ -729,7 +744,7 @@ mod tests {
         // もう 1 つのアプリは、印を付けられない
         assert!(mark_running(&db).is_err());
         drop(running);
-        assert!(!app_running(&db));
+        assert!(lets_go(&db), "捨てた印のロックが外れない");
         // 次に起動したアプリが、また印を付けられる
         let again = mark_running(&db).unwrap();
         assert!(app_running(&db));
