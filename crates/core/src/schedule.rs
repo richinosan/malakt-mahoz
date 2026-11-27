@@ -831,4 +831,183 @@ mod tests {
         assert_eq!(s.due_label().as_deref(), Some("当日 9:30"));
         assert_eq!(s.due_on("2026-11-27").as_deref(), Some("2026-11-27 09:30"));
     }
+
+    #[test]
+    fn 取り込む定時タスクの上限と整え方() {
+        use super::{clean, MAX_ASSIGNEES, MAX_TITLE_CHARS};
+        let mut st = store();
+        let made = st
+            .create_schedule(None, "定例", None, "2026-11-27 10:00")
+            .unwrap();
+        let with = |f: &dyn Fn(&mut Schedule)| {
+            let mut s = made.clone();
+            f(&mut s);
+            s
+        };
+        assert_eq!(clean(&made).unwrap(), made);
+        assert!(clean(&with(&|s| s.id.clear())).is_err());
+        assert!(clean(&with(&|s| s.next_at = "あした".into())).is_err());
+        assert!(clean(&with(&|s| s.title = "あ".repeat(MAX_TITLE_CHARS))).is_ok());
+        assert!(clean(&with(&|s| s.title = "あ".repeat(MAX_TITLE_CHARS + 1))).is_err());
+        let ids = |n: usize| (0..n).map(|i| format!("p{i}")).collect::<Vec<_>>();
+        assert!(clean(&with(&|s| s.assignee_ids = ids(MAX_ASSIGNEES))).is_ok());
+        assert!(clean(&with(&|s| s.assignee_ids = ids(MAX_ASSIGNEES + 1))).is_err());
+        let dirty = with(&|s| {
+            s.title = "  新しい題 ".into();
+            s.ai = " 指示 \n".into();
+            s.assignee_ids = vec!["a".into(), "".into(), "a".into(), "b".into()];
+            s.due_days = Some(2);
+            s.due_time = Some(" 17:00 ".into());
+            s.rule = Rule {
+                weekdays: vec![2, 0, 2],
+                ..Rule::weekly("2026-11-30")
+            };
+        });
+        let cleaned = clean(&dirty).unwrap();
+        assert_eq!(cleaned.title, "新しい題");
+        assert_eq!(cleaned.ai, "指示");
+        assert_eq!(cleaned.assignee_ids, ["a", "b"]);
+        assert_eq!(cleaned.due_days, Some(2));
+        assert_eq!(cleaned.due_time.as_deref(), Some("17:00"));
+        assert_eq!(cleaned.rule.weekdays, [0, 2]);
+    }
+
+    #[test]
+    fn 新しい定時タスクは同じ場所の末尾に並ぶ() {
+        let mut s = store();
+        let positions: Vec<i64> = (0..3)
+            .map(|_| {
+                s.create_schedule(None, "", None, "2026-11-27 10:00")
+                    .unwrap()
+                    .position
+            })
+            .collect();
+        assert_eq!(positions, [0, 1, 2]);
+    }
+
+    #[test]
+    fn 決まりを変えたときだけ次の時刻を決め直す() {
+        let mut s = store();
+        let made = s
+            .create_schedule(
+                None,
+                "定例",
+                Some(&weekly_monday("09:00")),
+                "2026-11-27 12:00",
+            )
+            .unwrap();
+        assert_eq!(made.next_at, "2026-11-30 09:00");
+        // 題だけ変えるなら、あとの時刻で更新しても次の時刻は動かない
+        let renamed = s
+            .update_schedule(
+                &made.id,
+                &SchedulePatch {
+                    title: Some("改名".into()),
+                    ..Default::default()
+                },
+                "2026-12-20 12:00",
+            )
+            .unwrap();
+        assert_eq!(renamed.title, "改名");
+        assert_eq!(renamed.next_at, "2026-11-30 09:00");
+        // 決まりを変えたら、更新した時刻から決め直す
+        let moved = s
+            .update_schedule(
+                &made.id,
+                &SchedulePatch {
+                    rule: Some(weekly_monday("10:00")),
+                    ..Default::default()
+                },
+                "2026-12-20 12:00",
+            )
+            .unwrap();
+        assert_eq!(moved.next_at, "2026-12-21 10:00");
+        // 止めている間は動かさず、有効にしたときに決め直す
+        let off = s
+            .update_schedule(
+                &made.id,
+                &SchedulePatch {
+                    enabled: Some(false),
+                    ..Default::default()
+                },
+                "2026-12-22 12:00",
+            )
+            .unwrap();
+        assert_eq!(off.next_at, "2026-12-21 10:00");
+        let on = s
+            .update_schedule(
+                &made.id,
+                &SchedulePatch {
+                    enabled: Some(true),
+                    ..Default::default()
+                },
+                "2026-12-22 12:00",
+            )
+            .unwrap();
+        assert_eq!(on.next_at, "2026-12-28 10:00");
+        // すでに有効で、決まりも同じなら、そのまま
+        let same = s
+            .update_schedule(
+                &made.id,
+                &SchedulePatch {
+                    enabled: Some(true),
+                    ..Default::default()
+                },
+                "2027-01-20 12:00",
+            )
+            .unwrap();
+        assert_eq!(same.next_at, "2026-12-28 10:00");
+    }
+
+    #[test]
+    fn 担当にできるのは登録している人だけ() {
+        let mut s = store();
+        let me = s.create_person("自分", true).unwrap();
+        let made = s
+            .create_schedule(None, "定例", None, "2026-11-27 12:00")
+            .unwrap();
+        let patch = |ids: Vec<String>| SchedulePatch {
+            assignee_ids: Some(ids),
+            ..Default::default()
+        };
+        assert!(s
+            .update_schedule(
+                &made.id,
+                &patch(vec!["いない人".into()]),
+                "2026-11-27 12:00"
+            )
+            .is_err());
+        let ok = s
+            .update_schedule(&made.id, &patch(vec![me.id.clone()]), "2026-11-27 12:00")
+            .unwrap();
+        assert_eq!(ok.assignee_ids, [me.id.clone()]);
+        // 作るタスクの担当は、登録している人
+        let rule = weekly_monday("09:00");
+        s.update_schedule(
+            &made.id,
+            &SchedulePatch {
+                rule: Some(rule),
+                ..Default::default()
+            },
+            "2026-11-27 12:00",
+        )
+        .unwrap();
+        let tasks = s.sweep_schedules("2026-11-30 09:00").unwrap();
+        assert_eq!(s.task(&tasks[0]).unwrap().assignee_ids, [me.id]);
+    }
+
+    #[test]
+    fn 定時タスクを消すと一覧から外れ二度は消せない() {
+        let mut s = store();
+        let made = s
+            .create_schedule(None, "定例", None, "2026-11-27 12:00")
+            .unwrap();
+        s.delete_schedule(&made.id).unwrap();
+        assert!(s.schedules(None).unwrap().is_empty());
+        assert!(s.schedule(&made.id).is_err());
+        assert!(matches!(
+            s.delete_schedule(&made.id),
+            Err(crate::Error::NotFound(_))
+        ));
+    }
 }

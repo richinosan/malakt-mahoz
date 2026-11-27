@@ -632,4 +632,104 @@ mod tests {
             "「受付を頼みたい」の担当になりました"
         );
     }
+
+    #[test]
+    fn 通知の種類は保存した名前から元に戻る() {
+        for kind in [
+            NoticeKind::Assigned,
+            NoticeKind::Commented,
+            NoticeKind::StatusChanged,
+            NoticeKind::DueToday,
+            NoticeKind::Due,
+            NoticeKind::Mentioned,
+        ] {
+            assert_eq!(NoticeKind::parse(kind.as_str()), Some(kind));
+        }
+        assert_eq!(NoticeKind::parse("commented"), Some(NoticeKind::Commented));
+        assert_eq!(NoticeKind::parse("due_today"), Some(NoticeKind::DueToday));
+        assert_eq!(NoticeKind::parse("ない種類"), None);
+    }
+
+    #[test]
+    fn 既読にした通知は未読に数えない() {
+        let (mut s, me, _) = setup();
+        let t = task(&mut s, "タスク", None, &[&me]);
+        s.notify_newly_assigned(&[]).unwrap();
+        let n = s.notices(10).unwrap().remove(0);
+        assert!(n.is_unread());
+        s.mark_notice_read(&n.id).unwrap();
+        let n = s.notices(10).unwrap().remove(0);
+        assert_eq!(n.task_id, t.id);
+        assert!(!n.is_unread());
+    }
+
+    #[test]
+    fn 担当になった通知は操作した人がいれば名前を出す() {
+        let (mut s, me, _) = setup();
+        task(&mut s, "タスク", None, &[&me]);
+        s.notify_newly_assigned(&[]).unwrap();
+        let mut n = s.notices(10).unwrap().remove(0);
+        assert_eq!(n.headline(), "「タスク」の担当になりました");
+        n.actor = "佐藤".into();
+        assert_eq!(
+            n.headline(),
+            "佐藤 さんが「タスク」の担当にあなたを入れました"
+        );
+    }
+
+    #[test]
+    fn 同じ印の通知は二度作らない() {
+        let (mut s, me, _) = setup();
+        let t = task(&mut s, "タスク", None, &[&me]);
+        let new = NewNotice {
+            task_id: &t.id,
+            dedupe: Some("same".into()),
+            ..Default::default()
+        };
+        assert!(insert(&s.conn, NoticeKind::Commented, &new).unwrap());
+        assert!(!insert(&s.conn, NoticeKind::Commented, &new).unwrap());
+        assert_eq!(s.notices(10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn 取り込みで新しく担当になったタスクだけ一度知らせる() {
+        let (mut s, me, _) = setup();
+        let t = task(&mut s, "タスク", None, &[&me]);
+        // もともと担当だったタスクは知らせない
+        assert_eq!(s.notify_newly_assigned(&[t.id.clone()]).unwrap(), 0);
+        assert!(s.notices(10).unwrap().is_empty());
+        assert_eq!(s.notify_newly_assigned(&[]).unwrap(), 1);
+        // 同じタスクをもう一度取り込んでも、通知は増えない
+        assert_eq!(s.notify_newly_assigned(&[]).unwrap(), 0);
+        assert_eq!(s.notices(10).unwrap().len(), 1);
+        let other = task(&mut s, "もう一つ", None, &[&me]);
+        assert_eq!(s.notify_newly_assigned(&[t.id.clone()]).unwrap(), 1);
+        assert_eq!(s.notices(10).unwrap().len(), 2);
+        assert_eq!(s.notices(10).unwrap()[0].task_id, other.id);
+    }
+
+    #[test]
+    fn 期限の4週間前の通知は先の期限でも次の時刻に入る() {
+        use chrono::Days;
+        let (mut s, me, _) = setup();
+        let now = at("2026-12-01 12:00");
+        let day = |n: u64| {
+            chrono::NaiveDate::from_ymd_opt(2026, 12, 1)
+                .unwrap()
+                .checked_add_days(Days::new(n))
+                .unwrap()
+                .format("%Y-%m-%d")
+                .to_string()
+        };
+        // 28 日後の期限の 28 日前（今日の 9:00）は過ぎている。29 日後の期限は、明日の 9:00
+        s.set_due_alert_date(&[28]).unwrap();
+        task(&mut s, "29 日後", Some(&day(29)), &[&me]);
+        let sweep = s.sweep_due_alerts(now).unwrap();
+        assert_eq!(sweep.made, 0);
+        assert_eq!(sweep.next, Some(at("2026-12-02 09:00")));
+        // 28 日後の期限は、28 日前の分を今知らせる
+        task(&mut s, "28 日後", Some(&day(28)), &[&me]);
+        let sweep = s.sweep_due_alerts(now).unwrap();
+        assert_eq!(sweep.made, 1);
+    }
 }

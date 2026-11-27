@@ -414,4 +414,50 @@ mod tests {
         let home = store.create_workspace(None, "家").unwrap();
         store.create_ai_rule(Some(&home.id), "", "").unwrap();
     }
+
+    #[test]
+    fn ルールを渡す場面の名前と判定() {
+        let names: Vec<&str> = Apply::ALL.iter().map(|a| a.label()).collect();
+        assert_eq!(names, ["いつも", "チャット", "自動の処理"]);
+        assert!(Apply::Always.applies(true) && Apply::Always.applies(false));
+        assert!(Apply::Chat.applies(false) && !Apply::Chat.applies(true));
+        assert!(Apply::Auto.applies(true) && !Apply::Auto.applies(false));
+    }
+
+    #[test]
+    fn 名前と本文は上限ちょうどまで使える() {
+        assert!(clean_name(&"あ".repeat(MAX_NAME_CHARS)).is_ok());
+        assert!(clean_name(&"あ".repeat(MAX_NAME_CHARS + 1)).is_err());
+        assert!(clean_body(&"あ".repeat(MAX_RULE_CHARS)).is_ok());
+        assert!(clean_body(&"あ".repeat(MAX_RULE_CHARS + 1)).is_err());
+    }
+
+    #[test]
+    fn 取り込むルールは名前と本文を整える() {
+        let mut store = Store::open_in_memory().unwrap();
+        let rule = store.create_ai_rule(None, "口調", "敬語").unwrap();
+        let dirty = AiRule {
+            name: "  言葉づかい ".into(),
+            body: " 短く答える \n".into(),
+            ..rule
+        };
+        let cleaned = clean(&dirty).unwrap();
+        assert_eq!(cleaned.name, "言葉づかい");
+        assert_eq!(cleaned.body, "短く答える");
+        assert_eq!(cleaned.id, dirty.id);
+        let no_id = AiRule {
+            id: String::new(),
+            ..dirty
+        };
+        assert!(clean(&no_id).is_err());
+    }
+
+    #[test]
+    fn 新しいルールは同じ場所の末尾に並ぶ() {
+        let mut store = Store::open_in_memory().unwrap();
+        let positions: Vec<i64> = (0..3)
+            .map(|_| store.create_ai_rule(None, "", "").unwrap().position)
+            .collect();
+        assert_eq!(positions, [0, 1, 2]);
+    }
 }

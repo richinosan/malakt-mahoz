@@ -750,4 +750,60 @@ mod tests {
         assert!(!is_valid_date("+026-04-01"));
         assert!(!is_valid_date("2026-04-01 "));
     }
+
+    #[test]
+    fn 既定の設定はどれか一つでも入っていれば入れる設定になる() {
+        let none = TaskDefaults::default();
+        assert!(!none.has_any());
+        let with = |f: fn(&mut TaskDefaults)| {
+            let mut d = TaskDefaults::default();
+            f(&mut d);
+            d
+        };
+        assert!(with(|d| d.assignee_ids = vec!["a".into()]).has_any());
+        assert!(with(|d| d.due = DueRule::Relative { days: 0 }).has_any());
+        assert!(with(|d| d.priority = Some(0)).has_any());
+        assert!(with(|d| d.categories = vec!["c".into()]).has_any());
+        assert!(with(|d| d.description = "d".into()).has_any());
+        assert!(with(|d| d.link_workspace_ids = vec!["w".into()]).has_any());
+    }
+
+    #[test]
+    fn 役の補足は役ごとに違う文() {
+        for role in Role::ALL {
+            assert!(role.hint().contains('（'), "{role:?}");
+        }
+        assert!(Role::R.hint().starts_with("実行責任者"));
+        assert!(Role::A.hint().starts_with("説明責任者"));
+        assert!(Role::C.hint().starts_with("相談先"));
+        assert!(Role::I.hint().starts_with("報告先"));
+    }
+
+    #[test]
+    fn 同じ役を重ねても役は消えない() {
+        assert!(Roles::of(&[Role::A, Role::A]).contains(Role::A));
+        assert!(Roles::R.with(Role::R).contains(Role::R));
+        assert_eq!(Roles::parse("A,A"), Roles::of(&[Role::A]));
+    }
+
+    #[test]
+    fn 添付の大きさの上限は十メビバイト() {
+        assert_eq!(MAX_ATTACHMENT_BYTES, 10_485_760);
+    }
+
+    #[test]
+    fn 日付の書き方と月ごとの日数を確かめる() {
+        assert!(is_valid_date("2026-11-27"));
+        assert!(!is_valid_date("2026/11-27"));
+        assert!(!is_valid_date("2026-11/27"));
+        assert!(!is_valid_date("2026-11-2"));
+        assert!(is_valid_date("2026-02-28"));
+        assert!(!is_valid_date("2026-02-29"));
+        assert!(is_valid_date("2024-02-29"));
+        assert!(!is_valid_date("1900-02-29"));
+        assert!(is_valid_date("2000-02-29"));
+        assert!(is_valid_date("2026-04-30"));
+        assert!(!is_valid_date("2026-04-31"));
+        assert!(!is_valid_date("2026-13-01"));
+    }
 }

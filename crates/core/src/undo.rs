@@ -377,4 +377,43 @@ mod tests {
         assert_eq!(s.undo_bytes().unwrap(), 0);
         assert!(!s.undo().unwrap());
     }
+
+    #[test]
+    fn 戻せる記録の上限() {
+        assert_eq!(super::MAX_STEPS, 100);
+        assert_eq!(super::MAX_BYTES, 33_554_432);
+    }
+
+    #[test]
+    fn 戻せるかとやり直せるかは記録の有無で決まる() {
+        let mut s = Store::open_in_memory().unwrap();
+        assert!(!s.can_undo());
+        assert!(!s.can_redo());
+        assert_eq!(s.undo_bytes().unwrap(), 0);
+        s.create_task(None, &draft("a")).unwrap();
+        s.undo_mark().unwrap();
+        assert!(s.can_undo());
+        assert!(!s.can_redo());
+        assert!(s.undo_bytes().unwrap() > 0);
+        assert!(s.undo().unwrap());
+        assert!(!s.can_undo());
+        assert!(s.can_redo());
+        assert!(s.redo().unwrap());
+        assert!(s.can_undo());
+        assert!(!s.can_redo());
+    }
+
+    #[test]
+    fn 段数の上限ちょうどまでは残る() {
+        let mut s = Store::open_in_memory().unwrap();
+        s.set_undo_limits(2, i64::MAX);
+        for title in ["a", "b", "c"] {
+            s.create_task(None, &draft(title)).unwrap();
+            s.undo_mark().unwrap();
+        }
+        assert!(s.undo().unwrap());
+        assert!(s.undo().unwrap());
+        assert!(!s.undo().unwrap());
+        assert_eq!(titles(&s), ["a"]);
+    }
 }

@@ -463,4 +463,22 @@ mod tests {
         s.set_setting(KEY, Some("{")).unwrap();
         assert!(s.done_notices().unwrap().is_standard());
     }
+
+    #[test]
+    fn 完了の通知の名前() {
+        assert_eq!(When::Each.label(), "1 人ずつ");
+        assert_eq!(When::Finished.label(), "タスクが完了したとき");
+    }
+
+    #[test]
+    fn 担当でない人の完了は役で絞っていないときだけ知らせる() {
+        let st = setup();
+        let all = DoneNotices::default();
+        assert!(all.wants(&st.task, "担当でない人", true, &[]));
+        let only_r = DoneNotices {
+            roles: Roles::of(&[Role::R]),
+            ..DoneNotices::default()
+        };
+        assert!(!only_r.wants(&st.task, "担当でない人", true, &[]));
+    }
 }

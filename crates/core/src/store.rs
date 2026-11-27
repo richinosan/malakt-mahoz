@@ -2746,6 +2746,143 @@ mod tests {
         let s = Store::open(&path).unwrap();
         assert_eq!(s.workspace(&id).unwrap().name, "残る");
     }
+
+    #[test]
+    fn 閉じるときに残すログの大きさは四メビバイト() {
+        assert_eq!(WAL_SIZE_LIMIT, 4_194_304);
+        let dir = tempfile::tempdir().unwrap();
+        let s = Store::open(dir.path().join("a.db")).unwrap();
+        let limit: i64 = s
+            .conn
+            .query_row("PRAGMA journal_size_limit", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(limit, WAL_SIZE_LIMIT);
+    }
+
+    #[test]
+    fn 別の接続が書くとデータの版が変わる() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.db");
+        let a = Store::open(&path).unwrap();
+        let mut b = Store::open(&path).unwrap();
+        let before = a.data_version().unwrap();
+        b.create_task(None, &draft("別の接続")).unwrap();
+        assert_ne!(a.data_version().unwrap(), before);
+    }
+
+    #[test]
+    fn 変更する人を切り替えて読める() {
+        let mut s = store();
+        assert_eq!(s.actor(), &Actor::Me);
+        let before = s.set_actor(Actor::Unknown);
+        assert_eq!(before, Actor::Me);
+        assert_eq!(s.actor(), &Actor::Unknown);
+    }
+
+    #[test]
+    fn 自分の担当ワークスペースを空にするのは受け付ける() {
+        let mut s = store();
+        let me = s.create_person("自分", true).unwrap();
+        let ws = s.create_workspace(None, "W").unwrap();
+        s.set_person_workspaces(&me.id, &[]).unwrap();
+        assert!(s.set_person_workspaces(&me.id, &[ws.id]).is_err());
+    }
+
+    #[test]
+    fn 完了のまま別の項目を変えても全員の完了は残る() {
+        let mut s = store();
+        let a = s.create_person("甲", false).unwrap();
+        let b = s.create_person("乙", false).unwrap();
+        let mut d = draft("t");
+        d.assignee_ids = vec![a.id.clone(), b.id.clone()];
+        let t = s.create_task(None, &d).unwrap();
+        let t = s.set_task_status(&t.id, Status::Completed).unwrap();
+        assert!(t.is_done_by(&a.id) && t.is_done_by(&b.id));
+        let mut d = TaskDraft::from(&t);
+        d.title = "改名".into();
+        let t = s.update_task(&t.id, &d).unwrap();
+        assert_eq!(t.status, Status::Completed);
+        assert!(t.is_done_by(&a.id) && t.is_done_by(&b.id));
+    }
+
+    #[test]
+    fn 一人の完了を取り消しても進行中のままほかの人は完了のまま() {
+        let mut s = store();
+        let people: Vec<Person> = ["甲", "乙", "丙"]
+            .iter()
+            .map(|n| s.create_person(n, false).unwrap())
+            .collect();
+        let mut d = draft("t");
+        d.assignee_ids = people.iter().map(|p| p.id.clone()).collect();
+        let t = s.create_task(None, &d).unwrap();
+        s.set_assignee_done(&t.id, &people[0].id, true).unwrap();
+        s.set_assignee_done(&t.id, &people[1].id, true).unwrap();
+        let t = s.set_assignee_done(&t.id, &people[0].id, false).unwrap();
+        assert!(!t.is_done_by(&people[0].id));
+        assert!(t.is_done_by(&people[1].id));
+        assert_ne!(t.status, Status::Completed);
+    }
+
+    #[test]
+    fn 手動の順はタスクを渡した順になる() {
+        let mut s = store();
+        let a = s.create_task(None, &draft("a")).unwrap();
+        let b = s.create_task(None, &draft("b")).unwrap();
+        let c = s.create_task(None, &draft("c")).unwrap();
+        s.set_task_order(&[c.id.clone(), a.id.clone(), b.id.clone()])
+            .unwrap();
+        let pos = |id: &str| s.task(id).unwrap().position;
+        assert!(pos(&c.id) < pos(&a.id) && pos(&a.id) < pos(&b.id));
+    }
+
+    #[test]
+    fn 書き出すアイコンは同じ画像を一度だけ入れる() {
+        let mut s = store();
+        let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+        png.extend([7u8; 16]);
+        let name = s.add_custom_icon(&png).unwrap();
+        for title in ["W1", "W2"] {
+            let w = s.create_workspace(None, title).unwrap();
+            s.set_workspace_icon(&w.id, Some(&name), None).unwrap();
+        }
+        assert_eq!(s.dump().unwrap().icons.len(), 1);
+    }
+
+    #[test]
+    fn 作ったときの値は空と0を入れない() {
+        let mut s = store();
+        let mut d = draft("t");
+        d.priority = 3;
+        let t = s.create_task(None, &d).unwrap();
+        let created = &s.changes(&t.id).unwrap()[0];
+        assert_eq!(created.field, CREATED_FIELD);
+        let json: serde_json::Value = serde_json::from_str(&created.new_value).unwrap();
+        assert_eq!(json["priority"], "3");
+        assert!(json.get("percent").is_none(), "{json}");
+        assert!(json.get("description").is_none(), "{json}");
+    }
+
+    #[test]
+    fn 変更履歴は件数が少なくても大きさの上限で古いものから消える() {
+        let mut s = store();
+        let t = s.create_task(None, &draft("t")).unwrap();
+        let mut d = TaskDraft::from(&t);
+        let big = "あ".repeat(20_000);
+        for n in 0..12 {
+            d.description = format!("{n}{big}");
+            s.update_task(&t.id, &d).unwrap();
+        }
+        let changes = s.changes(&t.id).unwrap();
+        let bytes: i64 = changes
+            .iter()
+            .map(|c| (c.old_value.len() + c.new_value.len()) as i64)
+            .sum();
+        assert!(bytes <= MAX_CHANGE_BYTES_PER_TASK, "{bytes}");
+        // 上限に収まる分は残る
+        assert!(changes.len() >= 6, "{}", changes.len());
+        assert!(changes.len() < 13, "{}", changes.len());
+        assert_eq!(changes[0].field, CREATED_FIELD);
+    }
 }
 
 #[cfg(test)]

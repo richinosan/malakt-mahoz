@@ -210,4 +210,52 @@ mod tests {
         assert!(error.to_string().contains("Lorem"), "{error}");
         assert!(to.workspaces().unwrap().is_empty());
     }
+
+    #[test]
+    fn 画像の上限と残す時間の定数() {
+        assert_eq!(MAX_CUSTOM_ICON_BYTES, 262_144);
+        assert_eq!(KEEP_UNUSED_MS, 86_400_000);
+    }
+
+    #[test]
+    fn 自分で足した名前は中身のハッシュの形だけ() {
+        let hash = "0123456789abcdef01234567";
+        assert!(is_custom(&format!("custom-{hash}")));
+        assert!(!is_custom(&format!("custom-{}", &hash[..23])));
+        assert!(!is_custom(&format!("custom-{hash}0")));
+        assert!(!is_custom("custom-abc"));
+        assert!(!is_custom(&format!("custom-{}", hash.to_uppercase())));
+        assert!(!is_custom(&format!("custom-{}g", &hash[..23])));
+        assert!(!is_custom(&format!("other-{hash}")));
+        assert!(!is_custom("star"));
+    }
+
+    #[test]
+    fn 上限ちょうどの大きさの画像は足せる() {
+        let mut store = Store::open_in_memory().unwrap();
+        let mut exact = png(0);
+        exact.resize(MAX_CUSTOM_ICON_BYTES, 0);
+        let name = store.add_custom_icon(&exact).unwrap();
+        assert_eq!(store.custom_icon(&name).unwrap(), Some(exact));
+    }
+
+    #[test]
+    fn 足して1日より前の使っていない画像だけ消える() {
+        let mut store = Store::open_in_memory().unwrap();
+        let old = store.add_custom_icon(&png(1)).unwrap();
+        let recent = store.add_custom_icon(&png(2)).unwrap();
+        let back = |name: &str, ms: i64| {
+            store
+                .conn
+                .execute(
+                    "UPDATE custom_icons SET created_at = ?2 WHERE name = ?1",
+                    params![name, now_ms() - ms],
+                )
+                .unwrap();
+        };
+        back(&old, 2 * KEEP_UNUSED_MS);
+        back(&recent, KEEP_UNUSED_MS - 60 * 60 * 1000);
+        assert_eq!(store.purge_custom_icons().unwrap(), 1);
+        assert_eq!(store.custom_icons().unwrap(), [recent]);
+    }
 }

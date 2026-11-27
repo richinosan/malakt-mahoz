@@ -148,4 +148,12 @@ mod tests {
         assert!(clean_all(&many).unwrap_err().contains("50 個まで"));
         assert_eq!(clean_all(&many[..MAX_URLS]).unwrap().len(), MAX_URLS);
     }
+
+    #[test]
+    fn リンクの長さは上限ちょうどまで使える() {
+        let base = "https://a.example/";
+        let pad = |n: usize| format!("{base}{}", "x".repeat(n - base.len()));
+        assert!(clean(&pad(MAX_URL_CHARS)).is_some());
+        assert!(clean(&pad(MAX_URL_CHARS + 1)).is_none());
+    }
 }

@@ -1381,4 +1381,79 @@ mod tests {
         assert_eq!(format_bytes(3 * 1024 * 1024 * 1024), "3.0 GB");
         assert_eq!(format_bytes(u64::MAX), "16777216.0 TB");
     }
+
+    #[test]
+    fn 絞り込みを外しても並び順の向きは残る() {
+        let mut q = ListQuery {
+            q: "探す".into(),
+            status: Some(Status::Completed),
+            descending: true,
+            sort: Sort::Priority,
+            ..Default::default()
+        };
+        q.clear_filters();
+        assert!(q.descending);
+        assert_eq!(q.sort, Sort::Priority);
+        assert_eq!(q.active_count(), 0);
+    }
+
+    #[test]
+    fn パンくずは最上位と今いる所に近い段を残す() {
+        assert_eq!(
+            crumbs(6, 4),
+            vec![
+                Crumb::At(0),
+                Crumb::More(vec![1, 2, 3]),
+                Crumb::At(4),
+                Crumb::At(5)
+            ]
+        );
+        assert_eq!(
+            crumbs(5, 3),
+            vec![Crumb::At(0), Crumb::More(vec![1, 2, 3]), Crumb::At(4)]
+        );
+        assert_eq!(crumbs(3, 3), vec![Crumb::At(0), Crumb::At(1), Crumb::At(2)]);
+    }
+
+    #[test]
+    fn 日付を変えても時刻は残す() {
+        assert_eq!(
+            with_time_of("2026-12-01", Some("2026-11-01 10:30")),
+            "2026-12-01 10:30"
+        );
+        assert_eq!(with_time_of("2026-12-01", Some("2026-11-01")), "2026-12-01");
+        assert_eq!(with_time_of("2026-12-01", None), "2026-12-01");
+    }
+
+    #[test]
+    fn いまの日時は分までの形() {
+        let text = now();
+        let parsed = chrono::NaiveDateTime::parse_from_str(&text, "%Y-%m-%d %H:%M").unwrap();
+        let diff = (chrono::Local::now().naive_local() - parsed)
+            .num_seconds()
+            .abs();
+        assert!(diff < 120, "{text}");
+    }
+
+    #[test]
+    fn 期限の見せ方の名前() {
+        let names: Vec<&str> = DueFormat::ALL.iter().map(|f| f.label()).collect();
+        assert_eq!(names, ["日付", "相対"]);
+    }
+
+    #[test]
+    fn 開始が期限と同じ日で時刻がなければ期限だけ() {
+        assert!(matches!(
+            span_of(Some("2026-11-27"), "2026-11-27"),
+            Span::Due
+        ));
+        assert!(matches!(
+            span_of(Some("2026-11-24"), "2026-11-27"),
+            Span::Range("2026-11-24")
+        ));
+        assert!(matches!(
+            span_of(Some("2026-11-27 09:00"), "2026-11-27 18:00"),
+            Span::Hours("09:00")
+        ));
+    }
 }

@@ -260,4 +260,64 @@ mod tests {
         assert!(Actor::Unknown.person(Some("me")).is_none());
         assert!(Actor::Unknown.machine_name().is_none());
     }
+
+    #[test]
+    fn 誰の操作かの判定() {
+        let ai = Actor::ai("Claude", None);
+        let all = [
+            (Actor::Unknown, true, false, false),
+            (Actor::Me, false, true, false),
+            (Actor::Ticket(None), false, false, false),
+            (ai.clone(), false, false, true),
+            (Actor::agent("x"), false, false, true),
+            (Actor::Command, false, false, true),
+            (Actor::Reminders, false, true, false),
+            (Actor::Repeat, false, false, true),
+            (Actor::Schedule, false, false, true),
+        ];
+        for (actor, unknown, me, machine) in all {
+            assert_eq!(actor.is_unknown(), unknown, "{actor:?}");
+            assert_eq!(actor.is_me(), me, "{actor:?}");
+            assert_eq!(actor.is_machine(), machine, "{actor:?}");
+        }
+        assert_eq!(super::unknown(), Actor::Unknown);
+    }
+
+    #[test]
+    fn 人でない操作の名前と印とアイコン() {
+        let name = |a: &Actor| a.machine_name();
+        assert_eq!(name(&Actor::ai("", None)).as_deref(), Some("AI"));
+        assert_eq!(
+            name(&Actor::ai("Claude", None)).as_deref(),
+            Some("AI（Claude）")
+        );
+        assert_eq!(name(&Actor::agent("")).as_deref(), Some("外部エージェント"));
+        assert_eq!(name(&Actor::agent("Codex")).as_deref(), Some("Codex"));
+        assert_eq!(name(&Actor::Command).as_deref(), Some("コマンド"));
+        assert_eq!(name(&Actor::Repeat).as_deref(), Some("繰り返し"));
+        assert_eq!(name(&Actor::Schedule).as_deref(), Some("定時タスク"));
+        assert_eq!(name(&Actor::Me), None);
+        assert_eq!(name(&Actor::Ticket(None)), None);
+
+        let badge = |a: &Actor| a.badge();
+        assert_eq!(badge(&Actor::Ticket(None)).as_deref(), Some("完了チケット"));
+        assert_eq!(
+            badge(&Actor::ai("Claude", Some("GitHub"))).as_deref(),
+            Some("GitHub")
+        );
+        assert_eq!(badge(&Actor::ai("Claude", None)).as_deref(), Some("AI"));
+        assert_eq!(
+            badge(&Actor::agent("x")).as_deref(),
+            Some("外部エージェント")
+        );
+        assert_eq!(badge(&Actor::Reminders).as_deref(), Some("リマインダー"));
+        assert_eq!(badge(&Actor::Me), None);
+        assert_eq!(badge(&Actor::Command), None);
+
+        assert_eq!(Actor::ai("a", None).machine_icon(), "bot");
+        assert_eq!(Actor::agent("a").machine_icon(), "plug");
+        assert_eq!(Actor::Repeat.machine_icon(), "repeat");
+        assert_eq!(Actor::Schedule.machine_icon(), "alarm-clock");
+        assert_eq!(Actor::Command.machine_icon(), "terminal");
+    }
 }

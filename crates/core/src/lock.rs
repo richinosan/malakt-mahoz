@@ -237,4 +237,10 @@ mod tests {
         disable(&mut s).unwrap();
         assert!(!is_enabled(&s).unwrap());
     }
+
+    #[test]
+    fn ロック中の通知の名前() {
+        assert_eq!(LockedNotices::Title.label(), "タイトルを出す");
+        assert_eq!(LockedNotices::Hidden.label(), "タイトルを出さない");
+    }
 }

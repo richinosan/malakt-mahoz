@@ -912,4 +912,103 @@ mod tests {
             .unwrap()
             .timestamp_millis()
     }
+
+    #[test]
+    fn 項目の名前() {
+        for (field, label) in [
+            ("title", "タイトル"),
+            ("description", "説明"),
+            ("status", "状態"),
+            ("priority", "優先度"),
+            ("start", "開始日"),
+            ("due", "期限"),
+            ("percent", "進捗"),
+            ("parent", "親タスク"),
+            ("assignees", "担当"),
+            ("assignee_roles", "担当者の役"),
+            ("assignee_done", "担当者ごとの完了"),
+            ("categories", "カテゴリ"),
+            ("urls", "URL"),
+            ("workspace", "ワークスペース"),
+            ("link", "表示するワークスペース"),
+            (crate::repeat::FIELD, "繰り返し"),
+            (crate::repeat::AI_FIELD, "繰り返しの AI への指示"),
+            ("ない項目", "その他"),
+        ] {
+            assert_eq!(field_label(field), label, "{field}");
+        }
+    }
+
+    #[test]
+    fn 変更の種類の名前() {
+        assert_eq!(Kind::Added.label(), "追加");
+        assert_eq!(Kind::Removed.label(), "削除");
+        assert_eq!(Kind::Changed.label(), "変更");
+    }
+
+    #[test]
+    fn 値は項目に合わせて表示の文字になる() {
+        let n = &Fake;
+        assert_eq!(show("percent", "50", n), "50%");
+        assert_eq!(show("percent", "0", n), "");
+        assert_eq!(show("categories", "a,b", n), "a、b");
+        assert_eq!(
+            show("urls", "https://a/x,y\nhttps://b", n),
+            "https://a/x,y\nhttps://b"
+        );
+        assert_eq!(
+            show("urls", "https://a\n\nhttps://b\n", n),
+            "https://a\nhttps://b"
+        );
+        assert_eq!(show("workspace", "w1", n), "WS-w1");
+        assert_eq!(show("link", "w1", n), "WS-w1");
+        assert_eq!(show("parent", "t1", n), "T-t1");
+        assert_eq!(show("assignees", "p1,p2", n), "佐藤、鈴木");
+        assert_eq!(show("title", "そのまま", n), "そのまま");
+        assert_eq!(show("percent", "", n), "");
+    }
+
+    #[test]
+    fn 一覧の項目は相手側にないものだけを強調する() {
+        let change = |field: &str, old: &str, new: &str| {
+            field_change(&change_of(field, old, new), &Fake).unwrap()
+        };
+        let c = change("categories", "a,b", "b,c");
+        assert_eq!(
+            c.before_parts,
+            [
+                Part::new(PartKind::Delete, "a"),
+                Part::new(PartKind::Equal, "、"),
+                Part::new(PartKind::Equal, "b"),
+            ]
+        );
+        assert_eq!(
+            c.after_parts,
+            [
+                Part::new(PartKind::Equal, "b"),
+                Part::new(PartKind::Equal, "、"),
+                Part::new(PartKind::Insert, "c"),
+            ]
+        );
+        let c = change("urls", "https://a/x,y\nhttps://b", "https://b\nhttps://c");
+        assert_eq!(
+            c.after_parts,
+            [
+                Part::new(PartKind::Equal, "https://b"),
+                Part::new(PartKind::Equal, "\n"),
+                Part::new(PartKind::Insert, "https://c"),
+            ]
+        );
+        assert_eq!(
+            c.before_parts[0],
+            Part::new(PartKind::Delete, "https://a/x,y")
+        );
+        let c = change("assignees", "p1", "p1,p2");
+        assert_eq!(c.after_parts[0], Part::new(PartKind::Equal, "佐藤"));
+        assert_eq!(c.after_parts[2], Part::new(PartKind::Insert, "鈴木"));
+    }
+
+    fn change_of(field: &str, old: &str, new: &str) -> Change {
+        change("c", 0, Actor::Me, field, old, new)
+    }
 }

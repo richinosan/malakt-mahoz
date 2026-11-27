@@ -542,4 +542,42 @@ mod tests {
             None
         );
     }
+
+    #[test]
+    fn 優先度は9まで入れられる() {
+        use super::clean;
+        let base = TaskDefaults {
+            workspace_id: "w".into(),
+            ..Default::default()
+        };
+        let ok = clean(&TaskDefaults {
+            priority: Some(9),
+            ..base.clone()
+        })
+        .unwrap();
+        assert_eq!(ok.priority, Some(9));
+        assert!(clean(&TaskDefaults {
+            priority: Some(10),
+            ..base
+        })
+        .is_err());
+    }
+
+    #[test]
+    fn 一緒に表示するワークスペースは上限ちょうどまで選べる() {
+        use super::clean;
+        let links = |n: usize| TaskDefaults {
+            workspace_id: "w".into(),
+            link_workspace_ids: (0..n).map(|i| format!("l{i}")).collect(),
+            ..Default::default()
+        };
+        assert_eq!(
+            clean(&links(MAX_DEFAULT_LINKS))
+                .unwrap()
+                .link_workspace_ids
+                .len(),
+            MAX_DEFAULT_LINKS
+        );
+        assert!(clean(&links(MAX_DEFAULT_LINKS + 1)).is_err());
+    }
 }
