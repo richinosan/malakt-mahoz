@@ -30,6 +30,7 @@ pub mod term;
 pub mod theme;
 pub mod update;
 mod webview;
+pub mod ws_drag;
 
 use std::path::PathBuf;
 
