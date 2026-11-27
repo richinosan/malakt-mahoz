@@ -6,7 +6,7 @@ use std::collections::VecDeque;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
-use gpui_kit::test::{ClickOptions, TestWindowExt};
+use gpui_kit::test::{ClickOptions, TestQueryExt, TestWindowExt};
 use gpui_kit::{
     point, px, size, AnyWindowHandle, AppContext, Bounds, Entity, MouseButton, Pixels, Point,
     RenderImage, TestAppContext, WindowBounds, WindowOptions,
@@ -1312,4 +1312,145 @@ fn the_small_window_takes_the_browser_keys(cx: &mut TestAppContext) {
     assert!(fake.dropped.get());
     assert!(terms(cx, |t| t.page(small).is_none()));
     assert_eq!(cx.update(|cx| cx.windows().len()), 1);
+}
+
+/// URL の欄に出ている文字。
+fn bar(cx: &mut TestAppContext, window: AnyWindowHandle) -> String {
+    let mut shown = String::new();
+    ui(cx, window, |window, _| {
+        shown = window
+            .find_by_label("URL")
+            .value()
+            .unwrap_or_default()
+            .to_owned();
+    });
+    shown
+}
+
+/// ページの場所が変わった（OS の部品の場所を変えてから知らせる）。
+fn move_page(world: &World, tab: u64, url: &str, event: Event) {
+    *world.fake(tab).url.borrow_mut() = url.to_owned();
+    world.send(tab, event);
+}
+
+/// URL の欄を押してからページに戻ると、そのあとの移動で URL の欄が変わる。
+/// リンクで読み込んだとき、リダイレクトしたとき、読み込まずに場所だけ変わったとき（GitHub など）のどれも。
+#[gpui_kit::test]
+fn the_url_bar_follows_the_page_after_going_back_into_it(cx: &mut TestAppContext) {
+    let world = start(cx, Store::open_in_memory().unwrap());
+    let (window, _view) = open(cx);
+    ui(cx, window, |window, cx| window.click("ai-toggle", cx));
+    let tab = open_page(cx, window, "https://example.com/a");
+    assert_eq!(bar(cx, window), "https://example.com/a");
+    // URL の欄を押してから、ページを押す
+    ui(cx, window, |window, cx| window.click("browser-url", cx));
+    world.send(tab, Event::Focused);
+    ui(cx, window, |_, _| {});
+    // ページの中のリンク
+    let load = |done: bool, url: &str| Event::Load {
+        done,
+        url: url.into(),
+    };
+    move_page(
+        &world,
+        tab,
+        "https://example.com/b",
+        load(false, "https://example.com/b"),
+    );
+    ui(cx, window, |_, _| {});
+    assert_eq!(bar(cx, window), "https://example.com/b");
+    // リダイレクトで、読み込み終わった場所が変わる
+    move_page(
+        &world,
+        tab,
+        "https://example.com/c",
+        load(true, "https://example.com/c"),
+    );
+    ui(cx, window, |_, _| {});
+    assert_eq!(bar(cx, window), "https://example.com/c");
+    // 読み込まずに場所だけ変わる（history.pushState、戻る・進む、# の移動）
+    move_page(&world, tab, "https://example.com/c/issues", Event::Moved);
+    ui(cx, window, |_, _| {});
+    assert_eq!(bar(cx, window), "https://example.com/c/issues");
+    assert_eq!(
+        terms(cx, |t| t.page(tab).unwrap().url.clone()),
+        "https://example.com/c/issues"
+    );
+}
+
+/// URL の欄を押して選んだだけなら、ページの場所が変われば欄も変わる。
+/// 書き換えている間は書き換えず、戻る・進む・読み込み直すを押したら、ページの場所に戻す。
+#[gpui_kit::test]
+fn the_url_bar_keeps_only_what_is_being_typed(cx: &mut TestAppContext) {
+    let world = start(cx, Store::open_in_memory().unwrap());
+    let (window, _view) = open(cx);
+    ui(cx, window, |window, cx| window.click("ai-toggle", cx));
+    let tab = open_page(cx, window, "https://example.com/a");
+    ui(cx, window, |window, cx| window.click("browser-url", cx));
+    move_page(&world, tab, "https://example.com/b", Event::Moved);
+    ui(cx, window, |_, _| {});
+    assert_eq!(bar(cx, window), "https://example.com/b", "選んだだけ");
+    // 書いている途中は、そのまま
+    ui(cx, window, |window, cx| window.input("rust gpui", cx));
+    move_page(&world, tab, "https://example.com/c", Event::Moved);
+    ui(cx, window, |_, _| {});
+    assert_eq!(bar(cx, window), "rust gpui", "書いている途中");
+    // 戻るを押したら、書きかけを捨ててページの場所を出す
+    world.fake(tab).history.set((true, false));
+    world.send(tab, Event::Title("C".into()));
+    ui(cx, window, |_, _| {});
+    ui(cx, window, |window, cx| window.click("browser-back", cx));
+    assert!(world.fake(tab).calls.borrow().contains(&"back".to_owned()));
+    assert_eq!(bar(cx, window), "https://example.com/c");
+    move_page(&world, tab, "https://example.com/b", Event::Moved);
+    ui(cx, window, |_, _| {});
+    assert_eq!(bar(cx, window), "https://example.com/b");
+}
+
+/// 書きかけの URL があっても、タブを切り替えたらそのタブの場所を出す。
+#[gpui_kit::test]
+fn the_url_bar_shows_the_tab_that_is_switched_to(cx: &mut TestAppContext) {
+    let world = start(cx, Store::open_in_memory().unwrap());
+    let (window, _view) = open(cx);
+    ui(cx, window, |window, cx| window.click("ai-toggle", cx));
+    let a = open_page(cx, window, "https://example.com/a");
+    let b = open_page(cx, window, "https://example.com/b");
+    assert_eq!(bar(cx, window), "https://example.com/b");
+    ui(cx, window, |window, cx| window.click("browser-url", cx));
+    ui(cx, window, |window, cx| window.input("書きかけ", cx));
+    cx.update(|cx| term::shared(cx).update(cx, |t, cx| t.activate(Some(a), cx)));
+    ui(cx, window, |_, _| {});
+    assert_eq!(bar(cx, window), "https://example.com/a");
+    // 見ていないタブの場所が変わっても、今のタブの欄はそのまま
+    move_page(&world, b, "https://example.com/b2", Event::Moved);
+    ui(cx, window, |_, _| {});
+    assert_eq!(bar(cx, window), "https://example.com/a");
+    cx.update(|cx| term::shared(cx).update(cx, |t, cx| t.activate(Some(b), cx)));
+    ui(cx, window, |_, _| {});
+    assert_eq!(bar(cx, window), "https://example.com/b2");
+}
+
+/// 小さなウィンドウのページも、読み込まずに変わった場所を覚える（「ブラウザで開く」「タブで開く」で使う）。
+#[gpui_kit::test]
+fn the_small_window_follows_the_page(cx: &mut TestAppContext) {
+    let world = start(cx, Store::open_in_memory().unwrap());
+    let (window, _view) = open(cx);
+    ui(cx, window, |window, cx| window.click("ai-toggle", cx));
+    let tab = open_page(cx, window, "https://example.com/");
+    world.send(tab, Event::Popup("https://example.com/b".into()));
+    cx.run_until_parked();
+    let small = terms(cx, |t| t.pages.iter().find(|p| p.popup).map(|p| p.id))
+        .expect("小さなウィンドウのページがある");
+    let popup = cx
+        .update(|cx| cx.windows())
+        .into_iter()
+        .find(|w| *w != window)
+        .expect("小さなウィンドウが開く");
+    ui(cx, popup, |_, _| {});
+    move_page(&world, small, "https://example.com/b#2", Event::Moved);
+    ui(cx, popup, |_, _| {});
+    assert_eq!(
+        terms(cx, |t| t.page(small).unwrap().url.clone()),
+        "https://example.com/b#2"
+    );
 }

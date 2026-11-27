@@ -120,6 +120,9 @@ pub enum Event {
     Load { done: bool, url: String },
     /// ページの題名が変わった。
     Title(String),
+    /// ページを読み込まずに場所が変わった（`history.pushState`、戻る・進む、`#` の移動）。
+    /// 場所は OS の部品から読む（ページが書いた文字は信じない）。
+    Moved,
     /// ページが新しいウィンドウで開こうとした。アプリの新しいタブで開く。
     NewTab(String),
     /// ページの中のリンクをホイールで押した。小さなウィンドウで開く。
@@ -928,6 +931,8 @@ impl Terms {
                 page.focused = true;
                 page.forget_shot();
             }
+            // 場所は下で OS の部品から読む
+            Event::Moved => {}
             Event::NewTab(_)
             | Event::Popup(_)
             | Event::External(_)
@@ -1441,24 +1446,27 @@ impl BrowserPane {
     /// ブラウザのキー（[`crate::shell_keys`]）を受ける。
     fn with_keys(&self, d: Stateful<Div>, cx: &mut Context<Self>) -> Stateful<Div> {
         use crate::shell_keys::*;
-        let page_step = |this: &mut Self, step: Step, cx: &mut Context<Self>| {
-            if let Some(id) = this.page_id(cx) {
-                this.step(id, step, cx);
-            }
-        };
+        let page_step =
+            |this: &mut Self, step: Step, window: &mut Window, cx: &mut Context<Self>| {
+                if let Some(id) = this.page_id(cx) {
+                    this.step(id, step, window, cx);
+                }
+            };
         let zoom = |this: &mut Self, zoom: Zoom, cx: &mut Context<Self>| {
             if let Some(id) = this.page_id(cx) {
                 this.terms
                     .update(cx, |terms, cx| terms.zoom_page(id, zoom, cx));
             }
         };
-        d.on_action(
-            cx.listener(move |this, _: &BrowserReload, _, cx| page_step(this, Step::Reload, cx)),
-        )
-        .on_action(cx.listener(move |this, _: &BrowserBack, _, cx| page_step(this, Step::Back, cx)))
-        .on_action(
-            cx.listener(move |this, _: &BrowserForward, _, cx| page_step(this, Step::Forward, cx)),
-        )
+        d.on_action(cx.listener(move |this, _: &BrowserReload, window, cx| {
+            page_step(this, Step::Reload, window, cx)
+        }))
+        .on_action(cx.listener(move |this, _: &BrowserBack, window, cx| {
+            page_step(this, Step::Back, window, cx)
+        }))
+        .on_action(cx.listener(move |this, _: &BrowserForward, window, cx| {
+            page_step(this, Step::Forward, window, cx)
+        }))
         .on_action(cx.listener(|this, _: &FocusAddress, window, cx| this.focus_address(window, cx)))
         .on_action(cx.listener(|this, _: &NewBrowserTab, _, cx| {
             this.terms.update(cx, |terms, cx| {
@@ -1488,6 +1496,25 @@ impl BrowserPane {
         )
     }
 
+    /// URL の欄に書いている途中か。欄にキーの入力先があり、出した URL から書き換えているときだけ。
+    /// 押して選んだだけのときや、ページに移ったあとは、ページの場所が変われば欄も変える。
+    fn editing(&self, id: u64, window: &Window, cx: &App) -> bool {
+        let bar = self.bar.read(cx);
+        bar.focus_handle(cx).is_focused(window)
+            && self
+                .shown
+                .as_ref()
+                .is_some_and(|(shown, url)| *shown == id && bar.value() != bar_text(url))
+    }
+
+    /// URL の欄から離れる。書きかけの URL は捨てて、次に描くときにページの場所を出し直す。
+    fn leave_bar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.bar.read(cx).focus_handle(cx).is_focused(window) {
+            window.focus(&self.focus, cx);
+            self.shown = None;
+        }
+    }
+
     /// 場所の欄に書いた所を開く。
     fn go(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(id) = self.terms.read(cx).active_page().map(|p| p.id) else {
@@ -1503,9 +1530,20 @@ impl BrowserPane {
         cx.notify();
     }
 
-    fn step(&self, id: u64, step: Step, cx: &mut App) {
+    /// 戻る・進む・読み込み直す・止める。URL の欄に書きかけの URL は捨てて、ページの場所に戻す。
+    fn step(&mut self, id: u64, step: Step, window: &mut Window, cx: &mut Context<Self>) {
+        self.leave_bar(window, cx);
         self.terms
             .update(cx, |terms, cx| terms.page_step(id, step, cx));
+    }
+}
+
+/// URL の欄に出す文字。何もないタブは空にする。
+fn bar_text(url: &str) -> String {
+    if url == BLANK {
+        String::new()
+    } else {
+        url.to_owned()
     }
 }
 
@@ -1878,20 +1916,23 @@ impl Render for BrowserPane {
             return div().into_any_element();
         };
         // ページの中にキーの入力先があるときも、アプリではブラウザの画面にいることにする。
-        // ページの中で押したキー（Ctrl+R など）は、ここで受ける
-        if page_focused && !elsewhere && !self.focus.contains_focused(window, cx) {
+        // ページの中で押したキー（Ctrl+R など）は、ここで受ける。URL の欄や検索の欄にいたら、
+        // そこから離れる（離れないと、欄に書いている途中とみなして URL を出し直さない）
+        if page_focused && !elsewhere && !self.focus.is_focused(window) {
+            self.leave_bar(window, cx);
             window.focus(&self.focus, cx);
         }
-        // 場所の欄は、書いている間は書き換えない
-        let bar_focused = self.bar.read(cx).focus_handle(cx).is_focused(window);
-        if self.shown.as_ref() != Some(&(id, url.clone())) && !bar_focused {
-            let shown = if url == BLANK {
-                String::new()
-            } else {
-                url.clone()
-            };
-            self.bar
-                .update(cx, |bar, cx| bar.set_value(shown, window, cx));
+        // 場所の欄は、ページの場所に合わせる。書いている間だけは書き換えない
+        if self.shown.as_ref() != Some(&(id, url.clone())) && !self.editing(id, window, cx) {
+            let text = bar_text(&url);
+            self.bar.update(cx, |bar, cx| {
+                // 欄を押して選んだまま場所が変わったら、新しい URL を選び直す（打つとそのまま置き換わる）
+                let selected = bar.focus_handle(cx).is_focused(window);
+                bar.set_value(text, window, cx);
+                if selected {
+                    bar.select_all(window, cx);
+                }
+            });
             self.shown = Some((id, url.clone()));
         }
         if focus_bar {
@@ -1919,20 +1960,26 @@ impl Render for BrowserPane {
                 can_back,
                 tool("browser-back", "arrow-left", "戻る")
                     .disabled(!can_back)
-                    .on_click(cx.listener(move |this, _, _, cx| this.step(id, Step::Back, cx))),
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.step(id, Step::Back, window, cx)
+                    })),
             ))
             .child(feel::gloss_when(
                 can_forward,
                 tool("browser-forward", "arrow-right", "進む")
                     .disabled(!can_forward)
-                    .on_click(cx.listener(move |this, _, _, cx| this.step(id, Step::Forward, cx))),
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.step(id, Step::Forward, window, cx)
+                    })),
             ))
             .child(feel::gloss(if loading {
-                tool("browser-stop", "x", "読み込みを止める")
-                    .on_click(cx.listener(move |this, _, _, cx| this.step(id, Step::Stop, cx)))
+                tool("browser-stop", "x", "読み込みを止める").on_click(
+                    cx.listener(move |this, _, window, cx| this.step(id, Step::Stop, window, cx)),
+                )
             } else {
-                tool("browser-reload", "rotate-cw", "読み込み直す")
-                    .on_click(cx.listener(move |this, _, _, cx| this.step(id, Step::Reload, cx)))
+                tool("browser-reload", "rotate-cw", "読み込み直す").on_click(
+                    cx.listener(move |this, _, window, cx| this.step(id, Step::Reload, window, cx)),
+                )
             }))
             .child(
                 div()
@@ -1993,9 +2040,9 @@ impl Render for BrowserPane {
                         .label("もう一度開く")
                         .ghost()
                         .small()
-                        .on_click(
-                            cx.listener(move |this, _, _, cx| this.step(id, Step::Reload, cx)),
-                        ),
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.step(id, Step::Reload, window, cx)
+                        })),
                 ))
                 .into_any_element()
         } else if elsewhere {
