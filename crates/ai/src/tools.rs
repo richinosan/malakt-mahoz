@@ -118,6 +118,32 @@ fn rule_fields(extra: Value) -> Value {
     )
 }
 
+fn schedule_fields(extra: Value) -> Value {
+    with(
+        json!({
+            "title": {"type": "string", "description": format!("作るタスクのタイトル（{} 文字まで）", malakt_core::schedule::MAX_TITLE_CHARS)},
+            "schedule": {
+                "type": "object",
+                "description": "いつタスクを作るか",
+                "properties": {
+                    "unit": {"type": "string", "enum": ["day", "week", "month", "year"]},
+                    "every": {"type": "integer", "minimum": 1, "maximum": malakt_core::repeat::MAX_EVERY, "description": "何日・何週間・何か月・何年ごとか（標準は 1）"},
+                    "weekdays": {"type": "array", "items": {"type": "integer", "minimum": 0, "maximum": 6}, "description": "unit が week のときの曜日。0 = 月 … 6 = 日。省くと起点の曜日"},
+                    "from": {"type": "string", "description": "数え始めの日 YYYY-MM-DD。毎月・毎年の日付になる。省くと今日（変えるときは今の起点）"},
+                    "time": {"type": "string", "description": "タスクを作る時刻 HH:MM。空で 0:00"},
+                },
+                "required": ["unit"],
+            },
+            "ai_instruction": {"type": "string", "description": "作ったタスクで AI に頼むこと。空で頼まない"},
+            "assignee_ids": {"type": "array", "items": {"type": "string"}, "description": "作るタスクの担当。[] でワークスペースの既定値"},
+            "due_days": {"type": ["integer", "null"], "minimum": 0, "maximum": malakt_core::schedule::MAX_DUE_DAYS, "description": "期限を作った日の何日後にするか（0 で当日）。null でワークスペースの既定値"},
+            "due_time": {"type": ["string", "null"], "description": "期限の時刻 HH:MM。null か空で日付だけ"},
+            "enabled": {"type": "boolean", "description": "false で止める"},
+        }),
+        extra,
+    )
+}
+
 fn with(mut base: Value, extra: Value) -> Value {
     if let (Some(base), Value::Object(extra)) = (base.as_object_mut(), extra) {
         base.extend(extra);
@@ -461,6 +487,26 @@ pub fn definitions() -> Vec<ToolDef> {
             ),
         },
         ToolDef {
+            name: "list_schedules",
+            description: "定時タスク（決まった時刻が来るたびに、雛形から新しいタスクを 1 件作る設定）の一覧を返す。workspace_id を省くと、ワークスペースの外に作るものと、ワークスペースごとのものをすべて返す。",
+            schema: object(json!({"workspace_id": {"type": "string"}}), &[]),
+        },
+        ToolDef {
+            name: "create_schedule",
+            description: "定時タスクを足す。時刻が来るたびに、そのワークスペース（workspace_id を省くとワークスペースの外）に新しいタスクを 1 件作る。作ったタスクにはワークスペースの既定値が入り、assignee_ids と due_days を渡すとそちらを使う。ai_instruction を付けると、作ったタスクでアプリの AI がその指示を実行して、結果をそのタスクにコメントする（例: 週次定例の報告の下書き）。前のタスクは書き換えない。1 つのタスクを毎回写すなら set_repeat。アプリが動いている間だけ動く。schedule を省くと今日の曜日の毎週 9:00。",
+            schema: object(schedule_fields(json!({"workspace_id": {"type": "string"}})), &["title"]),
+        },
+        ToolDef {
+            name: "update_schedule",
+            description: "定時タスクを変える。渡した項目だけが変わる。schedule を変えたときと、enabled を true にしたときは、次の時刻を今から決め直す。",
+            schema: object(schedule_fields(json!({"id": {"type": "string"}})), &["id"]),
+        },
+        ToolDef {
+            name: "delete_schedule",
+            description: "定時タスクを削除する。作ったタスクは残る。止めるだけなら update_schedule で enabled を false にする。",
+            schema: object(json!({"id": {"type": "string"}}), &["id"]),
+        },
+        ToolDef {
             name: "get_done_notices",
             description: "ほかの人が完了チケットで完了を報告したときに、通知を作るかの設定を返す。",
             schema: object(json!({}), &[]),
@@ -544,6 +590,9 @@ pub const WRITES: &[&str] = &[
     "update_ai_rule",
     "delete_ai_rule",
     "set_repeat",
+    "create_schedule",
+    "update_schedule",
+    "delete_schedule",
 ];
 
 /// 確認に出す文。`shell` は、[`RUN_SHELL`] のコマンドが動くシェル。
@@ -1163,6 +1212,130 @@ fn due_alerts_json(store: &Store, task_id: Option<&str>) -> Result<Value, String
 }
 
 /// タスクの繰り返し。なければ null。
+/// 繰り返しの決まり（`set_repeat` の repeat、定時タスクの schedule）を読む。`from` を省いたら `default_from`。
+fn parse_rule(
+    v: &Value,
+    key: &str,
+    default_from: &str,
+) -> Result<malakt_core::repeat::Rule, String> {
+    use malakt_core::repeat::{Rule, Unit};
+    let unit = v
+        .get("unit")
+        .and_then(Value::as_str)
+        .and_then(Unit::parse)
+        .ok_or_else(|| format!("{key}.unit は day・week・month・year のどれかです"))?;
+    let every = match v.get("every") {
+        None | Some(Value::Null) => 1,
+        Some(n) => n
+            .as_u64()
+            .and_then(|n| u32::try_from(n).ok())
+            .ok_or_else(|| format!("{key}.every は 1 以上の整数です: {n}"))?,
+    };
+    let weekdays = match v.get("weekdays") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(Value::Array(days)) => days
+            .iter()
+            .map(|d| {
+                d.as_u64()
+                    .and_then(|n| u8::try_from(n).ok())
+                    .ok_or_else(|| format!("{key}.weekdays は 0〜6 です: {d}"))
+            })
+            .collect::<Result<_, String>>()?,
+        Some(d) => return Err(format!("{key}.weekdays は整数の並びです: {d}")),
+    };
+    let from = match v.get("from").and_then(Value::as_str) {
+        Some(from) if !from.trim().is_empty() => from.trim().to_owned(),
+        _ => default_from.to_owned(),
+    };
+    let time = v
+        .get("time")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(str::to_owned);
+    Rule {
+        unit,
+        every,
+        weekdays,
+        from,
+        time,
+    }
+    .clean()
+    .map_err(|e| e.to_string())
+}
+
+fn rule_value(rule: &malakt_core::repeat::Rule) -> Value {
+    json!({
+        "unit": rule.unit.as_str(),
+        "every": rule.every,
+        "weekdays": rule.weekdays,
+        "from": rule.from,
+        "time": rule.time,
+        "text": rule.label(),
+    })
+}
+
+fn schedule_json(s: &malakt_core::schedule::Schedule) -> Value {
+    json!({
+        "id": s.id,
+        "workspace_id": s.workspace_id,
+        "title": s.title,
+        "schedule": rule_value(&s.rule),
+        "ai_instruction": s.ai,
+        "assignee_ids": s.assignee_ids,
+        "due_days": s.due_days,
+        "due_time": s.due_time,
+        "enabled": s.enabled,
+        "next_at": s.next_at,
+        "next_text": malakt_core::repeat::next_label(&s.next_at),
+    })
+}
+
+/// 定時タスクの書き換え。渡された項目だけを持つ。`from` は決まりの起点を省いたときの日。
+fn schedule_patch(
+    args: &Value,
+    from: &str,
+) -> Result<malakt_core::schedule::SchedulePatch, String> {
+    let rule = match args.get("schedule") {
+        None | Some(Value::Null) => None,
+        Some(v) => Some(parse_rule(v, "schedule", from)?),
+    };
+    let enabled = match args.get("enabled") {
+        None => None,
+        Some(Value::Bool(on)) => Some(*on),
+        Some(other) => return Err(format!("enabled が正しくありません: {other}")),
+    };
+    let due_days = match args.get("due_days") {
+        None => None,
+        Some(Value::Null) => Some(None),
+        Some(n) => {
+            Some(Some(n.as_i64().ok_or_else(|| {
+                format!("due_days は 0 以上の整数か null です: {n}")
+            })?))
+        }
+    };
+    let due_time = match args.get("due_time") {
+        None => None,
+        Some(Value::Null) => Some(None),
+        Some(Value::String(t)) if t.trim().is_empty() => Some(None),
+        Some(Value::String(t)) => Some(Some(t.trim().to_owned())),
+        Some(other) => return Err(format!("due_time は HH:MM です: {other}")),
+    };
+    let assignee_ids = match args.get("assignee_ids") {
+        None => None,
+        Some(v) => Some(strings(v, "assignee_ids")?),
+    };
+    Ok(malakt_core::schedule::SchedulePatch {
+        title: optional(args, "title").map(str::to_owned),
+        rule,
+        ai: optional(args, "ai_instruction").map(str::to_owned),
+        assignee_ids,
+        due_days,
+        due_time,
+        enabled,
+    })
+}
+
 fn repeat_json(store: &Store, task_id: &str) -> Result<Value, String> {
     use malakt_core::repeat;
     let Some(r) = store.repeat(task_id).map_err(|e| e.to_string())? else {
@@ -1675,7 +1848,7 @@ pub fn execute(
         }
         "get_due_alerts" => due_alerts_json(store, optional(args, "task_id"))?,
         "set_repeat" => {
-            use malakt_core::repeat::{self, Rule, Unit};
+            use malakt_core::repeat;
             let id = required(args, "task_id")?;
             let task = store.task(id).map_err(core)?;
             let old = store.repeat(id).map_err(core)?;
@@ -1685,53 +1858,11 @@ pub fn execute(
                 None => None,
                 Some(Value::Null) => Some(None),
                 Some(v) => {
-                    let unit = v
-                        .get("unit")
-                        .and_then(Value::as_str)
-                        .and_then(Unit::parse)
-                        .ok_or("repeat.unit は day・week・month・year のどれかです")?;
-                    let every = match v.get("every") {
-                        None | Some(Value::Null) => 1,
-                        Some(n) => n
-                            .as_u64()
-                            .and_then(|n| u32::try_from(n).ok())
-                            .ok_or_else(|| format!("repeat.every は 1 以上の整数です: {n}"))?,
-                    };
-                    let weekdays = match v.get("weekdays") {
-                        None | Some(Value::Null) => Vec::new(),
-                        Some(Value::Array(days)) => days
-                            .iter()
-                            .map(|d| {
-                                d.as_u64()
-                                    .and_then(|n| u8::try_from(n).ok())
-                                    .ok_or_else(|| format!("repeat.weekdays は 0〜6 です: {d}"))
-                            })
-                            .collect::<Result<_, String>>()?,
-                        Some(d) => return Err(format!("repeat.weekdays は整数の並びです: {d}")),
-                    };
-                    let from = match v.get("from").and_then(Value::as_str) {
-                        Some(from) if !from.trim().is_empty() => from.trim().to_owned(),
-                        // 変えるときは、今の起点のまま
-                        _ => old
-                            .as_ref()
-                            .map_or_else(|| repeat::anchor(&task, &now), |r| r.rule.from.clone()),
-                    };
-                    let time = v
-                        .get("time")
-                        .and_then(Value::as_str)
-                        .map(str::trim)
-                        .filter(|t| !t.is_empty())
-                        .map(str::to_owned);
-                    let rule = Rule {
-                        unit,
-                        every,
-                        weekdays,
-                        from,
-                        time,
-                    }
-                    .clean()
-                    .map_err(core)?;
-                    Some(Some(rule))
+                    // 変えるときは、今の起点のまま
+                    let from = old
+                        .as_ref()
+                        .map_or_else(|| repeat::anchor(&task, &now), |r| r.rule.from.clone());
+                    Some(Some(parse_rule(v, "repeat", &from)?))
                 }
             };
             let ai = optional(args, "ai_instruction");
@@ -1762,6 +1893,98 @@ pub fn execute(
                 }
             }
             json!({"task_id": id, "repeat": repeat_json(store, id)?})
+        }
+        "list_schedules" => match optional(args, "workspace_id").filter(|w| !w.is_empty()) {
+            Some(id) => {
+                store.workspace(id).map_err(core)?;
+                store
+                    .schedules(Some(id))
+                    .map_err(core)?
+                    .iter()
+                    .map(schedule_json)
+                    .collect()
+            }
+            None => {
+                let mut workspaces = Vec::new();
+                for w in store.workspaces().map_err(core)? {
+                    let list = store.schedules(Some(&w.id)).map_err(core)?;
+                    if !list.is_empty() {
+                        workspaces.push(json!({
+                            "id": w.id,
+                            "name": w.name,
+                            "schedules": list.iter().map(schedule_json).collect::<Vec<_>>(),
+                        }));
+                    }
+                }
+                let outside: Vec<Value> = store
+                    .schedules(None)
+                    .map_err(core)?
+                    .iter()
+                    .map(schedule_json)
+                    .collect();
+                json!({"outside": outside, "workspaces": workspaces})
+            }
+        },
+        "create_schedule" => {
+            let workspace = optional(args, "workspace_id").filter(|w| !w.is_empty());
+            let now = malakt_core::view::now();
+            // 先に全部の値を確かめ、1 つでも正しくなければ何も作らない
+            let patch = schedule_patch(args, malakt_core::date_of(&now))?;
+            let title = required(args, "title")?;
+            if let Some(ids) = &patch.assignee_ids {
+                let people = store.people().map_err(core)?;
+                if let Some(id) = ids.iter().find(|id| !people.iter().any(|p| &p.id == *id)) {
+                    return Err(format!("担当者 {id} が見つかりません"));
+                }
+            }
+            if let Some(text) = &patch.ai {
+                if text.trim().chars().count() > malakt_core::repeat::MAX_AI_CHARS {
+                    return Err(format!(
+                        "AI への指示は {} 文字までです",
+                        malakt_core::repeat::MAX_AI_CHARS
+                    ));
+                }
+            }
+            if let Some(Some(days)) = patch.due_days {
+                if !(0..=malakt_core::schedule::MAX_DUE_DAYS).contains(&days) {
+                    return Err(format!(
+                        "due_days は 0 から {} です",
+                        malakt_core::schedule::MAX_DUE_DAYS
+                    ));
+                }
+            }
+            if let Some(Some(time)) = &patch.due_time {
+                if !malakt_core::is_valid_time(time) {
+                    return Err(format!("due_time が正しくありません: {time}"));
+                }
+            }
+            let made = store
+                .create_schedule(workspace, title, patch.rule.as_ref(), &now)
+                .map_err(core)?;
+            let rest = malakt_core::schedule::SchedulePatch {
+                title: None,
+                rule: None,
+                ..patch
+            };
+            match store.update_schedule(&made.id, &rest, &now) {
+                Ok(s) => schedule_json(&s),
+                Err(e) => {
+                    // 半分だけの定時タスクを残さない
+                    store.delete_schedule(&made.id).map_err(core)?;
+                    return Err(core(e));
+                }
+            }
+        }
+        "update_schedule" => {
+            let id = required(args, "id")?;
+            let old = store.schedule(id).map_err(core)?;
+            let now = malakt_core::view::now();
+            let patch = schedule_patch(args, &old.rule.from)?;
+            schedule_json(&store.update_schedule(id, &patch, &now).map_err(core)?)
+        }
+        "delete_schedule" => {
+            store.delete_schedule(required(args, "id")?).map_err(core)?;
+            json!({"deleted": true})
         }
         "set_due_alerts" => {
             let task_id = optional(args, "task_id");
@@ -2100,6 +2323,10 @@ pub fn summary(name: &str, args: &Value) -> String {
         "create_ai_rule" => format!("AI のルールを追加: {}", arg("name")),
         "update_ai_rule" => "AI のルールを変更".into(),
         "delete_ai_rule" => "AI のルールを削除".into(),
+        "list_schedules" => "定時タスクを取得".into(),
+        "create_schedule" => format!("定時タスクを追加: {}", arg("title")),
+        "update_schedule" => "定時タスクを変更".into(),
+        "delete_schedule" => "定時タスクを削除".into(),
         "set_repeat" => match args.get("repeat") {
             Some(Value::Null) => "繰り返しを外す".into(),
             _ => "繰り返しを設定".into(),
@@ -2223,7 +2450,7 @@ pub fn system_prompt(rules: &str) -> String {
          - タスクの追加、書き換え、整理のように元に戻せる操作は、「〜しましょうか」と聞き返さずに実行し、結果だけを伝えてください。聞き返すのは、頼まれたことが 2 通り以上に読めて、どちらかで結果が大きく変わるときだけです。\n\
          - ツールが失敗したら、やり方を変えてやり直してください。返事には最後の結果だけを書き、途中の失敗、その原因、ツールやシェルの事情は書かないでください。どうしてもできなかったときだけ、できなかったことと、ユーザーにしてほしいことを 1 文で書いてください。\n\
          - {COMMENT_RULE}ユーザーが文面を決めてコメントを頼んだときは、その文面のまま書いてください。\n\
-         - 「毎週」「毎朝」のように、決まった間隔でするタスクを頼まれたら、set_repeat でタスクに繰り返しを付けてください。回を作ったときに AI にしてほしい作業（報告の下書きなど）は、set_repeat の ai_instruction に書いてください。\n\
+         - 「毎週」「毎朝」のように、決まった時刻ごとに新しいタスクを作ってほしいと頼まれたら（週次定例の報告など）、create_schedule で定時タスクにしてください。時刻が来るたびに新しいタスクを 1 件作ります。作ったタスクで AI にしてほしい作業（報告の下書きなど）は ai_instruction に書いてください。今あるタスクに繰り返しを付けるよう頼まれたときは、set_repeat を使ってください。\n\
          - ユーザーに「これからはこうして」「いつも〜して」のように、これから先も続けてほしいことを頼まれたら、list_ai_rules で今のルールを読み、create_ai_rule か update_ai_rule でルールにしてください。あるワークスペースだけのことなら、そのワークスペースのルールにしてください。\n\
          - 返事は短く、ユーザーの言葉（ふつうは日本語）で書いてください。記法は使わず、ふつうの文章で書いてください。"
     );
@@ -2316,6 +2543,69 @@ mod tests {
             summary("set_repeat", &json!({"repeat": null})),
             "繰り返しを外す"
         );
+    }
+
+    #[test]
+    fn schedules_are_created_changed_listed_and_deleted() {
+        let mut store = Store::open_in_memory().unwrap();
+        let ws = run(&mut store, "create_workspace", json!({"name": "定例"}));
+        let ws_id = ws["id"].as_str().unwrap();
+        let person = run(&mut store, "create_person", json!({"name": "佐藤"}));
+        let person_id = person["id"].as_str().unwrap();
+        let made = run(
+            &mut store,
+            "create_schedule",
+            json!({
+                "workspace_id": ws_id,
+                "title": "週次定例の報告",
+                // 2099-11-30 は月曜
+                "schedule": {"unit": "week", "from": "2099-11-30", "time": "09:00"},
+                "ai_instruction": "先週の進み具合をまとめる",
+                "assignee_ids": [person_id],
+                "due_days": 1,
+                "due_time": "17:00",
+            }),
+        );
+        assert_eq!(made["schedule"]["text"], "毎週 月 9:00");
+        assert_eq!(made["next_at"], "2099-11-30 09:00");
+        assert_eq!(made["ai_instruction"], "先週の進み具合をまとめる");
+        assert_eq!(made["assignee_ids"], json!([person_id]));
+        assert_eq!(made["due_days"], 1);
+        let id = made["id"].as_str().unwrap();
+        // 渡した項目だけが変わる
+        let changed = run(
+            &mut store,
+            "update_schedule",
+            json!({"id": id, "schedule": {"unit": "week", "weekdays": [4], "time": "18:00"}, "due_days": null}),
+        );
+        assert_eq!(changed["schedule"]["text"], "毎週 金 18:00");
+        assert_eq!(changed["schedule"]["from"], "2099-11-30");
+        assert!(changed["due_days"].is_null());
+        assert_eq!(changed["title"], "週次定例の報告");
+        let list = run(&mut store, "list_schedules", json!({}));
+        assert_eq!(list["outside"], json!([]));
+        assert_eq!(list["workspaces"][0]["schedules"][0]["id"], id);
+        // 正しくない値は、何も作らない
+        for bad in [
+            json!({"title": "x", "schedule": {"unit": "hour"}}),
+            json!({"title": "x", "due_days": -1}),
+            json!({"title": "x", "due_days": 0, "due_time": "25:00"}),
+            json!({"title": "x", "assignee_ids": ["nobody"]}),
+            json!({}),
+        ] {
+            assert!(
+                execute(&mut store, None, "create_schedule", &bad).is_err(),
+                "{bad}"
+            );
+        }
+        assert_eq!(store.all_schedules().unwrap().len(), 1);
+        assert!(WRITES.contains(&"create_schedule"));
+        assert_eq!(
+            summary("create_schedule", &json!({"title": "日報"})),
+            "定時タスクを追加: 日報"
+        );
+        run(&mut store, "delete_schedule", json!({"id": id}));
+        assert!(store.all_schedules().unwrap().is_empty());
     }
 
     #[test]

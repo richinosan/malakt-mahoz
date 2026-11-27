@@ -1487,6 +1487,7 @@ impl Store {
             task_alerts: self.all_task_alerts()?,
             ai_rules: self.all_ai_rules()?,
             repeats: self.all_repeats()?,
+            schedules: self.all_schedules()?,
         })
     }
 
@@ -1587,6 +1588,9 @@ impl Store {
             )?;
             crate::repeat::save(&tx, r)?;
         }
+        for s in &data.schedules {
+            crate::schedule::save(&tx, s)?;
+        }
         for a in &data.attachments {
             let known: bool = tx
                 .prepare_cached("SELECT EXISTS(SELECT 1 FROM blobs WHERE hash = ?1)")?
@@ -1643,7 +1647,7 @@ fn found(affected: usize, what: &str, id: &str) -> Result<()> {
     Ok(())
 }
 
-fn clean_draft(draft: &TaskDraft) -> Result<TaskDraft> {
+pub(crate) fn clean_draft(draft: &TaskDraft) -> Result<TaskDraft> {
     let title = required_line(&draft.title, "タイトル")?;
     if draft.priority > 9 {
         return Err(Error::Invalid("優先度は 0 から 9 です".into()));

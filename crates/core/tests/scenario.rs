@@ -6,6 +6,7 @@ use std::io::{Cursor, Write};
 
 use malakt_core::archive::{self, FORMAT, FORMAT_VERSION};
 use malakt_core::rules::{Apply, RulePatch};
+use malakt_core::schedule::SchedulePatch;
 use malakt_core::{lock, Error, Status, Store, TaskDraft, TaskFilter};
 
 fn draft(title: &str) -> TaskDraft {
@@ -50,6 +51,32 @@ fn plan_work_and_move_to_another_device() {
     a.set_repeat(&desk.id, Some(&weekly), "2026-11-27 12:00")
         .unwrap();
     a.set_repeat_ai(&desk.id, "借りる机の数を確かめる").unwrap();
+    // 定時タスクも一緒に移す
+    let report_rule = malakt_core::repeat::Rule {
+        time: Some("09:00".into()),
+        ..malakt_core::repeat::Rule::weekly("2026-11-30")
+    };
+    let report = a
+        .create_schedule(
+            Some(&venue.id),
+            "週次定例の報告",
+            Some(&report_rule),
+            "2026-11-27 12:00",
+        )
+        .unwrap();
+    let report = a
+        .update_schedule(
+            &report.id,
+            &SchedulePatch {
+                ai: Some("先週の進み具合をまとめる".into()),
+                assignee_ids: Some(vec![guest.id.clone()]),
+                due_days: Some(Some(1)),
+                due_time: Some(Some("17:00".into())),
+                ..SchedulePatch::default()
+            },
+            "2026-11-27 12:00",
+        )
+        .unwrap();
     // AI のルールも一緒に移す
     let global = a
         .create_ai_rule(None, "言葉づかい", "敬語で答える")
@@ -123,6 +150,14 @@ fn plan_work_and_move_to_another_device() {
     let made = b.sweep_repeats(&repeat.next_at).unwrap();
     assert_eq!(made.len(), 1);
     assert_eq!(b.task(&made[0]).unwrap().due.as_deref(), Some("2026-12-27"));
+    // 定時タスクも同じ中身で戻り、取り込んだ先でタスクを作る
+    assert_eq!(b.schedules(Some(&venue.id)).unwrap(), vec![report.clone()]);
+    let made = b.sweep_schedules(&report.next_at).unwrap();
+    assert_eq!(made.len(), 1);
+    let task = b.task(&made[0]).unwrap();
+    assert_eq!(task.title, "週次定例の報告");
+    assert_eq!(task.assignee_ids, vec![guest.id.clone()]);
+    assert_eq!(task.due.as_deref(), Some("2026-12-01 17:00"));
 }
 
 /// 2 台で別々に進めたあと取り込むと、同じものは上書き、ないものは追加になる。
@@ -376,6 +411,7 @@ fn archive_layout_is_portable() {
             "data/comments.json",
             "data/people.json",
             "data/repeats.json",
+            "data/schedules.json",
             "data/task_alerts.json",
             "data/task_defaults.json",
             "data/tasks.json",

@@ -99,6 +99,7 @@ pub enum CustomizeSection {
     AiModel,
     AiBehavior,
     AiRules,
+    AiSchedules,
     AiGithub,
     Lock,
     Notices,
@@ -110,7 +111,7 @@ pub enum CustomizeSection {
 }
 
 impl CustomizeSection {
-    pub const ALL: [CustomizeSection; 16] = [
+    pub const ALL: [CustomizeSection; 17] = [
         CustomizeSection::Theme,
         CustomizeSection::Layout,
         CustomizeSection::Backdrop,
@@ -119,6 +120,7 @@ impl CustomizeSection {
         CustomizeSection::AiModel,
         CustomizeSection::AiBehavior,
         CustomizeSection::AiRules,
+        CustomizeSection::AiSchedules,
         CustomizeSection::AiGithub,
         CustomizeSection::Lock,
         CustomizeSection::Notices,
@@ -139,6 +141,7 @@ impl CustomizeSection {
             CustomizeSection::AiModel => crate::ai_settings::AiGroup::Model.label(),
             CustomizeSection::AiBehavior => crate::ai_settings::AiGroup::Behavior.label(),
             CustomizeSection::AiRules => crate::ai_settings::AiGroup::Rules.label(),
+            CustomizeSection::AiSchedules => crate::ai_settings::AiGroup::Schedules.label(),
             CustomizeSection::AiGithub => crate::ai_settings::AiGroup::Github.label(),
             CustomizeSection::Lock => "ロック",
             CustomizeSection::Notices => "通知",
@@ -160,6 +163,7 @@ impl CustomizeSection {
             CustomizeSection::AiModel => "sparkles",
             CustomizeSection::AiBehavior => "bot",
             CustomizeSection::AiRules => "scroll-text",
+            CustomizeSection::AiSchedules => "alarm-clock",
             CustomizeSection::AiGithub => "github",
             CustomizeSection::Lock => "lock",
             CustomizeSection::Notices => "bell",
@@ -177,6 +181,7 @@ impl CustomizeSection {
             CustomizeSection::AiModel
             | CustomizeSection::AiBehavior
             | CustomizeSection::AiRules
+            | CustomizeSection::AiSchedules
             | CustomizeSection::AiGithub => "AI",
             CustomizeSection::Lock
             | CustomizeSection::Notices
@@ -196,6 +201,7 @@ impl CustomizeSection {
             CustomizeSection::AiModel => Some(AiGroup::Model),
             CustomizeSection::AiBehavior => Some(AiGroup::Behavior),
             CustomizeSection::AiRules => Some(AiGroup::Rules),
+            CustomizeSection::AiSchedules => Some(AiGroup::Schedules),
             CustomizeSection::AiGithub => Some(AiGroup::Github),
             _ => None,
         }
@@ -223,6 +229,8 @@ pub enum SubModal {
     Scene,
     /// ワークスペースの AI のルール（ワークスペースの設定の上に重ねる）
     Rules,
+    /// ワークスペースの定時タスク（ワークスペースの設定の上に重ねる）
+    Schedules,
     /// アプリ内ブラウザのデータを消す前の確認
     ClearBrowser,
     /// ほかの人の完了を知らせる担当者を選ぶ
@@ -4277,6 +4285,31 @@ impl MainView {
         let id = id.to_owned();
         self.ai_settings
             .update(cx, |s, cx| s.show_rules(Some(id), cx));
+    }
+
+    /// 「設定」の定時タスクを、そのワークスペースのものにして開く（ワークスペースのメニューから）。
+    pub fn open_workspace_schedules(
+        &mut self,
+        id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_appearance(window, cx);
+        self.show_appearance_section(CustomizeSection::AiSchedules, window, cx);
+        let id = id.to_owned();
+        self.ai_settings
+            .update(cx, |s, cx| s.show_schedules(Some(id), cx));
+    }
+
+    /// ワークスペースの設定の上に、そのワークスペースの定時タスクを重ねて出す。
+    pub fn open_schedules_over_settings(&mut self, cx: &mut Context<Self>) {
+        let Modal::WorkspaceSettings(id) = self.modal.clone() else {
+            return;
+        };
+        self.ai_settings
+            .update(cx, |s, cx| s.show_schedules(Some(id), cx));
+        self.sub_modal = Some(SubModal::Schedules);
+        cx.notify();
     }
 
     /// ワークスペースの設定の上に、そのワークスペースの AI のルールを重ねて出す。
