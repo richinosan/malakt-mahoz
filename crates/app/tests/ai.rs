@@ -3815,6 +3815,7 @@ fn shell_output_can_be_selected_and_copied(cx: &mut TestAppContext) {
         point(out.left() + px(1.), out.center().y),
         point(out.left() + px(400.), out.center().y),
     );
+    // シェルの出力は、どの OS も Ctrl+C でコピーできる（macOS の ⌘C も）
     ui(cx, window, |window, cx| window.press("ctrl-c", cx));
     assert_eq!(clipboard(cx).as_deref(), Some("hello-copy"));
 
@@ -3837,6 +3838,7 @@ fn shell_output_can_be_selected_and_copied(cx: &mut TestAppContext) {
     cx.update(|cx| cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string("before".into())));
     let at = point(out.left() + px(30.), out.center().y);
     drag(cx, at, at);
+    // どの OS も Ctrl+C でコピーする所だが、選んでいなければコピーしない
     ui(cx, window, |window, cx| window.press("ctrl-c", cx));
     assert_eq!(clipboard(cx).as_deref(), Some("before"));
 }
@@ -3886,11 +3888,11 @@ fn own_messages_can_be_selected_and_copied(cx: &mut TestAppContext) {
         .unwrap()
     };
 
-    // 入力欄にフォーカスがあるまま選んでも、Ctrl+C は選んだ文字のコピーになる
+    // 入力欄にフォーカスがあるまま選んでも、Ctrl+C（macOS は ⌘C）は選んだ文字のコピーになる
     ui(cx, window, |window, cx| window.click("ai-input", cx));
     let picked = drag_across(cx, ("ai-user", 0), 15.);
     assert_eq!(picked.trim(), "自分の発言をコピーする");
-    ui(cx, window, |window, cx| window.press("ctrl-c", cx));
+    ui(cx, window, |window, cx| window.press("secondary-c", cx));
     let copied = cx.update(|cx| cx.read_from_clipboard().and_then(|i| i.text()));
     assert_eq!(copied.as_deref(), Some("自分の発言をコピーする"));
 
@@ -3901,6 +3903,291 @@ fn own_messages_can_be_selected_and_copied(cx: &mut TestAppContext) {
     assert_eq!(
         drag_across(cx, ("ai-error", 2), 10.).trim(),
         "通信に失敗しました"
+    );
+}
+
+/// ワークスペースを作る。`parent` があればそのサブワークスペース。
+fn new_workspace(cx: &mut TestAppContext, parent: Option<&str>, name: &str) -> String {
+    cx.update(|cx| {
+        db::shared(cx).update(cx, |db, cx| {
+            let ws = db.store.create_workspace(parent, name).unwrap();
+            cx.notify();
+            ws.id
+        })
+    })
+}
+
+/// 「イベント」（サブワークスペース「告知」）と、「告知」のタスク。
+fn event_workspace(cx: &mut TestAppContext) -> String {
+    let event = new_workspace(cx, None, "イベント");
+    let ad = new_workspace(cx, Some(&event), "告知");
+    cx.update(|cx| {
+        db::shared(cx).update(cx, |db, cx| {
+            let draft = TaskDraft {
+                title: "ポスターを刷る".into(),
+                ..Default::default()
+            };
+            db.store.create_task(Some(&ad), &draft).unwrap();
+            cx.notify();
+        })
+    });
+    event
+}
+
+fn last_message(world: &World) -> String {
+    world.sent().last().unwrap().2["messages"][0]["content"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+/// 左のメニューのワークスペースをチャットの上に落とすと、並びは変えずに入力欄に添える。
+/// 送ると、サブワークスペースとタスクを含めて AI に渡す。
+#[gpui_kit::test]
+fn a_workspace_dropped_on_the_chat_is_attached(cx: &mut TestAppContext) {
+    let world = start(cx);
+    world.keys.set(Provider::Claude, "k").unwrap();
+    let s = session(cx);
+    cx.update(|cx| s.update(cx, |s, cx| s.set_arrange(false, cx)));
+    let event = event_workspace(cx);
+    let (window, view) = open(cx, wide());
+    let pane = open_chat(cx, window, &view);
+    let order = |cx: &mut TestAppContext| {
+        cx.update(|cx| {
+            db::shared(cx)
+                .read(cx)
+                .store
+                .workspaces()
+                .unwrap()
+                .into_iter()
+                .map(|w| (w.id, w.parent_id, w.position))
+                .collect::<Vec<_>>()
+        })
+    };
+    let before = order(cx);
+
+    // 行を押して、チャットの入力欄の上まで動かして離す
+    let drop = |cx: &mut TestAppContext| {
+        ui(cx, window, |window, cx| {
+            let at = window.find("ai-input").bounds().center();
+            view.update(cx, |v, cx| {
+                v.start_ws_drag(&event, point(px(100.), px(200.)), cx);
+                v.drag_ws_at(at, window, cx);
+            });
+        });
+        // 上にある間は、入力欄に色が付く
+        cx.update(|cx| assert!(view.read(cx).dropping_on_chat()));
+        ui(cx, window, |_, cx| {
+            view.update(cx, |v, cx| v.finish_ws_drag(cx))
+        });
+    };
+    drop(cx);
+    cx.update(|cx| assert!(!view.read(cx).dropping_on_chat()));
+    assert_eq!(
+        read(cx, |s| s.attached_workspaces.clone()),
+        vec![(event.clone(), "イベント".into())]
+    );
+    assert_eq!(order(cx), before);
+    // 同じワークスペースは 1 つだけ。× で外せる
+    drop(cx);
+    assert_eq!(read(cx, |s| s.attached_workspaces.len()), 1);
+    ui(cx, window, |window, cx| {
+        assert!(window.find(("ai-attached-ws", 0usize)).visible());
+        window.click(("ai-attached-ws-remove", 0usize), cx);
+    });
+    assert!(read(cx, |s| s.attached_workspaces.is_empty()));
+
+    drop(cx);
+    world.reply(text_reply("見ました。"));
+    say(cx, window, &pane, "進み具合は？");
+    wait(cx, "返事が来る", |s| !s.busy && s.items.len() >= 2);
+    let message = last_message(&world);
+    assert!(
+        message.starts_with("進み具合は？\n\n[添えたワークスペース「イベント」]\n"),
+        "{message}"
+    );
+    assert!(message.contains("告知"), "{message}");
+    assert!(message.contains("ポスターを刷る"), "{message}");
+    assert!(read(cx, |s| s.attached_workspaces.is_empty()));
+    assert_eq!(
+        read(cx, |s| s.items[0].clone()),
+        Item::User("「イベント」\n進み具合は？".into())
+    );
+}
+
+/// ワークスペースのメニューから、チャットに添えたりリンクをコピーしたりできる。貼ったリンクも添えられる。
+#[gpui_kit::test]
+fn a_workspace_is_attached_from_the_menu_or_a_pasted_link(cx: &mut TestAppContext) {
+    let world = start(cx);
+    world.keys.set(Provider::Claude, "k").unwrap();
+    let s = session(cx);
+    cx.update(|cx| s.update(cx, |s, cx| s.set_arrange(false, cx)));
+    let event = event_workspace(cx);
+    let home = new_workspace(cx, None, "家");
+    let (window, view) = open(cx, wide());
+
+    // 「AI チャットに添える」は、チャットを開いて添える
+    ui(cx, window, |window, cx| {
+        view.update(cx, |v, cx| v.attach_workspace_to_chat(&home, window, cx));
+    });
+    cx.update(|cx| assert!(view.read(cx).ai_open));
+    assert_eq!(
+        read(cx, |s| s.attached_workspaces.clone()),
+        vec![(home.clone(), "家".into())]
+    );
+    let pane = cx.update(|cx| view.read(cx).ai_pane.clone().unwrap());
+
+    // 「コピー」はリンクをクリップボードに入れる。入力欄に貼ると添えられ、リンクの文字は消える
+    ui(cx, window, |_, cx| {
+        view.update(cx, |v, cx| v.copy_workspace_link(&event, cx))
+    });
+    let link = cx
+        .update(|cx| cx.read_from_clipboard().and_then(|c| c.text()))
+        .unwrap();
+    assert_eq!(link, malakt_core::wslink::url(&event));
+    world.reply(text_reply("まとめました。"));
+    say(
+        cx,
+        window,
+        &pane,
+        &format!("{link} malakt-mahoz://workspace/nothing まとめて"),
+    );
+    wait(cx, "返事が来る", |s| !s.busy && s.items.len() >= 2);
+    assert_eq!(
+        read(cx, |s| s.items[0].clone()),
+        Item::User("「家」\n「イベント」\nmalakt-mahoz://workspace/nothing まとめて".into())
+    );
+    let message = last_message(&world);
+    assert!(
+        message.contains("[添えたワークスペース「家」]"),
+        "{message}"
+    );
+    assert!(
+        message.contains("[添えたワークスペース「イベント」]"),
+        "{message}"
+    );
+    assert!(!message.contains(&link), "{message}");
+}
+
+/// 回答と自分の発言の右クリックメニュー。文字を選んでいれば「選択をコピー」で選んだ所を、
+/// 「回答をコピー」「発言をコピー」で丸ごとをコピーする。選んでいなければ「選択をコピー」は出ない。
+#[gpui_kit::test]
+fn the_message_menu_copies_the_selection_or_the_whole_message(cx: &mut TestAppContext) {
+    use gpui_kit::test::TestEventExt;
+    use gpui_kit::{point, Modifiers, MouseButton, VisualTestContext};
+
+    let _world = start(cx);
+    let (window, view) = open(cx, wide());
+    let _pane = open_chat(cx, window, &view);
+    let session = session(cx);
+    cx.update(|cx| {
+        session.update(cx, |s, cx| {
+            s.items.push(Item::User("会場の下見を手伝って".into()));
+            s.items
+                .push(Item::Assistant("下見は来週の火曜にしましょう".into()));
+            cx.notify();
+        })
+    });
+    ui(cx, window, |_, _| {});
+
+    let bounds = |cx: &mut TestAppContext, id: (&'static str, usize)| {
+        let mut b = None;
+        ui(cx, window, |window, _| b = Some(window.find(id).bounds()));
+        b.unwrap()
+    };
+    let right_click = |cx: &mut TestAppContext, at: Point<Pixels>| {
+        let mut v = VisualTestContext::from_window(window, cx);
+        v.simulate_mouse_down(at, MouseButton::Right, Modifiers::default());
+        v.simulate_mouse_up(at, MouseButton::Right, Modifiers::default());
+        v.run_until_parked();
+    };
+    let has = |cx: &mut TestAppContext, label: &str| {
+        let mut found = false;
+        ui(cx, window, |window, _| {
+            found = window.try_find_by_label(label).is_some()
+        });
+        found
+    };
+    let pick = |cx: &mut TestAppContext, label: &str| {
+        ui(cx, window, |window, cx| {
+            let center = window.find_by_label(label).bounds().center();
+            window.pointer_move(center, None, cx);
+            window.pointer_down(center, MouseButton::Left, cx);
+            window.pointer_up(center, MouseButton::Left, cx);
+        });
+    };
+    let clipboard =
+        |cx: &mut TestAppContext| cx.update(|cx| cx.read_from_clipboard().and_then(|i| i.text()));
+
+    // 選んでいないときは、丸ごとのコピーだけ
+    let user = bounds(cx, ("ai-user", 0));
+    right_click(cx, user.center());
+    assert!(has(cx, "発言をコピー"));
+    assert!(!has(cx, "選択をコピー"));
+    pick(cx, "発言をコピー");
+    assert_eq!(clipboard(cx).as_deref(), Some("会場の下見を手伝って"));
+
+    // 回答の頭の方だけを選んで、右クリックする
+    let reply = bounds(cx, ("ai-assistant", 1));
+    let (from, to) = (
+        point(reply.left() + px(6.), reply.center().y),
+        point(reply.left() + px(60.), reply.center().y),
+    );
+    let mut v = VisualTestContext::from_window(window, cx);
+    v.simulate_mouse_down(from, MouseButton::Left, Modifiers::default());
+    v.update(|window, cx| window.render_frame(cx));
+    v.simulate_mouse_move(to, MouseButton::Left, Modifiers::default());
+    v.update(|window, cx| window.render_frame(cx));
+    v.simulate_mouse_up(to, MouseButton::Left, Modifiers::default());
+    v.run_until_parked();
+    let picked = cx
+        .update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            gpui_kit::base::TextSelection::selected_text(window, cx)
+        })
+        .unwrap();
+    let picked = picked.trim().to_owned();
+    assert!(!picked.is_empty() && picked != "下見は来週の火曜にしましょう");
+    right_click(cx, to);
+    assert!(has(cx, "選択をコピー"));
+    assert!(has(cx, "回答をコピー"));
+    pick(cx, "選択をコピー");
+    assert_eq!(clipboard(cx), Some(picked));
+
+    right_click(cx, to);
+    pick(cx, "回答をコピー");
+    assert_eq!(
+        clipboard(cx).as_deref(),
+        Some("下見は来週の火曜にしましょう")
+    );
+}
+
+/// 上限で添えられなかったワークスペースのリンクは、入力欄に文字のまま残る。
+#[gpui_kit::test]
+fn a_workspace_link_over_the_limit_stays_in_the_input(cx: &mut TestAppContext) {
+    let world = start(cx);
+    world.keys.set(Provider::Claude, "k").unwrap();
+    let s = session(cx);
+    cx.update(|cx| s.update(cx, |s, cx| s.set_arrange(false, cx)));
+    let ids: Vec<String> = (0..=ai::MAX_ATTACHED_WORKSPACES)
+        .map(|i| new_workspace(cx, None, &format!("場所{i}")))
+        .collect();
+    let (window, view) = open(cx, wide());
+    let pane = open_chat(cx, window, &view);
+    let links: Vec<String> = ids.iter().map(|id| malakt_core::wslink::url(id)).collect();
+    world.reply(text_reply("見ました。"));
+    say(cx, window, &pane, &links.join(" "));
+    wait(cx, "返事が来る", |s| !s.busy && s.items.len() >= 2);
+    let over = &links[ai::MAX_ATTACHED_WORKSPACES];
+    assert_eq!(
+        read(cx, |s| s.items[0].clone()),
+        Item::User(format!("「場所0」\n「場所1」\n「場所2」\n{over}").into())
+    );
+    let message = last_message(&world);
+    assert!(message.starts_with(over.as_str()), "{message}");
+    assert!(
+        !message.contains("[添えたワークスペース「場所3」]"),
+        "{message}"
     );
 }
 

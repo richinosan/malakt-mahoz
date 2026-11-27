@@ -15,7 +15,8 @@ run = "cargo build --release --locked -p malakt-mahoz"
 
 [tasks.test]
 description = "ユニットテストとシナリオテストをすべて実行する"
-run = "cargo test --workspace --locked"
+# 1 つのファイルで落ちても、残りのファイルのテストも走らせる。CI の 1 回で、その OS で落ちるものが全部わかる
+run = "cargo test --workspace --locked --no-fail-fast"
 
 [tasks.test-buttons]
 description = "画面のボタンを全部押して、押したら何かが変わることを確かめる（重いので手で回す）"

@@ -1565,6 +1565,98 @@ fn due_today_reaches_the_notice_list_and_the_os(cx: &mut TestAppContext) {
     });
 }
 
+/// 設定の「通知」で、ほかの人が完了にしたときに知らせるかを、役・担当者・ワークスペースで選ぶ。
+/// オフにすると細かい行は隠れる。担当者とワークスペースは重ねた一覧で、押すたびに入れる・外す。
+#[gpui_kit::test]
+fn done_notices_can_be_chosen(cx: &mut TestAppContext) {
+    use malakt_core::done_notice::When;
+    use malakt_core::{Role, Roles};
+    use malakt_mahoz::state::{CustomizeSection, SubModal};
+    start(cx);
+    let (sato, event) = cx.update(|cx| {
+        db::shared(cx).update(cx, |db, _| {
+            db.store.create_person("自分", true).unwrap();
+            let sato = db.store.create_person("佐藤", false).unwrap();
+            let event = db.store.create_workspace(None, "イベント").unwrap();
+            db.store.create_workspace(Some(&event.id), "受付").unwrap();
+            (sato, event)
+        })
+    });
+    let (window, view) = open(cx, wide());
+    ui(cx, window, |window, cx| {
+        view.update(cx, |v, cx| {
+            v.open_appearance(window, cx);
+            v.show_appearance_section(CustomizeSection::Notices, window, cx);
+        })
+    });
+    let notices = |cx: &mut TestAppContext| cx.update(|cx| view.read(cx).done_notices(cx));
+    assert!(notices(cx).is_standard());
+
+    // 役は R・A・C・I を押すたびに入れる・外す。最後の 1 つは外れない
+    for ix in [0usize, 2, 3] {
+        ui(cx, window, |window, cx| window.click(("done-role", ix), cx));
+    }
+    assert_eq!(notices(cx).roles, Roles::of(&[Role::A]));
+    ui(cx, window, |window, cx| {
+        window.click(("done-role", 1usize), cx)
+    });
+    assert_eq!(notices(cx).roles, Roles::of(&[Role::A]));
+    ui(cx, window, |window, cx| {
+        window.click("done-roles-reset", cx)
+    });
+    assert_eq!(notices(cx).roles, malakt_core::done_notice::all_roles());
+
+    // 担当者は、自分を除いた一覧。押すと「知らせない」になる
+    ui(cx, window, |window, cx| {
+        window.click("done-people-open", cx)
+    });
+    cx.update(|cx| assert_eq!(view.read(cx).sub_modal, Some(SubModal::DonePeople)));
+    ui(cx, window, |window, cx| {
+        window.click(("done-pick", 0usize), cx)
+    });
+    assert_eq!(notices(cx).muted_people, std::slice::from_ref(&sato.id));
+    ui(cx, window, |window, cx| window.press("escape", cx));
+    cx.update(|cx| {
+        let v = view.read(cx);
+        assert_eq!(v.sub_modal, None);
+        assert_eq!(v.modal, Modal::Appearance);
+    });
+
+    // ワークスペースは、親を外すとサブワークスペースも外れて見える
+    ui(cx, window, |window, cx| {
+        window.click("done-workspaces-open", cx)
+    });
+    ui(cx, window, |window, cx| {
+        window.click(("done-pick", 0usize), cx)
+    });
+    assert_eq!(
+        notices(cx).muted_workspaces,
+        std::slice::from_ref(&event.id)
+    );
+    ui(cx, window, |window, cx| window.press("escape", cx));
+    ui(cx, window, |window, cx| {
+        window.click("done-workspaces-reset", cx)
+    });
+    assert!(notices(cx).muted_workspaces.is_empty());
+
+    // 知らせるときを選ぶ
+    ui(cx, window, |window, cx| window.click("done-when", cx));
+    pick(cx, window, When::Finished.label());
+    assert_eq!(notices(cx).when, When::Finished);
+
+    // オフにすると細かい行は隠れ、オンに戻すと前の選び方のまま出る
+    ui(cx, window, |window, cx| window.click("done-switch", cx));
+    assert!(!notices(cx).enabled);
+    ui(cx, window, |window, _| {
+        assert!(window.try_find("done-when").is_none());
+    });
+    ui(cx, window, |window, cx| window.click("done-switch", cx));
+    let back = notices(cx);
+    assert!(back.enabled);
+    assert_eq!(back.when, When::Finished);
+    assert_eq!(back.muted_people, std::slice::from_ref(&sato.id));
+}
+
 /// 設定の「通知」で、期限をいつ知らせるかを選ぶ。選んだ時刻が来ていれば、すぐ OS の通知が出る。
 /// タスクの詳細の「通知」のメニューでは、そのタスクだけを変え、標準に戻せる。
 #[gpui_kit::test]
@@ -1982,6 +2074,136 @@ fn dialogs_fade_in_and_out(cx: &mut TestAppContext) {
     ui(cx, window, |_, _| {});
     ui(cx, window, |window, _| {
         assert!(window.try_find("dialog-closing").is_none())
+    });
+}
+
+/// 動きを付けているときは、タスクの詳細は閉じると右へ抜けながら薄くなって消える。
+/// ×・Esc・行き先の切り替えのどれで閉じても同じで、消えるまでの間は閉じた詳細のボタンを
+/// 押せない。消えかけのときに別のタスクを開くと、消えかけの詳細はすぐ消える。
+#[gpui_kit::test]
+fn task_detail_slides_out_when_closed(cx: &mut TestAppContext) {
+    start(cx);
+    let (window, view) = open(cx, wide());
+    let ids: Vec<String> = cx.update(|cx| {
+        view.update(cx, |v, cx| {
+            ["チラシを配る", "看板を立てる"]
+                .into_iter()
+                .map(|title| {
+                    let draft = malakt_core::TaskDraft {
+                        title: title.into(),
+                        ..Default::default()
+                    };
+                    v.write(cx, |s| Ok(s.create_task(None, &draft)?.id))
+                        .unwrap()
+                })
+                .collect()
+        })
+    });
+    ui(cx, window, |window, cx| window.click("nav-all", cx));
+    cx.update(|cx| view.update(cx, |v, _| v.motion = true));
+    type Step<'a> = &'a dyn Fn(&mut gpui_kit::Window, &mut gpui_kit::App);
+    // 動いている間は次の描画が続けて来るので、待つ（run_until_parked）前に見る
+    let act = |cx: &mut TestAppContext, f: Step| {
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            f(window, cx);
+            window.render_frame(cx);
+        })
+        .unwrap();
+    };
+    // 開く動きは画面の時計で、消える動きは本当の時計で進む
+    let settle = |cx: &mut TestAppContext| {
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(300));
+        cx.run_until_parked();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        ui(cx, window, |_, _| {});
+    };
+    let closing = |cx: &mut TestAppContext| {
+        cx.update_window(window, |_, window, _| {
+            window.try_find("panel-closing").is_some()
+        })
+        .unwrap()
+    };
+    let open_task = |cx: &mut TestAppContext, id: &str| {
+        let (id, view) = (id.to_owned(), view.clone());
+        act(cx, &move |window, cx| {
+            view.update(cx, |v, cx| v.open_panel(&id, window, cx))
+        });
+    };
+    let close_ways: [Step; 3] = [
+        &|window, cx| window.click("close-panel", cx),
+        &|window, cx| window.press("escape", cx),
+        &|_, cx| view.update(cx, |v, cx| v.go(Nav::Home, cx)),
+    ];
+    for close in close_ways {
+        open_task(cx, &ids[0]);
+        settle(cx);
+        assert!(!closing(cx));
+        act(cx, close);
+        cx.update(|cx| assert!(view.read(cx).detail.is_none()));
+        assert!(closing(cx));
+        // 閉じた詳細の「完了チケット」は、消えるまでの間も押せない
+        act(cx, &|window, cx| window.click("ticket-open", cx));
+        cx.update(|cx| assert_eq!(view.read(cx).modal, Modal::None));
+        settle(cx);
+        assert!(!closing(cx));
+        ui(cx, window, |window, cx| window.click("nav-all", cx));
+    }
+
+    // 消えかけのときに別のタスクを開くと、開いたタスクだけが残る
+    open_task(cx, &ids[0]);
+    settle(cx);
+    act(cx, &|window, cx| window.click("close-panel", cx));
+    assert!(closing(cx));
+    open_task(cx, &ids[1]);
+    assert!(!closing(cx));
+    cx.update(|cx| {
+        let v = view.read(cx);
+        assert_eq!(
+            v.detail.as_ref().map(|d| d.task.id.as_str()),
+            Some(ids[1].as_str())
+        );
+    });
+}
+
+/// 動きを付けているときは、設定の上に重ねたダイアログは、閉じると薄くなってから消える。
+/// 消えるまでの間は上を覆い、下の設定は開いたまま。
+#[gpui_kit::test]
+fn sub_dialogs_fade_out(cx: &mut TestAppContext) {
+    use malakt_mahoz::state::SubModal;
+    start(cx);
+    let (window, view) = open(cx, wide());
+    ui(cx, window, |window, cx| {
+        view.update(cx, |v, cx| v.open_appearance(window, cx))
+    });
+    ui(cx, window, |window, cx| {
+        window.click(("customize-nav", 3usize), cx)
+    });
+    ui(cx, window, |window, cx| window.click("font-open", cx));
+    cx.update(|cx| assert_eq!(view.read(cx).sub_modal, Some(SubModal::Font)));
+    cx.update(|cx| view.update(cx, |v, _| v.motion = true));
+    std::thread::sleep(std::time::Duration::from_millis(250));
+    ui(cx, window, |_, _| {});
+
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        window.press("escape", cx);
+        window.render_frame(cx);
+        assert!(window.try_find("sub-modal-closing").is_some());
+    })
+    .unwrap();
+    cx.update(|cx| {
+        let v = view.read(cx);
+        assert_eq!(v.sub_modal, None);
+        assert_eq!(v.modal, Modal::Appearance);
+    });
+    cx.run_until_parked();
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    ui(cx, window, |_, _| {});
+    ui(cx, window, |window, _| {
+        assert!(window.try_find("sub-modal-closing").is_none());
+        assert!(window.try_find("font-open").is_some());
     });
 }
 
@@ -3438,6 +3660,61 @@ fn workspace_icon_is_found_by_search(cx: &mut TestAppContext) {
         let first = malakt_mahoz::icons::search("", Some(category), &[], 1);
         assert_eq!(saved.icon.as_deref(), first.first().copied());
     }
+}
+
+/// 未読の数の丸は、1 桁なら正円、2 桁以上は高さのまま横に伸びる。100 以上は「99+」。
+/// 上のバーのベル、左のメニューの「通知」、畳んだ列のベルのどれも同じ。
+#[gpui_kit::test]
+fn unread_bubble_is_round(cx: &mut TestAppContext) {
+    start(cx);
+    let (window, view) = open(cx, wide());
+    let set = |cx: &mut TestAppContext, n: u32| {
+        cx.update(|cx| {
+            view.update(cx, |v, cx| {
+                v.unread_notices = n;
+                cx.notify();
+            })
+        });
+        cx.run_until_parked();
+    };
+    let ids = ["open-notices-count", "nav-notices-count"];
+    set(cx, 0);
+    ui(cx, window, |window, _| {
+        for id in ids {
+            assert!(window.try_find(id).is_none(), "{id}");
+        }
+    });
+    let mut widths = std::collections::HashMap::new();
+    for n in [1, 12, 150] {
+        set(cx, n);
+        ui(cx, window, |window, _| {
+            for id in ids {
+                let size = window.find(id).bounds().size;
+                assert!(size.height > px(0.), "{id}");
+                if n < 10 {
+                    assert_eq!(size.width, size.height, "{id} {n}");
+                } else {
+                    assert!(size.width > size.height, "{id} {n}");
+                    // 横に伸びても高さは同じ
+                    assert_eq!(size.height, widths[&(id, 1)], "{id} {n}");
+                }
+                widths.insert((id, n), size.width);
+            }
+        });
+    }
+    for id in ids {
+        assert!(widths[&(id, 150)] > widths[&(id, 12)], "{id}");
+    }
+    // 畳んだ列のベルも同じ丸
+    set(cx, 3);
+    ui(cx, window, |window, cx| window.click("toggle-sidebar", cx));
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(400));
+    ui(cx, window, |window, _| {
+        let size = window.find("rail-notices-count").bounds().size;
+        assert_eq!(size.width, size.height);
+        assert_eq!(size, window.find("open-notices-count").bounds().size);
+    });
 }
 
 /// 上のバーのメニューのボタンで左のメニューをアイコンだけの列に畳んで、また広げる。
@@ -5799,6 +6076,75 @@ fn sub_workspaces_fold_inside_the_task_list(cx: &mut TestAppContext) {
     });
 }
 
+/// サブワークスペースの一覧の上に、最上位からのパンくずが出る。押すとその段のワークスペースへ移る。
+/// 深いときは間を「…」にまとめ、そこから選べる。最上位では出さない。
+#[gpui_kit::test]
+fn breadcrumbs_lead_to_upper_workspaces(cx: &mut TestAppContext) {
+    start(cx);
+    let (top, hall, setup, desk, chair) = cx.update(|cx| {
+        db::shared(cx).update(cx, |db, _| {
+            let s = &mut db.store;
+            let top = s.create_workspace(None, "文化祭").unwrap();
+            let hall = s.create_workspace(Some(&top.id), "会場").unwrap();
+            let setup = s.create_workspace(Some(&hall.id), "設営").unwrap();
+            let desk = s.create_workspace(Some(&setup.id), "机").unwrap();
+            let chair = s.create_workspace(Some(&desk.id), "椅子").unwrap();
+            (top.id, hall.id, setup.id, desk.id, chair.id)
+        })
+    });
+    let (window, view) = open(cx, wide());
+    let go = |cx: &mut TestAppContext, id: &str| {
+        let id = id.to_owned();
+        cx.update(|cx| view.update(cx, |v, cx| v.go(Nav::Workspace(id), cx)));
+        cx.run_until_parked();
+    };
+    let crumb = |cx: &mut TestAppContext, id: &str| {
+        cx.update(|cx| {
+            let v = view.read(cx);
+            (
+                "crumb",
+                v.workspaces.iter().position(|w| w.id == id).unwrap(),
+            )
+        })
+    };
+
+    // 最上位では出さない
+    go(cx, &top);
+    assert!(!has(cx, window, "crumbs"));
+
+    // 3 段目では、上の 2 段と今いる所が並ぶ
+    go(cx, &setup);
+    assert!(has(cx, window, "crumbs"));
+    for id in [&top, &hall, &setup] {
+        let at = crumb(cx, id);
+        assert!(has_id(cx, window, at), "{id}");
+    }
+    assert!(!has(cx, window, "crumb-more"));
+
+    // 段を押すと、そのワークスペースへ移る
+    let at = crumb(cx, &hall);
+    ui(cx, window, |window, cx| window.click(at, cx));
+    cx.update(|cx| assert_eq!(view.read(cx).nav, Nav::Workspace(hall.clone())));
+
+    // 今いる所は押しても移らない
+    go(cx, &setup);
+    let at = crumb(cx, &setup);
+    ui(cx, window, |window, cx| window.click(at, cx));
+    cx.update(|cx| assert_eq!(view.read(cx).nav, Nav::Workspace(setup.clone())));
+
+    // 5 段目では、最上位・「…」・上の 1 段・今いる所の 4 つにまとめる
+    go(cx, &chair);
+    for id in [&top, &desk, &chair] {
+        let at = crumb(cx, id);
+        assert!(has_id(cx, window, at), "{id}");
+    }
+    for id in [&hall, &setup] {
+        let at = crumb(cx, id);
+        assert!(!has_id(cx, window, at), "{id}");
+    }
+    assert!(has(cx, window, "crumb-more"));
+}
+
 fn has_id(
     cx: &mut TestAppContext,
     window: AnyWindowHandle,
@@ -6734,7 +7080,7 @@ fn history_shows_who_changed_what(cx: &mut TestAppContext) {
     });
     cx.update(|cx| assert_eq!(view.read(cx).modal, Modal::History));
 
-    // 差分の文字は、ドラッグで選んで Ctrl+C でコピーできる
+    // 差分の文字は、ドラッグで選んで Ctrl+C（macOS は ⌘C）でコピーできる
     let ids: Vec<String> = cx
         .update_window(window, |_, window, _| {
             ["history-1-0-after", "history-1-0-0-after"]
@@ -6775,7 +7121,7 @@ fn history_shows_who_changed_what(cx: &mut TestAppContext) {
         v.simulate_mouse_up(to, MouseButton::Left, Modifiers::default());
         v.run_until_parked();
     }
-    ui(cx, window, |window, cx| window.press("ctrl-c", cx));
+    ui(cx, window, |window, cx| window.press("secondary-c", cx));
     let copied = cx.update(|cx| cx.read_from_clipboard().and_then(|i| i.text()));
     assert_eq!(copied.as_deref(), Some("下見の段取り"));
 }

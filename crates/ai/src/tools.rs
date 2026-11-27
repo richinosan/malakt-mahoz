@@ -23,6 +23,13 @@ pub const RUN_SHELL: &str = "run_shell";
 const LIST_LIMIT: usize = 200;
 /// `get_task` で返す変更履歴の数。
 const CHANGES_LIMIT: usize = 30;
+/// `get_workspace` で返すタスクとサブワークスペースの数。
+const WORKSPACE_TASKS: usize = 150;
+const WORKSPACE_SUBS: usize = 100;
+/// `get_workspace` の結果の文字数の上限。超える分のタスクは載せず、件数だけを返す。
+pub const WORKSPACE_CHARS: usize = 40_000;
+/// `get_workspace` の一覧に載せる、タスクの説明の文字数。
+const WORKSPACE_DESCRIPTION: usize = 200;
 
 /// ワークスペースごとの、ターミナルを始めるフォルダーの保存先。
 pub fn workspace_dir_key(workspace: &str) -> String {
@@ -150,6 +157,19 @@ pub fn definitions() -> Vec<ToolDef> {
             schema: object(json!({"id": {"type": "string"}}), &["id"]),
         },
         ToolDef {
+            name: "get_workspace",
+            description: "ワークスペース 1 つの中身を返す。上からの道筋、サブワークスペース（入れ子の全部）と\
+                          それぞれのタスクの数、サブワークスペースも含めたタスクの一覧。\
+                          多いときはタスクの一部だけを返す（tasks_total と tasks_shown を見る）。",
+            schema: object(
+                json!({
+                    "id": {"type": "string"},
+                    "include_done": {"type": "boolean", "description": "完了・中止のタスクも一覧に含める（標準は含めない）"},
+                }),
+                &["id"],
+            ),
+        },
+        ToolDef {
             name: "create_task",
             description: "タスクを作る。workspace_id を省くと、どのワークスペースにも入れない。",
             schema: object(
@@ -172,6 +192,19 @@ pub fn definitions() -> Vec<ToolDef> {
                     "roles": roles_schema("A を付けると、ほかの人の A は外れる。空にすると担当から外す"),
                 }),
                 &["task_id", "person", "roles"],
+            ),
+        },
+        ToolDef {
+            name: "set_assignee_done",
+            description: "担当者 1 人の「自分の分」の完了を付ける・外す。自分の分もほかの人の分も変えられる。\
+                          全員の分がそろうとタスクが完了になる。完了したタスクで誰かの分を外すと、タスクは進行中に戻る。",
+            schema: object(
+                json!({
+                    "task_id": {"type": "string"},
+                    "person": {"type": "string", "description": "タスクの担当者の ID か名前（敬称は付けない）"},
+                    "done": {"type": "boolean", "description": "true で完了にする、false で完了を外す"},
+                }),
+                &["task_id", "person", "done"],
             ),
         },
         ToolDef {
@@ -218,12 +251,13 @@ pub fn definitions() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "update_workspace",
-            description: "ワークスペースの名前を変える、または別のワークスペースの中へ移す。parent_id が null なら、いちばん上に出す。渡した項目だけが変わる。",
+            description: "ワークスペースの名前を変える、別のワークスペースの中へ移す、並び順を変える。parent_id が null なら、いちばん上に出す。index は、同じ親の中で何番目に置くか（0 が先頭。自分を除いて数え、多すぎると末尾）。渡した項目だけが変わる。",
             schema: object(
                 json!({
                     "id": {"type": "string"},
                     "name": {"type": "string"},
                     "parent_id": {"type": ["string", "null"]},
+                    "index": {"type": "integer", "minimum": 0},
                 }),
                 &["id"],
             ),
@@ -427,6 +461,28 @@ pub fn definitions() -> Vec<ToolDef> {
             ),
         },
         ToolDef {
+            name: "get_done_notices",
+            description: "ほかの人が完了チケットで完了を報告したときに、通知を作るかの設定を返す。",
+            schema: object(json!({}), &[]),
+        },
+        ToolDef {
+            name: "set_done_notices",
+            description: "ほかの人が完了を報告したときに、通知を作るかを変える。渡した項目だけが変わる。\
+                          enabled は全体のオン・オフ。when は each（1 人が自分の分を完了にするたび）か finished（タスクが完了したときだけ）。\
+                          roles は、完了にした人がこのどれかの役なら知らせる（R・A・C・I、1 つ以上）。\
+                          muted_people は知らせない担当者（ID か名前）、muted_workspaces は知らせないワークスペースの ID（サブワークスペースも知らせない）。どちらも渡すとその並びになり、[] で全員・全部を知らせる。",
+            schema: object(
+                json!({
+                    "enabled": {"type": "boolean"},
+                    "when": {"type": "string", "enum": ["each", "finished"]},
+                    "roles": {"type": "array", "items": {"type": "string", "enum": ["R", "A", "C", "I"]}},
+                    "muted_people": {"type": "array", "items": {"type": "string"}},
+                    "muted_workspaces": {"type": "array", "items": {"type": "string"}},
+                }),
+                &[],
+            ),
+        },
+        ToolDef {
             name: GITHUB_FETCH,
             description: "GitHub のリンク（issue、プルリクエスト、リポジトリ、ファイル、コミット）の中身を gh コマンドで取ってくる。",
             schema: object(json!({"url": {"type": "string"}}), &["url"]),
@@ -463,6 +519,7 @@ pub const WRITES: &[&str] = &[
     "create_task",
     "update_task",
     "set_assignee",
+    "set_assignee_done",
     "move_task",
     "delete_task",
     "add_comment",
@@ -482,6 +539,7 @@ pub const WRITES: &[&str] = &[
     "revoke_tickets",
     "mark_notices_read",
     "update_workspace_settings",
+    "set_done_notices",
     "create_ai_rule",
     "update_ai_rule",
     "delete_ai_rule",
@@ -915,13 +973,156 @@ fn task_json(task: &Task) -> Value {
         "assignees": task.assignee_ids.iter().map(|id| json!({
             "person_id": id,
             "roles": role_codes(task.roles_of(id).unwrap_or_default()),
+            "done": task.is_done_by(id),
         })).collect::<Vec<_>>(),
         "categories": task.categories,
         "urls": task.urls,
     })
 }
 
+/// 文字数で切る。切ったときは末尾に … を付ける。
+fn clip(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        text.to_owned()
+    } else {
+        let mut out: String = text.chars().take(max).collect();
+        out.push('…');
+        out
+    }
+}
+
+/// ワークスペース 1 つの中身（`get_workspace`）。AI チャットに添えたワークスペースにも使う。
+/// タスクは `WORKSPACE_TASKS` 件と `WORKSPACE_CHARS` 文字までにして、残りは件数だけを返す。
+pub fn workspace_context(store: &Store, id: &str, include_done: bool) -> Result<Value, String> {
+    let core = |e: malakt_core::Error| e.to_string();
+    let path = store.workspace_path(id).map_err(core)?;
+    let all = store.workspaces().map_err(core)?;
+    // サブワークスペースは、左のメニューと同じ並び（親のすぐ後ろに子）
+    let mut children: std::collections::HashMap<&str, Vec<&Workspace>> = Default::default();
+    for w in &all {
+        if let Some(parent) = w.parent_id.as_deref() {
+            children.entry(parent).or_default().push(w);
+        }
+    }
+    for list in children.values_mut() {
+        list.sort_by_key(|w| (w.position, w.id.clone()));
+    }
+    let mut subs: Vec<&Workspace> = Vec::new();
+    let mut seen: std::collections::HashSet<&str> = [id].into();
+    let mut stack: Vec<&Workspace> = children
+        .get(id)
+        .into_iter()
+        .flatten()
+        .rev()
+        .copied()
+        .collect();
+    while let Some(w) = stack.pop() {
+        // 壊れたデータで輪になっていても止まる
+        if !seen.insert(&w.id) {
+            continue;
+        }
+        subs.push(w);
+        stack.extend(children.get(w.id.as_str()).into_iter().flatten().rev());
+    }
+    let tasks = store
+        .tasks(
+            Scope::Workspace(id),
+            &TaskFilter {
+                include_descendants: true,
+                open_only: false,
+                assignee_id: None,
+                query: None,
+            },
+        )
+        .map_err(core)?;
+    let shows = |task: &Task, workspace: &str| {
+        task.workspace_id.as_deref() == Some(workspace)
+            || task.linked_workspace_ids.iter().any(|w| w == workspace)
+    };
+    let counts = |workspace: &str| {
+        let here = tasks.iter().filter(|t| shows(t, workspace));
+        let open = here.clone().filter(|t| t.status.is_open()).count();
+        (open, here.count() - open)
+    };
+    let sub_rows: Vec<Value> = subs
+        .iter()
+        .take(WORKSPACE_SUBS)
+        .map(|w| {
+            let (open, done) = counts(&w.id);
+            json!({
+                "id": w.id,
+                "name": w.name,
+                "parent_id": w.parent_id,
+                "open_tasks": open,
+                "done_tasks": done,
+            })
+        })
+        .collect();
+    let picked: Vec<&Task> = tasks
+        .iter()
+        .filter(|t| include_done || t.status.is_open())
+        .collect();
+    let open = tasks.iter().filter(|t| t.status.is_open()).count();
+    let me = path.last().map(workspace_json).unwrap_or(Value::Null);
+    let mut out = json!({
+        "workspace": me,
+        "path": path.iter().map(|w| w.name.as_str()).collect::<Vec<_>>().join(" / "),
+        "sub_workspaces_total": subs.len(),
+        "sub_workspaces": sub_rows,
+        "open_tasks": open,
+        "done_tasks": tasks.len() - open,
+        "tasks_total": picked.len(),
+        "tasks_shown": 0,
+        "tasks": [],
+    });
+    // 文字数に収まるだけのタスクを載せる
+    let mut budget = WORKSPACE_CHARS.saturating_sub(out.to_string().chars().count() + 200);
+    let mut rows = Vec::new();
+    for task in picked.iter().take(WORKSPACE_TASKS) {
+        let mut row = task_row(task);
+        if !task.description.is_empty() {
+            row["description"] = json!(clip(&task.description, WORKSPACE_DESCRIPTION));
+        }
+        let size = row.to_string().chars().count() + 1;
+        if size > budget {
+            break;
+        }
+        budget -= size;
+        rows.push(row);
+    }
+    out["tasks_shown"] = json!(rows.len());
+    if rows.len() < picked.len() {
+        out["note"] = json!(
+            "タスクが多いので、一部だけを載せています。残りは list_tasks に workspace_id と query を渡して読めます"
+        );
+    }
+    out["tasks"] = Value::Array(rows);
+    Ok(out)
+}
+
 /// 一覧では、説明を省いて短くする。
+/// ほかの人の完了を知らせるかの設定。担当者とワークスペースは名前も添える。
+fn done_notices_json(store: &Store) -> Result<Value, String> {
+    let core = |e: malakt_core::Error| e.to_string();
+    let notices = store.done_notices().map_err(core)?;
+    let people = store.people().map_err(core)?;
+    let workspaces = store.workspaces().map_err(core)?;
+    let mut out = notices.to_json();
+    out["muted_people"] = notices
+        .muted_people
+        .iter()
+        .filter_map(|id| people.iter().find(|p| &p.id == id))
+        .map(|p| json!({"id": p.id, "name": p.name}))
+        .collect();
+    out["muted_workspaces"] = notices
+        .muted_workspaces
+        .iter()
+        .filter_map(|id| workspaces.iter().find(|w| &w.id == id))
+        .map(|w| json!({"id": w.id, "name": w.name}))
+        .collect();
+    Ok(out)
+}
+
 /// 期限をいつ知らせるか。`task_id` があれば、そのタスクの上書きも。
 fn due_alerts_json(store: &Store, task_id: Option<&str>) -> Result<Value, String> {
     use malakt_core::alert;
@@ -1032,6 +1233,11 @@ pub fn execute(
             let rows: Vec<Value> = tasks.iter().take(LIST_LIMIT).map(task_row).collect();
             json!({"total": tasks.len(), "shown": rows.len(), "tasks": rows})
         }
+        "get_workspace" => workspace_context(
+            store,
+            required(args, "id")?,
+            args.get("include_done").and_then(Value::as_bool) == Some(true),
+        )?,
         "get_task" => {
             let id = required(args, "id")?;
             let mut task = task_json(&store.task(id).map_err(core)?);
@@ -1142,6 +1348,33 @@ pub fn execute(
                 )
             }
         }
+        "set_assignee_done" => {
+            let task = store.task(required(args, "task_id")?).map_err(core)?;
+            let done = match args.get("done") {
+                Some(Value::Bool(b)) => *b,
+                other => {
+                    return Err(format!(
+                        "done が正しくありません: {}",
+                        other.unwrap_or(&Value::Null)
+                    ))
+                }
+            };
+            let key = required(args, "person")?;
+            // 探すのはこのタスクの担当者だけ（担当でない人は、完了にできない）
+            let assignees: Vec<Person> = store
+                .people()
+                .map_err(core)?
+                .into_iter()
+                .filter(|p| task.roles_of(&p.id).is_some())
+                .collect();
+            let id = match find_person(&assignees, key, None)? {
+                Who::Known { id, .. } => id,
+                Who::New(name) => {
+                    return Err(format!("「{name}」はこのタスクの担当者ではありません"))
+                }
+            };
+            task_json(&store.set_assignee_done(&task.id, &id, done).map_err(core)?)
+        }
         "move_task" => {
             let id = required(args, "id")?;
             let workspace = optional(args, "workspace_id").filter(|id| !id.is_empty());
@@ -1205,11 +1438,27 @@ pub fn execute(
                 }
                 Some(other) => return Err(format!("parent_id が正しくありません: {other}")),
             };
+            let index = match args.get("index") {
+                None => None,
+                Some(v) => Some(
+                    v.as_u64()
+                        .ok_or_else(|| format!("index が正しくありません: {v}"))?
+                        as usize,
+                ),
+            };
             if let Some(name) = name.filter(|n| *n != before.name) {
                 store.rename_workspace(id, name).map_err(core)?;
             }
-            if let Some(parent) = parent.filter(|p| *p != before.parent_id.as_deref()) {
-                store.move_workspace(id, parent).map_err(core)?;
+            match index {
+                Some(index) => {
+                    let parent = parent.unwrap_or(before.parent_id.as_deref());
+                    store.place_workspace(id, parent, index).map_err(core)?;
+                }
+                None => {
+                    if let Some(parent) = parent.filter(|p| *p != before.parent_id.as_deref()) {
+                        store.move_workspace(id, parent).map_err(core)?;
+                    }
+                }
             }
             workspace_json(&store.workspace(id).map_err(core)?)
         }
@@ -1390,6 +1639,40 @@ pub fn execute(
                 json!({"read": ids.len()})
             }
         },
+        "get_done_notices" => done_notices_json(store)?,
+        "set_done_notices" => {
+            let mut notices = store.done_notices().map_err(core)?;
+            if let Some(v) = args.get("enabled") {
+                notices.enabled = v
+                    .as_bool()
+                    .ok_or_else(|| format!("enabled が正しくありません: {v}"))?;
+            }
+            if let Some(v) = args.get("when") {
+                notices.when = v
+                    .as_str()
+                    .and_then(malakt_core::done_notice::When::parse)
+                    .ok_or_else(|| format!("when が正しくありません: {v}"))?;
+            }
+            if let Some(v) = args.get("roles") {
+                notices.roles = parse_roles(v)?;
+            }
+            if let Some(v) = args.get("muted_people") {
+                let people = store.people().map_err(core)?;
+                let mut ids = Vec::new();
+                for key in strings(v, "muted_people")? {
+                    match find_person(&people, &key, None)? {
+                        Who::Known { id, .. } => ids.push(id),
+                        Who::New(name) => return Err(format!("「{name}」という担当者はいません")),
+                    }
+                }
+                notices.muted_people = ids;
+            }
+            if let Some(v) = args.get("muted_workspaces") {
+                notices.muted_workspaces = strings(v, "muted_workspaces")?;
+            }
+            store.set_done_notices(&notices).map_err(core)?;
+            done_notices_json(store)?
+        }
         "get_due_alerts" => due_alerts_json(store, optional(args, "task_id"))?,
         "set_repeat" => {
             use malakt_core::repeat::{self, Rule, Unit};
@@ -1765,6 +2048,7 @@ pub fn summary(name: &str, args: &Value) -> String {
             _ => "タスク一覧を取得".into(),
         },
         "get_task" => "タスクを取得".into(),
+        "get_workspace" => "ワークスペースを取得".into(),
         "create_task" => format!("タスクを作成: {}", arg("title")),
         "update_task" => "タスクを更新".into(),
         "set_assignee" => match args.get("roles").and_then(Value::as_array) {
@@ -1779,6 +2063,13 @@ pub fn summary(name: &str, args: &Value) -> String {
             ),
             None => format!("担当者の役を設定: {}", arg("person")),
         },
+        "set_assignee_done" => {
+            if args.get("done").and_then(Value::as_bool) == Some(false) {
+                format!("担当者の完了を外す: {}", arg("person"))
+            } else {
+                format!("担当者の分を完了にする: {}", arg("person"))
+            }
+        }
         "move_task" => "タスクを移動".into(),
         "delete_task" => "タスクを削除".into(),
         "add_comment" => "コメントを追加".into(),
@@ -1800,6 +2091,8 @@ pub fn summary(name: &str, args: &Value) -> String {
         "list_notices" => "通知を取得".into(),
         "mark_notices_read" => "通知を既読にする".into(),
         "get_workspace_settings" => "ワークスペースの設定を取得".into(),
+        "get_done_notices" => "完了の通知の設定を取得".into(),
+        "set_done_notices" => "完了の通知の設定を変更".into(),
         "get_due_alerts" => "期限の通知のタイミングを取得".into(),
         "set_due_alerts" => "期限の通知のタイミングを変更".into(),
         "update_workspace_settings" => "ワークスペースの設定を変更".into(),
@@ -1923,7 +2216,7 @@ pub fn system_prompt(rules: &str) -> String {
 \
          - 頼まれた操作は、確認を取らずにツールで実行してください。削除のように元に戻せない操作とシェルのコマンドは、アプリが実行の前にユーザーへ確認を出します。\n\
          - ID はツールで調べてから使ってください。ID を作らないでください。\n\
-         - 担当者は ID か名前で指定できます。登録されていない人の名前が出たら、聞き返さずにその名前で指定してください（アプリがその場で担当者に登録します）。担当者の役（RACI: {RACI}）は set_assignee か、create_task / update_task の assignees で付けてください。\n\
+         - 担当者は ID か名前で指定できます。登録されていない人の名前が出たら、聞き返さずにその名前で指定してください（アプリがその場で担当者に登録します）。担当者の役（RACI: {RACI}）は set_assignee か、create_task / update_task の assignees で付けてください。担当者ごとの「自分の分」の完了は、自分の分もほかの人の分も set_assignee_done で付け外しできます。\n\
          - GitHub のリンクの中身は、必ず {GITHUB_FETCH} で取ってきてください（アプリが、ユーザーのログイン済みの gh で読みます）。{RUN_SHELL} で gh を呼ぶのは、{GITHUB_FETCH} で読めない種類のものだけにしてください。\n\
          - Slack のメッセージへのリンクの中身は、必ず {SLACK_FETCH} で取ってきてください（アプリが、ユーザーの Slack CLI で読みます）。\n\
          - {RUN_SHELL} のコマンドが動くシェルは、ユーザーのメッセージの最後にアプリが書きます。そのシェルの書き方で書いてください。\n\
@@ -2023,6 +2316,117 @@ mod tests {
             summary("set_repeat", &json!({"repeat": null})),
             "繰り返しを外す"
         );
+    }
+
+    #[test]
+    fn a_workspace_comes_with_its_sub_workspaces_and_tasks() {
+        let mut store = Store::open_in_memory().unwrap();
+        let event = run(&mut store, "create_workspace", json!({"name": "イベント"}));
+        let ad = run(
+            &mut store,
+            "create_workspace",
+            json!({"name": "告知", "parent_id": event["id"]}),
+        );
+        let poster = run(
+            &mut store,
+            "create_workspace",
+            json!({"name": "ポスター", "parent_id": ad["id"]}),
+        );
+        let venue = run(
+            &mut store,
+            "create_workspace",
+            json!({"name": "会場", "parent_id": event["id"]}),
+        );
+        let other = run(&mut store, "create_workspace", json!({"name": "家"}));
+        run(
+            &mut store,
+            "create_task",
+            json!({"title": "会場を予約", "workspace_id": venue["id"], "description": "駅から近いところ"}),
+        );
+        run(
+            &mut store,
+            "create_task",
+            json!({"title": "ポスターを刷る", "workspace_id": poster["id"]}),
+        );
+        run(
+            &mut store,
+            "create_task",
+            json!({"title": "日程を決めた", "workspace_id": event["id"], "status": "completed"}),
+        );
+        run(
+            &mut store,
+            "create_task",
+            json!({"title": "掃除", "workspace_id": other["id"]}),
+        );
+
+        let got = run(&mut store, "get_workspace", json!({"id": event["id"]}));
+        assert_eq!(got["workspace"]["name"], "イベント");
+        assert_eq!(got["path"], "イベント");
+        // 入れ子の全部を、親のすぐ後ろに子の並びで
+        let subs: Vec<&str> = got["sub_workspaces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|w| w["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(subs, ["告知", "ポスター", "会場"]);
+        assert_eq!(got["sub_workspaces"][1]["open_tasks"], 1);
+        assert_eq!(got["open_tasks"], 2);
+        assert_eq!(got["done_tasks"], 1);
+        // 標準では、完了したタスクとほかのワークスペースのタスクは一覧にない
+        let titles: Vec<&str> = got["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["title"].as_str().unwrap())
+            .collect();
+        assert_eq!(titles.len(), 2);
+        assert!(titles.contains(&"会場を予約") && titles.contains(&"ポスターを刷る"));
+        assert_eq!(got["tasks_total"], 2);
+        assert_eq!(got["tasks_shown"], 2);
+        assert!(got.get("note").is_none());
+        let venue_task = got["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["title"] == "会場を予約")
+            .unwrap();
+        assert_eq!(venue_task["description"], "駅から近いところ");
+
+        let all = run(
+            &mut store,
+            "get_workspace",
+            json!({"id": event["id"], "include_done": true}),
+        );
+        assert_eq!(all["tasks_total"], 3);
+        let sub = run(&mut store, "get_workspace", json!({"id": poster["id"]}));
+        assert_eq!(sub["path"], "イベント / 告知 / ポスター");
+        assert!(execute(&mut store, None, "get_workspace", &json!({"id": "nope"})).is_err());
+    }
+
+    #[test]
+    fn a_large_workspace_is_cut_to_fit() {
+        let mut store = Store::open_in_memory().unwrap();
+        let ws = run(&mut store, "create_workspace", json!({"name": "大きい"}));
+        let long = "説明".repeat(300);
+        for i in 0..(WORKSPACE_TASKS + 20) {
+            run(
+                &mut store,
+                "create_task",
+                json!({"title": format!("タスク {i}"), "workspace_id": ws["id"], "description": long}),
+            );
+        }
+        let text = execute(&mut store, None, "get_workspace", &json!({"id": ws["id"]})).unwrap();
+        assert!(text.chars().count() <= WORKSPACE_CHARS, "{}", text.len());
+        let got: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(got["tasks_total"], WORKSPACE_TASKS + 20);
+        let shown = got["tasks_shown"].as_u64().unwrap() as usize;
+        assert!(shown > 0 && shown <= WORKSPACE_TASKS, "{shown}");
+        assert_eq!(got["tasks"].as_array().unwrap().len(), shown);
+        assert!(got["note"].is_string());
+        // 説明は短くしてある
+        let description = got["tasks"][0]["description"].as_str().unwrap();
+        assert_eq!(description.chars().count(), WORKSPACE_DESCRIPTION + 1);
     }
 
     #[test]
@@ -2890,6 +3294,167 @@ mod tests {
         )
         .unwrap();
         assert_eq!(store.comments(id).unwrap()[0].author_id, Some(me.id));
+    }
+
+    #[test]
+    fn anyones_part_can_be_done_and_undone() {
+        let mut store = Store::open_in_memory().unwrap();
+        let me = store.create_person("自分", true).unwrap();
+        let sato = store.create_person("佐藤", false).unwrap();
+        let stranger = store.create_person("田中", false).unwrap();
+        let task = run(
+            &mut store,
+            "create_task",
+            json!({"title": "原稿", "assignees": [{"person": me.id}, {"person": "佐藤"}]}),
+        );
+        let id = task["id"].as_str().unwrap().to_owned();
+        assert_eq!(task["assignees"][1]["done"], json!(false));
+        // ほかの人の分を名前で完了にする
+        let done = run(
+            &mut store,
+            "set_assignee_done",
+            json!({"task_id": id, "person": "佐藤", "done": true}),
+        );
+        assert_eq!(done["assignees"][1]["done"], json!(true));
+        assert_eq!(done["status"], json!("needs_action"));
+        // 最後の 1 人でタスクが完了になる
+        let all = run(
+            &mut store,
+            "set_assignee_done",
+            json!({"task_id": id, "person": me.id, "done": true}),
+        );
+        assert_eq!(all["status"], json!("completed"));
+        // 再レビューで指摘したら、相手の完了を外す。タスクは進行中に戻り、自分の分は残る
+        let back = run(
+            &mut store,
+            "set_assignee_done",
+            json!({"task_id": id, "person": sato.id, "done": false}),
+        );
+        assert_eq!(back["status"], json!("in_process"));
+        assert_eq!(back["assignees"][0]["done"], json!(true));
+        assert_eq!(back["assignees"][1]["done"], json!(false));
+        assert!(store.task(&id).unwrap().is_done_by(&me.id));
+        // 担当でない人・知らない人・正しくない値は、何も変えずに失敗する
+        for bad in [
+            json!({"task_id": id, "person": stranger.id, "done": true}),
+            json!({"task_id": id, "person": "田中", "done": true}),
+            json!({"task_id": id, "person": "いない人", "done": true}),
+            json!({"task_id": id, "person": "佐藤", "done": "yes"}),
+            json!({"task_id": id, "person": "佐藤"}),
+            json!({"task_id": "nope", "person": "佐藤", "done": true}),
+        ] {
+            let error = execute(&mut store, None, "set_assignee_done", &bad).unwrap_err();
+            assert!(!error.is_empty(), "{bad}");
+        }
+        assert!(!store.task(&id).unwrap().is_done_by(&sato.id));
+        assert_eq!(store.people().unwrap().len(), 3);
+        assert_eq!(
+            summary(
+                "set_assignee_done",
+                &json!({"person": "佐藤", "done": false})
+            ),
+            "担当者の完了を外す: 佐藤"
+        );
+    }
+
+    #[test]
+    fn done_notices_are_read_and_changed() {
+        let mut store = Store::open_in_memory().unwrap();
+        store.create_person("自分", true).unwrap();
+        let sato = store.create_person("佐藤", false).unwrap();
+        let event = store.create_workspace(None, "イベント").unwrap();
+        let got = run(&mut store, "get_done_notices", json!({}));
+        assert_eq!(got["enabled"], json!(true));
+        assert_eq!(got["when"], json!("each"));
+        assert_eq!(got["roles"], json!(["R", "A", "C", "I"]));
+        let set = run(
+            &mut store,
+            "set_done_notices",
+            json!({"when": "finished", "roles": ["a", "R"], "muted_people": ["佐藤"], "muted_workspaces": [event.id]}),
+        );
+        assert_eq!(set["when"], json!("finished"));
+        assert_eq!(set["roles"], json!(["R", "A"]));
+        assert_eq!(
+            set["muted_people"],
+            json!([{"id": sato.id, "name": "佐藤"}])
+        );
+        assert_eq!(
+            set["muted_workspaces"],
+            json!([{"id": event.id, "name": "イベント"}])
+        );
+        // 渡さない項目は変わらない
+        let off = run(&mut store, "set_done_notices", json!({"enabled": false}));
+        assert_eq!(off["enabled"], json!(false));
+        assert_eq!(off["when"], json!("finished"));
+        // 正しくない値では何も変えない
+        for bad in [
+            json!({"roles": []}),
+            json!({"roles": ["X"]}),
+            json!({"when": "sometimes"}),
+            json!({"muted_people": ["いない人"]}),
+            json!({"muted_workspaces": ["nope"]}),
+            json!({"enabled": "no", "when": "each"}),
+        ] {
+            assert!(
+                execute(&mut store, None, "set_done_notices", &bad).is_err(),
+                "{bad}"
+            );
+        }
+        let after = store.done_notices().unwrap();
+        assert!(!after.enabled && after.muted_people == [sato.id.clone()]);
+        // [] で全員・全部に戻す
+        let all = run(
+            &mut store,
+            "set_done_notices",
+            json!({"enabled": true, "when": "each", "roles": ["R", "A", "C", "I"], "muted_people": [], "muted_workspaces": []}),
+        );
+        assert_eq!(all["muted_people"], json!([]));
+        assert!(store.done_notices().unwrap().is_standard());
+    }
+
+    #[test]
+    fn workspaces_are_reordered_by_index() {
+        let mut store = Store::open_in_memory().unwrap();
+        let a = store.create_workspace(None, "A").unwrap();
+        let b = store.create_workspace(None, "B").unwrap();
+        let c = store.create_workspace(None, "C").unwrap();
+        let names = |store: &Store, parent: Option<&str>| -> Vec<String> {
+            let mut list: Vec<Workspace> = store
+                .workspaces()
+                .unwrap()
+                .into_iter()
+                .filter(|w| w.parent_id.as_deref() == parent)
+                .collect();
+            list.sort_by_key(|w| w.position);
+            list.into_iter().map(|w| w.name).collect()
+        };
+        run(
+            &mut store,
+            "update_workspace",
+            json!({"id": c.id, "index": 0}),
+        );
+        assert_eq!(names(&store, None), ["C", "A", "B"]);
+        // 親と並び順を一緒に変える
+        run(
+            &mut store,
+            "update_workspace",
+            json!({"id": b.id, "parent_id": a.id, "index": 0}),
+        );
+        assert_eq!(names(&store, None), ["C", "A"]);
+        assert_eq!(names(&store, Some(&a.id)), ["B"]);
+        run(
+            &mut store,
+            "update_workspace",
+            json!({"id": c.id, "parent_id": a.id, "index": 0}),
+        );
+        assert_eq!(names(&store, Some(&a.id)), ["C", "B"]);
+        assert!(execute(
+            &mut store,
+            None,
+            "update_workspace",
+            &json!({"id": a.id, "index": -1})
+        )
+        .is_err());
     }
 
     #[test]

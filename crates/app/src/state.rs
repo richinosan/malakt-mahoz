@@ -225,6 +225,10 @@ pub enum SubModal {
     Rules,
     /// アプリ内ブラウザのデータを消す前の確認
     ClearBrowser,
+    /// ほかの人の完了を知らせる担当者を選ぶ
+    DonePeople,
+    /// ほかの人の完了を知らせるワークスペースを選ぶ
+    DoneWorkspaces,
 }
 
 /// 詳細で日付と時刻を入れる 2 つの項目。
@@ -492,6 +496,8 @@ pub struct MainView {
     pub ws_rows: Rc<crate::ws_drag::Rows>,
     /// ドラッグで置いたばかりのワークスペースと、置いた回数（動きを毎回始めから見せる）。
     pub ws_landed: Option<(Id, usize)>,
+    /// ドラッグしているワークスペースが、この画面のチャットの上にある（ほかのウィンドウから来たものも）。
+    pub ws_chat_drop: bool,
     /// 詳細で、担当者と役を選ぶところを開いている。
     pub assignee_picker: bool,
     /// ダイアログの上に重ねて出しているダイアログ。
@@ -525,6 +531,12 @@ pub struct MainView {
     pub modal_opened: Option<std::time::Instant>,
     /// 閉じたばかりのダイアログと、閉じた時刻。消える動きの間だけ描く。
     pub modal_closing: Option<(std::time::Instant, Modal, Option<crate::panes::PaneOverlay>)>,
+    /// 閉じたばかりの重ねたダイアログと、閉じた時刻。消える動きの間だけ描く。
+    pub sub_closing: Option<(std::time::Instant, SubModal)>,
+    /// 前に描いたときに重ねていたダイアログ。
+    pub sub_seen: Option<SubModal>,
+    /// 閉じたばかりのタスクの詳細と、閉じた時刻。消える動きの間だけ描く。
+    pub panel_closing: Option<(std::time::Instant, Detail)>,
     /// 前に描いたときに出ていたダイアログ。
     pub modal_seen: Option<(Modal, Option<crate::panes::PaneOverlay>)>,
     /// 今描いているダイアログの出方。0 で消えていて、1 で出きっている。
@@ -946,6 +958,7 @@ impl MainView {
             ws_dropped: false,
             ws_rows: Default::default(),
             ws_landed: None,
+            ws_chat_drop: false,
             layout: Default::default(),
             primary: 0,
             children: HashMap::new(),
@@ -976,6 +989,9 @@ impl MainView {
             motion: true,
             modal_opened: None,
             modal_closing: None,
+            panel_closing: None,
+            sub_closing: None,
+            sub_seen: None,
             modal_seen: None,
             dialog_t: std::cell::Cell::new(1.),
             today: view::today(),
@@ -1109,7 +1125,7 @@ impl MainView {
             None
         };
         self.due = Rc::new(store.due_tasks(&until, mine)?);
-        self.detail = match &self.panel {
+        let detail = match &self.panel {
             Some(id) => match store.task(id) {
                 Ok(task) => Some(Detail {
                     linked: {
@@ -1140,6 +1156,7 @@ impl MainView {
             },
             None => None,
         };
+        self.set_detail(detail);
         if self.detail.is_none() {
             self.panel = None;
             self.editing = None;
@@ -1539,9 +1556,22 @@ impl MainView {
         }
     }
 
+    /// 詳細の中身を変える。閉じたときは、消える動きの間だけ最後の中身を残す。
+    /// 別のタスクを開いたら、消えかけの詳細はすぐ消す。
+    fn set_detail(&mut self, next: Option<Detail>) {
+        match (self.detail.take(), &next) {
+            (Some(last), None) if self.motion => {
+                self.panel_closing = Some((std::time::Instant::now(), last));
+            }
+            (_, Some(_)) => self.panel_closing = None,
+            _ => {}
+        }
+        self.detail = next;
+    }
+
     pub fn close_panel(&mut self, cx: &mut Context<Self>) {
         self.panel = None;
-        self.detail = None;
+        self.set_detail(None);
         self.editing = None;
         self.assignee_picker = false;
         self.comment_mode = CommentMode::New;
@@ -2243,6 +2273,11 @@ impl MainView {
     /// タスクをドラッグしている、または落とした直後。この間のクリックは、ドラッグの終わりとして扱う。
     pub fn dragging_task(&self) -> bool {
         self.dropped || self.task_drag.as_ref().is_some_and(|d| d.moved)
+    }
+
+    /// この画面のチャットの上を、ワークスペースかタスクがドラッグされている。
+    pub fn dropping_on_chat(&self) -> bool {
+        self.ws_chat_drop || self.drop_over() == Some(&DropTarget::Chat)
     }
 
     /// この画面の中で、今の落とし先になっている場所。
@@ -3409,6 +3444,13 @@ impl MainView {
         cx.notify();
     }
 
+    /// ワークスペースへのリンクをクリップボードに入れる。AI チャットの入力欄に貼ると、そのワークスペースが付く。
+    pub fn copy_workspace_link(&mut self, id: &str, cx: &mut Context<Self>) {
+        cx.write_to_clipboard(ClipboardItem::new_string(malakt_core::wslink::url(id)));
+        self.show_notice("リンクをコピーしました。".into());
+        cx.notify();
+    }
+
     // ---- 表の列 ----
 
     /// 保存してある列の並び・幅・表示を読む。読めない項目は最初の形のままにする。
@@ -3719,6 +3761,61 @@ impl MainView {
         }
         cx.notify();
         saved
+    }
+
+    // ---- ほかの人の完了の通知 ----
+
+    /// ほかの人が完了にしたときに知らせるかの設定。
+    pub fn done_notices(&self, cx: &App) -> malakt_core::done_notice::DoneNotices {
+        self.db.read(cx).store.done_notices().unwrap_or_default()
+    }
+
+    pub fn set_done_notices(
+        &mut self,
+        notices: &malakt_core::done_notice::DoneNotices,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let saved = self.write(cx, |s| s.set_done_notices(notices)).is_some();
+        cx.notify();
+        saved
+    }
+
+    /// 完了にした人の役で、`role` を入れる・外す。最後の 1 つは外さない。
+    pub fn toggle_done_role(&mut self, role: malakt_core::Role, cx: &mut Context<Self>) -> bool {
+        let mut notices = self.done_notices(cx);
+        let roles = if notices.roles.contains(role) {
+            notices.roles.without(role)
+        } else {
+            notices.roles.with(role)
+        };
+        if roles.is_empty() {
+            return false;
+        }
+        notices.roles = roles;
+        self.set_done_notices(&notices, cx)
+    }
+
+    /// その担当者の完了を、知らせる・知らせないを切り替える。
+    pub fn toggle_done_person(&mut self, id: &str, cx: &mut Context<Self>) -> bool {
+        let mut notices = self.done_notices(cx);
+        toggle_id(&mut notices.muted_people, id);
+        self.set_done_notices(&notices, cx)
+    }
+
+    /// そのワークスペースのタスクの完了を、知らせる・知らせないを切り替える。
+    pub fn toggle_done_workspace(&mut self, id: &str, cx: &mut Context<Self>) -> bool {
+        let mut notices = self.done_notices(cx);
+        toggle_id(&mut notices.muted_workspaces, id);
+        self.set_done_notices(&notices, cx)
+    }
+
+    pub fn open_done_picker(&mut self, people: bool, cx: &mut Context<Self>) {
+        self.sub_modal = Some(if people {
+            SubModal::DonePeople
+        } else {
+            SubModal::DoneWorkspaces
+        });
+        cx.notify();
     }
 
     // ---- 期限の通知 ----
@@ -4456,6 +4553,31 @@ impl MainView {
         };
         self.ai_session
             .update(cx, |s, cx| s.chat_about_task(id, title.into(), cx));
+        self.show_chat_input(window, cx);
+    }
+
+    /// ワークスペースを AI チャットの入力欄に添えて、チャットを開く。
+    pub fn attach_workspace_to_chat(
+        &mut self,
+        id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let name = match self.db.read(cx).store.workspace(id) {
+            Ok(ws) => ws.name,
+            Err(e) => {
+                self.error = Some(format!("ワークスペースを読めませんでした: {e}").into());
+                cx.notify();
+                return;
+            }
+        };
+        self.ai_session
+            .update(cx, |s, cx| s.attach_workspace(id, name.into(), cx));
+        self.show_chat_input(window, cx);
+    }
+
+    /// チャットを出して、入力欄にフォーカスする。別ウィンドウに出しているときは、そのウィンドウを手前に出す。
+    fn show_chat_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.ai_open || self.ai_session.read(cx).chat_window.is_some() {
             self.toggle_ai(window, cx);
         } else if let Some(pane) = self.ai_pane.clone() {
@@ -5254,6 +5376,14 @@ impl AssetSource for Assets {
 }
 
 /// 並びに `value` がなければ入れ、あれば外す。
+fn toggle_id(ids: &mut Vec<Id>, id: &str) {
+    if let Some(ix) = ids.iter().position(|v| v == id) {
+        ids.remove(ix);
+    } else {
+        ids.push(id.to_owned());
+    }
+}
+
 fn toggle_value(values: &mut Vec<u32>, value: u32) {
     if let Some(ix) = values.iter().position(|v| *v == value) {
         values.remove(ix);

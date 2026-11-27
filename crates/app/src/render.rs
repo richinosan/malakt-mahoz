@@ -369,6 +369,11 @@ enum SettingKey {
     AlertTimed,
     AlertDate,
     AlertHour,
+    DoneOn,
+    DoneWhen,
+    DoneRoles,
+    DonePeople,
+    DoneWorkspaces,
     LockNow,
     People,
     Keys,
@@ -684,6 +689,88 @@ fn status_badge(status: Status, cx: &App) -> Div {
         .child(status.label())
 }
 
+/// 数の丸に出す数の上限。これを超えたら「99+」にする（ベースの COUNT_BUBBLE_LIMIT）。
+const BUBBLE_LIMIT: u32 = 99;
+
+/// 数の丸に出す文字。0 のときは丸を出さない。
+pub(crate) fn bubble_text(count: u32) -> Option<String> {
+    match count {
+        0 => None,
+        n if n > BUBBLE_LIMIT => Some(format!("{BUBBLE_LIMIT}+")),
+        n => Some(n.to_string()),
+    }
+}
+
+/// 数の丸の大きさ。ベースの 2 か所の値をそのまま持つ。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Bubble {
+    /// ベルのアイコンの右上に重ねる（AdminNotificationBell: 高さ 1.125rem・文字 0.6875rem・px-1）
+    Bell,
+    /// 左のメニューの「通知」の右（AdminSidebar: 高さ 1.25rem・文字 text-xs・px-1.5）
+    Nav,
+}
+
+impl Bubble {
+    /// 高さ（rem）。幅の最小もこの値にして、1 桁は正円にする。
+    pub(crate) const fn height(self) -> f32 {
+        match self {
+            Bubble::Bell => 1.125,
+            Bubble::Nav => 1.25,
+        }
+    }
+
+    /// 文字の大きさ（rem）
+    pub(crate) const fn text(self) -> f32 {
+        match self {
+            Bubble::Bell => 0.6875,
+            Bubble::Nav => 0.75,
+        }
+    }
+
+    /// 左右の余白（rem）。2 桁以上はこの余白のまま横に伸びる。
+    pub(crate) const fn pad(self) -> f32 {
+        match self {
+            Bubble::Bell => 0.25,
+            Bubble::Nav => 0.375,
+        }
+    }
+}
+
+/// 未読などの数の丸。1 桁は正円、2 桁以上は横に伸びる丸。数は上下左右の真ん中に置く。
+/// `corner` があれば、親の右上から（上, 右）だけずらして重ねる。数が 0 のときは何も出さない。
+pub(crate) fn count_bubble(
+    id: impl Into<ElementId>,
+    count: u32,
+    size: Bubble,
+    corner: Option<(Pixels, Pixels)>,
+    cx: &App,
+) -> Option<impl IntoElement> {
+    let text = bubble_text(count)?;
+    let theme = cx.theme();
+    let height = rems(size.height());
+    Some(
+        div()
+            .id(id)
+            .when_some(corner, |d, (top, right)| d.absolute().top(top).right(right))
+            .flex()
+            .flex_none()
+            .items_center()
+            .justify_center()
+            .h(height)
+            .min_w(height)
+            .px(rems(size.pad()))
+            .rounded_full()
+            .bg(theme.danger)
+            .text_color(theme.danger_foreground)
+            .text_size(rems(size.text()))
+            .line_height(height)
+            .font_weight(FontWeight::BOLD)
+            .whitespace_nowrap()
+            .child(text)
+            .test_support(),
+    )
+}
+
 /// 表の値のボタンの中身。ボタンは中身を真ん中に寄せるので、幅いっぱいの行に入れて左から並べる。
 /// 列に入らない文字は、末尾を「…」にする。
 fn value_shown(shown: Div) -> impl IntoElement {
@@ -894,7 +981,12 @@ fn workspace_color(color: Option<&str>) -> Option<Hsla> {
 }
 
 /// ワークスペースのアイコン。自分で足した画像はそのままの色で、ほかは選んだ色の線画で出す。
-fn workspace_icon(icon: Option<&str>, color: Option<&str>, size: Pixels, cx: &App) -> AnyElement {
+pub fn workspace_icon(
+    icon: Option<&str>,
+    color: Option<&str>,
+    size: Pixels,
+    cx: &App,
+) -> AnyElement {
     let custom = icon
         .filter(|icon| malakt_core::icon::is_custom(icon))
         .and_then(|icon| crate::icons::custom_image(icon, cx));
@@ -917,6 +1009,20 @@ fn workspace_icon(icon: Option<&str>, color: Option<&str>, size: Pixels, cx: &Ap
 
 /// 左のメニューの行に出すアイコンの大きさ。
 const NAV_ICON_SIZE: Pixels = px(14.);
+/// パンくずに並べる段の数の上限（「…」を含む）。
+const MAX_CRUMBS: usize = 4;
+/// パンくずの 1 段の、名前のほかの幅（アイコン・すき間・左右の余白、rem）。
+const CRUMB_CHROME: f32 = 2.;
+
+/// パンくずの名前を縮めるときの、いちばん狭い幅（rem）。名前の幅の見積もり（text_sm で、英数字は 0.7 字、
+/// ほかは 1 字）と `cap` の小さいほう。
+fn crumb_min(name: &str, cap: f32) -> f32 {
+    let em: f32 = name
+        .chars()
+        .map(|c| if c.is_ascii() { 0.7 } else { 1. })
+        .sum();
+    (em * 0.875).min(cap)
+}
 /// 畳んだ左のメニューの、アイコンの大きさと押せる四角の大きさ（拡大率を掛ける前の値）。
 const RAIL_ICON_SIZE: Pixels = px(18.);
 const RAIL_BUTTON: f32 = 36.;
@@ -929,6 +1035,23 @@ pub(crate) fn app_icon(name: &str) -> Icon {
 /// 出てくるときの動き。すっと出て、ゆっくり止まる。
 fn appear(ms: u64) -> Animation {
     Animation::new(std::time::Duration::from_millis(ms)).with_easing(ease_out_quint())
+}
+
+/// ダイアログが閉じてから消えるまでの長さ（ミリ秒）。
+const DIALOG_CLOSE_MS: u64 = 150;
+
+/// タスクの詳細が出てくる動きと消える動きの長さ（ミリ秒）。ベースのサイドパネルと同じ。
+const PANEL_MOTION_MS: u64 = 200;
+
+/// 出入りの途中のタスクの詳細。`t` が 0 で右に 48px ずれて消えていて、1 で出きっている。
+fn panel_shift(panel: Div, t: f32) -> Div {
+    // 浮かせたパネルの中では、右のすき間の分だけ内側で止まる
+    let rest = if crate::theme::floating_now() {
+        FLOAT_GAP
+    } else {
+        px(0.)
+    };
+    panel.right(rest + px(-48.) * (1. - t)).opacity(t)
 }
 
 fn section_title(text: &'static str) -> Div {
@@ -1220,14 +1343,14 @@ impl MainView {
                 |_, _, _| {},
                 move |_, _, window, _| {
                     let moved = view.clone();
-                    window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
+                    window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
                         if phase != DispatchPhase::Capture {
                             return;
                         }
                         // 閉じた画面のドラッグは、もう続かない
                         let _ = moved.update(cx, |this, cx| {
                             if event.pressed_button == Some(MouseButton::Left) {
-                                this.drag_ws_at(event.position, cx);
+                                this.drag_ws_at(event.position, window, cx);
                             } else {
                                 this.finish_ws_drag(cx);
                             }
@@ -1367,6 +1490,14 @@ impl MainView {
             }))
             .item(item("AI のルール", |this, id, window, cx| {
                 this.open_workspace_rules(&id, window, cx)
+            }))
+            .separator()
+            .item(item(
+                "AI チャットに添える",
+                |this, id, window, cx| this.attach_workspace_to_chat(&id, window, cx),
+            ))
+            .item(item("コピー", |this, id, _, cx| {
+                this.copy_workspace_link(&id, cx)
             }))
             .separator()
             .item(item("削除", |this, id, _, cx| {
@@ -1675,17 +1806,13 @@ impl MainView {
                                 self.modal == Modal::Notices,
                                 cx,
                             )
-                            .when(unread > 0, |d| {
-                                d.child(
-                                    div()
-                                        .px_1p5()
-                                        .rounded_full()
-                                        .bg(theme.danger)
-                                        .text_color(theme.danger_foreground)
-                                        .text_xs()
-                                        .child(unread.to_string()),
-                                )
-                            })
+                            .children(count_bubble(
+                                "nav-notices-count",
+                                unread,
+                                Bubble::Nav,
+                                None,
+                                cx,
+                            ))
                             .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                                 this.modal = Modal::Notices;
                                 cx.notify();
@@ -1814,20 +1941,13 @@ impl MainView {
                     self.modal == Modal::Notices,
                     cx,
                 )
-                .when(unread > 0, |d| {
-                    d.child(
-                        div()
-                            .absolute()
-                            .top(px(1.))
-                            .right(px(-2.))
-                            .px_1()
-                            .rounded_full()
-                            .bg(theme.danger)
-                            .text_color(theme.danger_foreground)
-                            .text_xs()
-                            .child(unread.to_string()),
-                    )
-                })
+                .children(count_bubble(
+                    "rail-notices-count",
+                    unread,
+                    Bubble::Bell,
+                    Some((px(1.), px(-2.))),
+                    cx,
+                ))
                 .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                     this.modal = Modal::Notices;
                     cx.notify();
@@ -2308,20 +2428,13 @@ impl MainView {
                                     cx.notify();
                                 })),
                         ))
-                        .when(unread > 0, |d| {
-                            d.child(
-                                div()
-                                    .absolute()
-                                    .top(px(-4.))
-                                    .right(px(-4.))
-                                    .px_1()
-                                    .rounded_full()
-                                    .bg(theme.danger)
-                                    .text_color(theme.danger_foreground)
-                                    .text_xs()
-                                    .child(unread.to_string()),
-                            )
-                        }),
+                        .children(count_bubble(
+                            "open-notices-count",
+                            unread,
+                            Bubble::Bell,
+                            Some((px(-4.), px(-4.))),
+                            cx,
+                        )),
                 )
                 .child(feel::gloss(
                     button("open-settings")
@@ -2555,23 +2668,13 @@ impl MainView {
             Nav::Home => "ホーム".into(),
             Nav::All => "すべてのタスク".into(),
             Nav::Unfiled => "未所属のタスク".into(),
-            Nav::Workspace(id) => {
-                // 最上位からの道筋を「親 › 子」で出す
-                let mut names = Vec::new();
-                let mut current = self.workspaces.iter().find(|w| &w.id == id);
-                while let Some(w) = current {
-                    names.push(w.name.as_str());
-                    current = w
-                        .parent_id
-                        .as_ref()
-                        .and_then(|p| self.workspaces.iter().find(|x| &x.id == p));
-                    if names.len() > 64 {
-                        break;
-                    }
-                }
-                names.reverse();
-                names.join(" › ").into()
-            }
+            // 上の段への道筋は、一覧の上のパンくずに出す
+            Nav::Workspace(id) => self
+                .workspaces
+                .iter()
+                .find(|w| &w.id == id)
+                .map(|w| SharedString::from(w.name.clone()))
+                .unwrap_or_default(),
         }
     }
 
@@ -2934,19 +3037,32 @@ impl MainView {
                 .find(|w| &w.id == id)
                 .and_then(|w| w.date.clone())
         });
-        header = header.child(
-            // 基準日が入らない幅では、右のボタンを次の行へ送る
-            row()
-                .flex_1()
-                .flex_shrink_0()
-                .whitespace_nowrap()
-                .gap_2()
-                .text_sm()
-                .when_some(date, |d, date| {
-                    d.child(div().text_color(theme.muted_foreground).child("基準日"))
-                        .child(view::format_date(&date, &self.today))
-                }),
-        );
+        // パンくずは、狭いときは名前を省いて縮む（右のボタンを押し出さない）
+        let crumbs = self.render_crumbs(cx);
+        let has_crumbs = crumbs.is_some();
+        header = header
+            .children(crumbs.map(|c| {
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .overflow_hidden()
+                    .text_sm()
+                    .child(c)
+            }))
+            .child(
+                // 基準日が入らない幅では、右のボタンを次の行へ送る
+                row()
+                    .when(!has_crumbs, |d| d.flex_1())
+                    .flex_shrink_0()
+                    .whitespace_nowrap()
+                    .gap_2()
+                    .text_sm()
+                    .when_some(date, |d, date| {
+                        d.child(div().text_color(theme.muted_foreground).child("基準日"))
+                            .child(view::format_date(&date, &self.today))
+                    }),
+            );
         if let Some(id) = workspace_id.clone() {
             let (c, d) = (id.clone(), id.clone());
             header = header
@@ -3516,6 +3632,115 @@ impl MainView {
     }
 
     /// サブワークスペースの見出しの行。左の矢印で開く・閉じる。行を押すと、そのワークスペースへ移る。
+    /// 一覧の上のパンくず（最上位 › … › 今いる所）。押すとそのワークスペースへ移り、タスクを落とすとそこへ移す。
+    /// 最上位のワークスペースでは出さない（上のバーの名前と同じになる）。
+    fn render_crumbs(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let Nav::Workspace(id) = &self.nav else {
+            return None;
+        };
+        let path = view::workspace_path(&self.workspaces, id);
+        if path.len() < 2 {
+            return None;
+        }
+        let theme = cx.theme().clone();
+        let last = path.len() - 1;
+        let mut bar = row().id("crumbs").min_w_0().gap_0p5();
+        for (i, crumb) in view::crumbs(path.len(), MAX_CRUMBS).into_iter().enumerate() {
+            if i > 0 {
+                bar = bar.child(
+                    div()
+                        .flex_none()
+                        .text_color(theme.muted_foreground)
+                        .child(app_icon("chevron-right").small()),
+                );
+            }
+            bar = bar.child(match crumb {
+                view::Crumb::At(at) => self.render_crumb(path[at], at == last, cx),
+                view::Crumb::More(hidden) => {
+                    let view = cx.entity().downgrade();
+                    let hidden: Vec<(Id, SharedString)> = hidden
+                        .into_iter()
+                        .map(|at| {
+                            let w = &self.workspaces[path[at]];
+                            (w.id.clone(), w.name.clone().into())
+                        })
+                        .collect();
+                    button("crumb-more")
+                        .icon(app_icon("ellipsis"))
+                        .ghost()
+                        .small()
+                        .tooltip("上の階層")
+                        .pop_menu(move |mut menu, _, _| {
+                            for (id, name) in &hidden {
+                                let (view, id) = (view.clone(), id.clone());
+                                menu = menu.item(PopupMenuItem::new(name.clone()).on_click(
+                                    move |_, _, cx| {
+                                        // ウィンドウを閉じたあとなら、反映する先がない
+                                        let _ = view.update(cx, |this, cx| {
+                                            this.go_here(Nav::Workspace(id.clone()), cx)
+                                        });
+                                    },
+                                ));
+                            }
+                            menu
+                        })
+                        .into_any_element()
+                }
+            });
+        }
+        Some(bar.test_support().into_any_element())
+    }
+
+    /// パンくずの 1 段。長い名前は省いて、乗せると全体を出す。今いる所は押せない。
+    fn render_crumb(&self, workspace: usize, current: bool, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let ws = &self.workspaces[workspace];
+        let name: SharedString = ws.name.clone().into();
+        let tip = name.clone();
+        let go = ws.id.clone();
+        let el = row()
+            .id(("crumb", workspace))
+            // 狭いときは長い名前から縮む。短い名前と今いる所は、なるべく省かない
+            .min_w(rems(
+                crumb_min(&ws.name, if current { 8. } else { 4. }) + CRUMB_CHROME,
+            ))
+            .gap_1p5()
+            .px_1p5()
+            .py_0p5()
+            .rounded(feel::md())
+            // 乗せたとき・押している間の面は、名前より奥に敷く（先に付ける）
+            .when(!current, |d| {
+                d.cursor_pointer()
+                    .text_color(theme.muted_foreground)
+                    .hover(|s| s.text_color(theme.foreground))
+                    .lit(theme.accent, cx)
+                    .sunk(theme.primary.opacity(0.4), cx)
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        // ドラッグの終わりは、クリックにしない
+                        if this.dragging_task() {
+                            return;
+                        }
+                        this.go_here(Nav::Workspace(go.clone()), cx);
+                    }))
+            })
+            .child(div().flex_none().child(workspace_icon(
+                ws.icon.as_deref(),
+                ws.color.as_deref(),
+                NAV_ICON_SIZE,
+                cx,
+            )))
+            .child(div().min_w_0().max_w(px(240.)).truncate().child(name))
+            .tooltip(move |window, cx| {
+                gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
+            });
+        if current {
+            return el.test_support().into_any_element();
+        }
+        self.drop_zone(el, DropTarget::Workspace(Some(ws.id.clone())), cx)
+            .test_support()
+            .into_any_element()
+    }
+
     fn render_folder_row(
         &self,
         at: usize,
@@ -3742,46 +3967,40 @@ impl MainView {
                 .pl(LIST_INDENT * depth as f32
                     + px(if task.parent_id.is_some() { 16. } else { 0. }))
                 .child(
-                    row()
-                        .min_w_0()
-                        .gap_1p5()
-                        .child(
-                            div()
-                                .id(("title", ix))
-                                .min_w_0()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                // AI が整えている間は、タイトルの前で印が回る
-                                .when(arranging, |d| {
-                                    d.child(
-                                        div()
-                                            .id(("ai-working", ix))
-                                            .flex_none()
-                                            .child(Spinner::new().small())
-                                            .test_support(),
-                                    )
-                                })
-                                .truncate()
-                                .text_sm()
-                                .font_weight(FontWeight::BOLD)
-                                .cursor_pointer()
-                                .hover(|s| s.text_color(theme.primary))
-                                .active(|s| s.opacity(0.6))
-                                .when(closed, |d| {
-                                    d.text_color(theme.muted_foreground).line_through()
-                                })
-                                .child(task.title.clone())
-                                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                                    // ドラッグの終わりは、クリックにしない
-                                    if this.dragging_task() {
-                                        return;
-                                    }
-                                    this.open_panel(&id, window, cx)
-                                }))
-                                .test_support(),
-                        )
-                        .children(repeating),
+                    div()
+                        .id(("title", ix))
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        // AI が整えている間は、タイトルの前で印が回る
+                        .when(arranging, |d| {
+                            d.child(
+                                div()
+                                    .id(("ai-working", ix))
+                                    .flex_none()
+                                    .child(Spinner::new().small())
+                                    .test_support(),
+                            )
+                        })
+                        .truncate()
+                        .text_sm()
+                        .font_weight(FontWeight::BOLD)
+                        .cursor_pointer()
+                        .hover(|s| s.text_color(theme.primary))
+                        .active(|s| s.opacity(0.6))
+                        .when(closed, |d| {
+                            d.text_color(theme.muted_foreground).line_through()
+                        })
+                        .child(task.title.clone())
+                        .children(repeating)
+                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                            // ドラッグの終わりは、クリックにしない
+                            if this.dragging_task() {
+                                return;
+                            }
+                            this.open_panel(&id, window, cx)
+                        }))
+                        .test_support(),
                 )
                 .when(has_chips, |d| d.child(chips))
         };
@@ -4763,6 +4982,48 @@ impl MainView {
     }
 
     /// タスクの詳細。`width` があれば一覧の右に並ぶカラム、なければ全面のシート。
+    /// タスクの詳細に、出入りの動きを付けて描く。開くと右から入り、閉じると右へ抜けながら
+    /// 薄くなって消える（どちらも 200ms）。消えるまでの間は閉じた詳細の上を覆い、
+    /// そのボタンは押せない。
+    fn render_panel_motion(
+        &mut self,
+        width: Option<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if let Some(panel) = self.render_panel(width, cx) {
+            if !self.motion {
+                return Some(panel.into_any_element());
+            }
+            return Some(
+                panel
+                    .with_animation("panel-in", appear(PANEL_MOTION_MS), panel_shift)
+                    .into_any_element(),
+            );
+        }
+        let (at, last) = self.panel_closing.take()?;
+        let progress = at.elapsed().as_millis() as f32 / PANEL_MOTION_MS as f32;
+        if !self.motion || progress >= 1. {
+            return None;
+        }
+        window.request_animation_frame();
+        // 閉じる前の中身で描く。描いたら元の閉じた状態に戻す
+        let editing = self.editing.take();
+        self.detail = Some(last);
+        let panel = self.render_panel(width, cx);
+        if let Some(last) = self.detail.take() {
+            self.panel_closing = Some((at, last));
+        }
+        self.editing = editing;
+        Some(
+            panel_shift(panel?, 1. - ease_out_quint()(progress))
+                .id("panel-closing")
+                .child(div().absolute().inset_0().occlude())
+                .test_support()
+                .into_any_element(),
+        )
+    }
+
     fn render_panel(&self, width: Option<Pixels>, cx: &mut Context<Self>) -> Option<Div> {
         let sheet = width.is_none();
         let detail = self.detail.as_ref()?;
@@ -6245,10 +6506,16 @@ impl MainView {
                 cx,
             )
         };
-        let (title, width, over) = match self.sub_modal {
+        let (title, width, over) = match self.sub_shown().map(|(sub, _)| sub) {
             None | Some(SubModal::Rules) => return sized("dialog", body, cx),
             Some(SubModal::Font) => ("フォント", px(400.), self.font_picker(cx)),
             Some(SubModal::Scene) => ("背景の画像", px(680.), self.scene_picker(cx)),
+            Some(SubModal::DonePeople) => ("知らせる担当者", px(400.), self.done_picker(true, cx)),
+            Some(SubModal::DoneWorkspaces) => (
+                "知らせるワークスペース",
+                px(400.),
+                self.done_picker(false, cx),
+            ),
             Some(SubModal::ClearBrowser) => {
                 let body = col()
                     .gap_3()
@@ -6284,12 +6551,7 @@ impl MainView {
             }
         };
         let over = self.dialog_as("dialog", width, title, over, cx);
-        let over = if self.motion {
-            over.with_animation("sub-modal-in", appear(140), |d, t| d.opacity(t))
-                .into_any_element()
-        } else {
-            over.into_any_element()
-        };
+        let over = self.sub_motion(over);
         div()
             .absolute()
             .inset_0()
@@ -6683,7 +6945,46 @@ impl MainView {
                 None,
                 list(&["期限", "通知", "時刻"]),
             ),
+            Setting::new(
+                Section::Notices,
+                SettingKey::DoneOn,
+                "ほかの人の完了",
+                None,
+                list(&["完了", "通知", "担当者", "完了チケット"]),
+            ),
         ]);
+        if self.done_notices(cx).enabled {
+            all.extend([
+                Setting::new(
+                    Section::Notices,
+                    SettingKey::DoneWhen,
+                    "知らせるとき",
+                    None,
+                    list(&["完了", "通知", "1 人ずつ"]),
+                ),
+                Setting::new(
+                    Section::Notices,
+                    SettingKey::DoneRoles,
+                    "完了にした人の役",
+                    None,
+                    list(&["完了", "通知", "役", "RACI", "R", "A", "C", "I"]),
+                ),
+                Setting::new(
+                    Section::Notices,
+                    SettingKey::DonePeople,
+                    "知らせる担当者",
+                    None,
+                    list(&["完了", "通知", "担当者", "人"]),
+                ),
+                Setting::new(
+                    Section::Notices,
+                    SettingKey::DoneWorkspaces,
+                    "知らせるワークスペース",
+                    None,
+                    list(&["完了", "通知", "ワークスペース"]),
+                ),
+            ]);
+        }
         if let Some(name) = crate::reminders::setting_label(cx) {
             all.push(Setting::new(
                 Section::Notices,
@@ -7085,6 +7386,111 @@ impl MainView {
                     })
                     .child(reset("float-reset", false).placeholder())
                     .into_any_element(),
+                SettingKey::DoneOn => Switch::new("done-switch")
+                    .checked(self.done_notices(cx).enabled)
+                    .on_click(cx.listener(|this, on: &bool, _, cx| {
+                        let mut notices = this.done_notices(cx);
+                        notices.enabled = *on;
+                        this.set_done_notices(&notices, cx);
+                    }))
+                    .into_any_element(),
+                SettingKey::DoneWhen => {
+                    use malakt_core::done_notice::When;
+                    let view = cx.entity().downgrade();
+                    let when = self.done_notices(cx).when;
+                    menu_choice("done-when", when.label().into(), &theme)
+                        .pop_menu(move |mut menu, _, _| {
+                            for option in When::ALL {
+                                let view = view.clone();
+                                menu = menu.item(
+                                    PopupMenuItem::new(option.label())
+                                        .checked(when == option)
+                                        .on_click(move |_, _, cx| {
+                                            // ウィンドウを閉じたあとなら、反映する先がない
+                                            let _ = view.update(cx, |this, cx| {
+                                                let mut notices = this.done_notices(cx);
+                                                notices.when = option;
+                                                this.set_done_notices(&notices, cx);
+                                            });
+                                        }),
+                                );
+                            }
+                            menu
+                        })
+                        .into_any_element()
+                }
+                SettingKey::DoneRoles => {
+                    let roles = self.done_notices(cx).roles;
+                    row()
+                        .gap_1()
+                        .justify_end()
+                        .children(malakt_core::Role::ALL.into_iter().enumerate().map(
+                            |(ix, role)| {
+                                chip(("done-role", ix), role.code(), roles.contains(role), cx)
+                                    .tooltip(move |window, cx| {
+                                        gpui_kit::component::tooltip::Tooltip::new(role.label())
+                                            .build(window, cx)
+                                    })
+                                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                        this.toggle_done_role(role, cx);
+                                    }))
+                                    .test_support()
+                            },
+                        ))
+                        .child(
+                            reset(
+                                "done-roles-reset",
+                                roles != malakt_core::done_notice::all_roles(),
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                let mut notices = this.done_notices(cx);
+                                notices.roles = malakt_core::done_notice::all_roles();
+                                this.set_done_notices(&notices, cx);
+                            })),
+                        )
+                        .into_any_element()
+                }
+                SettingKey::DonePeople | SettingKey::DoneWorkspaces => {
+                    let people = item.key == SettingKey::DonePeople;
+                    let notices = self.done_notices(cx);
+                    let muted = if people {
+                        notices.muted_people.len()
+                    } else {
+                        notices.muted_workspaces.len()
+                    };
+                    let text = match (people, muted) {
+                        (true, 0) => "全員".to_owned(),
+                        (false, 0) => "すべて".to_owned(),
+                        (true, n) => format!("{n} 人を除く"),
+                        (false, n) => format!("{n} 個を除く"),
+                    };
+                    let (id, reset_id) = if people {
+                        ("done-people-open", "done-people-reset")
+                    } else {
+                        ("done-workspaces-open", "done-workspaces-reset")
+                    };
+                    row()
+                        .gap_1()
+                        .child(
+                            opener(id, text, cx)
+                                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                    this.open_done_picker(people, cx)
+                                }))
+                                .test_support(),
+                        )
+                        .child(reset(reset_id, muted > 0).on_click(cx.listener(
+                            move |this, _, _, cx| {
+                                let mut notices = this.done_notices(cx);
+                                if people {
+                                    notices.muted_people.clear();
+                                } else {
+                                    notices.muted_workspaces.clear();
+                                }
+                                this.set_done_notices(&notices, cx);
+                            },
+                        )))
+                        .into_any_element()
+                }
                 SettingKey::LockOn => Switch::new("lock-switch")
                     .checked(self.lock_enabled(cx))
                     .disabled(self.verifying(cx))
@@ -7651,6 +8057,96 @@ impl MainView {
             )
     }
 
+    /// ほかの人の完了を知らせる担当者・ワークスペースを選ぶ。押すたびに入れる・外す。
+    /// ワークスペースは左のメニューと同じ順に、サブワークスペースを字下げして並べる。
+    fn done_picker(&self, people: bool, cx: &mut Context<Self>) -> Div {
+        let theme = cx.theme().clone();
+        let notices = self.done_notices(cx);
+        // (ID, 名前, 字下げ, 知らせるか)
+        let items: Vec<(Id, String, usize, bool)> = if people {
+            self.people
+                .iter()
+                .filter(|p| !p.is_self)
+                .map(|p| {
+                    let on = !notices.muted_people.contains(&p.id);
+                    (p.id.clone(), p.name.clone(), 0, on)
+                })
+                .collect()
+        } else {
+            crate::state::build_tree(&self.workspaces, &std::collections::HashSet::new())
+                .into_iter()
+                .map(|r| {
+                    let w = &self.workspaces[r.index];
+                    // 親を外していれば、サブワークスペースも知らせない
+                    let mut on = true;
+                    let mut at = Some(w);
+                    while let Some(here) = at {
+                        if notices.muted_workspaces.contains(&here.id) {
+                            on = false;
+                            break;
+                        }
+                        at = here
+                            .parent_id
+                            .as_deref()
+                            .and_then(|p| self.workspaces.iter().find(|w| w.id == p));
+                    }
+                    (w.id.clone(), w.name.clone(), r.depth, on)
+                })
+                .collect()
+        };
+        let empty = items.is_empty();
+        let list = col()
+            .id("done-pick-list")
+            .gap_0p5()
+            .children(
+                items
+                    .into_iter()
+                    .enumerate()
+                    .map(|(ix, (id, name, depth, on))| {
+                        row()
+                            .id(("done-pick", ix))
+                            .w_full()
+                            .h(px(36.))
+                            .pl(px(12. + 16. * depth as f32))
+                            .pr_3()
+                            .gap_2()
+                            .rounded(feel::md())
+                            .cursor_pointer()
+                            .lit(theme.accent.opacity(0.6), cx)
+                            .sunk(theme.primary.opacity(0.4), cx)
+                            .child(div().flex_1().min_w_0().truncate().child(name))
+                            .child(
+                                app_icon("check")
+                                    .small()
+                                    .text_color(theme.primary)
+                                    .when(!on, |i| i.invisible()),
+                            )
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                if people {
+                                    this.toggle_done_person(&id, cx);
+                                } else {
+                                    this.toggle_done_workspace(&id, cx);
+                                }
+                            }))
+                            .test_support()
+                    }),
+            )
+            .max_h(px(400.))
+            .overflow_y_scrollbar();
+        col().gap_3().child(list).when(empty, |d| {
+            d.child(
+                div()
+                    .text_sm()
+                    .text_color(theme.muted_foreground)
+                    .child(if people {
+                        "ほかの担当者はいません。"
+                    } else {
+                        "ワークスペースはありません。"
+                    }),
+            )
+        })
+    }
+
     /// 背景の画像を選ぶ。同梱の画像は、今のライト/ダークの絵を小さく出す。
     fn scene_picker(&self, cx: &mut Context<Self>) -> Div {
         use crate::theme::Scene;
@@ -7778,7 +8274,7 @@ impl MainView {
     fn tick_dialog_motion(&mut self, window: &mut Window) {
         use std::time::{Duration, Instant};
         const OPEN: Duration = Duration::from_millis(200);
-        const CLOSE: Duration = Duration::from_millis(150);
+        const CLOSE: Duration = Duration::from_millis(DIALOG_CLOSE_MS);
         let shown = (self.modal != Modal::None || self.pane_overlay.is_some())
             .then(|| (self.modal.clone(), self.pane_overlay));
         let now = Instant::now();
@@ -7794,10 +8290,30 @@ impl MainView {
             _ => {}
         }
         self.modal_seen = shown;
+        // 重ねたダイアログだけを閉じたときは、下のダイアログの上で薄くなって消える
+        match (self.sub_seen.take(), self.sub_modal) {
+            (Some(last), None) if self.modal != Modal::None => {
+                self.sub_closing = Some((now, last));
+            }
+            (_, Some(_)) => self.sub_closing = None,
+            _ => {}
+        }
+        self.sub_seen = self.sub_modal;
+        if self.modal == Modal::None {
+            self.sub_closing = None;
+        }
         self.dialog_t.set(1.);
         if !self.motion {
             self.modal_closing = None;
+            self.sub_closing = None;
             return;
+        }
+        if let Some((at, _)) = self.sub_closing {
+            if now.duration_since(at) >= CLOSE {
+                self.sub_closing = None;
+            } else {
+                window.request_animation_frame();
+            }
         }
         if let Some(at) = self.modal_opened {
             let progress = now.duration_since(at).as_secs_f32() / OPEN.as_secs_f32();
@@ -7815,11 +8331,45 @@ impl MainView {
         }
     }
 
+    /// 重ねて出しているダイアログと、その濃さ（出ているときは 1）。閉じたばかりなら、
+    /// 消える動きの間だけそれを返し、濃さは 1 から 0 へ下がる。
+    fn sub_shown(&self) -> Option<(SubModal, f32)> {
+        if let Some(sub) = self.sub_modal {
+            return Some((sub, 1.));
+        }
+        let (at, sub) = self.sub_closing?;
+        let progress = at.elapsed().as_millis() as f32 / DIALOG_CLOSE_MS as f32;
+        (progress < 1.).then(|| (sub, 1. - ease_out_quint()(progress)))
+    }
+
+    /// 重ねたダイアログに出入りの動きを付ける。出るときは薄い所から浮かび、閉じたあとは
+    /// 薄くなって消える。消えるまでの間は上を覆い、閉じたダイアログのボタンは押せない。
+    fn sub_motion(&self, over: Div) -> AnyElement {
+        if !self.motion {
+            return over.into_any_element();
+        }
+        match self.sub_shown() {
+            Some((_, fade)) if self.sub_modal.is_none() => over
+                .opacity(fade)
+                .child(
+                    div()
+                        .id("sub-modal-closing")
+                        .absolute()
+                        .inset_0()
+                        .occlude()
+                        .test_support(),
+                )
+                .into_any_element(),
+            _ => over
+                .with_animation("sub-modal-in", appear(140), |d, t| d.opacity(t))
+                .into_any_element(),
+        }
+    }
+
     /// 閉じたばかりのダイアログ。薄くしながら描き、上を覆って押せないようにする。
     fn render_closing_dialog(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        const CLOSE: f32 = 0.15;
         let (at, modal, overlay) = self.modal_closing.clone()?;
-        let progress = (at.elapsed().as_secs_f32() / CLOSE).min(1.);
+        let progress = (at.elapsed().as_millis() as f32 / DIALOG_CLOSE_MS as f32).min(1.);
         let open = self.dialog_t.replace(1. - ease_out_quint()(progress));
         let dialog = match overlay {
             Some(overlay) => Some(self.pane_overlay_dialog(overlay, cx)),
@@ -8722,7 +9272,7 @@ impl MainView {
                             )),
                     );
                 let title = format!("「{}」の設定", self.workspace_name(Some(id)));
-                if self.sub_modal != Some(SubModal::Rules) {
+                if self.sub_shown().map(|(sub, _)| sub) != Some(SubModal::Rules) {
                     return Some(self.dialog(title, body, cx));
                 }
                 // AI のルールは、設定の上にもう 1 枚重ねる
@@ -8736,12 +9286,7 @@ impl MainView {
                     col().child(rules),
                     cx,
                 );
-                let over = if self.motion {
-                    over.with_animation("sub-modal-in", appear(140), |d, t| d.opacity(t))
-                        .into_any_element()
-                } else {
-                    over.into_any_element()
-                };
+                let over = self.sub_motion(over);
                 div()
                     .absolute()
                     .inset_0()
@@ -8945,7 +9490,7 @@ impl MainView {
     }
 
     /// ほかのウィンドウの中のペインとして出す。左のメニューと上のバーは出さない。
-    fn render_embedded(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_embedded(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         self.arm_notice(cx);
         self.drops.begin(crate::drops::PANE);
         let theme = cx.theme().clone();
@@ -8985,7 +9530,7 @@ impl MainView {
                     .w(list_width)
                     .child(main),
             )
-            .children(self.render_panel(panel_width, cx))
+            .children(self.render_panel_motion(panel_width, window, cx))
             .children(self.panel_drag_layer(cx))
             .children(self.task_drag_listener(cx))
             .children(self.render_modal(cx))
@@ -9048,7 +9593,7 @@ impl Render for MainView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.tick_dialog_motion(window);
         if self.embedded {
-            return self.render_embedded(cx);
+            return self.render_embedded(window, cx);
         }
         self.arm_notice(cx);
         // 落とせる場所を覚え直す。描かれなかったペインと AI チャットの場所は残さない
@@ -9078,6 +9623,8 @@ impl Render for MainView {
             self.sidebar_open && self.panel.is_none()
         };
         if !unlocked {
+            // ロックの画面に、閉じかけの詳細は出さない
+            self.panel_closing = None;
             return col()
                 .size_full()
                 .bg(theme.background)
@@ -9136,23 +9683,8 @@ impl Render for MainView {
             }
         };
 
-        // 詳細は右から入り、ダイアログはふわっと出る
-        let panel = self.render_panel(panel_width, cx).map(|panel| {
-            if !self.motion {
-                return panel.into_any_element();
-            }
-            panel
-                .with_animation("panel-in", appear(180), |panel, t| {
-                    // 浮かせたパネルの中では、右のすき間の分だけ内側で止まる
-                    let rest = if crate::theme::floating_now() {
-                        FLOAT_GAP
-                    } else {
-                        px(0.)
-                    };
-                    panel.right(rest + px(-48.) * (1. - t)).opacity(t)
-                })
-                .into_any_element()
-        });
+        // 詳細は右から入って右へ抜け、ダイアログはふわっと出る
+        let panel = self.render_panel_motion(panel_width, window, cx);
         // 幅が足りないときは、AI チャットを上のバーの下で、タスクの画面の右に重ねる
         let (ai_beside, ai_over) = if ai_width.is_some() {
             (ai, None)
@@ -9370,5 +9902,31 @@ fn auto_lock_label(minutes: Option<u32>) -> String {
         None => "しない".to_owned(),
         Some(m) if m % 60 == 0 => format!("{} 時間", m / 60),
         Some(m) => format!("{m} 分"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[::core::prelude::v1::test]
+    fn bubble_text_caps_at_99() {
+        assert_eq!(bubble_text(0), None);
+        assert_eq!(bubble_text(1).as_deref(), Some("1"));
+        assert_eq!(bubble_text(99).as_deref(), Some("99"));
+        assert_eq!(bubble_text(100).as_deref(), Some("99+"));
+    }
+
+    /// 1 桁が正円になるのは、幅の最小が高さと同じで、余白を足しても 1 文字が高さに収まるとき。
+    #[::core::prelude::v1::test]
+    fn one_digit_fits_in_a_circle() {
+        for size in [Bubble::Bell, Bubble::Nav] {
+            // 数字 1 文字の幅は文字の大きさの 0.6 倍以下
+            assert!(
+                size.pad() * 2. + size.text() * 0.6 <= size.height(),
+                "{size:?}"
+            );
+            assert!(size.text() < size.height(), "{size:?}");
+        }
     }
 }
