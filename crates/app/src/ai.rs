@@ -311,7 +311,7 @@ struct NewTask {
     /// タスクの URL の欄。
     urls: Vec<String>,
     links: Vec<Fetch>,
-    /// 繰り返しで作った回（前の回を写しただけなので、整えない）。
+    /// 繰り返しで作った回と、定時タスクで作ったタスク（前の回や雛形を写しただけなので、整えない）。
     copied: bool,
 }
 
@@ -362,7 +362,10 @@ fn task_links(store: &malakt_core::Store) -> Result<Vec<(NewTask, bool)>, String
         .map(|task| {
             let links = find_sources(&link_text(&task));
             let open = task.status.is_open();
-            let copied = task.created_by == malakt_core::Actor::Repeat;
+            let copied = matches!(
+                task.created_by,
+                malakt_core::Actor::Repeat | malakt_core::Actor::Schedule
+            );
             (
                 NewTask {
                     id: task.id,

@@ -63,6 +63,8 @@ pub struct Data {
     pub ai_rules: Vec<crate::rules::AiRule>,
     /// タスクに付けた繰り返し。
     pub repeats: Vec<crate::repeat::Repeat>,
+    /// 定時タスク。
+    pub schedules: Vec<crate::schedule::Schedule>,
 }
 
 impl Data {
@@ -182,6 +184,16 @@ impl Data {
                 r.task_id
             )));
         }
+        if let Some(s) = self.schedules.iter().find(|s| {
+            s.workspace_id
+                .as_ref()
+                .is_some_and(|w| !self.workspaces.iter().any(|x| &x.id == w))
+        }) {
+            return Err(Error::Invalid(format!(
+                "定時タスク「{}」のワークスペースがありません",
+                s.title
+            )));
+        }
         if let Some(a) = self
             .task_alerts
             .iter()
@@ -258,6 +270,7 @@ pub fn export<W: Write + Seek>(store: &Store, out: W) -> Result<Manifest> {
     )?;
     put("data/ai_rules.json", serde_json::to_vec(&data.ai_rules)?)?;
     put("data/repeats.json", serde_json::to_vec(&data.repeats)?)?;
+    put("data/schedules.json", serde_json::to_vec(&data.schedules)?)?;
     for (name, png) in &data.icons {
         put(&icon_entry(name), png.clone())?;
     }
@@ -348,6 +361,11 @@ fn read_zip<R: Read + Seek>(zip: &mut ZipArchive<R>) -> Result<(Manifest, Data)>
         .iter()
         .map(crate::repeat::clean_repeat)
         .collect::<Result<_>>()?;
+    let schedules: Vec<crate::schedule::Schedule> = read_optional(zip, "data/schedules.json")?;
+    let schedules = schedules
+        .iter()
+        .map(crate::schedule::clean)
+        .collect::<Result<_>>()?;
     let workspaces: Vec<Workspace> = read_json(zip, "data/workspaces.json")?;
     let mut icons: Vec<(String, Vec<u8>)> = Vec::new();
     for w in &workspaces {
@@ -379,6 +397,7 @@ fn read_zip<R: Read + Seek>(zip: &mut ZipArchive<R>) -> Result<(Manifest, Data)>
         task_alerts,
         ai_rules,
         repeats,
+        schedules,
     };
     data.normalize();
     data.validate()?;

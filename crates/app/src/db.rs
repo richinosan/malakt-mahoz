@@ -67,21 +67,23 @@ impl Db {
         }
     }
 
-    /// 時刻が来た繰り返しの、次の回を作る。作ったら `true`。
+    /// 時刻が来た繰り返しの次の回と、定時タスクのタスクを作る。作ったら `true`。
     /// 作れなかったときは、その理由を [`Db::repeat_error`] に入れる（次に作れたら消す）。
     pub fn sweep_repeats(&mut self, now: &str) -> bool {
+        let mut made = false;
+        let mut errors = Vec::new();
         match self.store.sweep_repeats(now) {
-            Ok(made) => {
-                let cleared = self.repeat_error.take().is_some();
-                !made.is_empty() || cleared
-            }
-            Err(error) => {
-                let text = format!("繰り返しの次の回を作れませんでした: {error}");
-                let changed = self.repeat_error.as_deref() != Some(text.as_str());
-                self.repeat_error = Some(text);
-                changed
-            }
+            Ok(ids) => made |= !ids.is_empty(),
+            Err(error) => errors.push(format!("繰り返しの次の回を作れませんでした: {error}")),
         }
+        match self.store.sweep_schedules(now) {
+            Ok(ids) => made |= !ids.is_empty(),
+            Err(error) => errors.push(format!("定時タスクのタスクを作れませんでした: {error}")),
+        }
+        let error = (!errors.is_empty()).then(|| errors.join("\n"));
+        let changed = self.repeat_error != error;
+        self.repeat_error = error;
+        made || changed
     }
 
     /// 操作がないまま、自動でロックする時間が過ぎたか。ロックが無効なときと、
@@ -260,7 +262,7 @@ const WATCH_EVERY: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// 外からの変更と日付の変わり目、期限を知らせる時刻を見張る。2 秒ごとに確かめ、変わっていたら
 /// 全ウィンドウを読み直させる（読み直しのときに、期限の通知も作られる）。
-/// 時刻が来た繰り返しは、次の回を作る（ロック中も）。
+/// 時刻が来た繰り返しの次の回と、定時タスクのタスクを作る（ロック中も）。
 /// 操作がないまま決めた時間が過ぎたら、ロックする。
 pub fn watch(cx: &mut App) {
     cx.spawn(async move |cx| {

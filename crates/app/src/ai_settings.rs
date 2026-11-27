@@ -21,6 +21,7 @@ use crate::render::app_icon;
 use crate::shadow::{Elevate, Elevation};
 
 mod rules;
+mod schedules;
 
 /// 参照する寸法を、画面全体の拡大率に合わせる。
 const fn px(value: f32) -> Pixels {
@@ -44,14 +45,16 @@ pub enum AiGroup {
     Model,
     Behavior,
     Rules,
+    Schedules,
     Github,
 }
 
 impl AiGroup {
-    pub const ALL: [AiGroup; 4] = [
+    pub const ALL: [AiGroup; 5] = [
         AiGroup::Model,
         AiGroup::Behavior,
         AiGroup::Rules,
+        AiGroup::Schedules,
         AiGroup::Github,
     ];
 
@@ -60,6 +63,7 @@ impl AiGroup {
             AiGroup::Model => "モデル",
             AiGroup::Behavior => "動作",
             AiGroup::Rules => "ルール",
+            AiGroup::Schedules => "定時タスク",
             AiGroup::Github => "GitHub",
         }
     }
@@ -75,6 +79,7 @@ pub enum AiRow {
     Key,
     AutoRun,
     Rules,
+    Schedules,
     Arrange,
     Track,
     Shell,
@@ -85,7 +90,7 @@ pub enum AiRow {
 }
 
 impl AiRow {
-    pub const ALL: [AiRow; 14] = [
+    pub const ALL: [AiRow; 15] = [
         AiRow::Service,
         AiRow::Model,
         AiRow::Effort,
@@ -96,6 +101,7 @@ impl AiRow {
         AiRow::Track,
         AiRow::Shell,
         AiRow::Rules,
+        AiRow::Schedules,
         AiRow::Account,
         AiRow::Watch,
         AiRow::WatchMinutes,
@@ -109,6 +115,7 @@ impl AiRow {
             }
             AiRow::AutoRun | AiRow::Arrange | AiRow::Track | AiRow::Shell => AiGroup::Behavior,
             AiRow::Rules => AiGroup::Rules,
+            AiRow::Schedules => AiGroup::Schedules,
             AiRow::Account | AiRow::Watch | AiRow::WatchMinutes | AiRow::WatchInstruction => {
                 AiGroup::Github
             }
@@ -124,6 +131,7 @@ impl AiRow {
             AiRow::Key => "API キー",
             AiRow::AutoRun => "オート実行",
             AiRow::Rules => "ルール",
+            AiRow::Schedules => "定時タスク",
             AiRow::Arrange => "新しいタスクを整える",
             AiRow::Track => "コメントから進捗を更新する",
             AiRow::Shell => "AI のタブのシェル",
@@ -139,6 +147,9 @@ impl AiRow {
             AiRow::Coordinator => "考え中に送ったメッセージを、続きか並列かに振り分ける",
             AiRow::AutoRun => "コマンド実行とタスク削除を確認なしで行う",
             AiRow::Rules => "AI がいつも従う指示",
+            AiRow::Schedules => {
+                "決まった時刻に新しいタスクを作り、AI への指示があれば AI が実行する"
+            }
             AiRow::Arrange => "タスクを作ると、AI がリンクを読んでタイトルと説明を整える",
             AiRow::Track => "タスクにコメントを書くと、AI が進捗・状態・期限を更新する",
             AiRow::Shell => "AI のコマンドを動かすシェル",
@@ -160,6 +171,9 @@ impl AiRow {
             AiRow::Shell => "ターミナル シェル",
             AiRow::Account => "gh ログイン",
             AiRow::Rules => "AI ルール 指示 前提 プロンプト ワークスペース",
+            AiRow::Schedules => {
+                "定時 定期 毎週 毎日 毎月 報告 繰り返し スケジュール ワークスペース"
+            }
             _ => "AI",
         }
     }
@@ -168,7 +182,12 @@ impl AiRow {
     pub fn wide(self) -> bool {
         matches!(
             self,
-            AiRow::Service | AiRow::Model | AiRow::Key | AiRow::Rules | AiRow::WatchInstruction
+            AiRow::Service
+                | AiRow::Model
+                | AiRow::Key
+                | AiRow::Rules
+                | AiRow::Schedules
+                | AiRow::WatchInstruction
         )
     }
 
@@ -199,6 +218,14 @@ pub struct AiSettings {
     rule_body: Entity<TextareaState>,
     /// ルールを保存できなかった理由。
     rules_error: Option<SharedString>,
+    /// 定時タスクの一覧で見ている場所。`None` は未所属。
+    pub schedules_scope: Option<String>,
+    /// 開いている（中身を変えている）定時タスク。
+    schedule_open: Option<String>,
+    schedule_title: Entity<InputState>,
+    schedule_ai: Entity<TextareaState>,
+    /// 定時タスクを保存できなかった理由。
+    schedules_error: Option<SharedString>,
     /// モデルの一覧を開いている。
     pub model_open: bool,
     _subscriptions: Vec<Subscription>,
@@ -224,8 +251,36 @@ impl AiSettings {
         let rule_body = cx.new(|cx| {
             TextareaState::new(window, cx).placeholder("例: PR のタスクは優先度を高にする")
         });
+        let schedule_title = cx.new(|cx| InputState::new(window, cx));
+        let schedule_ai = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .submit_on_enter(true)
+                .auto_grow(2, 8)
+                .placeholder("例: 先週完了したタスクから、定例の報告を下書きする")
+        });
         crate::term::shared(cx).update(cx, |terms, cx| terms.load_profiles(cx));
         let subscriptions = vec![
+            cx.subscribe_in(
+                &schedule_title,
+                window,
+                |this, _, event: &InputEvent, _, cx| {
+                    if matches!(event, InputEvent::PressEnter { .. } | InputEvent::Blur) {
+                        this.save_schedule_title(cx);
+                    }
+                },
+            ),
+            cx.subscribe_in(
+                &schedule_ai,
+                window,
+                |this, _, event: &InputEvent, _, cx| {
+                    if matches!(
+                        event,
+                        InputEvent::PressEnter { shift: false, .. } | InputEvent::Blur
+                    ) {
+                        this.save_schedule_ai(cx);
+                    }
+                },
+            ),
             cx.observe(&session, |_, _, cx| cx.notify()),
             cx.observe(&crate::term::shared(cx), |_, _, cx| cx.notify()),
             // AI や外のエージェントがルールを変えたら、一覧を読み直す
@@ -285,6 +340,11 @@ impl AiSettings {
             rule_name,
             rule_body,
             rules_error: None,
+            schedules_scope: None,
+            schedule_open: None,
+            schedule_title,
+            schedule_ai,
+            schedules_error: None,
             model_open: false,
             _subscriptions: subscriptions,
         }
@@ -568,6 +628,7 @@ impl AiSettings {
                 }))
                 .into_any_element(),
             AiRow::Rules => self.rules_editor(true, cx),
+            AiRow::Schedules => self.schedules_editor(true, cx),
             AiRow::Arrange => Switch::new("ai-arrange")
                 .checked(session.arrange)
                 .on_click(cx.listener(|this, on: &bool, _, cx| {

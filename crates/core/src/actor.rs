@@ -30,6 +30,8 @@ pub enum Actor {
     Reminders,
     /// 繰り返しで、アプリが次の回を作った。
     Repeat,
+    /// 定時タスクで、アプリがタスクを作った。
+    Schedule,
 }
 
 /// 名前から、改行などの制御文字を除き、長すぎる分を切る。
@@ -69,6 +71,7 @@ impl Actor {
             Actor::Command => "cli".into(),
             Actor::Reminders => "reminders".into(),
             Actor::Repeat => "repeat".into(),
+            Actor::Schedule => "schedule".into(),
         }
     }
 
@@ -80,6 +83,7 @@ impl Actor {
                 "cli" => Actor::Command,
                 "reminders" => Actor::Reminders,
                 "repeat" => Actor::Repeat,
+                "schedule" => Actor::Schedule,
                 _ => Actor::Unknown,
             },
             Some(("ticket", person)) => {
@@ -107,7 +111,7 @@ impl Actor {
     pub fn is_machine(&self) -> bool {
         matches!(
             self,
-            Actor::Ai { .. } | Actor::Agent(_) | Actor::Command | Actor::Repeat
+            Actor::Ai { .. } | Actor::Agent(_) | Actor::Command | Actor::Repeat | Actor::Schedule
         )
     }
 
@@ -129,6 +133,7 @@ impl Actor {
             Actor::Agent(name) => Some(name.clone()),
             Actor::Command => Some("コマンド".into()),
             Actor::Repeat => Some("繰り返し".into()),
+            Actor::Schedule => Some("定時タスク".into()),
             _ => None,
         }
     }
@@ -151,6 +156,7 @@ impl Actor {
             Actor::Ai { .. } => "bot",
             Actor::Agent(_) => "plug",
             Actor::Repeat => "repeat",
+            Actor::Schedule => "alarm-clock",
             _ => "terminal",
         }
     }
@@ -203,6 +209,7 @@ mod tests {
             Actor::Command,
             Actor::Reminders,
             Actor::Repeat,
+            Actor::Schedule,
         ];
         for actor in all {
             assert_eq!(Actor::parse(&actor.as_string()), actor, "{actor:?}");

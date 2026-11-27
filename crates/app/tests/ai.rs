@@ -4383,3 +4383,113 @@ fn retrying_a_running_repeat_does_not_restart_it_after_a_stop(cx: &mut TestAppCo
         2
     );
 }
+
+fn schedules_in(
+    cx: &mut TestAppContext,
+    workspace: Option<&str>,
+) -> Vec<malakt_core::schedule::Schedule> {
+    cx.update(|cx| db::shared(cx).read(cx).store.schedules(workspace).unwrap())
+}
+
+/// ワークスペースの設定に重ねた一覧で定時タスクを足し、タイトルと AI への指示をその場で書く。
+/// 時刻が来ると、そのワークスペースに新しいタスクを作り、AI が指示を実行してコメントする。
+/// 作ったタスクは AI の整理に回さない。
+#[gpui_kit::test]
+fn a_schedule_makes_a_new_task_and_runs_its_ai_instruction(cx: &mut TestAppContext) {
+    let world = start(cx);
+    world.keys.set(Provider::Claude, "k").unwrap();
+    let arrange = session(cx);
+    cx.update(|cx| arrange.update(cx, |s, cx| s.set_arrange(true, cx)));
+    let workspace = cx.update(|cx| {
+        db::shared(cx).update(cx, |db, cx| {
+            let w = db.store.create_workspace(None, "定例").unwrap();
+            cx.notify();
+            w.id
+        })
+    });
+    let (window, view) = open(cx, wide());
+    ui(cx, window, |window, cx| {
+        view.update(cx, |v, cx| {
+            v.open_workspace_settings(&workspace, window, cx)
+        });
+    });
+    ui(cx, window, |window, cx| window.click("ws-schedules", cx));
+    cx.update(|cx| {
+        assert_eq!(
+            view.read(cx).sub_modal,
+            Some(malakt_mahoz::state::SubModal::Schedules)
+        )
+    });
+    // 足すと「新規定時タスク」が開き、タイトルを全部選んでいるので、そのまま打ち替えられる
+    ui(cx, window, |window, cx| window.click("schedule-add", cx));
+    cx.run_until_parked();
+    assert_eq!(
+        schedules_in(cx, Some(&workspace))[0].title,
+        "新規定時タスク"
+    );
+    ui(cx, window, |window, _| window.activate_window());
+    ui(cx, window, |window, cx| window.input("週次定例の報告", cx));
+    ui(cx, window, |window, cx| window.press("enter", cx));
+    ui(cx, window, |window, cx| window.click("schedule-ai", cx));
+    ui(cx, window, |window, cx| {
+        window.input("先週のまとめを下書きする", cx)
+    });
+    ui(cx, window, |window, cx| window.press("enter", cx));
+    let made = schedules_in(cx, Some(&workspace)).remove(0);
+    assert_eq!(made.title, "週次定例の報告");
+    assert_eq!(made.ai, "先週のまとめを下書きする");
+    assert!(
+        made.rule.label().starts_with("毎週 "),
+        "{}",
+        made.rule.label()
+    );
+    assert!(schedules_in(cx, None).is_empty());
+    // Esc で重ねた一覧だけを閉じる
+    ui(cx, window, |window, cx| window.press("escape", cx));
+    ui(cx, window, |window, cx| window.press("escape", cx));
+    cx.update(|cx| {
+        let v = view.read(cx);
+        assert_eq!(v.sub_modal, None);
+        assert!(matches!(
+            v.modal,
+            malakt_mahoz::state::Modal::WorkspaceSettings(_)
+        ));
+    });
+
+    // 時刻が来た（アプリの見張りと同じ入口）
+    let draft = "## 先週の進み\n- ログインを直した";
+    let task = cx.update(|cx| {
+        db::shared(cx).update(cx, |db, _| {
+            assert!(db.sweep_repeats(&made.next_at));
+            db.store.repeat_ai_jobs().unwrap()[0].task_id.clone()
+        })
+    });
+    world.reply(tool_reply(
+        "t1",
+        "add_comment",
+        json!({"task_id": task, "body": draft}),
+    ));
+    world.reply(text_reply("下書きをコメントしました。"));
+    cx.update(|cx| db::shared(cx).update(cx, |_, cx| cx.notify()));
+    wait(cx, "定期実行が終わる", |s| {
+        s.runs.iter().any(|r| r.kind == RunKind::Repeat)
+    });
+    let created = cx.update(|cx| db::shared(cx).read(cx).store.task(&task).unwrap());
+    assert_eq!(created.title, "週次定例の報告");
+    assert_eq!(created.workspace_id.as_deref(), Some(workspace.as_str()));
+    assert_eq!(created.created_by, malakt_core::Actor::Schedule);
+    assert_eq!(comments_of(cx, &task), vec![draft.to_owned()]);
+    // AI に渡ったのは指示の実行だけ（整理には回っていない）
+    assert_eq!(world.sent().len(), 2);
+    let message = world.sent()[0].2["messages"][0]["content"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        message.contains("指示: 先週のまとめを下書きする"),
+        "{message}"
+    );
+    // 次の週も、別のタスクを作る
+    let next = schedules_in(cx, Some(&workspace))[0].next_at.clone();
+    assert_ne!(next, made.next_at);
+}

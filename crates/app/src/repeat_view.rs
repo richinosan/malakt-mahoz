@@ -29,37 +29,41 @@ fn every_label(unit: Unit, every: u32) -> String {
     }
 }
 
-/// メニューの 1 行。押すと繰り返しを `rule` にする（`None` は外す）。
+/// メニューで選んだ決まりを受け取る。`None` は外す。
+pub(crate) type Pick = std::rc::Rc<dyn Fn(Option<Rule>, &mut App)>;
+
+/// メニューの 1 行。押すと決まりを `rule` にする（`None` は外す）。
 fn choose(
-    view: &WeakEntity<MainView>,
+    pick: &Pick,
     label: impl Into<SharedString>,
     checked: bool,
     rule: Option<Rule>,
 ) -> PopupMenuItem {
-    let view = view.clone();
+    let pick = pick.clone();
     PopupMenuItem::new(label)
         .checked(checked)
-        .on_click(move |_, _, cx| {
-            let rule = rule.clone();
-            // ウィンドウを閉じたあとなら、反映する先がない
-            let _ = view.update(cx, |this, cx| this.set_repeat(rule, cx));
-        })
+        .on_click(move |_, _, cx| pick(rule.clone(), cx))
 }
 
-fn repeat_menu(
+/// 繰り返しの決まりを選ぶメニュー。`none` のときは「なし」も出す。
+/// 決まりがあれば、間隔・曜日・時刻のサブメニューも出す。
+pub(crate) fn repeat_menu(
     mut menu: PopupMenu,
-    view: &WeakEntity<MainView>,
+    view: &Pick,
     base: &Rule,
     current: Option<&Rule>,
+    none: bool,
     window: &mut Window,
     cx: &mut Context<PopupMenu>,
 ) -> PopupMenu {
     let is = |rule: &Rule| {
         current.is_some_and(|c| c.unit == rule.unit && c.every == 1 && c.weekdays == rule.weekdays)
     };
-    menu = menu
-        .item(choose(view, "なし", current.is_none(), None))
-        .separator();
+    if none {
+        menu = menu
+            .item(choose(view, "なし", current.is_none(), None))
+            .separator();
+    }
     let keep_time = |rule: Rule| Rule {
         time: base.time.clone(),
         ..rule
@@ -170,6 +174,10 @@ impl MainView {
             .as_ref()
             .map_or_else(|| "なし".to_owned(), Rule::label);
         let view = cx.entity().downgrade();
+        let pick: Pick = std::rc::Rc::new(move |rule, cx| {
+            // ウィンドウを閉じたあとなら、反映する先がない
+            let _ = view.update(cx, |this, cx| this.set_repeat(rule, cx));
+        });
         let menu = button("task-repeat")
             .accessibility_label(format!("繰り返し: {shown}"))
             .outline()
@@ -191,7 +199,7 @@ impl MainView {
                     ),
             )
             .pop_menu(move |menu, window, cx| {
-                repeat_menu(menu, &view, &base, current.as_ref(), window, cx)
+                repeat_menu(menu, &pick, &base, current.as_ref(), true, window, cx)
             });
         row()
             .gap_2()

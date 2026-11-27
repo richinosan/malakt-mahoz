@@ -109,11 +109,11 @@ fn one() -> u32 {
     1
 }
 
-fn date(s: &str) -> Option<NaiveDate> {
+pub(crate) fn date(s: &str) -> Option<NaiveDate> {
     NaiveDate::parse_from_str(s, "%Y-%m-%d").ok()
 }
 
-fn ymd(d: NaiveDate) -> String {
+pub(crate) fn ymd(d: NaiveDate) -> String {
     d.format("%Y-%m-%d").to_string()
 }
 
@@ -452,7 +452,7 @@ pub fn clean_repeat(r: &Repeat) -> Result<Repeat> {
     })
 }
 
-fn clean_ai(text: &str) -> Result<String> {
+pub(crate) fn clean_ai(text: &str) -> Result<String> {
     let text = crate::text::normalize(text).trim().to_owned();
     if text.chars().count() > MAX_AI_CHARS {
         return Err(Error::Invalid(format!(
@@ -760,7 +760,7 @@ impl Store {
     }
 }
 
-fn trim_ai_queue(conn: &Connection) -> rusqlite::Result<()> {
+pub(crate) fn trim_ai_queue(conn: &Connection) -> rusqlite::Result<()> {
     conn.prepare_cached(
         "DELETE FROM repeat_ai WHERE task_id NOT IN \
          (SELECT task_id FROM repeat_ai ORDER BY created_at DESC, task_id DESC LIMIT ?1)",

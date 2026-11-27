@@ -20,7 +20,7 @@ use crate::feel::{self, Lit};
 use crate::render::app_icon;
 
 /// ワークスペースを、左のメニューと同じ親子の順に並べる。深さも返す。
-fn workspace_tree(all: &[Workspace]) -> Vec<(Workspace, usize)> {
+pub(super) fn workspace_tree(all: &[Workspace]) -> Vec<(Workspace, usize)> {
     fn walk(
         all: &[Workspace],
         parent: Option<&str>,

@@ -12,6 +12,7 @@ data/changes.json
 data/task_defaults.json     ワークスペースごとのタスク追加時の既定値
 data/attachments.json       添付の名前と大きさ
 data/repeats.json           タスクに付けた繰り返しと AI への指示
+data/schedules.json         定時タスク（雛形と次に作る日時）
 files/<SHA-256>             添付の中身（同じ中身は 1 つだけ）
 ```
 

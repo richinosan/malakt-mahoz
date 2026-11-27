@@ -289,6 +289,31 @@ pub(crate) const MIGRATIONS: &[&str] = &[
         created_at INTEGER NOT NULL
     ) STRICT, WITHOUT ROWID;
     "#,
+    // 18: 定時タスク（`schedule`）。workspace_id がなければワークスペースの外に作る。
+    //     schedule_last は最後に作った回の日（元に戻す相手にしない）
+    r#"
+    CREATE TABLE schedules (
+        id TEXT PRIMARY KEY NOT NULL,
+        workspace_id TEXT REFERENCES workspaces(id) ON DELETE CASCADE,
+        title TEXT NOT NULL,
+        rule TEXT NOT NULL,
+        ai TEXT NOT NULL DEFAULT '',
+        assignees TEXT NOT NULL DEFAULT '[]',
+        due_days INTEGER,
+        due_time TEXT,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        next_at TEXT NOT NULL,
+        position INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+    ) STRICT;
+    CREATE INDEX schedules_workspace ON schedules(workspace_id, position);
+    CREATE INDEX schedules_next ON schedules(next_at);
+    CREATE TABLE schedule_last (
+        schedule_id TEXT PRIMARY KEY NOT NULL,
+        at TEXT NOT NULL
+    ) STRICT;
+    "#,
 ];
 
 pub(crate) fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
