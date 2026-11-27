@@ -307,7 +307,7 @@ pub struct Inputs {
     /// タスクに足す URL。
     pub url: Entity<InputState>,
     /// 繰り返しの、回を作ったときに AI に頼むこと。
-    pub repeat_ai: Entity<InputState>,
+    pub repeat_ai: Entity<TextareaState>,
     pub subtask: Entity<InputState>,
     pub start: Entity<InputState>,
     pub start_time: Entity<InputState>,
@@ -575,7 +575,13 @@ impl MainView {
             name: input(window, cx, "名前"),
             title: input(window, cx, "タイトル"),
             url: input(window, cx, "https://"),
-            repeat_ai: input(window, cx, "AI への指示"),
+            // 長い指示も全部見えるように、書いた分だけ伸ばす（8 行を超えたらスクロール）
+            repeat_ai: cx.new(|cx| {
+                TextareaState::new(window, cx)
+                    .submit_on_enter(true)
+                    .auto_grow(1, 8)
+                    .placeholder("AI への指示")
+            }),
             subtask: input(window, cx, "サブタスクを追加…"),
             start: input(window, cx, "日付"),
             start_time: input(window, cx, "時刻"),
@@ -691,14 +697,16 @@ impl MainView {
                 }
             },
         ));
-        on_enter!(repeat_ai, save_repeat_ai);
+        // AI への指示は、Enter かほかの場所を押すと保存する。Shift+Enter で改行
         subs.push(cx.subscribe_in(
             &inputs.repeat_ai,
             window,
-            |this, _, event: &InputEvent, window, cx| {
-                if matches!(event, InputEvent::Blur) && this.editing == Some(Editing::RepeatAi) {
-                    this.save_repeat_ai(window, cx);
+            |this, _, event: &InputEvent, window, cx| match event {
+                InputEvent::PressEnter { shift: false, .. } => this.save_repeat_ai(window, cx),
+                InputEvent::Blur if this.editing == Some(Editing::RepeatAi) => {
+                    this.save_repeat_ai(window, cx)
                 }
+                _ => {}
             },
         ));
         on_enter!(title, save_title);
@@ -1840,7 +1848,15 @@ impl MainView {
             return;
         }
         self.editing = None;
-        self.leave_input(&self.inputs.repeat_ai.clone(), window, cx);
+        if self
+            .inputs
+            .repeat_ai
+            .read(cx)
+            .focus_handle(cx)
+            .is_focused(window)
+        {
+            self.focus.focus(window, cx);
+        }
         cx.notify();
     }
 

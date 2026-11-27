@@ -7168,9 +7168,15 @@ fn repeat_is_chosen_in_place_and_makes_the_next_copy(cx: &mut TestAppContext) {
     ui(cx, window, |window, cx| window.click("repeat-ai-add", cx));
     ui(cx, window, |window, cx| {
         window.input("先週のまとめを下書きする", cx);
+        // Shift+Enter で改行できる。長い指示は折り返して全部見える
+        window.press("shift-enter", cx);
+        window.input("終わったら担当に知らせる", cx);
         window.press("enter", cx);
     });
-    assert_eq!(repeat(cx).unwrap().ai, "先週のまとめを下書きする");
+    assert_eq!(
+        repeat(cx).unwrap().ai,
+        "先週のまとめを下書きする\n終わったら担当に知らせる"
+    );
     ui(cx, window, |window, _| {
         assert!(window.find("repeat-ai-text").visible());
     });
