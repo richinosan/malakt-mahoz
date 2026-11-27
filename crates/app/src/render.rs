@@ -598,6 +598,41 @@ fn chip(
         .child(label.into())
 }
 
+/// 付いているものを外す ×（カテゴリ・URL・AI に渡すタスク）。ベースの `CategoryInput.vue` と同じ
+/// 丸いボタン（size-6、アイコン 3.5）で、乗せると accent の面と文字色に、押している間は濃い金になる。
+/// 何を外すかはホバーのラベルで出す。押したときの処理を渡さないと作れない。
+pub(crate) fn remove_x(
+    id: impl Into<ElementId>,
+    tip: impl Into<SharedString>,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    cx: &App,
+) -> Stateful<Div> {
+    let theme = cx.theme();
+    let tip: SharedString = tip.into();
+    let ink = theme.accent_foreground;
+    div()
+        .id(id)
+        .flex_none()
+        .size_6()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_full()
+        .cursor_pointer()
+        .lit(theme.accent, cx)
+        .sunk(theme.primary.opacity(0.4), cx)
+        .hover(move |s| s.text_color(ink))
+        .child(app_icon("x").size_3p5())
+        .tooltip(move |window, cx| {
+            gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
+        })
+        .on_click(move |event, window, cx| {
+            // チップ（URL など）が押したときの処理を持っていても、外すだけにする
+            cx.stop_propagation();
+            on_click(event, window, cx);
+        })
+}
+
 fn status_color(status: Status, cx: &App) -> Hsla {
     let theme = cx.theme();
     match status {
@@ -4629,23 +4664,16 @@ impl MainView {
                     .child(app_icon(shown.icon).small().flex_none())
                     .child(div().min_w_0().truncate().child(shown.label))
                     .child(
-                        div()
-                            .id(("task-url-remove", ix))
-                            .flex_none()
-                            .p_0p5()
-                            .rounded(feel::md())
-                            .text_color(theme.muted_foreground)
-                            .lit(theme.muted, cx)
-                            .child(app_icon("x").xsmall())
-                            .tooltip(|window, cx| {
-                                gpui_kit::component::tooltip::Tooltip::new("URL を外す")
-                                    .build(window, cx)
-                            })
-                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                cx.stop_propagation();
+                        remove_x(
+                            ("task-url-remove", ix),
+                            "URL を外す",
+                            cx.listener(move |this, _: &ClickEvent, _, cx| {
                                 this.remove_url(&remove, cx);
-                            }))
-                            .test_support(),
+                            }),
+                            cx,
+                        )
+                        .text_color(theme.muted_foreground)
+                        .test_support(),
                     )
                     .tooltip(move |window, cx| {
                         gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
@@ -5163,14 +5191,36 @@ impl MainView {
         }
 
         let mut categories = row().gap_1p5().flex_wrap();
+        // ベースの CategoryInput.vue と同じ形: 名前と、外す × のボタン。外すのは × だけ
         for (i, c) in task.categories.iter().enumerate() {
             let value = c.clone();
-            categories =
-                categories.child(chip(("p-cat", i), format!("{c} ✕"), false, cx).on_click(
-                    cx.listener(move |this, _: &ClickEvent, _, cx| {
-                        this.remove_category(&value, cx)
-                    }),
-                ));
+            categories = categories.child(
+                row()
+                    .id(("p-cat", i))
+                    .flex_none()
+                    .max_w_full()
+                    .gap_0p5()
+                    .rounded_full()
+                    .bg(theme.secondary)
+                    .py_0p5()
+                    .pr_0p5()
+                    .pl_2p5()
+                    .text_sm()
+                    .text_color(theme.secondary_foreground)
+                    .child(div().min_w_0().truncate().child(c.clone()))
+                    .child(
+                        remove_x(
+                            ("p-cat-remove", i),
+                            format!("カテゴリ「{c}」を外す"),
+                            cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                this.remove_category(&value, cx)
+                            }),
+                            cx,
+                        )
+                        .test_support(),
+                    )
+                    .test_support(),
+            );
         }
         categories = categories.child(
             Input::new(&self.inputs.category)

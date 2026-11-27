@@ -2268,6 +2268,47 @@ fn title_is_edited_in_place(cx: &mut TestAppContext) {
     assert!(cx.update(|cx| view.read(cx).editing.is_none()));
 }
 
+/// 詳細のカテゴリは、名前と × のチップで出る。外すのは × だけで、名前を押しても外れない。
+/// 外したものは元に戻せる。
+#[gpui_kit::test]
+fn categories_are_removed_only_by_their_x(cx: &mut TestAppContext) {
+    start(cx);
+    let (window, _view) = open(cx, wide());
+    ui(cx, window, |window, cx| {
+        window.click("nav-all", cx);
+        window.click("quick-add", cx);
+        window.input("会場を押さえる", cx);
+        window.press("enter", cx);
+    });
+    ui(cx, window, |window, cx| window.click(("title", 0usize), cx));
+    let categories = |cx: &mut TestAppContext| all_tasks(cx)[0].categories.clone();
+    for name in ["PR", "会場"] {
+        ui(cx, window, |window, cx| window.click("category-input", cx));
+        ui(cx, window, |window, cx| {
+            window.input(name, cx);
+            window.press("enter", cx);
+        });
+    }
+    assert_eq!(categories(cx), ["PR", "会場"]);
+
+    // 名前を押しても外れない
+    ui(cx, window, |window, cx| window.click(("p-cat", 0usize), cx));
+    assert_eq!(categories(cx), ["PR", "会場"]);
+
+    // × で、そのカテゴリだけ外れる
+    ui(cx, window, |window, cx| {
+        window.click(("p-cat-remove", 0usize), cx)
+    });
+    assert_eq!(categories(cx), ["会場"]);
+    ui(cx, window, |window, _| {
+        assert!(window.find(("p-cat", 0usize)).visible());
+    });
+    cx.update(|cx| {
+        db::shared(cx).update(cx, |db, _| assert!(db.store.undo().unwrap()));
+    });
+    assert_eq!(categories(cx), ["PR", "会場"]);
+}
+
 /// タイトルの下に URL をいくつも付けられる。その場の欄に書いて Enter で足し、✕ で外す。
 /// URL でないものは足さずにエラーを出し、Esc で書きかけを捨てる。
 #[gpui_kit::test]
