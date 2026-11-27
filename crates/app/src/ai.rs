@@ -75,7 +75,7 @@ fn watch_targets(store: &malakt_core::Store) -> Result<Vec<WatchTarget>, String>
     tasks.sort_by_key(|t| std::cmp::Reverse(t.updated_at));
     let mut targets: Vec<WatchTarget> = Vec::new();
     for task in tasks {
-        for link in github::find_links(&format!("{}\n{}", task.title, task.description)) {
+        for link in github::find_links(&link_text(&task)) {
             if !matches!(link.kind, github::Kind::Issue(_) | github::Kind::Pull(_)) {
                 continue;
             }
@@ -301,6 +301,8 @@ struct NewTask {
     id: String,
     title: String,
     description: String,
+    /// タスクの URL の欄。
+    urls: Vec<String>,
     links: Vec<Fetch>,
 }
 
@@ -320,6 +322,18 @@ impl Fetch {
     }
 }
 
+/// タスクの中でリンクを探す文。タイトル、URL の欄、説明の順。
+fn link_text(task: &malakt_core::Task) -> String {
+    let mut text = task.title.clone();
+    for url in &task.urls {
+        text.push('\n');
+        text.push_str(url);
+    }
+    text.push('\n');
+    text.push_str(&task.description);
+    text
+}
+
 /// 文章の中の、GitHub と Slack のリンク。
 fn find_sources(text: &str) -> Vec<Fetch> {
     github::find_links(text)
@@ -337,13 +351,14 @@ fn task_links(store: &malakt_core::Store) -> Result<Vec<(NewTask, bool)>, String
     Ok(tasks
         .into_iter()
         .map(|task| {
-            let links = find_sources(&format!("{}\n{}", task.title, task.description));
+            let links = find_sources(&link_text(&task));
             let open = task.status.is_open();
             (
                 NewTask {
                     id: task.id,
                     title: task.title,
                     description: task.description,
+                    urls: task.urls,
                     links,
                 },
                 open,
@@ -1931,7 +1946,7 @@ impl Session {
             "（アプリからの自動のメッセージです）\n\
              次のタスクが新しく作られたか、新しいリンクが書かれました。それぞれのタスクを update_task で整えてください。\n\
              - タイトルは、中身が一目で分かる短い言葉にする。URL が入っているタイトルは、リンク先の題を元に付け直す（「〜のレビュー」のようにユーザーが書いた目的は残す）。\n\
-             - 説明には、リンクの URL と要点を書く。ユーザーが書いた文は消さない。\n\
+             - 説明には、リンクの URL と要点を書く。タスクの URL の欄にあるリンクは、説明に URL を書き写さず、要点だけを書く。ユーザーが書いた文は消さない。\n\
              - 中身から分かる範囲で、優先度や期限を入れる。期限の時刻が分かるときは、時刻も入れる。\n\
              - 直すところがなければ、何も変えない。\n\
              - タスクを新しく作らない。消さない。\n\
@@ -1939,16 +1954,18 @@ impl Session {
         );
         let mut any = false;
         for task in &tasks {
-            let mut section = format!(
-                "\n## タスク（id: {}）\nタイトル: {}\n説明: {}\n",
-                task.id,
-                task.title,
+            let mut section = format!("\n## タスク（id: {}）\nタイトル: {}\n", task.id, task.title);
+            if !task.urls.is_empty() {
+                section.push_str(&format!("URL: {}\n", task.urls.join(" ")));
+            }
+            section.push_str(&format!(
+                "説明: {}\n",
                 if task.description.trim().is_empty() {
                     "（なし）"
                 } else {
                     task.description.as_str()
                 }
-            );
+            ));
             let mut read = 0;
             for link in task.links.iter().take(MAX_ARRANGE_LINKS) {
                 let url = link.url();

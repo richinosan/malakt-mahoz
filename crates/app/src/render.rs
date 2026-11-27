@@ -4295,6 +4295,102 @@ impl MainView {
         )
     }
 
+    /// タイトルの下に並べる URL。押すとアプリ内ブラウザで開き、右クリックでリンクのメニューを出す。
+    /// 足すときは、その場に入力欄を出す。
+    fn render_urls(&self, task: &Todo, cx: &mut Context<Self>) -> Div {
+        let theme = cx.theme().clone();
+        let mut urls = row().gap_1p5().flex_wrap().items_center();
+        for (ix, url) in task.urls.iter().enumerate() {
+            let shown = crate::task_urls::shown(url);
+            let (link, aux, tip, remove): (SharedString, SharedString, SharedString, String) = (
+                url.clone().into(),
+                url.clone().into(),
+                url.clone().into(),
+                url.clone(),
+            );
+            urls = urls.child(
+                row()
+                    .id(("task-url", ix))
+                    .flex_none()
+                    .max_w(px(320.))
+                    .gap_1()
+                    .items_center()
+                    .pl_2()
+                    .pr_0p5()
+                    .py_0p5()
+                    .rounded(feel::md())
+                    .border_1()
+                    .border_color(theme.border)
+                    .text_sm()
+                    .cursor_pointer()
+                    .lit(theme.secondary_hover, cx)
+                    .active(|s| s.opacity(0.7))
+                    .child(app_icon(shown.icon).small().flex_none())
+                    .child(div().min_w_0().truncate().child(shown.label))
+                    .child(
+                        div()
+                            .id(("task-url-remove", ix))
+                            .flex_none()
+                            .p_0p5()
+                            .rounded(feel::md())
+                            .text_color(theme.muted_foreground)
+                            .lit(theme.muted, cx)
+                            .child(app_icon("x").xsmall())
+                            .tooltip(|window, cx| {
+                                gpui_kit::component::tooltip::Tooltip::new("URL を外す")
+                                    .build(window, cx)
+                            })
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                cx.stop_propagation();
+                                this.remove_url(&remove, cx);
+                            }))
+                            .test_support(),
+                    )
+                    .tooltip(move |window, cx| {
+                        gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
+                    })
+                    // 左とホイールはアプリ内ブラウザ、右はリンクのメニュー
+                    .on_click(move |event, window, cx| {
+                        crate::browser::on_link(&link, event, window, cx)
+                    })
+                    .on_aux_click(move |event, window, cx| {
+                        crate::browser::on_link(&aux, event, window, cx)
+                    })
+                    .test_support(),
+            );
+        }
+        if self.editing == Some(Editing::Url) {
+            // Enter かほかの場所を押すと足し、Esc で取り消し。空白で区切って、いくつも貼れる
+            urls.child(
+                div()
+                    .w(px(320.))
+                    .max_w_full()
+                    .on_mouse_down_out(cx.listener(|this, _, window, cx| {
+                        this.save_url(window, cx);
+                    }))
+                    .child(
+                        Input::new(&self.inputs.url)
+                            .id("url-input")
+                            .aria_label("URL")
+                            .small()
+                            .bg(theme.background)
+                            .border_color(theme.ring),
+                    ),
+            )
+        } else {
+            urls.child(feel::gloss(
+                button("url-add")
+                    .icon(app_icon("link"))
+                    .ghost()
+                    .xsmall()
+                    .tooltip("URL を追加")
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.start_editing(Editing::Url, window, cx)
+                    })),
+            ))
+        }
+    }
+
     fn property(&self, label: &'static str, cx: &App) -> Div {
         row().gap_2().items_start().child(
             div()
@@ -5073,7 +5169,13 @@ impl MainView {
             col()
                 .p_4()
                 .gap_4()
-                .child(title)
+                // URL はタイトルのすぐ下に並べる
+                .child(
+                    col()
+                        .gap_1p5()
+                        .child(title)
+                        .child(self.render_urls(task, cx)),
+                )
                 .children(ai_state)
                 .child(ai_log)
                 .child(

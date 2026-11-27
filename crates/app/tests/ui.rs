@@ -2178,6 +2178,67 @@ fn title_is_edited_in_place(cx: &mut TestAppContext) {
     assert!(cx.update(|cx| view.read(cx).editing.is_none()));
 }
 
+/// タイトルの下に URL をいくつも付けられる。その場の欄に書いて Enter で足し、✕ で外す。
+/// URL でないものは足さずにエラーを出し、Esc で書きかけを捨てる。
+#[gpui_kit::test]
+fn urls_are_added_and_removed_under_the_title(cx: &mut TestAppContext) {
+    start(cx);
+    let (window, view) = open(cx, wide());
+    ui(cx, window, |window, cx| {
+        window.click("nav-all", cx);
+        window.click("quick-add", cx);
+        window.input("会場を押さえる", cx);
+        window.press("enter", cx);
+    });
+    ui(cx, window, |window, cx| window.click(("title", 0usize), cx));
+    let urls = |cx: &mut TestAppContext| all_tasks(cx)[0].urls.clone();
+
+    // 貼った文の空白・改行で区切って、まとめて足せる。https:// は省いてよい
+    ui(cx, window, |window, cx| window.click("url-add", cx));
+    ui(cx, window, |window, cx| {
+        window.input("github.com/acme/app/pull/7 https://example.com/map", cx);
+        window.press("enter", cx);
+    });
+    assert_eq!(
+        urls(cx),
+        [
+            "https://github.com/acme/app/pull/7",
+            "https://example.com/map"
+        ]
+    );
+    assert!(cx.update(|cx| view.read(cx).editing.is_none()));
+    ui(cx, window, |window, _| {
+        assert!(window.find(("task-url", 1usize)).visible());
+    });
+
+    // URL でないものは足さない。欄は開いたまま
+    ui(cx, window, |window, cx| window.click("url-add", cx));
+    ui(cx, window, |window, cx| {
+        window.input("メモ", cx);
+        window.press("enter", cx);
+    });
+    assert_eq!(urls(cx).len(), 2);
+    cx.update(|cx| {
+        let view = view.read(cx);
+        assert!(view.error.as_ref().is_some_and(|e| e.contains("「メモ」")));
+        assert_eq!(view.editing, Some(malakt_mahoz::state::Editing::Url));
+    });
+    // Esc は書きかけを捨てる
+    ui(cx, window, |window, cx| window.press("escape", cx));
+    assert!(cx.update(|cx| view.read(cx).editing.is_none()));
+    assert_eq!(urls(cx).len(), 2);
+
+    // ✕ で外す。外したものは元に戻せる
+    ui(cx, window, |window, cx| {
+        window.click(("task-url-remove", 0usize), cx)
+    });
+    assert_eq!(urls(cx), ["https://example.com/map"]);
+    cx.update(|cx| {
+        db::shared(cx).update(cx, |db, _| assert!(db.store.undo().unwrap()));
+    });
+    assert_eq!(urls(cx).len(), 2);
+}
+
 /// 詳細の期限は、日付の欄と時刻の欄で決める。「明日」「11/27 14時」のような書き方も読み、
 /// 保存すると欄は保存した形に直る。一覧のメニューで日付を変えても時刻は残る。
 #[gpui_kit::test]

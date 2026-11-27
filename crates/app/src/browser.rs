@@ -1367,6 +1367,8 @@ pub struct BrowserPane {
     find: Entity<FindBar>,
     /// 場所の欄に出しているページと場所。
     shown: Option<(u64, String)>,
+    /// URL の欄の外から押し始めた。離したときに、書いてある URL をすべて選ぶ（Chrome と同じ）。
+    select_bar_on_up: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -1398,6 +1400,7 @@ impl BrowserPane {
             bar,
             find,
             shown: None,
+            select_bar_on_up: false,
             _subscriptions: subscriptions,
         }
     }
@@ -1937,6 +1940,22 @@ impl Render for BrowserPane {
                     .flex_1()
                     .min_w_0()
                     .mx_1()
+                    // ほかの場所から URL の欄を押したら、書いてある URL をすべて選ぶ。
+                    // 欄の中にいるときに押したとき、ドラッグで範囲を選んだときは、そのまま
+                    .capture_any_mouse_down(cx.listener(
+                        |this, event: &MouseDownEvent, window, cx| {
+                            this.select_bar_on_up = event.button == MouseButton::Left
+                                && event.click_count == 1
+                                && !this.bar.read(cx).focus_handle(cx).is_focused(window);
+                        },
+                    ))
+                    .capture_any_mouse_up(cx.listener(|this, _: &MouseUpEvent, window, cx| {
+                        if std::mem::take(&mut this.select_bar_on_up)
+                            && this.bar.read(cx).selected_range().is_empty()
+                        {
+                            this.bar.update(cx, |bar, cx| bar.select_all(window, cx));
+                        }
+                    }))
                     .child(Input::new(&self.bar).small().aria_label("URL"))
                     .test_support(),
             )

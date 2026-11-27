@@ -78,6 +78,11 @@ fn task_fields() -> Value {
             },
         },
         "categories": {"type": "array", "items": {"type": "string"}},
+        "urls": {"type": "array", "items": {"type": "string"},
+                 "description": "タスクに付ける URL。渡すと URL がこの並びになる（足すだけなら add_urls）"},
+        "add_urls": {"type": "array", "items": {"type": "string"},
+                     "description": "今の URL の後ろに足す URL。同じものは足さない"},
+        "remove_urls": {"type": "array", "items": {"type": "string"}, "description": "外す URL"},
     })
 }
 
@@ -672,13 +677,35 @@ fn apply_fields(draft: &mut TaskDraft, args: &Value) -> Result<(), String> {
     for (key, slot) in [
         ("assignee_ids", &mut draft.assignee_ids),
         ("categories", &mut draft.categories),
+        ("urls", &mut draft.urls),
     ] {
         if let Some(v) = args.get(key) {
-            *slot = v
-                .as_array()
-                .and_then(|a| a.iter().map(|s| s.as_str().map(str::to_owned)).collect())
-                .ok_or_else(|| format!("{key} が正しくありません: {v}"))?;
+            *slot = strings(v, key)?;
         }
+    }
+    // URL は書いた形（https:// を省いたものなど）でも、保存した形と同じものとして扱う
+    let same = |a: &str, b: &str| {
+        let clean = |u: &str| malakt_core::weblink::clean(u).unwrap_or_else(|| u.trim().to_owned());
+        clean(a) == clean(b)
+    };
+    if let Some(v) = args.get("add_urls") {
+        for url in strings(v, "add_urls")? {
+            if !draft.urls.iter().any(|u| same(u, &url)) {
+                draft.urls.push(url);
+            }
+        }
+    }
+    if let Some(v) = args.get("remove_urls") {
+        let remove = strings(v, "remove_urls")?;
+        let missing: Vec<&String> = remove
+            .iter()
+            .filter(|r| !draft.urls.iter().any(|u| same(u, r)))
+            .collect();
+        if !missing.is_empty() {
+            let names: Vec<String> = missing.iter().map(|m| format!("「{m}」")).collect();
+            return Err(format!("タスクに付いていない URL です: {}", names.join("")));
+        }
+        draft.urls.retain(|u| !remove.iter().any(|r| same(u, r)));
     }
     Ok(())
 }
@@ -866,6 +893,7 @@ fn task_json(task: &Task) -> Value {
             "roles": role_codes(task.roles_of(id).unwrap_or_default()),
         })).collect::<Vec<_>>(),
         "categories": task.categories,
+        "urls": task.urls,
     })
 }
 
@@ -1777,6 +1805,64 @@ mod tests {
 
     fn run(store: &mut Store, name: &str, args: Value) -> Value {
         serde_json::from_str(&execute(store, None, name, &args).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn urls_are_set_added_and_removed() {
+        let mut store = Store::open_in_memory().unwrap();
+        let task = run(
+            &mut store,
+            "create_task",
+            json!({"title": "会場", "urls": ["https://a.jp/", "github.com/o/r/issues/2"]}),
+        );
+        assert_eq!(
+            task["urls"],
+            json!(["https://a.jp/", "https://github.com/o/r/issues/2"])
+        );
+        // 足すときは後ろに。https:// を省いて書いても同じものは足さない
+        let added = run(
+            &mut store,
+            "update_task",
+            json!({"id": task["id"], "add_urls": ["a.jp/", "https://b.jp/x"]}),
+        );
+        assert_eq!(
+            added["urls"],
+            json!([
+                "https://a.jp/",
+                "https://github.com/o/r/issues/2",
+                "https://b.jp/x"
+            ])
+        );
+        let removed = run(
+            &mut store,
+            "update_task",
+            json!({"id": task["id"], "remove_urls": ["https://github.com/o/r/issues/2"]}),
+        );
+        assert_eq!(removed["urls"], json!(["https://a.jp/", "https://b.jp/x"]));
+        let got = run(&mut store, "get_task", json!({"id": task["id"]}));
+        assert_eq!(got["urls"], removed["urls"]);
+        // 付いていない URL を外す・URL でないものを足すと失敗し、何も変わらない
+        for (args, text) in [
+            (
+                json!({"remove_urls": ["https://c.jp/"]}),
+                "「https://c.jp/」",
+            ),
+            (json!({"add_urls": ["メモ"]}), "「メモ」"),
+            (json!({"urls": [1]}), "urls"),
+        ] {
+            let mut args = args;
+            args["id"] = task["id"].clone();
+            let err = execute(&mut store, None, "update_task", &args).unwrap_err();
+            assert!(err.contains(text), "{err}");
+        }
+        let id = task["id"].as_str().unwrap();
+        assert_eq!(
+            store.task(id).unwrap().urls,
+            ["https://a.jp/", "https://b.jp/x"]
+        );
+        // 全部を置き換える
+        let set = run(&mut store, "update_task", json!({"id": id, "urls": []}));
+        assert_eq!(set["urls"], json!([]));
     }
 
     #[test]

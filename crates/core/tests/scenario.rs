@@ -29,6 +29,10 @@ fn plan_work_and_move_to_another_device() {
     d.assignee_ids = vec![me.id.clone(), guest.id.clone()];
     d.due = Some("2026-12-20".into());
     d.priority = 1;
+    d.urls = vec![
+        "https://example.com/rental?id=1,2".into(),
+        "github.com/acme/event/issues/3".into(),
+    ];
     let desk = a.create_task(Some(&venue.id), &d).unwrap();
     let flyer = a
         .create_task(Some(&print.id), &draft("チラシを刷る"))
@@ -89,6 +93,13 @@ fn plan_work_and_move_to_another_device() {
     assert_eq!(b.workspaces().unwrap(), a.workspaces().unwrap());
     assert_eq!(b.people().unwrap(), a.people().unwrap());
     assert_eq!(b.task(&desk.id).unwrap(), a.task(&desk.id).unwrap());
+    assert_eq!(
+        b.task(&desk.id).unwrap().urls,
+        [
+            "https://example.com/rental?id=1,2",
+            "https://github.com/acme/event/issues/3"
+        ]
+    );
     assert_eq!(b.task(&flyer.id).unwrap(), a.task(&flyer.id).unwrap());
     assert_eq!(b.comments(&desk.id).unwrap(), a.comments(&desk.id).unwrap());
     assert_eq!(b.changes(&desk.id).unwrap(), a.changes(&desk.id).unwrap());

@@ -136,6 +136,7 @@ pub fn field_label(field: &str) -> &'static str {
         "assignee_roles" => "担当者の役",
         "assignee_done" => "担当者ごとの完了",
         "categories" => "カテゴリ",
+        "urls" => "URL",
         "workspace" => "ワークスペース",
         "link" => "表示するワークスペース",
         _ => "その他",
@@ -144,8 +145,9 @@ pub fn field_label(field: &str) -> &'static str {
 
 /// 項目の並び順（タイトルが先、説明はあと）。
 fn field_order(field: &str) -> usize {
-    const ORDER: [&str; 14] = [
+    const ORDER: [&str; 15] = [
         "title",
+        "urls",
         "status",
         "assignee_done",
         "assignees",
@@ -168,6 +170,11 @@ fn field_order(field: &str) -> usize {
 
 fn list(value: &str) -> Vec<&str> {
     value.split(',').filter(|v| !v.is_empty()).collect()
+}
+
+/// URL の並び。URL には「,」が入るので、改行で区切ってある。
+fn url_list(value: &str) -> Vec<&str> {
+    value.split('\n').filter(|v| !v.is_empty()).collect()
 }
 
 /// 期限・開始の値（`YYYY-MM-DD` と、時刻つきなら ` HH:MM`）を、年つきの日付にする。
@@ -224,6 +231,7 @@ fn show(field: &str, value: &str, names: &dyn Names) -> String {
             .collect::<Vec<_>>()
             .join("、"),
         "categories" => list(value).join("、"),
+        "urls" => url_list(value).join("\n"),
         "workspace" | "link" => names.workspace(value),
         "parent" => names.task(value),
         _ => value.to_owned(),
@@ -231,11 +239,11 @@ fn show(field: &str, value: &str, names: &dyn Names) -> String {
 }
 
 /// 並びの値で、相手側にないものだけを強調する。
-fn list_parts(items: &[String], other: &[String], highlight: PartKind) -> Vec<Part> {
+fn list_parts(items: &[String], other: &[String], highlight: PartKind, sep: &str) -> Vec<Part> {
     let mut parts = Vec::new();
     for (i, item) in items.iter().enumerate() {
         if i > 0 {
-            parts.push(Part::new(PartKind::Equal, "、"));
+            parts.push(Part::new(PartKind::Equal, sep));
         }
         let kind = if other.contains(item) {
             PartKind::Equal
@@ -310,9 +318,14 @@ pub fn field_change(c: &Change, names: &dyn Names) -> Option<FieldChange> {
         "description" => {
             change.hunks = diff::hunks(&change.before, &change.after);
         }
-        "assignees" | "categories" => {
+        "assignees" | "categories" | "urls" => {
             let items = |value: &str| -> Vec<String> {
-                list(value)
+                let values = if field == "urls" {
+                    url_list(value)
+                } else {
+                    list(value)
+                };
+                values
                     .into_iter()
                     .map(|v| {
                         if field == "assignees" {
@@ -324,8 +337,9 @@ pub fn field_change(c: &Change, names: &dyn Names) -> Option<FieldChange> {
                     .collect()
             };
             let (old, new) = (items(&c.old_value), items(&c.new_value));
-            change.before_parts = list_parts(&old, &new, PartKind::Delete);
-            change.after_parts = list_parts(&new, &old, PartKind::Insert);
+            let sep = if field == "urls" { "\n" } else { "、" };
+            change.before_parts = list_parts(&old, &new, PartKind::Delete, sep);
+            change.after_parts = list_parts(&new, &old, PartKind::Insert, sep);
         }
         _ => {
             let (before, after) = diff::inline(&change.before, &change.after);
@@ -551,6 +565,26 @@ pub fn events(entry: &Entry, names: &dyn Names, status_comments: &[StatusComment
                     add("categories-removed", "tag", text, false);
                 }
             }
+            "urls" => {
+                let (before, after) = (url_list(old), url_list(new));
+                let quoted = |items: Vec<&&str>| {
+                    items
+                        .into_iter()
+                        .map(|u| quote(u))
+                        .collect::<Vec<_>>()
+                        .join("")
+                };
+                let added: Vec<&&str> = after.iter().filter(|u| !before.contains(u)).collect();
+                let removed: Vec<&&str> = before.iter().filter(|u| !after.contains(u)).collect();
+                if !added.is_empty() {
+                    let text = format!("URL {}を追加しました", quoted(added));
+                    add("urls-added", "link", text, false);
+                }
+                if !removed.is_empty() {
+                    let text = format!("URL {}を外しました", quoted(removed));
+                    add("urls-removed", "link", text, false);
+                }
+            }
             "parent" => {
                 let text = if new.is_empty() {
                     "親タスクを外しました".to_owned()
@@ -734,6 +768,36 @@ mod tests {
         assert_eq!(changes[0].before, "鈴木：未完了");
         assert_eq!(changes[0].after, "鈴木：完了");
         assert_eq!(changes[1].after, "佐藤（実行責任者・説明責任者）");
+    }
+
+    #[test]
+    fn urls_read_as_added_and_removed() {
+        let (a, b, c) = (
+            "https://a.jp/?x=1,2",
+            "https://b.jp/",
+            "https://github.com/o/r/pull/1",
+        );
+        let entry = &entries(&[change(
+            "1",
+            20,
+            Actor::Me,
+            "urls",
+            &format!("{a}\n{b}"),
+            &format!("{a}\n{c}"),
+        )])[0];
+        assert_eq!(
+            texts(entry, &[]),
+            [
+                format!("URL 「{c}」を追加しました"),
+                format!("URL 「{b}」を外しました"),
+            ]
+        );
+        let changes = field_changes(entry, &Fake);
+        assert_eq!(changes[0].label, "URL");
+        assert_eq!(changes[0].before, format!("{a}\n{b}"));
+        // 「,」の入った URL も 1 つのまま
+        assert_eq!(changes[0].after_parts[0], Part::new(PartKind::Equal, a));
+        assert_eq!(changes[0].after_parts[2], Part::new(PartKind::Insert, c));
     }
 
     #[test]

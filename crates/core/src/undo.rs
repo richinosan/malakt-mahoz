@@ -23,6 +23,7 @@ const TABLES: &[&str] = &[
     "person_workspaces",
     "tasks",
     "task_categories",
+    "task_urls",
     "task_assignees",
     "comments",
     "changes",

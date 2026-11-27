@@ -255,6 +255,15 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     ALTER TABLE changes ADD COLUMN actor TEXT NOT NULL DEFAULT '';
     ALTER TABLE comments ADD COLUMN actor TEXT NOT NULL DEFAULT '';
     "#,
+    // 16: タスクに付けた URL。position は足した順
+    r#"
+    CREATE TABLE task_urls (
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        position INTEGER NOT NULL,
+        url TEXT NOT NULL,
+        PRIMARY KEY (task_id, position)
+    ) STRICT, WITHOUT ROWID;
+    "#,
 ];
 
 pub(crate) fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {

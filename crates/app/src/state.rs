@@ -239,6 +239,8 @@ pub enum When {
 pub enum Editing {
     Title,
     Description,
+    /// タイトルの下の欄に、URL を足している
+    Url,
 }
 
 /// コメント欄でいま書いているもの。
@@ -283,6 +285,8 @@ pub struct Inputs {
     pub preset_name: Entity<InputState>,
     pub name: Entity<InputState>,
     pub title: Entity<InputState>,
+    /// タスクに足す URL。
+    pub url: Entity<InputState>,
     pub subtask: Entity<InputState>,
     pub start: Entity<InputState>,
     pub start_time: Entity<InputState>,
@@ -525,6 +529,7 @@ impl MainView {
             preset_name: input(window, cx, "テーマの名前"),
             name: input(window, cx, "名前"),
             title: input(window, cx, "タイトル"),
+            url: input(window, cx, "https://"),
             subtask: input(window, cx, "サブタスクを追加…"),
             start: input(window, cx, "日付"),
             start_time: input(window, cx, "時刻"),
@@ -626,6 +631,17 @@ impl MainView {
             |this, _, event: &InputEvent, window, cx| {
                 if matches!(event, InputEvent::Blur) && this.person_naming.is_some() {
                     this.save_person_name(window, cx);
+                }
+            },
+        ));
+        on_enter!(url, save_url);
+        // URL も、ほかの場所を押したときに足す
+        subs.push(cx.subscribe_in(
+            &inputs.url,
+            window,
+            |this, _, event: &InputEvent, window, cx| {
+                if matches!(event, InputEvent::Blur) && this.editing == Some(Editing::Url) {
+                    this.save_url(window, cx);
                 }
             },
         ));
@@ -1514,6 +1530,12 @@ impl MainView {
                     s.focus(window, cx);
                 });
             }
+            Editing::Url => {
+                self.inputs.url.update(cx, |s, cx| {
+                    s.set_value("", window, cx);
+                    s.focus(window, cx);
+                });
+            }
         }
         self.editing = Some(what);
         cx.notify();
@@ -1662,6 +1684,33 @@ impl MainView {
         let id = detail.task.id.clone();
         let done = !detail.task.is_done_by(person_id);
         self.write(cx, |s| s.set_assignee_done(&id, person_id, done));
+    }
+
+    /// 書いた URL を足す。空白や改行で区切って、いくつも貼れる。空なら何も足さずに閉じる。
+    /// 足せなかったとき（URL でないものがあるとき）は、欄を開いたままエラーを出す。
+    pub fn save_url(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.editing != Some(Editing::Url) {
+            return;
+        }
+        let text = self.inputs.url.read(cx).value().to_string();
+        let urls: Vec<String> = malakt_core::weblink::split(&text)
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        if !urls.is_empty() {
+            self.edit_task(cx, |d| d.urls.extend(urls));
+            if self.error.is_some() {
+                return;
+            }
+        }
+        self.editing = None;
+        Self::take(&self.inputs.url.clone(), window, cx);
+        self.leave_input(&self.inputs.url.clone(), window, cx);
+        cx.notify();
+    }
+
+    pub fn remove_url(&mut self, url: &str, cx: &mut Context<Self>) {
+        self.edit_task(cx, |d| d.urls.retain(|u| u != url));
     }
 
     pub fn submit_category(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -4960,6 +5009,7 @@ bundled_icons! {
         "upload",
         "x",
         "message-square-plus",
+        "message-square",
         "history",
         "picture-in-picture-2",
         "panel-right",

@@ -96,6 +96,15 @@ impl Data {
             t.categories.retain(|c| !c.is_empty());
             t.categories.sort_unstable();
             t.categories.dedup();
+            // URL は足した順のまま。同じものは最初の 1 つだけ
+            let mut urls: Vec<String> = Vec::new();
+            for url in &t.urls {
+                let url = url.trim();
+                if !url.is_empty() && !urls.iter().any(|u| u == url) {
+                    urls.push(url.to_owned());
+                }
+            }
+            t.urls = urls;
         }
         for c in &mut self.comments {
             c.body = normalize(&c.body);
@@ -135,6 +144,20 @@ impl Data {
                 || t.parent_id.as_deref() == Some(t.id.as_str())
             {
                 return bad("タスク");
+            }
+            use crate::weblink::{MAX_URLS, MAX_URL_CHARS};
+            if t.urls.len() > MAX_URLS {
+                return Err(Error::Invalid(format!(
+                    "タスク「{}」の URL が {} 個あります（{MAX_URLS} 個まで）",
+                    t.title,
+                    t.urls.len()
+                )));
+            }
+            if t.urls.iter().any(|u| u.chars().count() > MAX_URL_CHARS) {
+                return Err(Error::Invalid(format!(
+                    "タスク「{}」に {MAX_URL_CHARS} 文字より長い URL があります",
+                    t.title
+                )));
             }
         }
         if let Some(r) = self.ai_rules.iter().find(|r| {

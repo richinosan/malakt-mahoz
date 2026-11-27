@@ -353,6 +353,44 @@ fn a_link_in_the_task_detail_opens_in_a_browser_tab(cx: &mut TestAppContext) {
     assert!(placed.size.width > px(100.) && placed.size.height > px(100.));
 }
 
+/// タイトルの下の URL を押すと、アプリ内ブラウザで開く。右クリックではメニューを出す。
+#[gpui_kit::test]
+fn a_task_url_opens_in_a_browser_tab(cx: &mut TestAppContext) {
+    let _world = start(cx, Store::open_in_memory().unwrap());
+    let (window, view) = open(cx);
+    let id = cx.update(|cx| {
+        malakt_mahoz::db::shared(cx).update(cx, |db, _| {
+            let draft = TaskDraft {
+                title: "調べる".into(),
+                urls: vec![
+                    "https://example.com/a".into(),
+                    "https://example.com/b".into(),
+                ],
+                ..Default::default()
+            };
+            db.store.create_task(None, &draft).unwrap().id
+        })
+    });
+    open_task(cx, window, &view, &id);
+    ui(cx, window, |window, cx| {
+        window.click_with_options(
+            ("task-url", 1usize),
+            ClickOptions::new().with_button(MouseButton::Right),
+            cx,
+        )
+    });
+    assert!(terms(cx, |t| t.pages.is_empty()));
+    assert!(cx.update(|cx| browser::menus_open(cx)));
+    ui(cx, window, |window, cx| window.press("escape", cx));
+    ui(cx, window, |window, cx| {
+        window.click(("task-url", 1usize), cx)
+    });
+    assert_eq!(
+        terms(cx, |t| t.active_page().map(|p| p.url.clone())),
+        Some("https://example.com/b".to_owned())
+    );
+}
+
 /// リンクの右クリックで、アプリ内で開く・ブラウザで開く・コピーを選べる。メニューの間はページを隠す。
 #[gpui_kit::test]
 fn a_right_click_on_a_link_offers_where_to_open(cx: &mut TestAppContext) {
@@ -1058,6 +1096,28 @@ fn ctrl_l_moves_to_the_url_bar_and_ctrl_r_reloads_the_page(cx: &mut TestAppConte
     assert_eq!(
         fake.calls.borrow()[before..],
         ["focus_parent".to_owned(), "reload".to_owned()]
+    );
+}
+
+/// ほかの場所から URL の欄を押すと、書いてある URL がすべて選ばれ、打つとそのまま置き換わる。
+#[gpui_kit::test]
+fn a_click_on_the_url_bar_selects_the_whole_url(cx: &mut TestAppContext) {
+    let world = start(cx, Store::open_in_memory().unwrap());
+    let (window, _view) = open(cx);
+    ui(cx, window, |window, cx| window.click("ai-toggle", cx));
+    let tab = open_page(cx, window, "https://example.com/a");
+    let fake = world.fake(tab);
+    ui(cx, window, |window, cx| window.click("browser-url", cx));
+    ui(cx, window, |window, cx| {
+        window.input("example.org", cx);
+        window.press("enter", cx);
+    });
+    assert!(
+        fake.calls
+            .borrow()
+            .contains(&"load https://example.org".to_owned()),
+        "{:?}",
+        fake.calls.borrow()
     );
 }
 

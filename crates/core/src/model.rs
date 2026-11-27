@@ -341,6 +341,9 @@ pub struct Task {
     pub assignee_done: Vec<Option<i64>>,
     #[serde(default)]
     pub categories: Vec<String>,
+    /// タスクに付けた URL。足した順。
+    #[serde(default)]
+    pub urls: Vec<String>,
     /// 入っているワークスペースのほかに、このタスクを表示するワークスペース。足した順。
     #[serde(default)]
     pub linked_workspace_ids: Vec<Id>,
@@ -534,6 +537,8 @@ pub struct TaskDraft {
     pub parent_id: Option<Id>,
     pub assignee_ids: Vec<Id>,
     pub categories: Vec<String>,
+    /// タスクに付けた URL。足した順。
+    pub urls: Vec<String>,
 }
 
 impl Default for TaskDraft {
@@ -549,6 +554,7 @@ impl Default for TaskDraft {
             parent_id: None,
             assignee_ids: Vec::new(),
             categories: Vec::new(),
+            urls: Vec::new(),
         }
     }
 }
@@ -566,6 +572,7 @@ impl From<&Task> for TaskDraft {
             parent_id: t.parent_id.clone(),
             assignee_ids: t.assignee_ids.clone(),
             categories: t.categories.clone(),
+            urls: t.urls.clone(),
         }
     }
 }

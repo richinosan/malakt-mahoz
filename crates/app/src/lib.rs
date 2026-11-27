@@ -26,6 +26,7 @@ pub mod shadow;
 pub mod shell_keys;
 pub mod shortcuts;
 pub mod state;
+mod task_urls;
 pub mod term;
 pub mod theme;
 pub mod update;
