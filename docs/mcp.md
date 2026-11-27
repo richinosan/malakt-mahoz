@@ -67,17 +67,19 @@ Windows のアプリは、起動のときに黒い窓を出さないように作
 | `get_task` | タスク 1 件と、コメント、サブタスク、添付、変更履歴 |
 | `create_task` / `update_task` / `move_task` / `delete_task` | タスクを作る、書き換える、移す、削除する。`assignees` で担当者と役（RACI）をまとめて決められる。URL は `urls`（全部を置き換える）、`add_urls`、`remove_urls` |
 | `set_assignee` | タスクの担当者 1 人の役（R 実行責任者・A 説明責任者・C 相談先・I 報告先）を決める。担当でない人は担当に加え、役を空にすると担当から外す |
+| `set_assignee_done` | 担当者 1 人の「自分の分」の完了を付ける・外す（ほかの人の分も）。全員そろうとタスクが完了になり、完了したタスクで外すと進行中に戻る |
 | `link_task` / `reorder_tasks` | タスクをほかのワークスペースにも出す・外す、手動の順に並べる |
 | `add_comment` | コメントを書く（書き手は自分。返信とレビューコメントも）。書くのは、あとでタスクを読む人に要る事実だけ。作業をしたことだけを伝える文と、していないことは書かない |
 | `update_comment` / `delete_comment` | コメントを書き直す・ピン留めする・解決済みにする、削除する |
 | `add_attachment` / `delete_attachment` | ファイルを添付する、添付を削除する |
 | `issue_ticket` / `revoke_tickets` | 完了チケットを発行する、取り消す |
-| `create_workspace` / `update_workspace` / `delete_workspace` | ワークスペースを作る、名前を変える・移す、削除する |
+| `create_workspace` / `update_workspace` / `delete_workspace` | ワークスペースを作る、名前を変える・移す・並べ替える、削除する |
 | `get_workspace_settings` / `update_workspace_settings` | ワークスペースの基準日、タスクを追加したときに入る値、ターミナルのフォルダー |
 | `list_ai_rules` / `create_ai_rule` / `update_ai_rule` / `delete_ai_rule` | AI のルール（グローバルと、ワークスペースごと）を読む、足す、変える、削除する。サーバーの説明で、有効なルールに従うよう伝えている |
 | `create_person` / `update_person` / `delete_person` | 担当者を作る、名前・メモ・使うワークスペースを変える、削除する。`create_person` に `workspace_id` を渡すと、そのワークスペースの担当者になる |
 | `list_categories` / `list_notices` / `mark_notices_read` | カテゴリの一覧、通知の一覧、通知を既読にする |
 | `get_due_alerts` / `set_due_alerts` | 期限をいつ知らせるか（全体の標準と、タスクごとの上書き） |
+| `get_done_notices` / `set_done_notices` | ほかの人が完了を報告したときに知らせるか（オン・オフ、知らせるとき、役、知らせない担当者・ワークスペース） |
 | `undo` / `redo` | このサーバーからの変更を 1 つ元に戻す、やり直す |
 
 - 担当者は ID でも名前でも指定できます。登録されていない名前は、タスクのワークスペースの担当者としてその場で登録します（どこにも入っていないタスクでは、すべてのワークスペースの担当者）

@@ -7,6 +7,7 @@
 //! - `attachment`: 添付ファイル（重複なし・圧縮つきで保存）
 //! - `bulk`: 複数のタスクをまとめて変える操作と、一覧での選択
 //! - `diff`: 文字列の差分（変更履歴の赤と緑）
+//! - `done_notice`: ほかの人が完了にしたときに知らせるか（役・担当者・ワークスペースで選ぶ）
 //! - `defaults`: ワークスペースごとのタスク追加時の既定値と基準日
 //! - `history`: 変更履歴を、1 回の変更ごとの差分と、コメント欄に挟む出来事にする
 //! - `links`: 1 つのタスクを複数のワークスペースに表示する
@@ -30,6 +31,7 @@ pub mod attachment;
 pub mod bulk;
 pub mod defaults;
 pub mod diff;
+pub mod done_notice;
 pub mod error;
 pub mod history;
 pub mod icon;

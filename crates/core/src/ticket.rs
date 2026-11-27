@@ -288,7 +288,9 @@ impl Store {
         else {
             return Ok(());
         };
-        let (done, total) = self.task(&row.task_id)?.done_count();
+        let task = self.task(&row.task_id)?;
+        let wanted = self.wants_done_notice(&task, &actor.id, finished)?;
+        let (done, total) = task.done_count();
         let counts = if finished {
             (0, 0)
         } else {
@@ -304,7 +306,9 @@ impl Store {
             total_count: counts.1,
             ..Default::default()
         };
-        notice::insert(&self.conn, NoticeKind::StatusChanged, &new)?;
+        if wanted {
+            notice::insert(&self.conn, NoticeKind::StatusChanged, &new)?;
+        }
         if me.is_some_and(|me| comment.mentions.contains(&me.id)) {
             notice::insert(&self.conn, NoticeKind::Mentioned, &new)?;
         }

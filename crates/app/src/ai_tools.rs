@@ -234,14 +234,17 @@ pub fn definitions() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "pane",
-            description: "画面を分けたペインを操作する。split_right / split_down（分ける）、close（今のペインを閉じる）、zoom（今のペインだけを大きく出す・戻す）、focus_next / focus_prev、focus_left / focus_right / focus_up / focus_down、swap_left / swap_right / swap_up / swap_down、duplicate（複製）、pop_out（別ウィンドウに出す）、save_layout（今の配置を保存）。",
+            description: "画面を分けたペインを操作する。split_right / split_down（分ける）、close（今のペインを閉じる）、zoom（今のペインだけを大きく出す・戻す）、focus_next / focus_prev、focus_left / focus_right / focus_up / focus_down、swap_left / swap_right / swap_up / swap_down、duplicate（複製）、pop_out（別ウィンドウに出す）、save_layout（今の配置を保存）、load_layout（name の配置にする。最初からある配置か、保存した配置）、delete_layout（保存した配置 name を削除）。",
             schema: object(
-                json!({"action": {"type": "string", "enum": [
-                    "split_right", "split_down", "close", "zoom", "focus_next", "focus_prev",
-                    "focus_left", "focus_right", "focus_up", "focus_down",
-                    "swap_left", "swap_right", "swap_up", "swap_down",
-                    "duplicate", "pop_out", "save_layout",
-                ]}}),
+                json!({
+                    "action": {"type": "string", "enum": [
+                        "split_right", "split_down", "close", "zoom", "focus_next", "focus_prev",
+                        "focus_left", "focus_right", "focus_up", "focus_down",
+                        "swap_left", "swap_right", "swap_up", "swap_down",
+                        "duplicate", "pop_out", "save_layout", "load_layout", "delete_layout",
+                    ]},
+                    "name": {"type": "string", "description": "load_layout と delete_layout の配置の名前（get_screen の pane_layouts）"},
+                }),
                 &["action"],
             ),
         },
@@ -352,11 +355,12 @@ pub fn definitions() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "set_workspace_icon",
-            description: "ワークスペースのアイコンと色を変える。icon は find_icons で見つけた名前（null で最初のアイコン）、color は red / orange / yellow / green / teal / blue / purple / pink（null で文字と同じ色）。渡した項目だけが変わる。",
+            description: "ワークスペースのアイコンと色を変える。icon は find_icons で見つけた名前（null で最初のアイコン）、image_path は icon の代わりに使う画像ファイル（PNG・JPEG・SVG）の絶対パス（先頭の ~ はホーム）、color は red / orange / yellow / green / teal / blue / purple / pink（null で文字と同じ色）。渡した項目だけが変わる。",
             schema: object(
                 json!({
                     "id": {"type": "string"},
                     "icon": {"type": ["string", "null"]},
+                    "image_path": {"type": "string"},
                     "color": {"type": ["string", "null"]},
                 }),
                 &["id"],
@@ -829,8 +833,19 @@ impl MainView {
                         Some(other) => Err(format!("{key} が正しくありません: {other}")),
                     }
                 };
-                let icon = pick("icon", ws.icon)?;
+                let mut icon = pick("icon", ws.icon)?;
                 let color = pick("color", ws.color)?;
+                if let Some(path) = str_arg(args, "image_path").filter(|p| !p.trim().is_empty()) {
+                    if args.get("icon").is_some() {
+                        return Err("icon と image_path は一緒に渡せません".into());
+                    }
+                    let path = malakt_ai::tools::expand_dir(path.trim());
+                    let png = crate::icons::shrink_file(&path)?;
+                    icon = Some(
+                        self.write(cx, |s| s.add_custom_icon(&png))
+                            .ok_or_else(|| self.take_error("画像をアイコンにできませんでした"))?,
+                    );
+                }
                 if let Some(icon) = &icon {
                     if !malakt_core::icon::is_custom(icon) && crate::icons::svg(icon).is_none() {
                         return Err(format!(
@@ -1068,6 +1083,7 @@ impl MainView {
             "pane_zoomed": self.layout.zoomed(),
             "pane_keys": self.pane_keys.code(),
             "saved_pane_layouts": self.pane_presets.iter().map(|(n, _)| n).collect::<Vec<_>>(),
+            "pane_layouts": malakt_core::panes::PRESETS.iter().map(|(n, _)| *n).collect::<Vec<_>>(),
             "lock_enabled": self.lock_enabled(cx),
             "lock": self.lock_json(cx),
             "reminders": crate::reminders::enabled(cx),
@@ -1338,6 +1354,33 @@ impl MainView {
             "pop_out" => Action::PopOut,
             "save_layout" => {
                 self.save_pane_preset(cx);
+                return Ok(
+                    json!({"saved_pane_layouts": self.pane_presets.iter().map(|(n, _)| n).collect::<Vec<_>>()}),
+                );
+            }
+            "load_layout" => {
+                let name = required(args, "name")?.trim();
+                let text = malakt_core::panes::PRESETS
+                    .iter()
+                    .map(|(n, text)| (n.to_string(), text.to_string()))
+                    .chain(self.pane_presets.iter().cloned())
+                    .find(|(n, _)| n == name)
+                    .map(|(_, text)| text)
+                    .ok_or_else(|| format!("「{name}」という配置はありません"))?;
+                self.apply_pane_layout(&text, window, cx);
+                if let Some(error) = self.error.take() {
+                    return Err(error.to_string());
+                }
+                return Ok(json!({"panes": self.layout.panes().len()}));
+            }
+            "delete_layout" => {
+                let name = required(args, "name")?.trim();
+                let at = self
+                    .pane_presets
+                    .iter()
+                    .position(|(n, _)| n == name)
+                    .ok_or_else(|| format!("「{name}」という保存した配置はありません"))?;
+                self.delete_pane_preset(at, cx);
                 return Ok(
                     json!({"saved_pane_layouts": self.pane_presets.iter().map(|(n, _)| n).collect::<Vec<_>>()}),
                 );
