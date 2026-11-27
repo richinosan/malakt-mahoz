@@ -9,7 +9,7 @@ use gpui_kit::component::button::ButtonVariants;
 use gpui_kit::component::input::{
     Copy as CopyText, Input, InputEvent, InputState, MoveDown, MoveUp, Textarea, TextareaState,
 };
-use gpui_kit::component::menu::PopupMenuItem;
+use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
 use gpui_kit::component::scroll::ScrollableElement;
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::text::TextView;
@@ -48,6 +48,29 @@ fn copy_chat_selection(window: &mut Window, cx: &mut App) -> bool {
     }
     cx.write_to_clipboard(ClipboardItem::new_string(text));
     true
+}
+
+/// 会話の発言の右クリックメニュー。文字を選んでいれば「選択をコピー」、そのあとに発言を丸ごと
+/// コピーする項目（`whole`）を出す。選んだ文字は開いたときに覚える（メニューを押すと選択が外れるため）。
+fn copy_menu(
+    menu: PopupMenu,
+    whole: &'static str,
+    text: &SharedString,
+    window: &mut Window,
+    cx: &mut App,
+) -> PopupMenu {
+    let picked = TextSelection::selected_text(window, cx).trim().to_owned();
+    let text = text.clone();
+    menu.when(!picked.is_empty(), |menu| {
+        menu.item(
+            PopupMenuItem::new("選択をコピー").on_click(move |_, _, cx| {
+                cx.write_to_clipboard(ClipboardItem::new_string(picked.clone()))
+            }),
+        )
+    })
+    .item(PopupMenuItem::new(whole).on_click(move |_, _, cx| {
+        cx.write_to_clipboard(ClipboardItem::new_string(text.to_string()))
+    }))
 }
 
 fn term_font(cx: &App) -> Pixels {
@@ -1394,7 +1417,14 @@ impl AiPane {
                             crate::render::selectable_text(("ai-user-text", ix), text.clone(), cx)
                                 .selection_color(theme.primary_foreground.opacity(0.35)),
                         )
-                        .test_support(),
+                        .test_support()
+                        // 右クリックで、選んだ所か発言を丸ごとコピーする
+                        .right_menu({
+                            let text = text.clone();
+                            move |menu, window, cx| {
+                                copy_menu(menu, "発言をコピー", &text, window, cx)
+                            }
+                        }),
                 )
                 .into_any_element(),
             // AI の返答は、枠も印も付けずにペインの幅いっぱいに出す
@@ -1416,18 +1446,11 @@ impl AiPane {
                                 .on_link_click(crate::browser::on_link),
                         )
                         .test_support()
-                        // 右クリックで、返答を丸ごとコピーする
+                        // 右クリックで、選んだ所か回答を丸ごとコピーする
                         .right_menu({
                             let text = text.clone();
-                            move |menu, _, _| {
-                                let text = text.clone();
-                                menu.item(PopupMenuItem::new("返答をコピー").on_click(
-                                    move |_, _, cx| {
-                                        cx.write_to_clipboard(ClipboardItem::new_string(
-                                            text.to_string(),
-                                        ));
-                                    },
-                                ))
+                            move |menu, window, cx| {
+                                copy_menu(menu, "回答をコピー", &text, window, cx)
                             }
                         }),
                 )

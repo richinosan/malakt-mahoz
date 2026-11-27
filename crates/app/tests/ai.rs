@@ -3905,3 +3905,96 @@ fn own_messages_can_be_selected_and_copied(cx: &mut TestAppContext) {
         "通信に失敗しました"
     );
 }
+
+/// 回答と自分の発言の右クリックメニュー。文字を選んでいれば「選択をコピー」で選んだ所を、
+/// 「回答をコピー」「発言をコピー」で丸ごとをコピーする。選んでいなければ「選択をコピー」は出ない。
+#[gpui_kit::test]
+fn the_message_menu_copies_the_selection_or_the_whole_message(cx: &mut TestAppContext) {
+    use gpui_kit::test::TestEventExt;
+    use gpui_kit::{point, Modifiers, MouseButton, VisualTestContext};
+
+    let _world = start(cx);
+    let (window, view) = open(cx, wide());
+    let _pane = open_chat(cx, window, &view);
+    let session = session(cx);
+    cx.update(|cx| {
+        session.update(cx, |s, cx| {
+            s.items.push(Item::User("会場の下見を手伝って".into()));
+            s.items
+                .push(Item::Assistant("下見は来週の火曜にしましょう".into()));
+            cx.notify();
+        })
+    });
+    ui(cx, window, |_, _| {});
+
+    let bounds = |cx: &mut TestAppContext, id: (&'static str, usize)| {
+        let mut b = None;
+        ui(cx, window, |window, _| b = Some(window.find(id).bounds()));
+        b.unwrap()
+    };
+    let right_click = |cx: &mut TestAppContext, at: Point<Pixels>| {
+        let mut v = VisualTestContext::from_window(window, cx);
+        v.simulate_mouse_down(at, MouseButton::Right, Modifiers::default());
+        v.simulate_mouse_up(at, MouseButton::Right, Modifiers::default());
+        v.run_until_parked();
+    };
+    let has = |cx: &mut TestAppContext, label: &str| {
+        let mut found = false;
+        ui(cx, window, |window, _| {
+            found = window.try_find_by_label(label).is_some()
+        });
+        found
+    };
+    let pick = |cx: &mut TestAppContext, label: &str| {
+        ui(cx, window, |window, cx| {
+            let center = window.find_by_label(label).bounds().center();
+            window.pointer_move(center, None, cx);
+            window.pointer_down(center, MouseButton::Left, cx);
+            window.pointer_up(center, MouseButton::Left, cx);
+        });
+    };
+    let clipboard =
+        |cx: &mut TestAppContext| cx.update(|cx| cx.read_from_clipboard().and_then(|i| i.text()));
+
+    // 選んでいないときは、丸ごとのコピーだけ
+    let user = bounds(cx, ("ai-user", 0));
+    right_click(cx, user.center());
+    assert!(has(cx, "発言をコピー"));
+    assert!(!has(cx, "選択をコピー"));
+    pick(cx, "発言をコピー");
+    assert_eq!(clipboard(cx).as_deref(), Some("会場の下見を手伝って"));
+
+    // 回答の頭の方だけを選んで、右クリックする
+    let reply = bounds(cx, ("ai-assistant", 1));
+    let (from, to) = (
+        point(reply.left() + px(6.), reply.center().y),
+        point(reply.left() + px(60.), reply.center().y),
+    );
+    let mut v = VisualTestContext::from_window(window, cx);
+    v.simulate_mouse_down(from, MouseButton::Left, Modifiers::default());
+    v.update(|window, cx| window.render_frame(cx));
+    v.simulate_mouse_move(to, MouseButton::Left, Modifiers::default());
+    v.update(|window, cx| window.render_frame(cx));
+    v.simulate_mouse_up(to, MouseButton::Left, Modifiers::default());
+    v.run_until_parked();
+    let picked = cx
+        .update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            gpui_kit::base::TextSelection::selected_text(window, cx)
+        })
+        .unwrap();
+    let picked = picked.trim().to_owned();
+    assert!(!picked.is_empty() && picked != "下見は来週の火曜にしましょう");
+    right_click(cx, to);
+    assert!(has(cx, "選択をコピー"));
+    assert!(has(cx, "回答をコピー"));
+    pick(cx, "選択をコピー");
+    assert_eq!(clipboard(cx), Some(picked));
+
+    right_click(cx, to);
+    pick(cx, "回答をコピー");
+    assert_eq!(
+        clipboard(cx).as_deref(),
+        Some("下見は来週の火曜にしましょう")
+    );
+}

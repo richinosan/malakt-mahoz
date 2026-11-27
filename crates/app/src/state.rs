@@ -521,6 +521,12 @@ pub struct MainView {
     pub modal_opened: Option<std::time::Instant>,
     /// 閉じたばかりのダイアログと、閉じた時刻。消える動きの間だけ描く。
     pub modal_closing: Option<(std::time::Instant, Modal, Option<crate::panes::PaneOverlay>)>,
+    /// 閉じたばかりの重ねたダイアログと、閉じた時刻。消える動きの間だけ描く。
+    pub sub_closing: Option<(std::time::Instant, SubModal)>,
+    /// 前に描いたときに重ねていたダイアログ。
+    pub sub_seen: Option<SubModal>,
+    /// 閉じたばかりのタスクの詳細と、閉じた時刻。消える動きの間だけ描く。
+    pub panel_closing: Option<(std::time::Instant, Detail)>,
     /// 前に描いたときに出ていたダイアログ。
     pub modal_seen: Option<(Modal, Option<crate::panes::PaneOverlay>)>,
     /// 今描いているダイアログの出方。0 で消えていて、1 で出きっている。
@@ -960,6 +966,9 @@ impl MainView {
             motion: true,
             modal_opened: None,
             modal_closing: None,
+            panel_closing: None,
+            sub_closing: None,
+            sub_seen: None,
             modal_seen: None,
             dialog_t: std::cell::Cell::new(1.),
             today: view::today(),
@@ -1089,7 +1098,7 @@ impl MainView {
             None
         };
         self.due = Rc::new(store.due_tasks(&until, mine)?);
-        self.detail = match &self.panel {
+        let detail = match &self.panel {
             Some(id) => match store.task(id) {
                 Ok(task) => Some(Detail {
                     linked: {
@@ -1119,6 +1128,7 @@ impl MainView {
             },
             None => None,
         };
+        self.set_detail(detail);
         if self.detail.is_none() {
             self.panel = None;
             self.editing = None;
@@ -1518,9 +1528,22 @@ impl MainView {
         }
     }
 
+    /// 詳細の中身を変える。閉じたときは、消える動きの間だけ最後の中身を残す。
+    /// 別のタスクを開いたら、消えかけの詳細はすぐ消す。
+    fn set_detail(&mut self, next: Option<Detail>) {
+        match (self.detail.take(), &next) {
+            (Some(last), None) if self.motion => {
+                self.panel_closing = Some((std::time::Instant::now(), last));
+            }
+            (_, Some(_)) => self.panel_closing = None,
+            _ => {}
+        }
+        self.detail = next;
+    }
+
     pub fn close_panel(&mut self, cx: &mut Context<Self>) {
         self.panel = None;
-        self.detail = None;
+        self.set_detail(None);
         self.editing = None;
         self.assignee_picker = false;
         self.comment_mode = CommentMode::New;
