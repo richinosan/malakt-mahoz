@@ -318,8 +318,8 @@ fn open_task(cx: &mut TestAppContext, window: AnyWindowHandle, view: &Entity<Mai
     ui(cx, window, |_, _| {});
 }
 
-/// 説明の最初の文字（リンク）の上を押す場所。
-const ON_LINK: Point<Pixels> = point(px(6.), px(6.));
+/// 説明の最初の文字（リンク）の上を押す場所。説明は押せる面の内側（左 8・上 4）から始まる。
+const ON_LINK: Point<Pixels> = point(px(14.), px(10.));
 
 /// タスクの詳細のリンクを押すと、シェルの場所にブラウザのタブが開き、ページが見える。
 #[gpui_kit::test]
@@ -336,6 +336,8 @@ fn a_link_in_the_task_detail_opens_in_a_browser_tab(cx: &mut TestAppContext) {
         (page.id, page.url.clone())
     });
     assert_eq!(url, "https://example.com/doc");
+    // リンクを押したときは、説明の編集にならない
+    assert!(cx.update(|cx| view.read(cx).editing.is_none()));
     // チャットとシェルが開き、タブとページが出る
     assert!(cx.update(|cx| view.read(cx).ai_open));
     assert_eq!(

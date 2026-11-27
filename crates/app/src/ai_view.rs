@@ -238,6 +238,8 @@ pub struct AiPane {
     shell_dragging: bool,
     copied: bool,
     seen: usize,
+    /// 返答の本文から作った、描く Markdown（行の番号ごとに、元の本文と描く文）。
+    md_cache: std::cell::RefCell<std::collections::HashMap<usize, (SharedString, SharedString)>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -490,6 +492,7 @@ impl AiPane {
             shell_dragging: false,
             copied: false,
             seen,
+            md_cache: Default::default(),
             _subscriptions: subscriptions,
         }
     }
@@ -547,6 +550,7 @@ impl AiPane {
         if items < self.seen {
             // 新しいチャットでは、行の番号が最初からになる
             self.open_tools.clear();
+            self.md_cache.borrow_mut().clear();
         }
         self.seen = items;
         // さかのぼって読んでいる間は、新しい出力が来ても動かさない
@@ -1335,6 +1339,19 @@ impl AiPane {
         cx.notify();
     }
 
+    /// 返答の本文を描く Markdown にする（日本語まで続いた URL を切る）。本文が同じ間は作り直さない。
+    fn md_text(&self, ix: usize, text: &SharedString) -> SharedString {
+        let mut cache = self.md_cache.borrow_mut();
+        if let Some((source, out)) = cache.get(&ix) {
+            if source == text {
+                return out.clone();
+            }
+        }
+        let out: SharedString = malakt_core::markdown::with_links(text).text.into();
+        cache.insert(ix, (text.clone(), out.clone()));
+        out
+    }
+
     fn render_item(&self, ix: usize, item: &Item, cx: &App) -> AnyElement {
         let theme = cx.theme();
         match item {
@@ -1368,7 +1385,8 @@ impl AiPane {
                         .text_sm()
                         // ドラッグで選んでコピーできる
                         .child(
-                            TextView::markdown(("ai-text", ix), text.clone())
+                            TextView::markdown(("ai-text", ix), self.md_text(ix, text))
+                                .style(crate::render::md_style())
                                 .selectable(true)
                                 .on_link_click(crate::browser::on_link),
                         )

@@ -45,7 +45,6 @@ const NOT_BUTTONS: &[&str] = &[
     "dialog-under-backdrop",
     // メニューの入れ物。中の項目は 1 つずつ押す
     "popup-menu",
-    "detail-description",
     "col-head",
     "col-resize",
     "input-state",

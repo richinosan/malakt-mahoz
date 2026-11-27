@@ -4929,6 +4929,7 @@ dependencies = [
  "criterion 0.5.1",
  "flate2",
  "malakt-reminders",
+ "markdown",
  "rand 0.8.8",
  "rusqlite",
  "serde",
