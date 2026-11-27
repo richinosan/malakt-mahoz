@@ -10,10 +10,15 @@ pub fn url(task_id: &str) -> String {
 
 /// 文章の中のリンクが指すタスクの ID。出てきた順で、同じものは 1 回だけ。
 pub fn find(text: &str) -> Vec<&str> {
+    find_ids(PREFIX, text)
+}
+
+/// 文章の中の、頭が `prefix` のリンクが指す ID。出てきた順で、同じものは 1 回だけ。
+pub(crate) fn find_ids<'a>(prefix: &str, text: &'a str) -> Vec<&'a str> {
     let mut ids: Vec<&str> = Vec::new();
     let mut rest = text;
-    while let Some(at) = rest.find(PREFIX) {
-        let after = &rest[at + PREFIX.len()..];
+    while let Some(at) = rest.find(prefix) {
+        let after = &rest[at + prefix.len()..];
         let end = after
             .find(|c: char| !c.is_ascii_alphanumeric())
             .unwrap_or(after.len());

@@ -23,6 +23,13 @@ pub const RUN_SHELL: &str = "run_shell";
 const LIST_LIMIT: usize = 200;
 /// `get_task` で返す変更履歴の数。
 const CHANGES_LIMIT: usize = 30;
+/// `get_workspace` で返すタスクとサブワークスペースの数。
+const WORKSPACE_TASKS: usize = 150;
+const WORKSPACE_SUBS: usize = 100;
+/// `get_workspace` の結果の文字数の上限。超える分のタスクは載せず、件数だけを返す。
+pub const WORKSPACE_CHARS: usize = 40_000;
+/// `get_workspace` の一覧に載せる、タスクの説明の文字数。
+const WORKSPACE_DESCRIPTION: usize = 200;
 
 /// ワークスペースごとの、ターミナルを始めるフォルダーの保存先。
 pub fn workspace_dir_key(workspace: &str) -> String {
@@ -148,6 +155,19 @@ pub fn definitions() -> Vec<ToolDef> {
             name: "get_task",
             description: "タスク 1 件の内容と、コメント、サブタスク、添付、変更履歴を返す。",
             schema: object(json!({"id": {"type": "string"}}), &["id"]),
+        },
+        ToolDef {
+            name: "get_workspace",
+            description: "ワークスペース 1 つの中身を返す。上からの道筋、サブワークスペース（入れ子の全部）と\
+                          それぞれのタスクの数、サブワークスペースも含めたタスクの一覧。\
+                          多いときはタスクの一部だけを返す（tasks_total と tasks_shown を見る）。",
+            schema: object(
+                json!({
+                    "id": {"type": "string"},
+                    "include_done": {"type": "boolean", "description": "完了・中止のタスクも一覧に含める（標準は含めない）"},
+                }),
+                &["id"],
+            ),
         },
         ToolDef {
             name: "create_task",
@@ -897,6 +917,126 @@ fn task_json(task: &Task) -> Value {
     })
 }
 
+/// 文字数で切る。切ったときは末尾に … を付ける。
+fn clip(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        text.to_owned()
+    } else {
+        let mut out: String = text.chars().take(max).collect();
+        out.push('…');
+        out
+    }
+}
+
+/// ワークスペース 1 つの中身（`get_workspace`）。AI チャットに添えたワークスペースにも使う。
+/// タスクは `WORKSPACE_TASKS` 件と `WORKSPACE_CHARS` 文字までにして、残りは件数だけを返す。
+pub fn workspace_context(store: &Store, id: &str, include_done: bool) -> Result<Value, String> {
+    let core = |e: malakt_core::Error| e.to_string();
+    let path = store.workspace_path(id).map_err(core)?;
+    let all = store.workspaces().map_err(core)?;
+    // サブワークスペースは、左のメニューと同じ並び（親のすぐ後ろに子）
+    let mut children: std::collections::HashMap<&str, Vec<&Workspace>> = Default::default();
+    for w in &all {
+        if let Some(parent) = w.parent_id.as_deref() {
+            children.entry(parent).or_default().push(w);
+        }
+    }
+    for list in children.values_mut() {
+        list.sort_by_key(|w| (w.position, w.id.clone()));
+    }
+    let mut subs: Vec<&Workspace> = Vec::new();
+    let mut seen: std::collections::HashSet<&str> = [id].into();
+    let mut stack: Vec<&Workspace> = children
+        .get(id)
+        .into_iter()
+        .flatten()
+        .rev()
+        .copied()
+        .collect();
+    while let Some(w) = stack.pop() {
+        // 壊れたデータで輪になっていても止まる
+        if !seen.insert(&w.id) {
+            continue;
+        }
+        subs.push(w);
+        stack.extend(children.get(w.id.as_str()).into_iter().flatten().rev());
+    }
+    let tasks = store
+        .tasks(
+            Scope::Workspace(id),
+            &TaskFilter {
+                include_descendants: true,
+                open_only: false,
+                assignee_id: None,
+                query: None,
+            },
+        )
+        .map_err(core)?;
+    let shows = |task: &Task, workspace: &str| {
+        task.workspace_id.as_deref() == Some(workspace)
+            || task.linked_workspace_ids.iter().any(|w| w == workspace)
+    };
+    let counts = |workspace: &str| {
+        let here = tasks.iter().filter(|t| shows(t, workspace));
+        let open = here.clone().filter(|t| t.status.is_open()).count();
+        (open, here.count() - open)
+    };
+    let sub_rows: Vec<Value> = subs
+        .iter()
+        .take(WORKSPACE_SUBS)
+        .map(|w| {
+            let (open, done) = counts(&w.id);
+            json!({
+                "id": w.id,
+                "name": w.name,
+                "parent_id": w.parent_id,
+                "open_tasks": open,
+                "done_tasks": done,
+            })
+        })
+        .collect();
+    let picked: Vec<&Task> = tasks
+        .iter()
+        .filter(|t| include_done || t.status.is_open())
+        .collect();
+    let open = tasks.iter().filter(|t| t.status.is_open()).count();
+    let me = path.last().map(workspace_json).unwrap_or(Value::Null);
+    let mut out = json!({
+        "workspace": me,
+        "path": path.iter().map(|w| w.name.as_str()).collect::<Vec<_>>().join(" / "),
+        "sub_workspaces_total": subs.len(),
+        "sub_workspaces": sub_rows,
+        "open_tasks": open,
+        "done_tasks": tasks.len() - open,
+        "tasks_total": picked.len(),
+        "tasks_shown": 0,
+        "tasks": [],
+    });
+    // 文字数に収まるだけのタスクを載せる
+    let mut budget = WORKSPACE_CHARS.saturating_sub(out.to_string().chars().count() + 200);
+    let mut rows = Vec::new();
+    for task in picked.iter().take(WORKSPACE_TASKS) {
+        let mut row = task_row(task);
+        if !task.description.is_empty() {
+            row["description"] = json!(clip(&task.description, WORKSPACE_DESCRIPTION));
+        }
+        let size = row.to_string().chars().count() + 1;
+        if size > budget {
+            break;
+        }
+        budget -= size;
+        rows.push(row);
+    }
+    out["tasks_shown"] = json!(rows.len());
+    if rows.len() < picked.len() {
+        out["note"] = json!(
+            "タスクが多いので、一部だけを載せています。残りは list_tasks に workspace_id と query を渡して読めます"
+        );
+    }
+    out["tasks"] = Value::Array(rows);
+    Ok(out)
+}
+
 /// 一覧では、説明を省いて短くする。
 /// 期限をいつ知らせるか。`task_id` があれば、そのタスクの上書きも。
 fn due_alerts_json(store: &Store, task_id: Option<&str>) -> Result<Value, String> {
@@ -989,6 +1129,11 @@ pub fn execute(
             let rows: Vec<Value> = tasks.iter().take(LIST_LIMIT).map(task_row).collect();
             json!({"total": tasks.len(), "shown": rows.len(), "tasks": rows})
         }
+        "get_workspace" => workspace_context(
+            store,
+            required(args, "id")?,
+            args.get("include_done").and_then(Value::as_bool) == Some(true),
+        )?,
         "get_task" => {
             let id = required(args, "id")?;
             let mut task = task_json(&store.task(id).map_err(core)?);
@@ -1632,6 +1777,7 @@ pub fn summary(name: &str, args: &Value) -> String {
             _ => "タスク一覧を取得".into(),
         },
         "get_task" => "タスクを取得".into(),
+        "get_workspace" => "ワークスペースを取得".into(),
         "create_task" => format!("タスクを作成: {}", arg("title")),
         "update_task" => "タスクを更新".into(),
         "set_assignee" => match args.get("roles").and_then(Value::as_array) {
@@ -1805,6 +1951,117 @@ mod tests {
 
     fn run(store: &mut Store, name: &str, args: Value) -> Value {
         serde_json::from_str(&execute(store, None, name, &args).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn a_workspace_comes_with_its_sub_workspaces_and_tasks() {
+        let mut store = Store::open_in_memory().unwrap();
+        let event = run(&mut store, "create_workspace", json!({"name": "イベント"}));
+        let ad = run(
+            &mut store,
+            "create_workspace",
+            json!({"name": "告知", "parent_id": event["id"]}),
+        );
+        let poster = run(
+            &mut store,
+            "create_workspace",
+            json!({"name": "ポスター", "parent_id": ad["id"]}),
+        );
+        let venue = run(
+            &mut store,
+            "create_workspace",
+            json!({"name": "会場", "parent_id": event["id"]}),
+        );
+        let other = run(&mut store, "create_workspace", json!({"name": "家"}));
+        run(
+            &mut store,
+            "create_task",
+            json!({"title": "会場を予約", "workspace_id": venue["id"], "description": "駅から近いところ"}),
+        );
+        run(
+            &mut store,
+            "create_task",
+            json!({"title": "ポスターを刷る", "workspace_id": poster["id"]}),
+        );
+        run(
+            &mut store,
+            "create_task",
+            json!({"title": "日程を決めた", "workspace_id": event["id"], "status": "completed"}),
+        );
+        run(
+            &mut store,
+            "create_task",
+            json!({"title": "掃除", "workspace_id": other["id"]}),
+        );
+
+        let got = run(&mut store, "get_workspace", json!({"id": event["id"]}));
+        assert_eq!(got["workspace"]["name"], "イベント");
+        assert_eq!(got["path"], "イベント");
+        // 入れ子の全部を、親のすぐ後ろに子の並びで
+        let subs: Vec<&str> = got["sub_workspaces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|w| w["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(subs, ["告知", "ポスター", "会場"]);
+        assert_eq!(got["sub_workspaces"][1]["open_tasks"], 1);
+        assert_eq!(got["open_tasks"], 2);
+        assert_eq!(got["done_tasks"], 1);
+        // 標準では、完了したタスクとほかのワークスペースのタスクは一覧にない
+        let titles: Vec<&str> = got["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["title"].as_str().unwrap())
+            .collect();
+        assert_eq!(titles.len(), 2);
+        assert!(titles.contains(&"会場を予約") && titles.contains(&"ポスターを刷る"));
+        assert_eq!(got["tasks_total"], 2);
+        assert_eq!(got["tasks_shown"], 2);
+        assert!(got.get("note").is_none());
+        let venue_task = got["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["title"] == "会場を予約")
+            .unwrap();
+        assert_eq!(venue_task["description"], "駅から近いところ");
+
+        let all = run(
+            &mut store,
+            "get_workspace",
+            json!({"id": event["id"], "include_done": true}),
+        );
+        assert_eq!(all["tasks_total"], 3);
+        let sub = run(&mut store, "get_workspace", json!({"id": poster["id"]}));
+        assert_eq!(sub["path"], "イベント / 告知 / ポスター");
+        assert!(execute(&mut store, None, "get_workspace", &json!({"id": "nope"})).is_err());
+    }
+
+    #[test]
+    fn a_large_workspace_is_cut_to_fit() {
+        let mut store = Store::open_in_memory().unwrap();
+        let ws = run(&mut store, "create_workspace", json!({"name": "大きい"}));
+        let long = "説明".repeat(300);
+        for i in 0..(WORKSPACE_TASKS + 20) {
+            run(
+                &mut store,
+                "create_task",
+                json!({"title": format!("タスク {i}"), "workspace_id": ws["id"], "description": long}),
+            );
+        }
+        let text = execute(&mut store, None, "get_workspace", &json!({"id": ws["id"]})).unwrap();
+        assert!(text.chars().count() <= WORKSPACE_CHARS, "{}", text.len());
+        let got: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(got["tasks_total"], WORKSPACE_TASKS + 20);
+        let shown = got["tasks_shown"].as_u64().unwrap() as usize;
+        assert!(shown > 0 && shown <= WORKSPACE_TASKS, "{shown}");
+        assert_eq!(got["tasks"].as_array().unwrap().len(), shown);
+        assert!(got["note"].is_string());
+        // 説明は短くしてある
+        let description = got["tasks"][0]["description"].as_str().unwrap();
+        assert_eq!(description.chars().count(), WORKSPACE_DESCRIPTION + 1);
     }
 
     #[test]

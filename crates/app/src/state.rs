@@ -484,6 +484,8 @@ pub struct MainView {
     pub ws_rows: Rc<crate::ws_drag::Rows>,
     /// ドラッグで置いたばかりのワークスペースと、置いた回数（動きを毎回始めから見せる）。
     pub ws_landed: Option<(Id, usize)>,
+    /// ドラッグしているワークスペースが、この画面のチャットの上にある（ほかのウィンドウから来たものも）。
+    pub ws_chat_drop: bool,
     /// 詳細で、担当者と役を選ぶところを開いている。
     pub assignee_picker: bool,
     /// ダイアログの上に重ねて出しているダイアログ。
@@ -926,6 +928,7 @@ impl MainView {
             ws_dropped: false,
             ws_rows: Default::default(),
             ws_landed: None,
+            ws_chat_drop: false,
             layout: Default::default(),
             primary: 0,
             children: HashMap::new(),
@@ -2170,6 +2173,11 @@ impl MainView {
         self.dropped || self.task_drag.as_ref().is_some_and(|d| d.moved)
     }
 
+    /// この画面のチャットの上を、ワークスペースかタスクがドラッグされている。
+    pub fn dropping_on_chat(&self) -> bool {
+        self.ws_chat_drop || self.drop_over() == Some(&DropTarget::Chat)
+    }
+
     /// この画面の中で、今の落とし先になっている場所。
     pub fn drop_over(&self) -> Option<&DropTarget> {
         match &self.task_drag {
@@ -3334,6 +3342,13 @@ impl MainView {
         cx.notify();
     }
 
+    /// ワークスペースへのリンクをクリップボードに入れる。AI チャットの入力欄に貼ると、そのワークスペースが付く。
+    pub fn copy_workspace_link(&mut self, id: &str, cx: &mut Context<Self>) {
+        cx.write_to_clipboard(ClipboardItem::new_string(malakt_core::wslink::url(id)));
+        self.show_notice("リンクをコピーしました。".into());
+        cx.notify();
+    }
+
     // ---- 表の列 ----
 
     /// 保存してある列の並び・幅・表示を読む。読めない項目は最初の形のままにする。
@@ -4381,6 +4396,31 @@ impl MainView {
         };
         self.ai_session
             .update(cx, |s, cx| s.chat_about_task(id, title.into(), cx));
+        self.show_chat_input(window, cx);
+    }
+
+    /// ワークスペースを AI チャットの入力欄に添えて、チャットを開く。
+    pub fn attach_workspace_to_chat(
+        &mut self,
+        id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let name = match self.db.read(cx).store.workspace(id) {
+            Ok(ws) => ws.name,
+            Err(e) => {
+                self.error = Some(format!("ワークスペースを読めませんでした: {e}").into());
+                cx.notify();
+                return;
+            }
+        };
+        self.ai_session
+            .update(cx, |s, cx| s.attach_workspace(id, name.into(), cx));
+        self.show_chat_input(window, cx);
+    }
+
+    /// チャットを出して、入力欄にフォーカスする。別ウィンドウに出しているときは、そのウィンドウを手前に出す。
+    fn show_chat_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.ai_open || self.ai_session.read(cx).chat_window.is_some() {
             self.toggle_ai(window, cx);
         } else if let Some(pane) = self.ai_pane.clone() {

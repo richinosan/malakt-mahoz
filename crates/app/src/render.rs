@@ -894,7 +894,12 @@ fn workspace_color(color: Option<&str>) -> Option<Hsla> {
 }
 
 /// ワークスペースのアイコン。自分で足した画像はそのままの色で、ほかは選んだ色の線画で出す。
-fn workspace_icon(icon: Option<&str>, color: Option<&str>, size: Pixels, cx: &App) -> AnyElement {
+pub fn workspace_icon(
+    icon: Option<&str>,
+    color: Option<&str>,
+    size: Pixels,
+    cx: &App,
+) -> AnyElement {
     let custom = icon
         .filter(|icon| malakt_core::icon::is_custom(icon))
         .and_then(|icon| crate::icons::custom_image(icon, cx));
@@ -1220,14 +1225,14 @@ impl MainView {
                 |_, _, _| {},
                 move |_, _, window, _| {
                     let moved = view.clone();
-                    window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
+                    window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
                         if phase != DispatchPhase::Capture {
                             return;
                         }
                         // 閉じた画面のドラッグは、もう続かない
                         let _ = moved.update(cx, |this, cx| {
                             if event.pressed_button == Some(MouseButton::Left) {
-                                this.drag_ws_at(event.position, cx);
+                                this.drag_ws_at(event.position, window, cx);
                             } else {
                                 this.finish_ws_drag(cx);
                             }
@@ -1367,6 +1372,14 @@ impl MainView {
             }))
             .item(item("AI のルール", |this, id, window, cx| {
                 this.open_workspace_rules(&id, window, cx)
+            }))
+            .separator()
+            .item(item(
+                "AI チャットに添える",
+                |this, id, window, cx| this.attach_workspace_to_chat(&id, window, cx),
+            ))
+            .item(item("コピー", |this, id, _, cx| {
+                this.copy_workspace_link(&id, cx)
             }))
             .separator()
             .item(item("削除", |this, id, _, cx| {

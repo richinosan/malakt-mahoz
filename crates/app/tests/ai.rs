@@ -3903,3 +3903,166 @@ fn own_messages_can_be_selected_and_copied(cx: &mut TestAppContext) {
         "通信に失敗しました"
     );
 }
+
+/// ワークスペースを作る。`parent` があればそのサブワークスペース。
+fn new_workspace(cx: &mut TestAppContext, parent: Option<&str>, name: &str) -> String {
+    cx.update(|cx| {
+        db::shared(cx).update(cx, |db, cx| {
+            let ws = db.store.create_workspace(parent, name).unwrap();
+            cx.notify();
+            ws.id
+        })
+    })
+}
+
+/// 「イベント」（サブワークスペース「告知」）と、「告知」のタスク。
+fn event_workspace(cx: &mut TestAppContext) -> String {
+    let event = new_workspace(cx, None, "イベント");
+    let ad = new_workspace(cx, Some(&event), "告知");
+    cx.update(|cx| {
+        db::shared(cx).update(cx, |db, cx| {
+            let draft = TaskDraft {
+                title: "ポスターを刷る".into(),
+                ..Default::default()
+            };
+            db.store.create_task(Some(&ad), &draft).unwrap();
+            cx.notify();
+        })
+    });
+    event
+}
+
+fn last_message(world: &World) -> String {
+    world.sent().last().unwrap().2["messages"][0]["content"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+/// 左のメニューのワークスペースをチャットの上に落とすと、並びは変えずに入力欄に添える。
+/// 送ると、サブワークスペースとタスクを含めて AI に渡す。
+#[gpui_kit::test]
+fn a_workspace_dropped_on_the_chat_is_attached(cx: &mut TestAppContext) {
+    let world = start(cx);
+    world.keys.set(Provider::Claude, "k").unwrap();
+    let s = session(cx);
+    cx.update(|cx| s.update(cx, |s, cx| s.set_arrange(false, cx)));
+    let event = event_workspace(cx);
+    let (window, view) = open(cx, wide());
+    let pane = open_chat(cx, window, &view);
+    let order = |cx: &mut TestAppContext| {
+        cx.update(|cx| {
+            db::shared(cx)
+                .read(cx)
+                .store
+                .workspaces()
+                .unwrap()
+                .into_iter()
+                .map(|w| (w.id, w.parent_id, w.position))
+                .collect::<Vec<_>>()
+        })
+    };
+    let before = order(cx);
+
+    // 行を押して、チャットの入力欄の上まで動かして離す
+    let drop = |cx: &mut TestAppContext| {
+        ui(cx, window, |window, cx| {
+            let at = window.find("ai-input").bounds().center();
+            view.update(cx, |v, cx| {
+                v.start_ws_drag(&event, point(px(100.), px(200.)), cx);
+                v.drag_ws_at(at, window, cx);
+            });
+        });
+        // 上にある間は、入力欄に色が付く
+        cx.update(|cx| assert!(view.read(cx).dropping_on_chat()));
+        ui(cx, window, |_, cx| {
+            view.update(cx, |v, cx| v.finish_ws_drag(cx))
+        });
+    };
+    drop(cx);
+    cx.update(|cx| assert!(!view.read(cx).dropping_on_chat()));
+    assert_eq!(
+        read(cx, |s| s.attached_workspaces.clone()),
+        vec![(event.clone(), "イベント".into())]
+    );
+    assert_eq!(order(cx), before);
+    // 同じワークスペースは 1 つだけ。× で外せる
+    drop(cx);
+    assert_eq!(read(cx, |s| s.attached_workspaces.len()), 1);
+    ui(cx, window, |window, cx| {
+        assert!(window.find(("ai-attached-ws", 0usize)).visible());
+        window.click(("ai-attached-ws-remove", 0usize), cx);
+    });
+    assert!(read(cx, |s| s.attached_workspaces.is_empty()));
+
+    drop(cx);
+    world.reply(text_reply("見ました。"));
+    say(cx, window, &pane, "進み具合は？");
+    wait(cx, "返事が来る", |s| !s.busy && s.items.len() >= 2);
+    let message = last_message(&world);
+    assert!(
+        message.starts_with("進み具合は？\n\n[添えたワークスペース「イベント」]\n"),
+        "{message}"
+    );
+    assert!(message.contains("告知"), "{message}");
+    assert!(message.contains("ポスターを刷る"), "{message}");
+    assert!(read(cx, |s| s.attached_workspaces.is_empty()));
+    assert_eq!(
+        read(cx, |s| s.items[0].clone()),
+        Item::User("「イベント」\n進み具合は？".into())
+    );
+}
+
+/// ワークスペースのメニューから、チャットに添えたりリンクをコピーしたりできる。貼ったリンクも添えられる。
+#[gpui_kit::test]
+fn a_workspace_is_attached_from_the_menu_or_a_pasted_link(cx: &mut TestAppContext) {
+    let world = start(cx);
+    world.keys.set(Provider::Claude, "k").unwrap();
+    let s = session(cx);
+    cx.update(|cx| s.update(cx, |s, cx| s.set_arrange(false, cx)));
+    let event = event_workspace(cx);
+    let home = new_workspace(cx, None, "家");
+    let (window, view) = open(cx, wide());
+
+    // 「AI チャットに添える」は、チャットを開いて添える
+    ui(cx, window, |window, cx| {
+        view.update(cx, |v, cx| v.attach_workspace_to_chat(&home, window, cx));
+    });
+    cx.update(|cx| assert!(view.read(cx).ai_open));
+    assert_eq!(
+        read(cx, |s| s.attached_workspaces.clone()),
+        vec![(home.clone(), "家".into())]
+    );
+    let pane = cx.update(|cx| view.read(cx).ai_pane.clone().unwrap());
+
+    // 「コピー」はリンクをクリップボードに入れる。入力欄に貼ると添えられ、リンクの文字は消える
+    ui(cx, window, |_, cx| {
+        view.update(cx, |v, cx| v.copy_workspace_link(&event, cx))
+    });
+    let link = cx
+        .update(|cx| cx.read_from_clipboard().and_then(|c| c.text()))
+        .unwrap();
+    assert_eq!(link, malakt_core::wslink::url(&event));
+    world.reply(text_reply("まとめました。"));
+    say(
+        cx,
+        window,
+        &pane,
+        &format!("{link} malakt-mahoz://workspace/nothing まとめて"),
+    );
+    wait(cx, "返事が来る", |s| !s.busy && s.items.len() >= 2);
+    assert_eq!(
+        read(cx, |s| s.items[0].clone()),
+        Item::User("「家」\n「イベント」\nmalakt-mahoz://workspace/nothing まとめて".into())
+    );
+    let message = last_message(&world);
+    assert!(
+        message.contains("[添えたワークスペース「家」]"),
+        "{message}"
+    );
+    assert!(
+        message.contains("[添えたワークスペース「イベント」]"),
+        "{message}"
+    );
+    assert!(!message.contains(&link), "{message}");
+}
