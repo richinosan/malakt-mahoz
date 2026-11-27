@@ -369,6 +369,11 @@ enum SettingKey {
     AlertTimed,
     AlertDate,
     AlertHour,
+    DoneOn,
+    DoneWhen,
+    DoneRoles,
+    DonePeople,
+    DoneWorkspaces,
     LockNow,
     People,
     Keys,
@@ -6288,6 +6293,12 @@ impl MainView {
             None | Some(SubModal::Rules) => return sized("dialog", body, cx),
             Some(SubModal::Font) => ("フォント", px(400.), self.font_picker(cx)),
             Some(SubModal::Scene) => ("背景の画像", px(680.), self.scene_picker(cx)),
+            Some(SubModal::DonePeople) => ("知らせる担当者", px(400.), self.done_picker(true, cx)),
+            Some(SubModal::DoneWorkspaces) => (
+                "知らせるワークスペース",
+                px(400.),
+                self.done_picker(false, cx),
+            ),
             Some(SubModal::ClearBrowser) => {
                 let body = col()
                     .gap_3()
@@ -6722,7 +6733,46 @@ impl MainView {
                 None,
                 list(&["期限", "通知", "時刻"]),
             ),
+            Setting::new(
+                Section::Notices,
+                SettingKey::DoneOn,
+                "ほかの人の完了",
+                None,
+                list(&["完了", "通知", "担当者", "完了チケット"]),
+            ),
         ]);
+        if self.done_notices(cx).enabled {
+            all.extend([
+                Setting::new(
+                    Section::Notices,
+                    SettingKey::DoneWhen,
+                    "知らせるとき",
+                    None,
+                    list(&["完了", "通知", "1 人ずつ"]),
+                ),
+                Setting::new(
+                    Section::Notices,
+                    SettingKey::DoneRoles,
+                    "完了にした人の役",
+                    None,
+                    list(&["完了", "通知", "役", "RACI", "R", "A", "C", "I"]),
+                ),
+                Setting::new(
+                    Section::Notices,
+                    SettingKey::DonePeople,
+                    "知らせる担当者",
+                    None,
+                    list(&["完了", "通知", "担当者", "人"]),
+                ),
+                Setting::new(
+                    Section::Notices,
+                    SettingKey::DoneWorkspaces,
+                    "知らせるワークスペース",
+                    None,
+                    list(&["完了", "通知", "ワークスペース"]),
+                ),
+            ]);
+        }
         if let Some(name) = crate::reminders::setting_label(cx) {
             all.push(Setting::new(
                 Section::Notices,
@@ -7124,6 +7174,111 @@ impl MainView {
                     })
                     .child(reset("float-reset", false).placeholder())
                     .into_any_element(),
+                SettingKey::DoneOn => Switch::new("done-switch")
+                    .checked(self.done_notices(cx).enabled)
+                    .on_click(cx.listener(|this, on: &bool, _, cx| {
+                        let mut notices = this.done_notices(cx);
+                        notices.enabled = *on;
+                        this.set_done_notices(&notices, cx);
+                    }))
+                    .into_any_element(),
+                SettingKey::DoneWhen => {
+                    use malakt_core::done_notice::When;
+                    let view = cx.entity().downgrade();
+                    let when = self.done_notices(cx).when;
+                    menu_choice("done-when", when.label().into(), &theme)
+                        .pop_menu(move |mut menu, _, _| {
+                            for option in When::ALL {
+                                let view = view.clone();
+                                menu = menu.item(
+                                    PopupMenuItem::new(option.label())
+                                        .checked(when == option)
+                                        .on_click(move |_, _, cx| {
+                                            // ウィンドウを閉じたあとなら、反映する先がない
+                                            let _ = view.update(cx, |this, cx| {
+                                                let mut notices = this.done_notices(cx);
+                                                notices.when = option;
+                                                this.set_done_notices(&notices, cx);
+                                            });
+                                        }),
+                                );
+                            }
+                            menu
+                        })
+                        .into_any_element()
+                }
+                SettingKey::DoneRoles => {
+                    let roles = self.done_notices(cx).roles;
+                    row()
+                        .gap_1()
+                        .justify_end()
+                        .children(malakt_core::Role::ALL.into_iter().enumerate().map(
+                            |(ix, role)| {
+                                chip(("done-role", ix), role.code(), roles.contains(role), cx)
+                                    .tooltip(move |window, cx| {
+                                        gpui_kit::component::tooltip::Tooltip::new(role.label())
+                                            .build(window, cx)
+                                    })
+                                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                        this.toggle_done_role(role, cx);
+                                    }))
+                                    .test_support()
+                            },
+                        ))
+                        .child(
+                            reset(
+                                "done-roles-reset",
+                                roles != malakt_core::done_notice::all_roles(),
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                let mut notices = this.done_notices(cx);
+                                notices.roles = malakt_core::done_notice::all_roles();
+                                this.set_done_notices(&notices, cx);
+                            })),
+                        )
+                        .into_any_element()
+                }
+                SettingKey::DonePeople | SettingKey::DoneWorkspaces => {
+                    let people = item.key == SettingKey::DonePeople;
+                    let notices = self.done_notices(cx);
+                    let muted = if people {
+                        notices.muted_people.len()
+                    } else {
+                        notices.muted_workspaces.len()
+                    };
+                    let text = match (people, muted) {
+                        (true, 0) => "全員".to_owned(),
+                        (false, 0) => "すべて".to_owned(),
+                        (true, n) => format!("{n} 人を除く"),
+                        (false, n) => format!("{n} 個を除く"),
+                    };
+                    let (id, reset_id) = if people {
+                        ("done-people-open", "done-people-reset")
+                    } else {
+                        ("done-workspaces-open", "done-workspaces-reset")
+                    };
+                    row()
+                        .gap_1()
+                        .child(
+                            opener(id, text, cx)
+                                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                    this.open_done_picker(people, cx)
+                                }))
+                                .test_support(),
+                        )
+                        .child(reset(reset_id, muted > 0).on_click(cx.listener(
+                            move |this, _, _, cx| {
+                                let mut notices = this.done_notices(cx);
+                                if people {
+                                    notices.muted_people.clear();
+                                } else {
+                                    notices.muted_workspaces.clear();
+                                }
+                                this.set_done_notices(&notices, cx);
+                            },
+                        )))
+                        .into_any_element()
+                }
                 SettingKey::LockOn => Switch::new("lock-switch")
                     .checked(self.lock_enabled(cx))
                     .disabled(self.verifying(cx))
@@ -7688,6 +7843,96 @@ impl MainView {
                         )
                     }),
             )
+    }
+
+    /// ほかの人の完了を知らせる担当者・ワークスペースを選ぶ。押すたびに入れる・外す。
+    /// ワークスペースは左のメニューと同じ順に、サブワークスペースを字下げして並べる。
+    fn done_picker(&self, people: bool, cx: &mut Context<Self>) -> Div {
+        let theme = cx.theme().clone();
+        let notices = self.done_notices(cx);
+        // (ID, 名前, 字下げ, 知らせるか)
+        let items: Vec<(Id, String, usize, bool)> = if people {
+            self.people
+                .iter()
+                .filter(|p| !p.is_self)
+                .map(|p| {
+                    let on = !notices.muted_people.contains(&p.id);
+                    (p.id.clone(), p.name.clone(), 0, on)
+                })
+                .collect()
+        } else {
+            crate::state::build_tree(&self.workspaces, &std::collections::HashSet::new())
+                .into_iter()
+                .map(|r| {
+                    let w = &self.workspaces[r.index];
+                    // 親を外していれば、サブワークスペースも知らせない
+                    let mut on = true;
+                    let mut at = Some(w);
+                    while let Some(here) = at {
+                        if notices.muted_workspaces.contains(&here.id) {
+                            on = false;
+                            break;
+                        }
+                        at = here
+                            .parent_id
+                            .as_deref()
+                            .and_then(|p| self.workspaces.iter().find(|w| w.id == p));
+                    }
+                    (w.id.clone(), w.name.clone(), r.depth, on)
+                })
+                .collect()
+        };
+        let empty = items.is_empty();
+        let list = col()
+            .id("done-pick-list")
+            .gap_0p5()
+            .children(
+                items
+                    .into_iter()
+                    .enumerate()
+                    .map(|(ix, (id, name, depth, on))| {
+                        row()
+                            .id(("done-pick", ix))
+                            .w_full()
+                            .h(px(36.))
+                            .pl(px(12. + 16. * depth as f32))
+                            .pr_3()
+                            .gap_2()
+                            .rounded(feel::md())
+                            .cursor_pointer()
+                            .lit(theme.accent.opacity(0.6), cx)
+                            .sunk(theme.primary.opacity(0.4), cx)
+                            .child(div().flex_1().min_w_0().truncate().child(name))
+                            .child(
+                                app_icon("check")
+                                    .small()
+                                    .text_color(theme.primary)
+                                    .when(!on, |i| i.invisible()),
+                            )
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                if people {
+                                    this.toggle_done_person(&id, cx);
+                                } else {
+                                    this.toggle_done_workspace(&id, cx);
+                                }
+                            }))
+                            .test_support()
+                    }),
+            )
+            .max_h(px(400.))
+            .overflow_y_scrollbar();
+        col().gap_3().child(list).when(empty, |d| {
+            d.child(
+                div()
+                    .text_sm()
+                    .text_color(theme.muted_foreground)
+                    .child(if people {
+                        "ほかの担当者はいません。"
+                    } else {
+                        "ワークスペースはありません。"
+                    }),
+            )
+        })
     }
 
     /// 背景の画像を選ぶ。同梱の画像は、今のライト/ダークの絵を小さく出す。

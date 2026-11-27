@@ -1565,6 +1565,98 @@ fn due_today_reaches_the_notice_list_and_the_os(cx: &mut TestAppContext) {
     });
 }
 
+/// 設定の「通知」で、ほかの人が完了にしたときに知らせるかを、役・担当者・ワークスペースで選ぶ。
+/// オフにすると細かい行は隠れる。担当者とワークスペースは重ねた一覧で、押すたびに入れる・外す。
+#[gpui_kit::test]
+fn done_notices_can_be_chosen(cx: &mut TestAppContext) {
+    use malakt_core::done_notice::When;
+    use malakt_core::{Role, Roles};
+    use malakt_mahoz::state::{CustomizeSection, SubModal};
+    start(cx);
+    let (sato, event) = cx.update(|cx| {
+        db::shared(cx).update(cx, |db, _| {
+            db.store.create_person("自分", true).unwrap();
+            let sato = db.store.create_person("佐藤", false).unwrap();
+            let event = db.store.create_workspace(None, "イベント").unwrap();
+            db.store.create_workspace(Some(&event.id), "受付").unwrap();
+            (sato, event)
+        })
+    });
+    let (window, view) = open(cx, wide());
+    ui(cx, window, |window, cx| {
+        view.update(cx, |v, cx| {
+            v.open_appearance(window, cx);
+            v.show_appearance_section(CustomizeSection::Notices, window, cx);
+        })
+    });
+    let notices = |cx: &mut TestAppContext| cx.update(|cx| view.read(cx).done_notices(cx));
+    assert!(notices(cx).is_standard());
+
+    // 役は R・A・C・I を押すたびに入れる・外す。最後の 1 つは外れない
+    for ix in [0usize, 2, 3] {
+        ui(cx, window, |window, cx| window.click(("done-role", ix), cx));
+    }
+    assert_eq!(notices(cx).roles, Roles::of(&[Role::A]));
+    ui(cx, window, |window, cx| {
+        window.click(("done-role", 1usize), cx)
+    });
+    assert_eq!(notices(cx).roles, Roles::of(&[Role::A]));
+    ui(cx, window, |window, cx| {
+        window.click("done-roles-reset", cx)
+    });
+    assert_eq!(notices(cx).roles, malakt_core::done_notice::all_roles());
+
+    // 担当者は、自分を除いた一覧。押すと「知らせない」になる
+    ui(cx, window, |window, cx| {
+        window.click("done-people-open", cx)
+    });
+    cx.update(|cx| assert_eq!(view.read(cx).sub_modal, Some(SubModal::DonePeople)));
+    ui(cx, window, |window, cx| {
+        window.click(("done-pick", 0usize), cx)
+    });
+    assert_eq!(notices(cx).muted_people, std::slice::from_ref(&sato.id));
+    ui(cx, window, |window, cx| window.press("escape", cx));
+    cx.update(|cx| {
+        let v = view.read(cx);
+        assert_eq!(v.sub_modal, None);
+        assert_eq!(v.modal, Modal::Appearance);
+    });
+
+    // ワークスペースは、親を外すとサブワークスペースも外れて見える
+    ui(cx, window, |window, cx| {
+        window.click("done-workspaces-open", cx)
+    });
+    ui(cx, window, |window, cx| {
+        window.click(("done-pick", 0usize), cx)
+    });
+    assert_eq!(
+        notices(cx).muted_workspaces,
+        std::slice::from_ref(&event.id)
+    );
+    ui(cx, window, |window, cx| window.press("escape", cx));
+    ui(cx, window, |window, cx| {
+        window.click("done-workspaces-reset", cx)
+    });
+    assert!(notices(cx).muted_workspaces.is_empty());
+
+    // 知らせるときを選ぶ
+    ui(cx, window, |window, cx| window.click("done-when", cx));
+    pick(cx, window, When::Finished.label());
+    assert_eq!(notices(cx).when, When::Finished);
+
+    // オフにすると細かい行は隠れ、オンに戻すと前の選び方のまま出る
+    ui(cx, window, |window, cx| window.click("done-switch", cx));
+    assert!(!notices(cx).enabled);
+    ui(cx, window, |window, _| {
+        assert!(window.try_find("done-when").is_none());
+    });
+    ui(cx, window, |window, cx| window.click("done-switch", cx));
+    let back = notices(cx);
+    assert!(back.enabled);
+    assert_eq!(back.when, When::Finished);
+    assert_eq!(back.muted_people, std::slice::from_ref(&sato.id));
+}
+
 /// 設定の「通知」で、期限をいつ知らせるかを選ぶ。選んだ時刻が来ていれば、すぐ OS の通知が出る。
 /// タスクの詳細の「通知」のメニューでは、そのタスクだけを変え、標準に戻せる。
 #[gpui_kit::test]

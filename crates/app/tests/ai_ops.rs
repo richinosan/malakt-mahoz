@@ -566,6 +566,82 @@ fn the_ai_edits_workspaces_people_and_exports(cx: &mut TestAppContext) {
     assert_eq!(last_tool(cx).1, ToolState::Done);
 }
 
+/// 保存した配置を名前で呼び出し・削除でき、ワークスペースのアイコンに画像ファイルを使える。
+#[gpui_kit::test]
+fn the_ai_uses_saved_layouts_and_image_icons(cx: &mut TestAppContext) {
+    let mut store = Store::open_in_memory().unwrap();
+    let ws = store.create_workspace(None, "仕事").unwrap();
+    let world = start(cx, store);
+    let (window, view) = open(cx);
+    let pane = open_chat(cx, window, &view);
+    let panes = |cx: &mut TestAppContext| cx.update(|cx| view.read(cx).layout.panes().len());
+
+    world.call(
+        "pane",
+        json!({"action": "load_layout", "name": "左に 1 つ、右に 2 つ"}),
+        "変えました。",
+    );
+    say(cx, window, &pane, "3 つに分けて");
+    assert_eq!(panes(cx), 3);
+    world.call("pane", json!({"action": "save_layout"}), "保存しました。");
+    say(cx, window, &pane, "この配置を保存して");
+    world.call(
+        "pane",
+        json!({"action": "load_layout", "name": "1 画面"}),
+        "戻しました。",
+    );
+    say(cx, window, &pane, "1 つに戻して");
+    assert_eq!(panes(cx), 1);
+    world.call(
+        "pane",
+        json!({"action": "load_layout", "name": "配置 1"}),
+        "開きました。",
+    );
+    say(cx, window, &pane, "保存した配置にして");
+    assert_eq!(panes(cx), 3);
+    world.call(
+        "pane",
+        json!({"action": "delete_layout", "name": "配置 1"}),
+        "削除しました。",
+    );
+    say(cx, window, &pane, "保存した配置を消して");
+    cx.update(|cx| assert!(view.read(cx).pane_presets.is_empty()));
+    world.call(
+        "pane",
+        json!({"action": "load_layout", "name": "配置 1"}),
+        "ありませんでした。",
+    );
+    say(cx, window, &pane, "もう一度");
+    let (result, error) = world.last_result();
+    assert!(error && result.contains("配置 1"), "{result}");
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("logo.svg");
+    std::fs::write(
+        &path,
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"><rect width="16" height="16" fill="#3366ff"/></svg>"##,
+    )
+    .unwrap();
+    world.call(
+        "set_workspace_icon",
+        json!({"id": ws.id, "image_path": path.display().to_string()}),
+        "変えました。",
+    );
+    say(cx, window, &pane, "この画像をアイコンにして");
+    cx.update(|cx| {
+        let icon = view.read(cx).workspaces[0].icon.clone().unwrap_or_default();
+        assert!(malakt_core::icon::is_custom(&icon), "{icon}");
+    });
+    world.call(
+        "set_workspace_icon",
+        json!({"id": ws.id, "image_path": dir.path().join("ない.png").display().to_string()}),
+        "ありませんでした。",
+    );
+    say(cx, window, &pane, "ない画像に");
+    let (result, error) = world.last_result();
+    assert!(error && result.contains("ない.png"), "{result}");
+}
+
 /// ユーザーが始めた会話では、画面と設定のツールも AI に渡す（自動の実行には渡さない）。
 #[gpui_kit::test]
 fn the_chat_offers_the_app_tools(cx: &mut TestAppContext) {
