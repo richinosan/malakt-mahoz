@@ -1985,6 +1985,136 @@ fn dialogs_fade_in_and_out(cx: &mut TestAppContext) {
     });
 }
 
+/// 動きを付けているときは、タスクの詳細は閉じると右へ抜けながら薄くなって消える。
+/// ×・Esc・行き先の切り替えのどれで閉じても同じで、消えるまでの間は閉じた詳細のボタンを
+/// 押せない。消えかけのときに別のタスクを開くと、消えかけの詳細はすぐ消える。
+#[gpui_kit::test]
+fn task_detail_slides_out_when_closed(cx: &mut TestAppContext) {
+    start(cx);
+    let (window, view) = open(cx, wide());
+    let ids: Vec<String> = cx.update(|cx| {
+        view.update(cx, |v, cx| {
+            ["チラシを配る", "看板を立てる"]
+                .into_iter()
+                .map(|title| {
+                    let draft = malakt_core::TaskDraft {
+                        title: title.into(),
+                        ..Default::default()
+                    };
+                    v.write(cx, |s| Ok(s.create_task(None, &draft)?.id))
+                        .unwrap()
+                })
+                .collect()
+        })
+    });
+    ui(cx, window, |window, cx| window.click("nav-all", cx));
+    cx.update(|cx| view.update(cx, |v, _| v.motion = true));
+    type Step<'a> = &'a dyn Fn(&mut gpui_kit::Window, &mut gpui_kit::App);
+    // 動いている間は次の描画が続けて来るので、待つ（run_until_parked）前に見る
+    let act = |cx: &mut TestAppContext, f: Step| {
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            f(window, cx);
+            window.render_frame(cx);
+        })
+        .unwrap();
+    };
+    // 開く動きは画面の時計で、消える動きは本当の時計で進む
+    let settle = |cx: &mut TestAppContext| {
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(300));
+        cx.run_until_parked();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        ui(cx, window, |_, _| {});
+    };
+    let closing = |cx: &mut TestAppContext| {
+        cx.update_window(window, |_, window, _| {
+            window.try_find("panel-closing").is_some()
+        })
+        .unwrap()
+    };
+    let open_task = |cx: &mut TestAppContext, id: &str| {
+        let (id, view) = (id.to_owned(), view.clone());
+        act(cx, &move |window, cx| {
+            view.update(cx, |v, cx| v.open_panel(&id, window, cx))
+        });
+    };
+    let close_ways: [Step; 3] = [
+        &|window, cx| window.click("close-panel", cx),
+        &|window, cx| window.press("escape", cx),
+        &|_, cx| view.update(cx, |v, cx| v.go(Nav::Home, cx)),
+    ];
+    for close in close_ways {
+        open_task(cx, &ids[0]);
+        settle(cx);
+        assert!(!closing(cx));
+        act(cx, close);
+        cx.update(|cx| assert!(view.read(cx).detail.is_none()));
+        assert!(closing(cx));
+        // 閉じた詳細の「完了チケット」は、消えるまでの間も押せない
+        act(cx, &|window, cx| window.click("ticket-open", cx));
+        cx.update(|cx| assert_eq!(view.read(cx).modal, Modal::None));
+        settle(cx);
+        assert!(!closing(cx));
+        ui(cx, window, |window, cx| window.click("nav-all", cx));
+    }
+
+    // 消えかけのときに別のタスクを開くと、開いたタスクだけが残る
+    open_task(cx, &ids[0]);
+    settle(cx);
+    act(cx, &|window, cx| window.click("close-panel", cx));
+    assert!(closing(cx));
+    open_task(cx, &ids[1]);
+    assert!(!closing(cx));
+    cx.update(|cx| {
+        let v = view.read(cx);
+        assert_eq!(
+            v.detail.as_ref().map(|d| d.task.id.as_str()),
+            Some(ids[1].as_str())
+        );
+    });
+}
+
+/// 動きを付けているときは、設定の上に重ねたダイアログは、閉じると薄くなってから消える。
+/// 消えるまでの間は上を覆い、下の設定は開いたまま。
+#[gpui_kit::test]
+fn sub_dialogs_fade_out(cx: &mut TestAppContext) {
+    use malakt_mahoz::state::SubModal;
+    start(cx);
+    let (window, view) = open(cx, wide());
+    ui(cx, window, |window, cx| {
+        view.update(cx, |v, cx| v.open_appearance(window, cx))
+    });
+    ui(cx, window, |window, cx| {
+        window.click(("customize-nav", 3usize), cx)
+    });
+    ui(cx, window, |window, cx| window.click("font-open", cx));
+    cx.update(|cx| assert_eq!(view.read(cx).sub_modal, Some(SubModal::Font)));
+    cx.update(|cx| view.update(cx, |v, _| v.motion = true));
+    std::thread::sleep(std::time::Duration::from_millis(250));
+    ui(cx, window, |_, _| {});
+
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        window.press("escape", cx);
+        window.render_frame(cx);
+        assert!(window.try_find("sub-modal-closing").is_some());
+    })
+    .unwrap();
+    cx.update(|cx| {
+        let v = view.read(cx);
+        assert_eq!(v.sub_modal, None);
+        assert_eq!(v.modal, Modal::Appearance);
+    });
+    cx.run_until_parked();
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    ui(cx, window, |_, _| {});
+    ui(cx, window, |window, _| {
+        assert!(window.try_find("sub-modal-closing").is_none());
+        assert!(window.try_find("font-open").is_some());
+    });
+}
+
 /// 画面で発行した完了チケットをコマンドで引き換えると、開いている画面に届く。
 #[gpui_kit::test]
 fn completion_ticket_issued_here_and_redeemed_by_command(cx: &mut TestAppContext) {
