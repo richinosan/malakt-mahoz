@@ -3440,6 +3440,61 @@ fn workspace_icon_is_found_by_search(cx: &mut TestAppContext) {
     }
 }
 
+/// 未読の数の丸は、1 桁なら正円、2 桁以上は高さのまま横に伸びる。100 以上は「99+」。
+/// 上のバーのベル、左のメニューの「通知」、畳んだ列のベルのどれも同じ。
+#[gpui_kit::test]
+fn unread_bubble_is_round(cx: &mut TestAppContext) {
+    start(cx);
+    let (window, view) = open(cx, wide());
+    let set = |cx: &mut TestAppContext, n: u32| {
+        cx.update(|cx| {
+            view.update(cx, |v, cx| {
+                v.unread_notices = n;
+                cx.notify();
+            })
+        });
+        cx.run_until_parked();
+    };
+    let ids = ["open-notices-count", "nav-notices-count"];
+    set(cx, 0);
+    ui(cx, window, |window, _| {
+        for id in ids {
+            assert!(window.try_find(id).is_none(), "{id}");
+        }
+    });
+    let mut widths = std::collections::HashMap::new();
+    for n in [1, 12, 150] {
+        set(cx, n);
+        ui(cx, window, |window, _| {
+            for id in ids {
+                let size = window.find(id).bounds().size;
+                assert!(size.height > px(0.), "{id}");
+                if n < 10 {
+                    assert_eq!(size.width, size.height, "{id} {n}");
+                } else {
+                    assert!(size.width > size.height, "{id} {n}");
+                    // 横に伸びても高さは同じ
+                    assert_eq!(size.height, widths[&(id, 1)], "{id} {n}");
+                }
+                widths.insert((id, n), size.width);
+            }
+        });
+    }
+    for id in ids {
+        assert!(widths[&(id, 150)] > widths[&(id, 12)], "{id}");
+    }
+    // 畳んだ列のベルも同じ丸
+    set(cx, 3);
+    ui(cx, window, |window, cx| window.click("toggle-sidebar", cx));
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(400));
+    ui(cx, window, |window, _| {
+        let size = window.find("rail-notices-count").bounds().size;
+        assert_eq!(size.width, size.height);
+        assert_eq!(size, window.find("open-notices-count").bounds().size);
+    });
+}
+
 /// 上のバーのメニューのボタンで左のメニューをアイコンだけの列に畳んで、また広げる。
 /// 境界で変えた幅は保存される。
 #[gpui_kit::test]

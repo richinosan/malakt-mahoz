@@ -674,6 +674,88 @@ fn status_badge(status: Status, cx: &App) -> Div {
         .child(status.label())
 }
 
+/// 数の丸に出す数の上限。これを超えたら「99+」にする（ベースの COUNT_BUBBLE_LIMIT）。
+const BUBBLE_LIMIT: u32 = 99;
+
+/// 数の丸に出す文字。0 のときは丸を出さない。
+pub(crate) fn bubble_text(count: u32) -> Option<String> {
+    match count {
+        0 => None,
+        n if n > BUBBLE_LIMIT => Some(format!("{BUBBLE_LIMIT}+")),
+        n => Some(n.to_string()),
+    }
+}
+
+/// 数の丸の大きさ。ベースの 2 か所の値をそのまま持つ。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Bubble {
+    /// ベルのアイコンの右上に重ねる（AdminNotificationBell: 高さ 1.125rem・文字 0.6875rem・px-1）
+    Bell,
+    /// 左のメニューの「通知」の右（AdminSidebar: 高さ 1.25rem・文字 text-xs・px-1.5）
+    Nav,
+}
+
+impl Bubble {
+    /// 高さ（rem）。幅の最小もこの値にして、1 桁は正円にする。
+    pub(crate) const fn height(self) -> f32 {
+        match self {
+            Bubble::Bell => 1.125,
+            Bubble::Nav => 1.25,
+        }
+    }
+
+    /// 文字の大きさ（rem）
+    pub(crate) const fn text(self) -> f32 {
+        match self {
+            Bubble::Bell => 0.6875,
+            Bubble::Nav => 0.75,
+        }
+    }
+
+    /// 左右の余白（rem）。2 桁以上はこの余白のまま横に伸びる。
+    pub(crate) const fn pad(self) -> f32 {
+        match self {
+            Bubble::Bell => 0.25,
+            Bubble::Nav => 0.375,
+        }
+    }
+}
+
+/// 未読などの数の丸。1 桁は正円、2 桁以上は横に伸びる丸。数は上下左右の真ん中に置く。
+/// `corner` があれば、親の右上から（上, 右）だけずらして重ねる。数が 0 のときは何も出さない。
+pub(crate) fn count_bubble(
+    id: impl Into<ElementId>,
+    count: u32,
+    size: Bubble,
+    corner: Option<(Pixels, Pixels)>,
+    cx: &App,
+) -> Option<impl IntoElement> {
+    let text = bubble_text(count)?;
+    let theme = cx.theme();
+    let height = rems(size.height());
+    Some(
+        div()
+            .id(id)
+            .when_some(corner, |d, (top, right)| d.absolute().top(top).right(right))
+            .flex()
+            .flex_none()
+            .items_center()
+            .justify_center()
+            .h(height)
+            .min_w(height)
+            .px(rems(size.pad()))
+            .rounded_full()
+            .bg(theme.danger)
+            .text_color(theme.danger_foreground)
+            .text_size(rems(size.text()))
+            .line_height(height)
+            .font_weight(FontWeight::BOLD)
+            .whitespace_nowrap()
+            .child(text)
+            .test_support(),
+    )
+}
+
 /// 表の値のボタンの中身。ボタンは中身を真ん中に寄せるので、幅いっぱいの行に入れて左から並べる。
 /// 列に入らない文字は、末尾を「…」にする。
 fn value_shown(shown: Div) -> impl IntoElement {
@@ -1665,17 +1747,13 @@ impl MainView {
                                 self.modal == Modal::Notices,
                                 cx,
                             )
-                            .when(unread > 0, |d| {
-                                d.child(
-                                    div()
-                                        .px_1p5()
-                                        .rounded_full()
-                                        .bg(theme.danger)
-                                        .text_color(theme.danger_foreground)
-                                        .text_xs()
-                                        .child(unread.to_string()),
-                                )
-                            })
+                            .children(count_bubble(
+                                "nav-notices-count",
+                                unread,
+                                Bubble::Nav,
+                                None,
+                                cx,
+                            ))
                             .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                                 this.modal = Modal::Notices;
                                 cx.notify();
@@ -1804,20 +1882,13 @@ impl MainView {
                     self.modal == Modal::Notices,
                     cx,
                 )
-                .when(unread > 0, |d| {
-                    d.child(
-                        div()
-                            .absolute()
-                            .top(px(1.))
-                            .right(px(-2.))
-                            .px_1()
-                            .rounded_full()
-                            .bg(theme.danger)
-                            .text_color(theme.danger_foreground)
-                            .text_xs()
-                            .child(unread.to_string()),
-                    )
-                })
+                .children(count_bubble(
+                    "rail-notices-count",
+                    unread,
+                    Bubble::Bell,
+                    Some((px(1.), px(-2.))),
+                    cx,
+                ))
                 .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                     this.modal = Modal::Notices;
                     cx.notify();
@@ -2298,20 +2369,13 @@ impl MainView {
                                     cx.notify();
                                 })),
                         ))
-                        .when(unread > 0, |d| {
-                            d.child(
-                                div()
-                                    .absolute()
-                                    .top(px(-4.))
-                                    .right(px(-4.))
-                                    .px_1()
-                                    .rounded_full()
-                                    .bg(theme.danger)
-                                    .text_color(theme.danger_foreground)
-                                    .text_xs()
-                                    .child(unread.to_string()),
-                            )
-                        }),
+                        .children(count_bubble(
+                            "open-notices-count",
+                            unread,
+                            Bubble::Bell,
+                            Some((px(-4.), px(-4.))),
+                            cx,
+                        )),
                 )
                 .child(feel::gloss(
                     button("open-settings")
@@ -9333,5 +9397,31 @@ fn auto_lock_label(minutes: Option<u32>) -> String {
         None => "しない".to_owned(),
         Some(m) if m % 60 == 0 => format!("{} 時間", m / 60),
         Some(m) => format!("{m} 分"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[::core::prelude::v1::test]
+    fn bubble_text_caps_at_99() {
+        assert_eq!(bubble_text(0), None);
+        assert_eq!(bubble_text(1).as_deref(), Some("1"));
+        assert_eq!(bubble_text(99).as_deref(), Some("99"));
+        assert_eq!(bubble_text(100).as_deref(), Some("99+"));
+    }
+
+    /// 1 桁が正円になるのは、幅の最小が高さと同じで、余白を足しても 1 文字が高さに収まるとき。
+    #[::core::prelude::v1::test]
+    fn one_digit_fits_in_a_circle() {
+        for size in [Bubble::Bell, Bubble::Nav] {
+            // 数字 1 文字の幅は文字の大きさの 0.6 倍以下
+            assert!(
+                size.pad() * 2. + size.text() * 0.6 <= size.height(),
+                "{size:?}"
+            );
+            assert!(size.text() < size.height(), "{size:?}");
+        }
     }
 }
