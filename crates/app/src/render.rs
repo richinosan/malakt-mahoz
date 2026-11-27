@@ -8,13 +8,13 @@ use gpui_kit::base::{Disableable, TestSupportExt};
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::color_picker::ColorPicker;
-use gpui_kit::component::input::{Input, Textarea};
+use gpui_kit::component::input::{Input, Textarea, TextareaState};
 use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
 use gpui_kit::component::scroll::ScrollableElement;
 use gpui_kit::component::slider::{Slider, SliderState};
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::switch::Switch;
-use gpui_kit::component::text::TextView;
+use gpui_kit::component::text::{TextView, TextViewStyle};
 use gpui_kit::component::{ActiveTheme, Icon, IconName, Sizable};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
@@ -28,8 +28,8 @@ use crate::feel::{self, Grip, Lit, Sunk};
 use crate::scroll::Menus;
 use crate::shadow::{Elevate, Elevation};
 use crate::state::{
-    Column, CommentMode, Detail, DropTarget, Editing, MainView, Modal, Nav, SubModal, When,
-    RAIL_WIDTH,
+    Column, CommentMode, Compose, Detail, DropTarget, Editing, MainView, Modal, Nav, SubModal,
+    When, RAIL_WIDTH,
 };
 use crate::{Dismiss, LockNow, NewWindow, PanePrefix, ToggleAi};
 use malakt_core::{Id, Person};
@@ -561,6 +561,13 @@ fn percent_bar(percent: u8, width: Pixels, cx: &App) -> Div {
                 .rounded_full()
                 .bg(theme.primary),
         )
+}
+
+/// 本文の Markdown の見た目。表のセルの左右の余白を px で決める。画面を 1.25 倍にしているので、
+/// 標準の余白（`rem` で決まる）のままだと、表の幅の計算（16px の `rem` で測る）より余白が広くなり、
+/// セルの最後の文字が次の行に落ちる。
+pub(crate) fn md_style() -> TextViewStyle {
+    TextViewStyle::default().table_cell(StyleRefinement::default().px(px(12. * crate::UI_SCALE)))
 }
 
 fn chip(
@@ -3816,6 +3823,96 @@ impl MainView {
 
     // ---- 詳細パネル ----
 
+    /// Markdown の入力欄。上の「書く」「プレビュー」で、入力欄と描いた本文を切り替える。
+    fn compose(
+        &self,
+        which: Compose,
+        input: &Entity<TextareaState>,
+        height: Pixels,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let theme = cx.theme().clone();
+        let preview = self.previewing.contains(&which);
+        let key = match which {
+            Compose::Description => "desc",
+            Compose::Comment => "comment",
+            Compose::Status => "status",
+        };
+        let tab = |name: &str, label: &'static str, active: bool, cx: &mut Context<Self>| {
+            let on = name == "preview";
+            div()
+                .id(SharedString::from(format!("{key}-{name}")))
+                .relative()
+                .mb(px(-1.))
+                .px_3()
+                .py_1()
+                .rounded_t(feel::md())
+                .border_1()
+                .border_b_0()
+                .text_sm()
+                .font_weight(FontWeight::BOLD)
+                .cursor_pointer()
+                .when(active, |d| {
+                    d.border_color(theme.border)
+                        .bg(theme.background)
+                        .text_color(theme.foreground)
+                })
+                .when(!active, |d| {
+                    d.border_color(transparent_black())
+                        .text_color(theme.muted_foreground)
+                        .lit(theme.secondary_hover, cx)
+                })
+                .child(label)
+                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                    this.set_preview(which, on, window, cx)
+                }))
+                .test_support()
+        };
+        let tabs = row()
+            .items_end()
+            .gap_1()
+            .border_b_1()
+            .border_color(theme.border)
+            .child(tab("write", "書く", !preview, cx))
+            .child(tab("preview", "プレビュー", preview, cx));
+        let body: AnyElement = if preview {
+            let value = input.read(cx).value().to_string();
+            let panel = div()
+                .id(SharedString::from(format!("{key}-preview-body")))
+                .min_h(height)
+                .px_3()
+                .py_2()
+                .rounded(feel::md())
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.background)
+                .text_sm();
+            if value.trim().is_empty() {
+                panel
+                    .text_color(theme.muted_foreground)
+                    .child("プレビューするものがありません")
+                    .test_support()
+                    .into_any_element()
+            } else {
+                panel
+                    .child(
+                        TextView::markdown(
+                            SharedString::from(format!("{key}-preview-text")),
+                            self.md_text(&value),
+                        )
+                        .style(md_style())
+                        .selectable(true)
+                        .on_link_click(crate::browser::on_link),
+                    )
+                    .test_support()
+                    .into_any_element()
+            }
+        } else {
+            Textarea::new(input).h(height).into_any_element()
+        };
+        col().gap_2().child(tabs).child(body)
+    }
+
     /// コメント 1 件。書いた人・時刻・操作と、Markdown の本文。
     fn render_attachments(&self, detail: &Detail, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
@@ -3974,7 +4071,8 @@ impl MainView {
                 };
                 div().text_sm().when(!body.is_empty(), |d| {
                     d.child(
-                        TextView::markdown(("comment-body", ix), body)
+                        TextView::markdown(("comment-body", ix), self.md_text(&body))
+                            .style(md_style())
                             .on_link_click(crate::browser::on_link),
                     )
                 })
@@ -4579,7 +4677,7 @@ impl MainView {
         let description = if self.editing == Some(Editing::Description) {
             col()
                 .gap_2()
-                .child(Textarea::new(&self.inputs.description).h(px(160.)))
+                .child(self.compose(Compose::Description, &self.inputs.description, px(160.), cx))
                 .child(
                     row()
                         .gap_2()
@@ -4620,17 +4718,31 @@ impl MainView {
                     })),
             )
         } else {
-            // Markdown で見せる。文字を選べるので、押して編集にはしない
+            // Markdown で見せる。押すと編集になる（リンクを押したとき・文字を選んだときはならない）
             col()
                 .gap_1()
                 .child(
                     div()
                         .id("detail-description")
+                        .relative()
+                        .mx(px(-8.))
+                        .px_2()
+                        .py_1()
+                        .rounded(feel::md())
+                        .cursor_text()
                         .text_sm()
+                        .lit(theme.secondary_hover, cx)
                         .child(
                             TextView::new(&self.description_view)
+                                .style(md_style())
                                 .on_link_click(crate::browser::on_link),
                         )
+                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                            if this.description_selected(cx) {
+                                return;
+                            }
+                            this.start_editing(Editing::Description, window, cx)
+                        }))
                         .test_support(),
                 )
                 .child(
@@ -5133,7 +5245,8 @@ impl MainView {
                             .child(section_title("ピン留め"))
                             .children(pinned.iter().enumerate().map(|(i, c)| {
                                 div().text_sm().child(
-                                    TextView::markdown(("pinned-body", i), c.body.clone())
+                                    TextView::markdown(("pinned-body", i), self.md_text(&c.body))
+                                        .style(md_style())
                                         .on_link_click(crate::browser::on_link),
                                 )
                             })),
@@ -5203,7 +5316,7 @@ impl MainView {
                                     )),
                             )
                         })
-                        .child(Textarea::new(&self.inputs.comment).h(px(88.)))
+                        .child(self.compose(Compose::Comment, &self.inputs.comment, px(88.), cx))
                         .child(mention_row)
                         .child(
                             row()
@@ -7637,7 +7750,7 @@ impl MainView {
                     } else {
                         "コメント（任意）"
                     }))
-                    .child(Textarea::new(&self.inputs.status_comment).h(px(96.)))
+                    .child(self.compose(Compose::Status, &self.inputs.status_comment, px(96.), cx))
                     .child(
                         row()
                             .gap_2()

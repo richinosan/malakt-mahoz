@@ -1000,6 +1000,96 @@ fn comments_edit_mention_review_and_report(cx: &mut TestAppContext) {
     ui(cx, window, |_, _| {});
 }
 
+/// 説明の本文を押すと編集になり、入力欄は「書く」「プレビュー」で切り替えられる。
+#[gpui_kit::test]
+fn markdown_preview_and_click_to_edit(cx: &mut TestAppContext) {
+    use malakt_mahoz::state::{Compose, Editing};
+    start(cx);
+    let (window, view) = open(cx, win(1280., 2400.));
+    cx.update(|cx| {
+        view.update(cx, |v, cx| {
+            v.write(cx, |s| {
+                s.create_task(
+                    None,
+                    &malakt_core::TaskDraft {
+                        title: "記事を書く".into(),
+                        description: "1 行目\n2 行目".into(),
+                        ..Default::default()
+                    },
+                )
+            })
+            .unwrap()
+        })
+    });
+    ui(cx, window, |window, cx| window.click("nav-all", cx));
+    ui(cx, window, |window, cx| window.click(("title", 0usize), cx));
+    let id = all_tasks(cx).remove(0).id;
+
+    // 説明の本文を押すと、元の文のまま編集になる
+    ui(cx, window, |window, cx| {
+        window.click("detail-description", cx)
+    });
+    cx.update(|cx| {
+        let v = view.read(cx);
+        assert_eq!(v.editing, Some(Editing::Description));
+        assert_eq!(
+            v.inputs.description.read(cx).value().as_ref(),
+            "1 行目\n2 行目"
+        );
+    });
+
+    // プレビューにすると入力欄が消えて本文が描かれ、「書く」で入力欄に戻る
+    cx.update_window(window, |_, window, cx| {
+        view.update(cx, |v, cx| {
+            v.inputs
+                .description
+                .update(cx, |s, cx| s.set_value("**太字**\n- 項目", window, cx))
+        })
+    })
+    .unwrap();
+    ui(cx, window, |window, cx| window.click("desc-preview", cx));
+    cx.update(|cx| assert!(view.read(cx).previewing.contains(&Compose::Description)));
+    ui(cx, window, |window, _| {
+        assert!(window.find("desc-preview-body").visible());
+    });
+    ui(cx, window, |window, cx| window.click("desc-write", cx));
+    cx.update(|cx| assert!(!view.read(cx).previewing.contains(&Compose::Description)));
+    ui(cx, window, |window, _| {
+        assert!(window.try_find("desc-preview-body").is_none());
+    });
+    // プレビューのままでも保存でき、次に編集するときは「書く」から始まる
+    ui(cx, window, |window, cx| window.click("desc-preview", cx));
+    ui(cx, window, |window, cx| window.click("desc-save", cx));
+    assert_eq!(
+        store(cx, |s| s.task(&id).unwrap()).description,
+        "**太字**\n- 項目"
+    );
+    cx.update(|cx| assert_eq!(view.read(cx).editing, None));
+    ui(cx, window, |window, cx| window.click("desc-edit", cx));
+    cx.update(|cx| assert!(!view.read(cx).previewing.contains(&Compose::Description)));
+    ui(cx, window, |window, cx| window.click("desc-cancel", cx));
+
+    // コメント欄: 空のプレビュー、書いてからのプレビュー、送ると「書く」に戻る
+    ui(cx, window, |window, cx| window.click("comment-preview", cx));
+    ui(cx, window, |window, _| {
+        assert!(window.find("comment-preview-body").visible());
+    });
+    ui(cx, window, |window, cx| window.click("comment-write", cx));
+    cx.update_window(window, |_, window, cx| {
+        view.update(cx, |v, cx| {
+            v.inputs
+                .comment
+                .update(cx, |s, cx| s.set_value("見ました\n直します", window, cx))
+        })
+    })
+    .unwrap();
+    ui(cx, window, |window, cx| window.click("comment-preview", cx));
+    ui(cx, window, |window, cx| window.click("comment-submit", cx));
+    let comments = store(cx, |s| s.comments(&id).unwrap());
+    assert_eq!(comments[0].body, "見ました\n直します");
+    cx.update(|cx| assert!(!view.read(cx).previewing.contains(&Compose::Comment)));
+}
+
 /// ファイルを添付し、保存し、消せる。大きすぎるファイルは断る。
 #[gpui_kit::test]
 fn attachments_add_save_and_delete(cx: &mut TestAppContext) {

@@ -241,6 +241,17 @@ pub enum Editing {
     Description,
 }
 
+/// 「書く」「プレビュー」を切り替えられる、Markdown の入力欄。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Compose {
+    /// 詳細の説明
+    Description,
+    /// 詳細のコメント欄
+    Comment,
+    /// 「状態を変更」のコメント（完了報告）
+    Status,
+}
+
 /// コメント欄でいま書いているもの。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum CommentMode {
@@ -366,6 +377,12 @@ pub struct MainView {
     /// 説明の表示。文字を選んでレビューコメントを付けられる。
     pub description_view: Entity<TextViewState>,
     description_shown: String,
+    /// 説明の表示に描いている Markdown（選んだ範囲を元の説明の位置に戻すのに使う）。
+    description_rendered: malakt_core::markdown::Rendered,
+    /// プレビューを出している入力欄。
+    pub previewing: HashSet<Compose>,
+    /// コメントの本文から作った、描く Markdown。本文が同じなら作り直さない。
+    md_cache: std::cell::RefCell<HashMap<String, SharedString>>,
     pub modal: Modal,
     /// 完了チケットをだれの分として発行するか（`None` は自分）と、発行したばかりのチケット。
     /// チケットの文字列は発行したときしか分からないので、ダイアログを閉じるまで持つ
@@ -838,6 +855,9 @@ impl MainView {
             expanded_threads: HashSet::new(),
             description_view: cx.new(|cx| TextViewState::markdown("", cx).selectable(true)),
             description_shown: String::new(),
+            description_rendered: Default::default(),
+            previewing: HashSet::new(),
+            md_cache: Default::default(),
             modal: Modal::None,
             ticket_person: None,
             status_draft: None,
@@ -995,8 +1015,10 @@ impl MainView {
             .map_or("", |d| d.task.description.as_str());
         if self.description_shown != description {
             self.description_shown = description.to_owned();
+            self.description_rendered = malakt_core::markdown::with_line_breaks(description);
+            let text = self.description_rendered.text.clone();
             self.description_view
-                .update(cx, |view, cx| view.set_text(description, cx));
+                .update(cx, |view, cx| view.set_text(&text, cx));
         }
         self.refilter();
         cx.notify();
@@ -1508,6 +1530,7 @@ impl MainView {
                 });
             }
             Editing::Description => {
+                self.previewing.remove(&Compose::Description);
                 let description = detail.task.description.clone();
                 self.inputs.description.update(cx, |s, cx| {
                     s.set_value(description, window, cx);
@@ -1732,9 +1755,15 @@ impl MainView {
         });
         if done.is_some() {
             Self::take_area(&self.inputs.comment.clone(), window, cx);
+            self.previewing.remove(&Compose::Comment);
             self.comment_mode = CommentMode::New;
             self.pending_anchor = None;
         }
+    }
+
+    /// 説明の文字を選んでいるか（選んでいる間は、押しても編集にしない）。
+    pub fn description_selected(&self, cx: &App) -> bool {
+        !self.description_view.read(cx).selected_text().is_empty()
     }
 
     /// 説明で選んでいる文字列に、次のコメントを付ける。
@@ -1742,8 +1771,10 @@ impl MainView {
         let Some(detail) = &self.detail else { return };
         let source = detail.task.description.as_str();
         let view = self.description_view.read(cx);
+        let rendered = &self.description_rendered;
         let range = view
             .selected_source_range()
+            .map(|r| rendered.to_source(r.start)..rendered.to_source(r.end))
             .filter(|r| r.start < r.end && r.end <= source.len())
             .filter(|r| source.is_char_boundary(r.start) && source.is_char_boundary(r.end));
         let Some(range) = range else {
@@ -1752,6 +1783,43 @@ impl MainView {
             return;
         };
         self.set_pending_anchor(anchor_at(source, range), window, cx);
+    }
+
+    /// 入力欄の「書く」と「プレビュー」を切り替える。「書く」に戻ったら、すぐ続きを書けるようにする。
+    pub fn set_preview(
+        &mut self,
+        which: Compose,
+        on: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if on {
+            self.previewing.insert(which);
+        } else {
+            self.previewing.remove(&which);
+            let input = match which {
+                Compose::Description => &self.inputs.description,
+                Compose::Comment => &self.inputs.comment,
+                Compose::Status => &self.inputs.status_comment,
+            };
+            input.update(cx, |s, cx| s.focus(window, cx));
+        }
+        cx.notify();
+    }
+
+    /// 本文を、改行をそのまま見せる Markdown にする（コメント・ピン留め・完了報告）。
+    pub fn md_text(&self, body: &str) -> SharedString {
+        let mut cache = self.md_cache.borrow_mut();
+        if let Some(text) = cache.get(body) {
+            return text.clone();
+        }
+        // 開いたタスクを替え続けても増え続けないようにする
+        if cache.len() >= 512 {
+            cache.clear();
+        }
+        let text: SharedString = malakt_core::markdown::with_line_breaks(body).text.into();
+        cache.insert(body.to_owned(), text.clone());
+        text
     }
 
     pub fn set_pending_anchor(
@@ -1763,6 +1831,7 @@ impl MainView {
         self.pending_anchor = Some(anchor);
         self.comment_mode = CommentMode::New;
         self.error = None;
+        self.previewing.remove(&Compose::Comment);
         self.inputs.comment.update(cx, |s, cx| s.focus(window, cx));
         cx.notify();
     }
@@ -1770,6 +1839,7 @@ impl MainView {
     pub fn start_reply(&mut self, root: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.comment_mode = CommentMode::Reply(root.to_owned());
         self.pending_anchor = None;
+        self.previewing.remove(&Compose::Comment);
         self.inputs.comment.update(cx, |s, cx| s.focus(window, cx));
         cx.notify();
     }
@@ -1785,6 +1855,7 @@ impl MainView {
         };
         self.comment_mode = CommentMode::Edit(id.to_owned());
         self.pending_anchor = None;
+        self.previewing.remove(&Compose::Comment);
         self.inputs.comment.update(cx, |s, cx| {
             s.set_value(body, window, cx);
             s.focus(window, cx);
@@ -1843,6 +1914,7 @@ impl MainView {
     ) {
         let text = self.inputs.comment.read(cx).value().to_string();
         let next = mention::complete(&text, person);
+        self.previewing.remove(&Compose::Comment);
         self.inputs.comment.update(cx, |s, cx| {
             s.set_value(next, window, cx);
             s.focus(window, cx);
@@ -1877,6 +1949,7 @@ impl MainView {
                 .update(cx, |s, cx| s.set_value("", window, cx));
         }
         self.modal = Modal::Status(id.to_owned(), next);
+        self.previewing.remove(&Compose::Status);
         // すぐ書けるようにする。メニューから開いたときは、メニューが閉じたあとでフォーカスを移す
         let input = self.inputs.status_comment.clone();
         cx.defer_in(window, move |this, window, cx| {
@@ -1918,6 +1991,7 @@ impl MainView {
         });
         if done.is_some() {
             Self::take_area(&self.inputs.status_comment.clone(), window, cx);
+            self.previewing.remove(&Compose::Status);
             self.modal = Modal::None;
             self.show_notice(format!("状態を「{}」にしました。", status.label()).into());
         }

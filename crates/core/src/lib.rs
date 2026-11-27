@@ -16,6 +16,7 @@
 //! - `ticket`: 完了チケット（画面で発行し、コマンドで完了報告する）
 //! - `undo`: 元に戻す・やり直し（上限つきの記録）
 //! - `lock`: アプリロック
+//! - `markdown`: 本文の Markdown を画面に出す形にそろえる（改行をそのまま見せる）
 //! - `mention`: コメントの `@名前`
 //! - `view`: 一覧の絞り込みや並べ替え
 //! - `when`: 期限や開始の入力（いろいろな書き方）を読む
@@ -34,6 +35,7 @@ pub mod history;
 pub mod icon;
 pub mod links;
 pub mod lock;
+pub mod markdown;
 pub mod mention;
 pub mod model;
 pub mod notice;
