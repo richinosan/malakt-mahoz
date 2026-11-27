@@ -492,4 +492,50 @@ mod tests {
         assert_eq!(resolve(" あとで ", NOW, None), "あとで");
         assert_eq!(resolve("明日", NOW, None), "2026-11-26");
     }
+
+    #[test]
+    fn 先頭の数字は9桁まで読む() {
+        use super::number;
+        assert_eq!(number("123456789x"), Some((123_456_789, "x")));
+        assert_eq!(number("1234567890"), None);
+        assert_eq!(number("x1"), None);
+    }
+
+    #[test]
+    fn 曜日は曜をつけたときだけ読み月末は曜日にしない() {
+        use super::weekday;
+        assert_eq!(weekday("水", false), None);
+        assert_eq!(weekday("水", true), Some((2, "")));
+        assert_eq!(weekday("水曜", false), Some((2, "")));
+        assert_eq!(weekday("月末", true), None);
+        assert_eq!(weekday("月の", true), Some((0, "の")));
+    }
+
+    #[test]
+    fn nextとthisは曜日が続くときだけ読む() {
+        use super::date;
+        use chrono::NaiveDate;
+        let today = NaiveDate::from_ymd_opt(2026, 11, 25).unwrap();
+        let d = |y, m, day| NaiveDate::from_ymd_opt(y, m, day).unwrap();
+        assert_eq!(date("next foo", today), None);
+        assert_eq!(date("this foo", today), None);
+        assert_eq!(date("next friday", today), Some((d(2026, 12, 4), "")));
+        assert_eq!(date("this friday", today), Some((d(2026, 11, 27), "")));
+        assert_eq!(date("next week", today), Some((d(2026, 12, 2), "")));
+    }
+
+    #[test]
+    fn 年は3桁以上ならそのまま使う() {
+        use super::date;
+        use chrono::NaiveDate;
+        let today = NaiveDate::from_ymd_opt(2026, 11, 25).unwrap();
+        assert_eq!(
+            date("100/1/2", today),
+            Some((NaiveDate::from_ymd_opt(100, 1, 2).unwrap(), ""))
+        );
+        assert_eq!(
+            date("99/1/2", today),
+            Some((NaiveDate::from_ymd_opt(2099, 1, 2).unwrap(), ""))
+        );
+    }
 }

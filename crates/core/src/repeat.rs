@@ -1270,4 +1270,210 @@ mod tests {
             .unwrap();
         }
     }
+
+    #[test]
+    fn 単位の名前と選べる間隔() {
+        for unit in Unit::ALL {
+            assert_eq!(Unit::parse(unit.as_str()), Some(unit));
+        }
+        assert_eq!(Unit::parse("ない"), None);
+        assert_eq!(Unit::parse(""), None);
+        let names: Vec<(&str, &str)> = Unit::ALL.iter().map(|u| (u.as_str(), u.label())).collect();
+        assert_eq!(
+            names,
+            [
+                ("day", "日"),
+                ("week", "週間"),
+                ("month", "か月"),
+                ("year", "年")
+            ]
+        );
+        assert_eq!(Unit::Day.choices(), [1, 2, 3, 4, 5, 6, 7, 10, 14]);
+        assert_eq!(Unit::Week.choices(), [1, 2, 3, 4]);
+        assert_eq!(Unit::Month.choices(), [1, 2, 3, 4, 6]);
+        assert_eq!(Unit::Year.choices(), [1, 2]);
+    }
+
+    #[test]
+    fn 保存した規則に間隔がなければ1() {
+        let rule: Rule = serde_json::from_str(r#"{"unit":"day","from":"2026-11-27"}"#).unwrap();
+        assert_eq!(rule.every, 1);
+        assert!(rule.weekdays.is_empty());
+        assert_eq!(rule.time, None);
+    }
+
+    #[test]
+    fn 二週間ごとは起点の週から数える() {
+        // 2026-11-25 は水曜
+        let r = rule(Unit::Week, 2, &[0, 2], "2026-11-25");
+        let on: Vec<&str> = [
+            "2026-11-25",
+            "2026-11-30",
+            "2026-12-02",
+            "2026-12-07",
+            "2026-12-09",
+            "2026-12-14",
+            "2026-12-21",
+        ]
+        .into_iter()
+        .filter(|day| r.occurs(d(day)))
+        .collect();
+        assert_eq!(on, ["2026-11-25", "2026-12-07", "2026-12-09", "2026-12-21"]);
+    }
+
+    #[test]
+    fn 次の回は指定の日より後で時刻まで含めて決まる() {
+        let mut r = rule(Unit::Day, 1, &[], "2026-11-25");
+        r.time = Some("09:00".into());
+        assert_eq!(r.next_after(d("2026-11-25")), Some(d("2026-11-26")));
+        assert_eq!(r.when(d("2026-11-25")), "2026-11-25 09:00");
+        r.time = None;
+        assert_eq!(r.when(d("2026-11-25")), "2026-11-25 00:00");
+        r.time = Some("09:00".into());
+        // 作る時刻ちょうどは、もう過ぎたものとして次の日にする
+        assert_eq!(
+            r.upcoming(d("2026-11-24"), "2026-11-25 09:00"),
+            Some(d("2026-11-26"))
+        );
+        assert_eq!(
+            r.upcoming(d("2026-11-24"), "2026-11-25 08:59"),
+            Some(d("2026-11-25"))
+        );
+    }
+
+    #[test]
+    fn 取り込む繰り返しはどれかが正しくなければ断る() {
+        let (mut store, task) = weekly_report();
+        let made = store
+            .set_repeat(
+                &task.id,
+                Some(&Rule::weekly("2026-11-30")),
+                "2026-11-27 12:00",
+            )
+            .unwrap()
+            .unwrap();
+        let ok = clean_repeat(&made).unwrap();
+        assert_eq!(ok, made);
+        let with = |f: fn(&mut Repeat)| {
+            let mut r = made.clone();
+            f(&mut r);
+            r
+        };
+        assert!(clean_repeat(&with(|r| r.id.clear())).is_err());
+        assert!(clean_repeat(&with(|r| r.task_id.clear())).is_err());
+        assert!(clean_repeat(&with(|r| r.at = "2026-13-01".into())).is_err());
+        assert!(clean_repeat(&with(|r| r.next_at = "あした".into())).is_err());
+        // 規則と AI への指示は整えて返す
+        let dirty = with(|r| r.ai = "  下書き \n".into());
+        let cleaned = clean_repeat(&dirty).unwrap();
+        assert_eq!(cleaned.ai, "下書き");
+        assert_eq!(cleaned.rule, dirty.rule.clean().unwrap());
+        let bad_rule = with(|r| r.rule.every = 0);
+        assert!(clean_repeat(&bad_rule).is_err());
+    }
+
+    #[test]
+    fn 指示の文字数は上限ちょうどまで書ける() {
+        assert!(clean_ai(&"あ".repeat(MAX_AI_CHARS)).is_ok());
+        assert!(clean_ai(&"あ".repeat(MAX_AI_CHARS + 1)).is_err());
+    }
+
+    #[test]
+    fn 繰り返しが付いているタスクの一覧() {
+        let (mut store, task) = weekly_report();
+        assert!(store.repeating_task_ids().unwrap().is_empty());
+        store
+            .set_repeat(
+                &task.id,
+                Some(&Rule::weekly("2026-11-30")),
+                "2026-11-27 12:00",
+            )
+            .unwrap();
+        assert_eq!(
+            store.repeating_task_ids().unwrap(),
+            HashSet::from([task.id.clone()])
+        );
+    }
+
+    #[test]
+    fn 上限まで付けたあとも付けている繰り返しは変えられる() {
+        let mut store = Store::open_in_memory().unwrap();
+        let now = "2026-11-27 12:00";
+        let mut ids = Vec::new();
+        for n in 0..MAX_REPEATS {
+            let t = store
+                .create_task(
+                    None,
+                    &TaskDraft {
+                        title: format!("t{n}"),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            store
+                .set_repeat(&t.id, Some(&Rule::weekly("2026-11-30")), now)
+                .unwrap();
+            ids.push(t.id);
+        }
+        let extra = store
+            .create_task(
+                None,
+                &TaskDraft {
+                    title: "あふれる".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert!(store
+            .set_repeat(&extra.id, Some(&Rule::weekly("2026-11-30")), now)
+            .is_err());
+        // すでに付いているものは、変えられるし外せる
+        assert!(store
+            .set_repeat(&ids[0], Some(&Rule::daily("2026-11-30")), now)
+            .is_ok());
+        assert!(store.set_repeat(&ids[1], None, now).unwrap().is_none());
+    }
+
+    #[test]
+    fn 失敗した指示は待ち行列に残り上限を超えたら古いものから消える() {
+        let mut store = Store::open_in_memory().unwrap();
+        let mut ids = Vec::new();
+        for n in 0..MAX_AI_QUEUE + 2 {
+            let t = store
+                .create_task(
+                    None,
+                    &TaskDraft {
+                        title: format!("t{n}"),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            store.fail_repeat_ai(&t.id, "指示").unwrap();
+            ids.push(t.id);
+            let jobs = store.repeat_ai_jobs().unwrap();
+            assert!(jobs.iter().all(|j| j.failed && j.prompt == "指示"));
+            assert_eq!(jobs.len(), (n + 1).min(MAX_AI_QUEUE));
+        }
+        let left: Vec<String> = store
+            .repeat_ai_jobs()
+            .unwrap()
+            .into_iter()
+            .map(|j| j.task_id)
+            .collect();
+        assert!(!left.contains(&ids[0]));
+        assert!(!left.contains(&ids[1]));
+        assert!(left.contains(&ids[2]));
+        assert!(left.contains(ids.last().unwrap()));
+    }
+
+    #[test]
+    fn 七週間ごとは起点の週から七週あけて回になる() {
+        // 2026-11-23 は月曜
+        let r = rule(Unit::Week, 7, &[0], "2026-11-23");
+        assert!(r.occurs(d("2026-11-23")));
+        assert!(!r.occurs(d("2026-11-30")));
+        assert!(!r.occurs(d("2026-12-07")));
+        assert!(r.occurs(d("2027-01-11")));
+        assert!(!r.occurs(d("2027-01-18")));
+    }
 }

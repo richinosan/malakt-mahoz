@@ -330,4 +330,22 @@ mod tests {
         assert!(source.is_char_boundary(back));
         assert_eq!(&source[back..], "漢字");
     }
+
+    #[test]
+    fn リンクの終わりは句読点と対のない閉じ括弧を含めない() {
+        for (input, want) in [
+            ("https://e.x/a", "https://e.x/a"),
+            ("https://e.x/a.", "https://e.x/a"),
+            ("https://e.x/a,;!?", "https://e.x/a"),
+            ("https://e.x/a)", "https://e.x/a"),
+            ("https://e.x/a(b)", "https://e.x/a(b)"),
+            ("https://e.x/a(b))", "https://e.x/a(b)"),
+            ("https://e.x/a).", "https://e.x/a"),
+            ("https://e.x/a(b).", "https://e.x/a(b)"),
+            ("https://e.x/a を見て", "https://e.x/a"),
+            ("https://e.x/a<b", "https://e.x/a"),
+        ] {
+            assert_eq!(&input[..url_end(input)], want, "{input}");
+        }
+    }
 }

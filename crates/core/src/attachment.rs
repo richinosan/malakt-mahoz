@@ -502,4 +502,30 @@ mod tests {
         assert_eq!(manifest.counts.attachments, 0);
         assert!(other.task(&task.id).is_ok());
     }
+
+    #[test]
+    fn 一割以上縮むときだけ圧縮して置く() {
+        let (mut s, task) = setup();
+        // 半分は縮まない乱数、半分はその繰り返し。約半分に縮む
+        let half = noise(3000);
+        let mut bytes = half.clone();
+        bytes.extend_from_slice(&half);
+        let a = s
+            .add_attachment(&task.id, None, "半分.bin", &bytes)
+            .unwrap();
+        assert!(s.blob_bytes().unwrap() < bytes.len() as u64 * 9 / 10);
+        assert_eq!(s.attachment_data(&a.id).unwrap(), bytes);
+    }
+
+    #[test]
+    fn 記録より大きく膨らむ中身は壊れているとして読まない() {
+        let (mut s, task) = setup();
+        let text = "議事録。".repeat(1000).into_bytes();
+        let a = s.add_attachment(&task.id, None, "a.txt", &text).unwrap();
+        // 記録の大きさを 1 つ小さくする
+        s.conn
+            .execute("UPDATE blobs SET size = size - 1", [])
+            .unwrap();
+        assert!(matches!(s.attachment_data(&a.id), Err(Error::Invalid(_))));
+    }
 }

@@ -911,4 +911,196 @@ mod tests {
         }
         assert_eq!(Layout::decode("0@0"), Some(Layout::default()));
     }
+
+    /// 決まった手順で作る、いろいろな形の配置。
+    fn 乱数の配置(seed: u32) -> Layout {
+        let mut state = seed.wrapping_mul(2_654_435_761).wrapping_add(12_345);
+        let mut next = move |n: u32| {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (state >> 16) % n
+        };
+        let mut l = Layout::default();
+        let panes = 2 + next(12);
+        for _ in 1..panes {
+            let all = l.panes();
+            let at = all[next(all.len() as u32) as usize];
+            l.set_focus(at);
+            let dir = [Dir::Left, Dir::Right, Dir::Up, Dir::Down][next(4) as usize];
+            l.split(dir);
+            if next(3) == 0 {
+                let all = l.panes();
+                l.set_focus(all[next(all.len() as u32) as usize]);
+                let amount = [0.1, 0.2, 0.3][next(3) as usize];
+                l.resize(
+                    [Dir::Left, Dir::Right, Dir::Up, Dir::Down][next(4) as usize],
+                    amount,
+                );
+            }
+        }
+        l
+    }
+
+    /// 隣になれるペインと、今のペインの真ん中からの遠さ（別の書き方で確かめる）。
+    fn 隣の候補(l: &Layout, dir: Dir) -> Vec<(PaneId, f32)> {
+        let rects = l.rects();
+        let Some((_, me)) = rects.iter().find(|(id, _)| *id == l.focus()) else {
+            return Vec::new();
+        };
+        let (left, right, top, bottom) = (me.x, me.x + me.w, me.y, me.y + me.h);
+        let mut out = Vec::new();
+        for (id, r) in &rects {
+            if *id == l.focus() {
+                continue;
+            }
+            let (rl, rr, rt, rb) = (r.x, r.x + r.w, r.y, r.y + r.h);
+            let touches = match dir {
+                Dir::Left => (rr - left).abs() < 1e-4,
+                Dir::Right => (rl - right).abs() < 1e-4,
+                Dir::Up => (rb - top).abs() < 1e-4,
+                Dir::Down => (rt - bottom).abs() < 1e-4,
+            };
+            let overlap = match dir {
+                Dir::Left | Dir::Right => rt < bottom - 1e-4 && rb > top + 1e-4,
+                Dir::Up | Dir::Down => rl < right - 1e-4 && rr > left + 1e-4,
+            };
+            if !(touches && overlap) {
+                continue;
+            }
+            let gap = match dir {
+                Dir::Left | Dir::Right => ((rt + rb) / 2. - (top + bottom) / 2.).abs(),
+                Dir::Up | Dir::Down => ((rl + rr) / 2. - (left + right) / 2.).abs(),
+            };
+            out.push((*id, gap));
+        }
+        out
+    }
+
+    #[test]
+    fn 隣のペインはどんな配置でも辺の接し方と真ん中の近さで決まる() {
+        let mut found = [0usize; 4];
+        for seed in 0..6000 {
+            let mut l = 乱数の配置(seed);
+            for pane in l.panes() {
+                l.set_focus(pane);
+                for (n, dir) in [Dir::Left, Dir::Right, Dir::Up, Dir::Down]
+                    .into_iter()
+                    .enumerate()
+                {
+                    let candidates = 隣の候補(&l, dir);
+                    let got = l.neighbor(dir);
+                    let note = format!("seed {seed} pane {pane} {dir:?}");
+                    if candidates.is_empty() {
+                        assert_eq!(got, None, "{note}");
+                        continue;
+                    }
+                    found[n] += 1;
+                    let best = candidates.iter().map(|c| c.1).fold(f32::MAX, f32::min);
+                    let got = got.unwrap_or_else(|| panic!("{note}: 隣がない"));
+                    let gap = candidates.iter().find(|c| c.0 == got).map(|c| c.1);
+                    // 同じ遠さのペインが並ぶときは、どちらでもよい
+                    assert!(gap.is_some_and(|g| g - best < 1e-4), "{note}: {got}");
+                }
+            }
+        }
+        assert!(found.iter().all(|n| *n > 1000), "{found:?}");
+    }
+
+    #[test]
+    fn 角だけが接しているペインは隣にならない() {
+        // 右の列は上半分（1）と下半分を細かく分けたもの。左の列は上半分の中に細かく積む
+        let mut l = Layout::default();
+        l.split(Dir::Right); // 1
+        l.split(Dir::Down); // 2（右の列の下半分）
+        l.split(Dir::Down); // 3（2 の下）
+        l.set_focus(0);
+        l.split(Dir::Down); // 4（左の下半分）
+        l.set_focus(0);
+        l.split(Dir::Down); // 5
+        l.set_focus(5);
+        l.split(Dir::Down); // 6
+        l.set_focus(6);
+        let last = l.split(Dir::Down); // 7。左の列の、上半分の底にある細いペイン
+        assert_eq!(last, 7);
+        // 右には、同じ高さの 1 がある。角だけが接している 2 は選ばない
+        assert_eq!(l.neighbor(Dir::Right), Some(1));
+        assert_eq!(l.neighbor(Dir::Left), None);
+    }
+
+    #[test]
+    fn 先頭のペインを閉じたら次のペインに移り他は前のペインに移る() {
+        let mut l = Layout::default();
+        l.split(Dir::Right);
+        l.split(Dir::Right);
+        assert_eq!(l.panes(), [0, 1, 2]);
+        l.set_focus(0);
+        assert!(l.close(0));
+        assert_eq!(l.focus(), 1);
+        let mut l = Layout::default();
+        l.split(Dir::Right);
+        l.split(Dir::Right);
+        l.set_focus(2);
+        assert!(l.close(2));
+        assert_eq!(l.focus(), 1);
+        let mut l = Layout::default();
+        l.split(Dir::Right);
+        l.split(Dir::Right);
+        l.set_focus(2);
+        assert!(l.close(1));
+        assert_eq!(l.focus(), 2);
+    }
+
+    #[test]
+    fn 拡大は二つ以上あるときだけできる() {
+        let mut l = Layout::default();
+        l.toggle_zoom();
+        assert!(!l.zoomed());
+        l.split(Dir::Right);
+        l.toggle_zoom();
+        assert!(l.zoomed());
+        l.toggle_zoom();
+        assert!(!l.zoomed());
+    }
+
+    #[test]
+    fn キー割り当ての名前() {
+        assert_eq!(Keys::Herdr.label(), "herdr 風");
+        assert_eq!(Keys::Tmux.label(), "tmux 風");
+    }
+
+    #[test]
+    fn リサイズモードのキーは広げる向きと量を返す() {
+        assert_eq!(resize_step("l", false), Some((true, 20.)));
+        assert_eq!(resize_step("L", true), Some((true, 80.)));
+        assert_eq!(resize_step("→", false), Some((true, 20.)));
+        assert_eq!(resize_step("h", false), Some((true, -20.)));
+        assert_eq!(resize_step("←", true), Some((true, -80.)));
+        assert_eq!(resize_step("j", false), Some((false, 20.)));
+        assert_eq!(resize_step("↓", true), Some((false, 80.)));
+        assert_eq!(resize_step("k", false), Some((false, -20.)));
+        assert_eq!(resize_step("K", true), Some((false, -80.)));
+        assert_eq!(resize_step("↑", false), Some((false, -20.)));
+        assert_eq!(resize_step("x", false), None);
+    }
+
+    #[test]
+    fn 境界は動かしても範囲の外へは出ない() {
+        let mut l = Layout::default();
+        l.split(Dir::Right);
+        l.set_focus(0);
+        l.resize(Dir::Right, 0.9);
+        let w = l.rects()[0].1.w;
+        assert!((w - 0.9).abs() < 1e-6, "{w}");
+        l.resize(Dir::Left, 0.9);
+        l.resize(Dir::Right, -2.);
+        let w = l.rects()[0].1.w;
+        assert!((w - 0.1).abs() < 1e-6, "{w}");
+    }
+
+    #[test]
+    fn 保存した割合は範囲の中だけ読む() {
+        assert!(Layout::decode("h(0.9000,0,1)@0").is_some());
+        assert!(Layout::decode("h(0.9500,0,1)@0").is_none());
+        assert!(Layout::decode("h(0.1000,0,1)@0").is_some());
+        assert!(Layout::decode("h(0.0500,0,1)@0").is_none());
+    }
 }

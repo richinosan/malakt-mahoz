@@ -616,4 +616,64 @@ mod tests {
             "「牛乳」の期限は 12月24日です"
         );
     }
+    #[test]
+    fn 選べる上限の定数は4週間() {
+        assert_eq!(MAX_MINUTES, 40_320);
+        assert_eq!(MAX_DAYS, 28);
+    }
+
+    #[test]
+    fn 時刻の名前は時と分で書く() {
+        assert_eq!(hour_label(9), "9:00");
+        assert_eq!(hour_label(0), "0:00");
+        assert_eq!(timed_label(61), "1 時間 1 分前");
+        assert_eq!(timed_label(59), "59 分前");
+    }
+
+    #[test]
+    fn 通知の値は上限ちょうどまで選べる() {
+        assert_eq!(clean_timed(&[MAX_MINUTES]).unwrap(), [MAX_MINUTES]);
+        assert!(clean_timed(&[MAX_MINUTES + 1]).is_err());
+        assert_eq!(clean_date(&[MAX_DAYS]).unwrap(), [MAX_DAYS]);
+        assert!(clean_date(&[MAX_DAYS + 1]).is_err());
+    }
+
+    #[test]
+    fn 通知の数は上限ちょうどまで付けられる() {
+        let ten: Vec<u32> = (0..10).collect();
+        assert_eq!(clean_date(&ten).unwrap(), ten);
+        let eleven: Vec<u32> = (0..11).collect();
+        assert!(clean_date(&eleven).is_err());
+        // 重なりは 1 つにまとめてから数える
+        let dup: Vec<u32> = (0..11).map(|n| n % 10).collect();
+        assert_eq!(clean_date(&dup).unwrap(), ten);
+    }
+
+    #[test]
+    fn 日付の通知は並べ替えて重なりをなくす() {
+        assert_eq!(clean_date(&[3, 1, 3]).unwrap(), [1, 3]);
+        assert_eq!(clean_date(&[]).unwrap(), Vec::<u32>::new());
+    }
+
+    #[test]
+    fn 残りがちょうど1時間なら時刻で書く() {
+        let ms = |text: &str| at(text) * 1000;
+        assert_eq!(
+            headline("会議", "2026-12-24 18:00", ms("2026-12-24 17:01")),
+            "「会議」の期限まであと 59 分です"
+        );
+        assert_eq!(
+            headline("会議", "2026-12-24 18:00", ms("2026-12-24 17:00")),
+            "「会議」の期限は今日の 18:00 です"
+        );
+    }
+
+    #[test]
+    fn 範囲外の時刻の設定は標準に戻る() {
+        let mut s = Store::open_in_memory().unwrap();
+        s.set_setting(HOUR_KEY, Some("23")).unwrap();
+        assert_eq!(s.due_alert_standard().unwrap().hour, 23);
+        s.set_setting(HOUR_KEY, Some("24")).unwrap();
+        assert_eq!(s.due_alert_standard().unwrap().hour, STANDARD_HOUR);
+    }
 }

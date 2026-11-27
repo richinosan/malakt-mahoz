@@ -541,4 +541,33 @@ mod tests {
         assert_eq!(s.revoke_tickets(&task.id).unwrap(), 0);
         assert!(s.redeem_ticket(&ticket.secret, "済み").is_ok());
     }
+
+    #[test]
+    fn 一日の長さと有効期限() {
+        assert_eq!(DAY_MS, 86_400_000);
+        let (mut s, me, _, task) = setup();
+        let before = now_ms();
+        let ticket = s.issue_ticket(&task.id, Some(&me.id)).unwrap();
+        let span = ticket.expires_at - before;
+        assert!(span >= TICKET_LIFETIME_DAYS * DAY_MS, "{span}");
+        assert!(span < TICKET_LIFETIME_DAYS * DAY_MS + 60_000, "{span}");
+    }
+
+    #[test]
+    fn 担当を外された人のチケットは引き換えられない() {
+        let (mut s, me, sato, task) = setup();
+        let mine = s.issue_ticket(&task.id, Some(&me.id)).unwrap();
+        let theirs = s.issue_ticket(&task.id, Some(&sato.id)).unwrap();
+        let mut draft = TaskDraft::from(&s.task(&task.id).unwrap());
+        draft.assignee_ids = vec![me.id.clone()];
+        s.update_task(&task.id, &draft).unwrap();
+        assert!(matches!(
+            s.redeem_ticket(&theirs.secret, "終わりました"),
+            Err(Error::Invalid(_))
+        ));
+        assert_eq!(s.task(&task.id).unwrap().status, Status::NeedsAction);
+        // 自分のチケットは、そのまま使える
+        s.redeem_ticket(&mine.secret, "終わりました").unwrap();
+        assert_eq!(s.task(&task.id).unwrap().status, Status::Completed);
+    }
 }

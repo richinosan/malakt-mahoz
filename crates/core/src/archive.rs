@@ -447,3 +447,188 @@ fn read_entry<R: Read + Seek>(zip: &mut ZipArchive<R>, name: &str, limit: u64) -
     }
     Ok(bytes)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::TaskDraft;
+
+    /// 作業の場所・担当者・タスク・ルール・繰り返し・定時タスク・添付・期限の通知を 1 つずつ持つデータ。
+    fn base() -> Data {
+        let mut s = Store::open_in_memory().unwrap();
+        let ws = s.create_workspace(None, "場所").unwrap();
+        s.create_person("担当", false).unwrap();
+        let t = s
+            .create_task(
+                Some(&ws.id),
+                &TaskDraft {
+                    title: "タスク".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        s.create_ai_rule(Some(&ws.id), "規則", "本文").unwrap();
+        s.set_repeat(
+            &t.id,
+            Some(&crate::repeat::Rule::weekly("2026-11-30")),
+            "2026-11-27 12:00",
+        )
+        .unwrap();
+        s.create_schedule(Some(&ws.id), "定時", None, "2026-11-27 12:00")
+            .unwrap();
+        s.add_attachment(&t.id, None, "a.txt", b"abc").unwrap();
+        s.set_task_alerts(&crate::alert::TaskAlerts {
+            task_id: t.id.clone(),
+            timed: Some(vec![5]),
+            date: None,
+        })
+        .unwrap();
+        let data = s.dump().unwrap();
+        assert!(data.validate().is_ok());
+        assert_eq!(data.ai_rules.len(), 1);
+        assert_eq!(data.repeats.len(), 1);
+        assert_eq!(data.schedules.len(), 1);
+        assert_eq!(data.attachments.len(), 1);
+        assert_eq!(data.task_alerts.len(), 1);
+        data
+    }
+
+    /// 変えたデータが正しくないと断られること。
+    fn rejects(edit: impl FnOnce(&mut Data)) -> bool {
+        let mut data = base();
+        edit(&mut data);
+        data.validate().is_err()
+    }
+
+    #[test]
+    fn 読む大きさの上限と中の名前() {
+        assert_eq!(MAX_ENTRY_BYTES, 268_435_456);
+        assert_eq!(icon_entry("custom-abc"), "icons/custom-abc.png");
+        assert_eq!(file_entry("abc"), "files/abc");
+    }
+
+    #[test]
+    fn 取り込むときカテゴリとリンクの空と重なりをなくす() {
+        let mut data = base();
+        data.tasks[0].categories = vec!["b".into(), " ".into(), "a".into(), "a".into()];
+        data.tasks[0].urls = vec![
+            " https://a ".into(),
+            "".into(),
+            "https://b".into(),
+            "https://a".into(),
+        ];
+        data.normalize();
+        assert_eq!(data.tasks[0].categories, ["a", "b"]);
+        assert_eq!(data.tasks[0].urls, ["https://a", "https://b"]);
+    }
+
+    #[test]
+    fn ワークスペースと担当者は名前と識別子と日付を確かめる() {
+        assert!(rejects(|d| d.workspaces[0].name.clear()));
+        assert!(rejects(|d| d.workspaces[0].id.clear()));
+        assert!(rejects(|d| d.workspaces[0].date = Some("2026-13-01".into())));
+        assert!(!rejects(
+            |d| d.workspaces[0].date = Some("2026-12-01".into())
+        ));
+        assert!(rejects(|d| d.people[0].name.clear()));
+        assert!(rejects(|d| d.people[0].id.clear()));
+    }
+
+    #[test]
+    fn タスクは項目の範囲を確かめる() {
+        assert!(rejects(|d| d.tasks[0].title.clear()));
+        assert!(rejects(|d| d.tasks[0].id.clear()));
+        assert!(rejects(|d| d.tasks[0].priority = 10));
+        assert!(!rejects(|d| d.tasks[0].priority = 9));
+        assert!(rejects(|d| d.tasks[0].percent = 101));
+        assert!(!rejects(|d| d.tasks[0].percent = 100));
+        assert!(rejects(|d| d.tasks[0].due = Some("あした".into())));
+        assert!(!rejects(
+            |d| d.tasks[0].due = Some("2026-12-01 10:00".into())
+        ));
+        assert!(rejects(|d| d.tasks[0].start = Some("あした".into())));
+        assert!(!rejects(|d| d.tasks[0].start = Some("2026-12-01".into())));
+        assert!(rejects(
+            |d| d.tasks[0].parent_id = Some(d.tasks[0].id.clone())
+        ));
+        assert!(!rejects(
+            |d| d.tasks[0].parent_id = Some("別のタスク".into())
+        ));
+    }
+
+    #[test]
+    fn リンクの数と長さは上限ちょうどまで入る() {
+        use crate::weblink::{MAX_URLS, MAX_URL_CHARS};
+        assert!(!rejects(|d| {
+            d.tasks[0].urls = (0..MAX_URLS).map(|n| format!("https://e.x/{n}")).collect();
+        }));
+        assert!(rejects(|d| {
+            d.tasks[0].urls = (0..=MAX_URLS).map(|n| format!("https://e.x/{n}")).collect();
+        }));
+        let url = |n: usize| format!("https://e.x/{}", "a".repeat(n - "https://e.x/".len()));
+        assert!(!rejects(|d| d.tasks[0].urls = vec![url(MAX_URL_CHARS)]));
+        assert!(rejects(|d| d.tasks[0].urls = vec![url(MAX_URL_CHARS + 1)]));
+    }
+
+    #[test]
+    fn ほかのデータが指す先がなければ断る() {
+        assert!(rejects(|d| d.ai_rules[0].workspace_id = Some("ない".into())));
+        assert!(!rejects(|d| d.ai_rules[0].workspace_id = None));
+        assert!(rejects(|d| d.repeats[0].task_id = "ない".into()));
+        assert!(rejects(
+            |d| d.schedules[0].workspace_id = Some("ない".into())
+        ));
+        assert!(!rejects(|d| d.schedules[0].workspace_id = None));
+        assert!(rejects(|d| d.task_alerts[0].task_id = "ない".into()));
+    }
+
+    #[test]
+    fn 添付は識別子と大きさとハッシュを確かめる() {
+        assert!(rejects(|d| d.attachments[0].id.clear()));
+        assert!(!rejects(|d| d.attachments[0].size = MAX_ATTACHMENT_BYTES));
+        assert!(rejects(|d| d.attachments[0].size = MAX_ATTACHMENT_BYTES + 1));
+        assert!(rejects(|d| d.attachments[0].hash.push('0')));
+        assert!(rejects(|d| {
+            d.attachments[0].hash.pop();
+        }));
+        assert!(rejects(|d| d.attachments[0].hash = "g".repeat(64)));
+        assert!(rejects(|d| d.attachments[0].hash = "A".repeat(64)));
+        assert!(!rejects(|d| d.attachments[0].hash = "a".repeat(64)));
+    }
+
+    fn zip_with(name: &str, bytes: &[u8]) -> ZipArchive<std::io::Cursor<Vec<u8>>> {
+        let mut out = std::io::Cursor::new(Vec::new());
+        let mut zip = ZipWriter::new(&mut out);
+        zip.start_file(name, SimpleFileOptions::default()).unwrap();
+        zip.write_all(bytes).unwrap();
+        zip.finish().unwrap();
+        out.set_position(0);
+        ZipArchive::new(out).unwrap()
+    }
+
+    #[test]
+    fn 上限ちょうどの大きさのファイルは読めて超えると断る() {
+        let mut zip = zip_with("a.bin", &[7u8; 10]);
+        assert_eq!(read_entry(&mut zip, "a.bin", 10).unwrap(), vec![7u8; 10]);
+        assert!(read_entry(&mut zip, "a.bin", 9).is_err());
+        assert!(read_entry(&mut zip, "ない.bin", 10).is_err());
+    }
+
+    #[test]
+    fn 同じアイコンを使う複数のワークスペースでも画像は一度だけ読む() {
+        let mut s = Store::open_in_memory().unwrap();
+        let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+        png.extend([3u8; 16]);
+        let icon = s.add_custom_icon(&png).unwrap();
+        for name in ["甲", "乙"] {
+            let w = s.create_workspace(None, name).unwrap();
+            s.set_workspace_icon(&w.id, Some(&icon), None).unwrap();
+        }
+        let mut out = std::io::Cursor::new(Vec::new());
+        export(&s, &mut out).unwrap();
+        out.set_position(0);
+        let (_, data) = read(out).unwrap();
+        assert_eq!(data.icons.len(), 1);
+        assert_eq!(data.icons[0].0, icon);
+    }
+}

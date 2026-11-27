@@ -297,4 +297,156 @@ mod tests {
         assert_eq!(before, vec![Part::new(PartKind::Delete, a)]);
         assert_eq!(after, vec![Part::new(PartKind::Insert, b)]);
     }
+
+    /// 最長共通部分列の長さ（確かめ用の素朴な実装）。
+    fn lcs(a: &[char], b: &[char]) -> usize {
+        let mut table = vec![vec![0usize; b.len() + 1]; a.len() + 1];
+        for i in 1..=a.len() {
+            for j in 1..=b.len() {
+                table[i][j] = if a[i - 1] == b[j - 1] {
+                    table[i - 1][j - 1] + 1
+                } else {
+                    table[i - 1][j].max(table[i][j - 1])
+                };
+            }
+        }
+        table[a.len()][b.len()]
+    }
+
+    fn 全ての文字列(alphabet: &[char], max_len: usize) -> Vec<String> {
+        let mut all = vec![String::new()];
+        let mut layer = vec![String::new()];
+        for _ in 0..max_len {
+            layer = layer
+                .iter()
+                .flat_map(|s| {
+                    alphabet.iter().map(move |c| {
+                        let mut t = s.clone();
+                        t.push(*c);
+                        t
+                    })
+                })
+                .collect();
+            all.extend(layer.iter().cloned());
+        }
+        all
+    }
+
+    #[test]
+    fn 文字ごとの差分は最長の共通部分を残して元の文に戻る() {
+        let all = 全ての文字列(&['a', 'b', 'c'], 5);
+        for before in &all {
+            for after in &all {
+                let ops = diff_sequences(
+                    &before.chars().collect::<Vec<_>>(),
+                    &after.chars().collect::<Vec<_>>(),
+                );
+                let side = |keep: PartKind| -> String {
+                    ops.iter()
+                        .filter(|(k, _)| *k == PartKind::Equal || *k == keep)
+                        .map(|(_, c)| *c)
+                        .collect()
+                };
+                assert_eq!(&side(PartKind::Delete), before, "{before} -> {after}");
+                assert_eq!(&side(PartKind::Insert), after, "{before} -> {after}");
+                let equal = ops.iter().filter(|(k, _)| *k == PartKind::Equal).count();
+                let want = lcs(
+                    &before.chars().collect::<Vec<_>>(),
+                    &after.chars().collect::<Vec<_>>(),
+                );
+                assert_eq!(equal, want, "{before} -> {after}");
+            }
+        }
+    }
+
+    #[test]
+    fn 大きすぎる比べ方は全部を入れ替えたものとして扱う() {
+        let big = |first: char, last: char, n: usize| -> Vec<char> {
+            let mut v = vec![first];
+            v.extend(std::iter::repeat_n('a', n));
+            v.push(last);
+            v
+        };
+        let equal = |left: &[char], right: &[char]| {
+            diff_sequences(left, right)
+                .iter()
+                .filter(|(k, _)| *k == PartKind::Equal)
+                .count()
+        };
+        // 表のマスの数が上限ちょうど（2000 × 1000）なら比べる
+        let (l, r) = (big('b', 'c', 1997), big('d', 'e', 997));
+        assert_eq!(equal(&l, &r), 997);
+        assert_eq!(equal(&r, &l), 997);
+        // 上限を 1 つでも超えたら、全部を入れ替えたものにする
+        let (l, r) = (big('b', 'c', 1998), big('d', 'e', 997));
+        assert_eq!(equal(&l, &r), 0);
+        assert_eq!(equal(&r, &l), 0);
+    }
+
+    fn lines_text(hunks: &[Hunk]) -> Vec<Vec<String>> {
+        hunks
+            .iter()
+            .map(|h| {
+                h.lines
+                    .iter()
+                    .map(|l| {
+                        let side = if l.after.is_empty() {
+                            &l.before
+                        } else {
+                            &l.after
+                        };
+                        side.iter().map(|p| p.text.as_str()).collect::<String>()
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn 変わった行の前後は決まった行数だけ出す() {
+        let before: Vec<String> = (1..=12).map(|n| n.to_string()).collect();
+        let mut after = before.clone();
+        after[5] = "変更".into();
+        let hunks = hunks(&before.join("\n"), &after.join("\n"));
+        assert_eq!(lines_text(&hunks), [["4", "5", "変更", "7", "8"]]);
+    }
+
+    #[test]
+    fn 近い変更は一つにまとめて遠い変更は分ける() {
+        let make = |gap: usize| -> (String, String) {
+            let before: Vec<String> = (0..20).map(|n| n.to_string()).collect();
+            let mut after = before.clone();
+            after[5] = "甲".into();
+            after[5 + gap + 1] = "乙".into();
+            (before.join("\n"), after.join("\n"))
+        };
+        // 間の変わらない行が 4 行までなら 1 つ
+        let (b, a) = make(4);
+        assert_eq!(hunks(&b, &a).len(), 1);
+        let (b, a) = make(5);
+        assert_eq!(hunks(&b, &a).len(), 2);
+        let (b, a) = make(1);
+        assert_eq!(hunks(&b, &a).len(), 1);
+    }
+
+    #[test]
+    fn 先頭と末尾の同じところは比べずに変わらない部分にする() {
+        // 全部を比べると表が大きすぎて、全部を入れ替えたものになる長さ
+        let same: Vec<u32> = (0..5000).collect();
+        let mut changed = same.clone();
+        changed[2500] = 99_999;
+        let ops = diff_sequences(&same, &changed);
+        let count = |kind: PartKind| ops.iter().filter(|(k, _)| *k == kind).count();
+        assert_eq!(count(PartKind::Equal), 4999);
+        assert_eq!(count(PartKind::Delete), 1);
+        assert_eq!(count(PartKind::Insert), 1);
+        // 変わるのが先頭に近くても、末尾に近くても同じ
+        for at in [3, 4996] {
+            let mut changed = same.clone();
+            changed[at] = 99_999;
+            let ops = diff_sequences(&same, &changed);
+            let equal = ops.iter().filter(|(k, _)| *k == PartKind::Equal).count();
+            assert_eq!(equal, 4999, "{at}");
+        }
+    }
 }

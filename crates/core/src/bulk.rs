@@ -257,4 +257,10 @@ mod tests {
         toggle_all(&mut sel, &visible[..2]);
         assert_eq!(sel, set(&["c", "x"]));
     }
+
+    #[test]
+    fn 一覧の変え方の名前() {
+        let names: Vec<&str> = ListMode::ALL.iter().map(|m| m.label()).collect();
+        assert_eq!(names, ["追加", "外す", "置き換え"]);
+    }
 }
