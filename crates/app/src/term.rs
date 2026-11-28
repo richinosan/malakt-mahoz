@@ -1004,7 +1004,10 @@ fn passes_to_app(keystroke: &Keystroke) -> bool {
         return false;
     }
     let plain = !mods.control && !mods.alt && !mods.shift;
-    (plain && name == "f11")
+    // Ctrl+? はキー操作の一覧。Ctrl+/ と F1 は、動いているプログラムのキーのまま
+    let keys_help = mods.control && mods.shift && !mods.alt && matches!(name, "/" | "?");
+    keys_help
+        || (plain && name == "f11")
         || (mods.control
             && mods.alt
             && !mods.shift

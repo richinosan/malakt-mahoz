@@ -63,6 +63,17 @@ pub fn bind(cx: &mut App) {
     ]);
 }
 
+/// キーの一覧に出す、カレンダーのキー。
+pub fn help() -> Vec<(&'static str, &'static str)> {
+    vec![
+        ("← → ↑ ↓", "日を選ぶ"),
+        ("Home / End", "週の最初 / 最後"),
+        ("PageUp / PageDown", "前 / 次の月"),
+        ("Shift+PageUp / PageDown", "前 / 次の年"),
+        ("Enter / Space", "その日にする"),
+    ]
+}
+
 /// パネルの幅（ベースの日付のポップオーバーと同じ）。
 const PANEL_WIDTH: f32 = 340.;
 
