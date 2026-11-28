@@ -65,7 +65,11 @@ fn main() {
             // ロックしてあるなら、起動してすぐパスキーを求める
             window
                 .update(cx, |_, window, cx| {
-                    view.update(cx, |view, cx| view.request_unlock(window, cx))
+                    view.update(cx, |view, cx| {
+                        view.request_unlock(window, cx);
+                        // AI を使っていなければ、AI のおすすめを出す
+                        view.offer_ai(cx);
+                    })
                 })
                 .expect("開いたばかりのウィンドウがありません");
             cx.activate(true);

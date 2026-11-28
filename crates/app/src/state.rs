@@ -21,7 +21,7 @@ use malakt_core::{
     Scope, Status, Store, Task as Todo, TaskDefaults, TaskDraft, TaskFilter, Workspace,
 };
 
-use crate::ai::{self, Session, ShellPlace};
+use crate::ai::{self, KeyState, Session, ShellPlace};
 use crate::ai_view::{AiPane, PaneMode};
 use crate::db::{self, Db};
 use crate::passkey::{self, Passkey};
@@ -66,7 +66,12 @@ pub enum Modal {
     Ticket(Id),
     /// 書体と色
     Appearance,
+    /// AI を使っていないときに、起動してすぐ出す AI のおすすめ
+    AiPromo,
 }
+
+/// AI のおすすめを「今後は表示しない」にしたかを覚える設定。
+pub const AI_PROMO_SETTING: &str = "ai.promo.hidden";
 
 /// 左のメニューで、その場で名前を書いているワークスペース。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -434,6 +439,14 @@ pub struct MainView {
     pub ai_log_open: bool,
     pub ai_pane: Option<Entity<AiPane>>,
     pub ai_session: Entity<Session>,
+    /// AI のおすすめを出すかどうかを、キーを調べ終わるまで待っている（起動した最初のウィンドウだけ）
+    pub ai_promo_waiting: bool,
+    /// AI のおすすめのために、キーを調べ始めた
+    ai_promo_asked: bool,
+    /// AI のおすすめで「今後は表示しない」に印を付けている
+    pub ai_promo_never: bool,
+    /// AI のおすすめを出したので、次に描くときにキー（Esc）をこのウィンドウで受ける
+    pub(crate) ai_promo_focus: bool,
     /// 広いウィンドウで、左のメニューをアイコンだけの細い列に畳んでいる
     pub sidebar_hidden: bool,
     /// 左のメニューを開け閉めした回数。開け閉めの動きを、そのたびに頭から始めるのに使う
@@ -614,9 +627,17 @@ impl MainView {
         let ai_settings = cx.new(|cx| crate::ai_settings::AiSettings::new(window, cx));
         let mut subs = vec![
             cx.observe(&ai_settings, |_, _, cx| cx.notify()),
-            cx.observe(&db, |this, _, cx| this.reload(cx)),
-            // チャットを別ウィンドウに出した・戻したときに、右の表示を合わせる
-            cx.observe(&ai_session, |_, _, cx| cx.notify()),
+            cx.observe(&db, |this, _, cx| {
+                this.reload(cx);
+                // ロックを解除したら、待っていた AI のおすすめを出す
+                this.check_ai_promo(cx);
+            }),
+            // チャットを別ウィンドウに出した・戻したときに、右の表示を合わせる。
+            // キーを調べ終わったら、AI のおすすめを出すかを決める
+            cx.observe(&ai_session, |this, _, cx| {
+                this.check_ai_promo(cx);
+                cx.notify();
+            }),
             // 今見ている場所を、AI に伝えられるようにしておく
             cx.observe_self(|this, cx| {
                 this.finish_naming_task(cx);
@@ -949,6 +970,10 @@ impl MainView {
             ai_log_open: false,
             ai_pane: None,
             ai_session,
+            ai_promo_waiting: false,
+            ai_promo_asked: false,
+            ai_promo_never: false,
+            ai_promo_focus: false,
             sidebar_hidden: false,
             sidebar_turns: 0,
             sort_turns: 0,
@@ -4754,6 +4779,77 @@ impl MainView {
                 }
             };
             pane.update(cx, |pane, cx| pane.focus_input(window, cx));
+        }
+        cx.notify();
+    }
+
+    /// 起動したときに、AI を使っていなければ（選んでいるサービスの API キーがなければ）
+    /// AI のおすすめを出す。「今後は表示しない」にしてあれば出さない。ロック中は解除するまで待つ。
+    pub fn offer_ai(&mut self, cx: &mut Context<Self>) {
+        self.ai_promo_waiting = true;
+        self.check_ai_promo(cx);
+    }
+
+    fn check_ai_promo(&mut self, cx: &mut Context<Self>) {
+        if !self.ai_promo_waiting || !self.unlocked(cx) {
+            return;
+        }
+        let hidden = match self.db.read(cx).store.setting(AI_PROMO_SETTING) {
+            Ok(value) => value.as_deref() == Some("1"),
+            Err(e) => {
+                self.ai_promo_waiting = false;
+                self.error = Some(format!("AI のおすすめの設定を読めませんでした: {e}").into());
+                cx.notify();
+                return;
+            }
+        };
+        if hidden {
+            self.ai_promo_waiting = false;
+            return;
+        }
+        let key = self.ai_session.read(cx).key.clone();
+        match key {
+            // キーチェーンを読むだけで、通信はしない。調べ終わると、もう一度ここに来る
+            KeyState::Unknown => {
+                if !std::mem::replace(&mut self.ai_promo_asked, true) {
+                    self.ai_session.update(cx, |s, cx| s.refresh_key(cx));
+                }
+            }
+            KeyState::Missing => {
+                // ほかのダイアログを開いているあいだは、閉じるまで待つ
+                if self.modal != Modal::None {
+                    return;
+                }
+                self.ai_promo_waiting = false;
+                if !self.ai_open {
+                    self.ai_promo_never = false;
+                    self.modal = Modal::AiPromo;
+                    self.ai_promo_focus = true;
+                    cx.notify();
+                }
+            }
+            KeyState::Present { .. } | KeyState::Failed(_) => self.ai_promo_waiting = false,
+        }
+    }
+
+    /// AI のおすすめの「今後は表示しない」。押したらすぐ保存する。
+    pub fn set_ai_promo_never(&mut self, never: bool, cx: &mut Context<Self>) {
+        let value = never.then_some("1");
+        let result = self
+            .db
+            .update(cx, |db, _| db.store.set_setting(AI_PROMO_SETTING, value));
+        match result {
+            Ok(()) => self.ai_promo_never = never,
+            Err(e) => self.error = Some(format!("設定を保存できませんでした: {e}").into()),
+        }
+        cx.notify();
+    }
+
+    /// AI のおすすめから、右に AI チャットを開く。キーがなければ、そこから設定に進める。
+    pub fn open_ai_from_promo(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.modal = Modal::None;
+        if !self.ai_docked(cx) {
+            self.toggle_ai(window, cx);
         }
         cx.notify();
     }
