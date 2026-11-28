@@ -12,6 +12,7 @@ fn setup() -> (Store, Account, Calendar, Workspace) {
         .add_caldav_account(
             "https://dav.example.com/dav/",
             "me",
+            "",
             &[ME.to_owned()],
             &[Found {
                 href: CAL.into(),
@@ -311,4 +312,31 @@ fn tasks_moved_away_during_a_sync_are_not_deleted() {
         s.task(&t.id).unwrap().workspace_id.as_deref(),
         Some(w2.id.as_str())
     );
+}
+
+#[test]
+fn account_shows_its_name_or_user_and_host() {
+    let mut s = Store::open_in_memory().unwrap();
+    let plain = s
+        .add_caldav_account("https://dav.example.com/dav/", "me", " ", &[], &[])
+        .unwrap();
+    assert_eq!(plain.label(), "me@dav.example.com");
+    let named = s
+        .add_caldav_account(
+            "https://dav.example.com/dav/",
+            "you",
+            " 仕事\n用 ",
+            &[],
+            &[],
+        )
+        .unwrap();
+    assert_eq!(named.label(), "仕事 用");
+    let read: Vec<String> = s
+        .caldav_accounts()
+        .unwrap()
+        .iter()
+        .map(|a| a.label())
+        .collect();
+    assert!(read.contains(&"me@dav.example.com".to_owned()));
+    assert!(read.contains(&"仕事 用".to_owned()));
 }

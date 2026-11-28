@@ -491,6 +491,10 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     WHERE v IS NULL OR v IN ('full', 'read');
     DELETE FROM settings WHERE key = 'mcp.keyless';
     "#,
+    // 28: CalDAV のアカウントに付ける名前（「説明」）。空なら `ユーザー名@ホスト名` で出す
+    r#"
+    ALTER TABLE caldav_accounts ADD COLUMN name TEXT NOT NULL DEFAULT '';
+    "#,
 ];
 
 pub(crate) fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
