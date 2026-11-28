@@ -45,7 +45,17 @@ pub use state::{anchor_at, Assets, CommentMode, MainView, Modal, Nav, NOTICE_FAD
 
 actions!(
     malakt,
-    [NewWindow, Quit, LockNow, Dismiss, ToggleAi, StopAi, ClearShell, PanePrefix]
+    [
+        NewWindow,
+        Quit,
+        LockNow,
+        Dismiss,
+        ToggleAi,
+        StopAi,
+        ClearShell,
+        PanePrefix,
+        CancelKeyEdit
+    ]
 );
 
 /// 画面に出すアプリの名前。
@@ -168,6 +178,8 @@ pub fn init_with(store: malakt_core::Store, ai: AiConfig, cx: &mut App) {
         KeyBinding::new("ctrl-l", ClearShell, Some("AiShell")),
         KeyBinding::new("ctrl-l", ClearShell, Some("AiShell > Input")),
         KeyBinding::new("escape", Dismiss, Some("MainView")),
+        // API キーを変えている間の Esc は、書きかけのキーを捨てるだけ（設定は閉じない）
+        KeyBinding::new("escape", CancelKeyEdit, Some("AiKeyEditor")),
         KeyBinding::new("ctrl-b", PanePrefix, Some("MainView")),
     ]);
     shortcuts::bind(cx);
