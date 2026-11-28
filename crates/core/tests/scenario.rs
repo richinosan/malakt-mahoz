@@ -428,6 +428,7 @@ fn archive_layout_is_portable() {
             "data/attachments.json",
             "data/changes.json",
             "data/comments.json",
+            "data/import_origins.json",
             "data/people.json",
             "data/repeats.json",
             "data/schedule_files.json",

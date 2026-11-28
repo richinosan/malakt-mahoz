@@ -556,6 +556,38 @@ pub fn spawn(
     Ok(handle)
 }
 
+/// コマンドを起こして、終わるまで待つ。終了コード、標準出力、標準出力と標準エラーを合わせたもの。
+/// 待つので、画面のスレッドでは呼ばない。
+pub fn run(spec: &Spec) -> std::io::Result<(Option<i32>, String, String)> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let tx = std::sync::Mutex::new(tx);
+    spawn(spec, move |event| {
+        // 待つ側は終了まで受け取るので、送れないのは待つ側が先に終わったときだけ
+        let _ = tx.lock().map(|tx| tx.send(event));
+    })?;
+    let (mut stdout, mut all) = (String::new(), String::new());
+    loop {
+        match rx.recv() {
+            Ok(Event::Stdout(line)) => {
+                stdout.push_str(&line);
+                stdout.push('\n');
+                all.push_str(&line);
+                all.push('\n');
+            }
+            Ok(Event::Stderr(line)) => {
+                all.push_str(&line);
+                all.push('\n');
+            }
+            Ok(Event::Exit(code)) => return Ok((code, stdout, all)),
+            Err(_) => {
+                return Err(std::io::Error::other(
+                    "コマンドの終わりを受け取れませんでした",
+                ))
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -7487,7 +7487,7 @@ impl MainView {
                 ),
             ]);
         }
-        // macOS のリマインダーは「同期」のアカウントに並べる。ここは Windows の通知の予約
+        // macOS のリマインダーは「連携と同期」のアカウントに並べる。ここは Windows の通知の予約
         if let Some(name) =
             crate::reminders::setting_label(cx).filter(|_| !crate::reminders::is_app(cx))
         {
@@ -7540,14 +7540,19 @@ impl MainView {
             Setting::new(
                 Section::Sync,
                 SettingKey::CalDav,
-                if crate::reminders::is_app(cx) {
-                    "CalDAV・リマインダー同期"
-                } else {
-                    "CalDAV 同期"
-                },
+                "連携",
                 None,
                 list(&[
                     "同期",
+                    "連携",
+                    "取り込み",
+                    "インポート",
+                    "Notion",
+                    "Redmine",
+                    "Backlog",
+                    "ClickUp",
+                    "Slack",
+                    "CSV",
                     "CalDAV",
                     "サーバー",
                     "カレンダー",
@@ -10622,7 +10627,7 @@ impl MainView {
 
 impl Render for MainView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // 「アカウントを追加」を Esc や外側で閉じたら、調べている途中の結果を捨てる。
+        // 「連携を追加」を Esc や外側で閉じたら、調べている途中の結果を捨てる。
         // 前に描いたときに出していたかで見る（開いた直後は、まだ `sub_modal` に入っていない）
         if self.sub_seen == Some(SubModal::AddAccount)
             && self.sub_modal != Some(SubModal::AddAccount)

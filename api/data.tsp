@@ -360,6 +360,24 @@ op add_comment(
   review?: boolean,
 ): void;
 
+/**
+ * ほかのツールのタスクを取り込む。
+ * source が file なら、path のファイル（Notion の「Markdown & CSV」の zip か CSV、Redmine・Backlog・ClickUp の CSV。形式は中身で見分ける）を読む。path は絶対パス（先頭の ~ はホーム）。
+ * base_url は Redmine・Backlog のサーバーの URL（あれば、チケットの URL をタスクの URL 欄に入れる）。
+ * source が slack_reminders なら Slack のリマインダー、slack_list なら list（Slack リストの URL か ID）の項目を、ユーザーの Slack CLI（slack-cli）で読む。
+ * workspace_id を省くと、取り込み元の名前で新しいワークスペースを作って入れる。
+ * 前に取り込んだもの（同じ元の ID）は新しく作らない。読めない行が 1 つでもあれば、何も取り込まない。
+ */
+@writes
+@localFiles
+op import_tasks(
+  source: "file" | "slack_reminders" | "slack_list",
+  path?: string,
+  base_url?: string,
+  list?: string,
+  workspace_id?: string,
+): void;
+
 /** ワークスペースを作る。parent_id を渡すと、その中に作る。 */
 @writes
 op create_workspace(name: string, parent_id?: string): void;

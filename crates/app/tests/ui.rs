@@ -5554,11 +5554,11 @@ fn reminders(
     os
 }
 
-/// 「設定」の「同期」の「アカウントを追加」でリマインダーを選び、設定を閉じる。
+/// 「設定」の「連携と同期」の「連携を追加」でリマインダーを選び、設定を閉じる。
 fn start_reminders_sync(cx: &mut TestAppContext, window: AnyWindowHandle, view: &Entity<MainView>) {
     pick_sync_provider(cx, window, view, "caldav-pick-reminders");
     ui(cx, window, |window, _| {
-        // 選ぶとダイアログが閉じ、「同期」の一覧にリマインダーが出る
+        // 選ぶとダイアログが閉じ、「連携と同期」の一覧にリマインダーが出る
         assert!(window.try_find("caldav-pick-other").is_none());
         assert!(window.find("reminders-account").visible());
     });
@@ -5566,7 +5566,7 @@ fn start_reminders_sync(cx: &mut TestAppContext, window: AnyWindowHandle, view: 
     ui(cx, window, |window, cx| window.click("dialog-close", cx));
 }
 
-/// 「設定」の「同期」で、リマインダーのごみ箱の「同期をやめる」を選ぶ。
+/// 「設定」の「連携と同期」で、リマインダーのごみ箱の「同期をやめる」を選ぶ。
 fn stop_reminders_sync(cx: &mut TestAppContext, window: AnyWindowHandle, view: &Entity<MainView>) {
     ui(cx, window, |window, cx| window.click("open-settings", cx));
     ui(cx, window, |window, cx| {
@@ -8338,7 +8338,7 @@ fn caldav(
     (server, secrets)
 }
 
-/// 「設定」の「同期」を開き、「アカウントを追加」でプロバイダを選ぶ。
+/// 「設定」の「連携と同期」を開き、「連携を追加」でプロバイダを選ぶ。
 fn pick_sync_provider(
     cx: &mut TestAppContext,
     window: AnyWindowHandle,
@@ -8414,7 +8414,7 @@ fn caldav_calendar_syncs_with_a_workspace(cx: &mut TestAppContext) {
     assert_eq!(accounts.len(), 1);
     assert_eq!(accounts[0].label(), "チーム");
     ui(cx, window, |window, _| {
-        // 足したら重ねたダイアログは閉じ、「同期」の一覧にアカウントが出る
+        // 足したら重ねたダイアログは閉じ、「連携と同期」の一覧にアカウントが出る
         assert!(window.try_find("caldav-name").is_none());
         assert!(window.find(("caldav-account", 0usize)).visible());
     });
@@ -9049,4 +9049,90 @@ fn pr_times_become_the_elapsed_basis(cx: &mut TestAppContext) {
         Some("https://github.com/o/r/pull/7")
     );
     assert_eq!(task_span(cx), None);
+}
+
+/// 一覧の上のインポートで、ほかのツール（Redmine）の CSV を今のワークスペースに取り込める。
+/// もう一度取り込んでも増えない。
+#[gpui_kit::test]
+fn importing_another_tools_csv_into_the_workspace(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("issues.csv");
+    std::fs::write(
+        &path,
+        "#,トラッカー,ステータス,題名,担当者\n5,機能,新規,見積を出す,佐藤\n6,バグ,終了,表示が崩れる,\n",
+    )
+    .unwrap();
+    start(cx);
+    let workspace = cx.update(|cx| {
+        db::shared(cx).update(cx, |db, _| db.store.create_workspace(None, "案件").unwrap())
+    });
+    let (_window, view) = open(cx, wide());
+    cx.run_until_parked();
+    cx.update(|cx| view.update(cx, |v, cx| v.go(Nav::Workspace(workspace.id.clone()), cx)));
+    cx.update(|cx| view.update(cx, |v, cx| v.import_from(&path, cx)));
+    cx.run_until_parked();
+    let tasks = store(cx, |s| {
+        s.tasks(workspace.id.as_str(), &TaskFilter::default())
+            .unwrap()
+    });
+    assert_eq!(tasks.len(), 2);
+    cx.update(|cx| {
+        let notice = view.read(cx).notice.clone().unwrap();
+        assert!(notice.contains("Redmine から 2 件"), "{notice}");
+    });
+    cx.update(|cx| view.update(cx, |v, cx| v.import_from(&path, cx)));
+    assert_eq!(
+        store(cx, |s| s
+            .tasks(workspace.id.as_str(), &TaskFilter::default())
+            .unwrap())
+        .len(),
+        2
+    );
+    cx.update(|cx| {
+        let notice = view.read(cx).notice.clone().unwrap();
+        assert!(notice.contains("2 件は取り込み済み"), "{notice}");
+    });
+}
+
+/// 「連携と同期」の「連携を追加」で Redmine を選び、ファイルとサーバーを入れて取り込むと、
+/// 新しいワークスペースにチケットの URL つきで入る。ファイルを選ばずに押すとエラーが出る。
+#[gpui_kit::test]
+fn importing_from_the_integrations_settings(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("issues.csv");
+    std::fs::write(&path, "#,題名,ステータス\n12,ログイン画面,進行中\n").unwrap();
+    start(cx);
+    let (window, view) = open(cx, wide());
+    cx.run_until_parked();
+    pick_sync_provider(cx, window, &view, "intake-pick-redmine");
+    ui(cx, window, |window, cx| window.click("intake-run", cx));
+    ui(cx, window, |window, _| {
+        assert!(window.find("caldav-add-error").visible());
+    });
+    cx.update(|cx| {
+        let settings = view.read(cx).caldav_settings.clone();
+        settings.update(cx, |s, cx| s.choose_file(path.clone(), cx));
+    });
+    ui(cx, window, |window, cx| window.click("intake-server", cx));
+    ui(cx, window, |window, cx| {
+        window.input("redmine.example.com", cx)
+    });
+    ui(cx, window, |window, cx| window.click("intake-run", cx));
+    cx.run_until_parked();
+    wait_sub_closed(cx, window);
+    let ws = store(cx, |s| s.workspaces().unwrap())
+        .into_iter()
+        .find(|w| w.name == "Redmine")
+        .expect("新しいワークスペース");
+    let tasks = store(cx, |s| {
+        s.tasks(ws.id.as_str(), &TaskFilter::default()).unwrap()
+    });
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(tasks[0].status, malakt_core::Status::InProcess);
+    assert_eq!(tasks[0].urls, vec!["https://redmine.example.com/issues/12"]);
+    ui(cx, window, |window, _| {
+        assert!(window.try_find("intake-run").is_none());
+        assert!(window.find("caldav-add").visible());
+    });
+    cx.update(|cx| assert!(view.read(cx).notice.is_some()));
 }

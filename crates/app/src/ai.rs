@@ -5226,6 +5226,17 @@ impl Session {
                 }
             }
             _ => {
+                // 取り込みは、ファイルや Slack CLI を読むのを先に裏で済ませる（画面を止めない）
+                let import = if name == "import_tasks" {
+                    let args = call.args.clone();
+                    Some(
+                        cx.background_executor()
+                            .spawn(async move { tools::read_import(&args) })
+                            .await,
+                    )
+                } else {
+                    None
+                };
                 let result = this
                     .update(cx, |s, cx| {
                         // ユーザーが作って、まだ整えていないタスク
@@ -5272,8 +5283,10 @@ impl Session {
                                 Ok(())
                             };
                             let result = marked.and_then(|()| {
-                                db.store.acting(actor, |store| {
-                                    tools::execute(store, author.as_deref(), name, args)
+                                db.store.acting(actor, |store| match import {
+                                    Some(batch) => tools::import_json(store, args, batch)
+                                        .map(|v| v.to_string()),
+                                    None => tools::execute(store, author.as_deref(), name, args),
                                 })
                             });
                             if write {
