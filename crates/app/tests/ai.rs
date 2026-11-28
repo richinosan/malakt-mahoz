@@ -49,6 +49,8 @@ struct World {
     /// 振り分け役の答え（CONTINUE か NEW）と、振り分け役に送られた本文。
     routes: Arc<Mutex<VecDeque<String>>>,
     routed: Arc<Mutex<Vec<Value>>>,
+    /// チャットに添えたファイルを置く場所。
+    files: tempfile::TempDir,
 }
 
 impl World {
@@ -88,6 +90,7 @@ fn start_with(cx: &mut TestAppContext, store: Store) -> World {
         fetched: Arc::default(),
         routes: Arc::default(),
         routed: Arc::default(),
+        files: tempfile::tempdir().unwrap(),
     };
     let (routes, routed) = (world.routes.clone(), world.routed.clone());
     let (sent, replies, fetched) = (
@@ -198,6 +201,7 @@ fn start_with(cx: &mut TestAppContext, store: Store) -> World {
                 }
             }
         }),
+        files: world.files.path().to_path_buf(),
     };
     cx.update(|cx| malakt_mahoz::init_with(store, config, cx));
     world
@@ -528,10 +532,24 @@ fn the_ai_creates_a_task_and_the_list_updates(cx: &mut TestAppContext) {
     assert_eq!(first["model"], "claude-opus-5-5");
     assert!(first.get("output_config").is_none(), "effort は標準のまま");
     // 今の画面は、最初の指示ではなくメッセージに添える
-    let first_message = first["messages"][0]["content"].as_str().unwrap();
+    let first_message = first["messages"][0]["content"][0]["text"].as_str().unwrap();
     assert!(first_message.contains("すべてのタスク"), "{first_message}");
-    assert!(!first["system"].as_str().unwrap().contains("すべてのタスク"));
+    assert!(!first["system"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("すべてのタスク"));
     assert!(first["tools"].as_array().unwrap().len() >= 10);
+    // プロンプトキャッシュ: ツールと最初の指示は 1 時間、会話は 5 分
+    let hour = json!({"type": "ephemeral", "ttl": "1h"});
+    assert_eq!(
+        first["tools"].as_array().unwrap().last().unwrap()["cache_control"],
+        hour
+    );
+    assert_eq!(first["system"][0]["cache_control"], hour);
+    assert_eq!(
+        first["messages"][0]["content"][0]["cache_control"],
+        json!({"type": "ephemeral"})
+    );
     // 2 回目は、返ってきたブロックをそのまま返し、ツールの結果を付ける
     let messages = sent[1].2["messages"].as_array().unwrap();
     assert_eq!(messages.len(), 3);
@@ -703,7 +721,7 @@ fn ctrl_c_kills_the_running_command(cx: &mut TestAppContext) {
     let messages = world.sent()[1].2["messages"].as_array().unwrap().clone();
     assert_eq!(messages[2]["content"][0]["tool_use_id"], "t1");
     assert_eq!(messages[2]["content"][0]["is_error"], true);
-    assert!(messages[3]["content"]
+    assert!(messages[3]["content"][0]["text"]
         .as_str()
         .unwrap()
         .starts_with("もういいよ\n\n（アプリからの補足）"));
@@ -793,7 +811,9 @@ fn github_links_are_fetched_before_sending(cx: &mut TestAppContext) {
         cmd_line("echo 'fetched https://github.com/o/r/issues/3'")
     );
     let sent = world.sent();
-    let message = sent[0].2["messages"][0]["content"].as_str().unwrap();
+    let message = sent[0].2["messages"][0]["content"][0]["text"]
+        .as_str()
+        .unwrap();
     assert!(message.starts_with("https://github.com/o/r/issues/3 をタスクにして"));
     assert!(message.contains("[https://github.com/o/r/issues/3 の中身]"));
     assert!(message.contains("fetched https://github.com/o/r/issues/3"));
@@ -837,7 +857,9 @@ fn slack_links_are_fetched_before_sending(cx: &mut TestAppContext) {
     say(cx, window, &pane, &format!("{URL} をタスクにして"));
     wait(cx, "返事が出る", |s| !s.busy);
     let sent = world.sent();
-    let message = sent[0].2["messages"][0]["content"].as_str().unwrap();
+    let message = sent[0].2["messages"][0]["content"][0]["text"]
+        .as_str()
+        .unwrap();
     assert!(
         message.contains(&format!("[{URL} の中身]\nU01 ")),
         "{message}"
@@ -1387,7 +1409,9 @@ fn progress_on_github_is_summarized_into_a_task_comment(cx: &mut TestAppContext)
     tick(cx, 1440);
     let sent = world.sent();
     assert_eq!(sent.len(), 2);
-    let message = sent[0].2["messages"][0]["content"].as_str().unwrap();
+    let message = sent[0].2["messages"][0]["content"][0]["text"]
+        .as_str()
+        .unwrap();
     assert!(
         message.contains("## https://github.com/o/r/pull/7"),
         "{message}"
@@ -1422,7 +1446,9 @@ fn progress_on_github_is_summarized_into_a_task_comment(cx: &mut TestAppContext)
     tick(cx, 1440);
     let sent = world.sent();
     assert_eq!(sent.len(), 3);
-    let message = sent[2].2["messages"][0]["content"].as_str().unwrap();
+    let message = sent[2].2["messages"][0]["content"][0]["text"]
+        .as_str()
+        .unwrap();
     assert!(
         message.contains("状態: マージ済み（前回のチェックでは オープン）"),
         "{message}"
@@ -1907,12 +1933,21 @@ fn a_new_task_is_arranged_by_the_ai(cx: &mut TestAppContext) {
 
     let sent = world.sent();
     assert_eq!(sent.len(), 2);
-    let message = sent[0].2["messages"][0]["content"].as_str().unwrap();
+    let message = sent[0].2["messages"][0]["content"][0]["text"]
+        .as_str()
+        .unwrap();
     assert!(message.contains(&format!("## タスク（id: {task}）")));
     assert!(message.contains("fetched https://github.com/o/r/pull/7"));
     // 今見ている画面も伝える
     assert!(message.contains("すべてのタスク"), "{message}");
     assert!(message.contains("のレビュー（ID: "), "{message}");
+    // アプリが始めた実行も、プロンプトキャッシュを使う。2 回目は 1 回目の結果の後ろに区切りが移る
+    assert_eq!(sent[0].2["system"][0]["cache_control"]["ttl"], "1h");
+    let results = sent[1].2["messages"][2]["content"].as_array().unwrap();
+    assert_eq!(
+        results.last().unwrap()["cache_control"],
+        json!({"type": "ephemeral"})
+    );
     assert_eq!(all_tasks(cx)[0].title, "ログインを直す PR のレビュー");
     assert!(read(cx, |s| s.arranging.is_empty()));
     ui(cx, window, |window, _| {
@@ -1997,7 +2032,10 @@ fn rules_written_in_settings_reach_the_ai(cx: &mut TestAppContext) {
     world.reply(text_reply("はい。"));
     say(cx, window, &pane, "こんにちは");
     wait(cx, "返事が来る", |s| !s.busy && s.items.len() >= 2);
-    let system = world.sent()[0].2["system"].as_str().unwrap().to_owned();
+    let system = world.sent()[0].2["system"][0]["text"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     assert!(
         system.ends_with("いつも従ってください。\n## 優先度\nPR のタスクは優先度を高にする"),
         "{system}"
@@ -2013,7 +2051,10 @@ fn rules_written_in_settings_reach_the_ai(cx: &mut TestAppContext) {
     world.reply(text_reply("はい。"));
     say(cx, window, &pane, "もう一度");
     wait(cx, "返事が来る", |s| !s.busy && s.items.len() >= 4);
-    let system = world.sent()[1].2["system"].as_str().unwrap().to_owned();
+    let system = world.sent()[1].2["system"][0]["text"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     assert!(!system.contains("ユーザーが決めたルール"), "{system}");
 
     // ごみ箱は、乗せたときと開いているときに出る
@@ -2138,9 +2179,12 @@ fn workspace_rules_reach_the_ai_in_that_workspace(cx: &mut TestAppContext) {
     world.reply(text_reply("はい。"));
     say(cx, window, &pane, "こんにちは");
     wait(cx, "返事が来る", |s| !s.busy && s.items.len() >= 2);
-    let system = world.sent()[0].2["system"].as_str().unwrap().to_owned();
+    let system = world.sent()[0].2["system"][0]["text"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     assert!(system.ends_with("## 敬語\n敬語で答える"), "{system}");
-    let first = world.sent()[0].2["messages"][0]["content"]
+    let first = world.sent()[0].2["messages"][0]["content"][0]["text"]
         .as_str()
         .unwrap()
         .to_owned();
@@ -2157,8 +2201,10 @@ fn workspace_rules_reach_the_ai_in_that_workspace(cx: &mut TestAppContext) {
     wait(cx, "返事が来る", |s| !s.busy && s.items.len() >= 4);
     // 最初の指示は変えず、ワークスペースの分はメッセージに添える
     let second = world.sent()[1].2.clone();
-    assert_eq!(second["system"].as_str().unwrap(), system);
-    let message = second["messages"][2]["content"].as_str().unwrap();
+    assert_eq!(second["system"][0]["text"].as_str().unwrap(), system);
+    let message = second["messages"][2]["content"][0]["text"]
+        .as_str()
+        .unwrap();
     assert!(
         message.ends_with(
             "ワークスペース「仕事」のルールです。いつも従ってください。\n## 優先度\nPR のタスクは優先度を高にする"
@@ -2166,7 +2212,12 @@ fn workspace_rules_reach_the_ai_in_that_workspace(cx: &mut TestAppContext) {
         "{message}"
     );
     // 前のメッセージは、送ったときのまま
-    assert_eq!(second["messages"][0]["content"].as_str().unwrap(), first);
+    assert_eq!(
+        second["messages"][0]["content"][0]["text"]
+            .as_str()
+            .unwrap(),
+        first
+    );
 }
 
 /// ワークスペースのメニューの「AI のルール」は、設定のルールをそのワークスペースのものにして開く。
@@ -2301,7 +2352,7 @@ fn a_task_dropped_on_the_chat_is_attached(cx: &mut TestAppContext) {
     world.reply(text_reply("見ました。"));
     say(cx, window, &pane, "これを見て");
     wait(cx, "返事が来る", |s| !s.busy && s.items.len() >= 2);
-    let message = world.sent()[0].2["messages"][0]["content"]
+    let message = world.sent()[0].2["messages"][0]["content"][0]["text"]
         .as_str()
         .unwrap()
         .to_owned();
@@ -2336,7 +2387,7 @@ fn enter_sends_and_shift_enter_breaks_the_line(cx: &mut TestAppContext) {
     wait(cx, "返事が来る", |s| !s.busy && s.items.len() >= 2);
     let sent = world.sent();
     assert_eq!(sent.len(), 1);
-    assert!(sent[0].2["messages"][0]["content"]
+    assert!(sent[0].2["messages"][0]["content"][0]["text"]
         .as_str()
         .unwrap()
         .starts_with("1 行目\n2 行目\n\n（アプリからの補足）"));
@@ -2401,7 +2452,9 @@ fn a_task_with_a_slack_link_is_arranged_by_the_ai(cx: &mut TestAppContext) {
     world.reply(text_reply("タイトルを付け直しました。"));
     wait(cx, "AI が整え終わる", |s| !s.busy);
     let sent = world.sent();
-    let message = sent[0].2["messages"][0]["content"].as_str().unwrap();
+    let message = sent[0].2["messages"][0]["content"][0]["text"]
+        .as_str()
+        .unwrap();
     assert!(
         message.contains(&format!("### {URL} の中身\nU01 ")),
         "{message}"
@@ -2456,7 +2509,7 @@ fn fetch_notes_never_reach_the_task(cx: &mut TestAppContext) {
         !s.busy && !s.runs.is_empty()
     });
     assert_eq!(world.sent().len(), 2);
-    let message = world.sent()[0].2["messages"][0]["content"]
+    let message = world.sent()[0].2["messages"][0]["content"][0]["text"]
         .as_str()
         .unwrap()
         .to_owned();
@@ -2858,7 +2911,7 @@ fn a_pasted_task_link_is_attached(cx: &mut TestAppContext) {
         Item::User("「会場を予約する」\nmalakt-mahoz://task/nothing どう進める？".into())
     );
     let sent = world.sent();
-    let message = sent.last().unwrap().2["messages"][0]["content"]
+    let message = sent.last().unwrap().2["messages"][0]["content"][0]["text"]
         .as_str()
         .unwrap()
         .to_owned();
@@ -3027,7 +3080,9 @@ fn a_comment_updates_the_progress(cx: &mut TestAppContext) {
 
     let sent = world.sent();
     assert_eq!(sent.len(), 2);
-    let message = sent[0].2["messages"][0]["content"].as_str().unwrap();
+    let message = sent[0].2["messages"][0]["content"][0]["text"]
+        .as_str()
+        .unwrap();
     assert!(
         message.contains(&format!("## タスク（id: {task}）")),
         "{message}"
@@ -3096,7 +3151,7 @@ fn comments_are_sent_once_after_a_pause(cx: &mut TestAppContext) {
     world.reply(text_reply("更新しました。"));
     settle_comments(cx);
     assert_eq!(world.sent().len(), 2);
-    let message = world.sent()[0].2["messages"][0]["content"]
+    let message = world.sent()[0].2["messages"][0]["content"][0]["text"]
         .as_str()
         .unwrap()
         .to_owned();
@@ -3715,7 +3770,7 @@ fn commands_run_in_the_shell_of_the_open_tab(cx: &mut TestAppContext) {
     );
     ui(cx, window, |window, cx| window.click("ai-allow", cx));
     wait(cx, "コマンドが終わる", |s| !s.busy);
-    let message = world.sent()[0].2["messages"][0]["content"]
+    let message = world.sent()[0].2["messages"][0]["content"][0]["text"]
         .as_str()
         .unwrap()
         .to_owned();
@@ -3960,7 +4015,7 @@ fn event_workspace(cx: &mut TestAppContext) -> String {
 }
 
 fn last_message(world: &World) -> String {
-    world.sent().last().unwrap().2["messages"][0]["content"]
+    world.sent().last().unwrap().2["messages"][0]["content"][0]["text"]
         .as_str()
         .unwrap()
         .to_owned()
@@ -4264,7 +4319,7 @@ fn a_repeat_runs_its_ai_instruction_on_the_new_copy(cx: &mut TestAppContext) {
     wait(cx, "定期実行が終わる", |s| {
         s.runs.iter().any(|r| r.kind == RunKind::Repeat)
     });
-    let message = world.sent()[0].2["messages"][0]["content"]
+    let message = world.sent()[0].2["messages"][0]["content"][0]["text"]
         .as_str()
         .unwrap()
         .to_owned();
@@ -4506,7 +4561,7 @@ fn a_schedule_makes_a_new_task_and_runs_its_ai_instruction(cx: &mut TestAppConte
     assert_eq!(comments_of(cx, &task), vec![draft.to_owned()]);
     // AI に渡ったのは指示の実行だけ（整理には回っていない）
     assert_eq!(world.sent().len(), 2);
-    let message = world.sent()[0].2["messages"][0]["content"]
+    let message = world.sent()[0].2["messages"][0]["content"][0]["text"]
         .as_str()
         .unwrap()
         .to_owned();
@@ -4786,4 +4841,128 @@ fn a_schedule_template_takes_every_task_field_from_the_screen(cx: &mut TestAppCo
         assert_eq!(store.subtasks(&task.id).unwrap()[0].title, "金額を確かめる");
         assert_eq!(store.attachments(&task.id).unwrap()[0].name, "見積.txt");
     });
+}
+
+/// 小さな PNG。
+fn tiny_png() -> Vec<u8> {
+    let mut out = Vec::new();
+    image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(4, 3, image::Rgb([200, 30, 30])))
+        .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
+        .unwrap();
+    out
+}
+
+/// ファイルをチャットの入力欄の上に落とす。
+fn drop_files(cx: &mut TestAppContext, window: AnyWindowHandle, paths: Vec<std::path::PathBuf>) {
+    use gpui_kit::{ExternalPaths, FileDropEvent, PlatformInput};
+    ui(cx, window, |window, cx| {
+        let position = window.find("ai-input").bounds().center();
+        window.dispatch_event(
+            PlatformInput::FileDrop(FileDropEvent::Entered {
+                position,
+                paths: ExternalPaths(paths.into()),
+            }),
+            cx,
+        );
+        window.dispatch_event(
+            PlatformInput::FileDrop(FileDropEvent::Submit { position }),
+            cx,
+        );
+    });
+}
+
+/// 画像やファイルは、ドロップ・貼り付けで入力欄に添えられ、送ると AI にその形式で渡る。
+/// 会話を開き直しても、置いた中身から読み直して渡す。
+#[gpui_kit::test]
+fn files_are_attached_by_drop_and_paste(cx: &mut TestAppContext) {
+    let world = start(cx);
+    world.keys.set(Provider::Claude, "k").unwrap();
+    let session = session(cx);
+    cx.update(|cx| session.update(cx, |s, cx| s.set_arrange(false, cx)));
+    let (window, view) = open(cx, wide());
+    let pane = open_chat(cx, window, &view);
+    let dir = tempfile::tempdir().unwrap();
+    let photo = dir.path().join("写真.png");
+    std::fs::write(&photo, tiny_png()).unwrap();
+    let memo = dir.path().join("メモ.txt");
+    std::fs::write(&memo, "牛乳を買う").unwrap();
+    let song = dir.path().join("曲.mp3");
+    std::fs::write(&song, [0xFF, 0xFB, 0x90, 0, 1, 2, 3]).unwrap();
+
+    // ドロップで添える
+    drop_files(cx, window, vec![photo.clone(), memo.clone()]);
+    wait(cx, "読み込み終わる", |s| {
+        s.files.len() == 2 && !s.files_loading()
+    });
+    ui(cx, window, |window, _| {
+        assert!(window.find(("ai-file", 0usize)).visible());
+        assert!(window.find(("ai-file", 1usize)).visible());
+    });
+
+    // コピーした画像を貼り付けると、文字は入らずに添えられる
+    ui(cx, window, |window, cx| {
+        cx.write_to_clipboard(gpui_kit::ClipboardItem::new_image(
+            &gpui_kit::Image::from_bytes(gpui_kit::ImageFormat::Png, tiny_png()),
+        ));
+        pane.update(cx, |pane, cx| pane.focus_input(window, cx));
+        window.press("secondary-v", cx);
+    });
+    wait(cx, "貼った画像を読み込む", |s| {
+        s.files.len() == 3 && !s.files_loading()
+    });
+    assert_eq!(read(cx, |s| s.files[2].name.clone()), "貼り付けた画像.png");
+    // × で外せる
+    ui(cx, window, |window, cx| {
+        window.click(("ai-file-remove", 2usize), cx)
+    });
+    assert_eq!(read(cx, |s| s.files.len()), 2);
+    // 中身を渡せない形式も添えられる
+    drop_files(cx, window, vec![song.clone()]);
+    wait(cx, "読み込み終わる", |s| {
+        s.files.len() == 3 && !s.files_loading()
+    });
+
+    world.reply(text_reply("赤い画像です。"));
+    say(cx, window, &pane, "これは何？");
+    wait(cx, "返事が来る", |s| !s.busy && s.items.len() >= 3);
+    let items = read(cx, |s| s.items.clone());
+    let Item::Files(shown) = &items[0] else {
+        panic!("送ったファイルが会話に出ない: {items:?}");
+    };
+    let names: Vec<&str> = shown.iter().map(|f| f.name.as_ref()).collect();
+    assert_eq!(names, ["写真.png", "メモ.txt", "曲.mp3"]);
+    assert!(shown[0].image && !shown[1].image);
+    assert_eq!(items[1], Item::User("これは何？".into()));
+    assert!(read(cx, |s| s.files.is_empty()));
+    ui(cx, window, |window, _| {
+        assert!(window.find(("ai-sent-file", 0usize)).visible());
+    });
+
+    let content = world.sent()[0].2["messages"][0]["content"].clone();
+    assert_eq!(content[0]["type"], "image");
+    assert_eq!(content[0]["source"]["media_type"], "image/png");
+    assert_eq!(content[1]["type"], "document");
+    assert_eq!(content[1]["source"]["data"], "牛乳を買う");
+    let text = content[2]["text"].as_str().unwrap();
+    assert!(text.contains("「曲.mp3」（audio/mpeg"), "{text}");
+    assert!(text.contains("これは何？"), "{text}");
+    // 中身は決めた場所に写してある
+    let stored = shown[0].path.clone();
+    assert!(stored.starts_with(world.files.path()), "{stored:?}");
+    assert_eq!(std::fs::read(&stored).unwrap(), tiny_png());
+
+    // 新しい会話にしてから開き直しても、画像は置いた中身から渡る
+    let first = read(cx, |s| s.chats[0].id.clone());
+    cx.update(|cx| session.update(cx, |s, cx| s.clear(cx)));
+    cx.update(|cx| session.update(cx, |s, cx| s.open_chat(&first, cx)));
+    world.reply(text_reply("はい。"));
+    say(cx, window, &pane, "もう一度");
+    wait(cx, "返事が来る", |s| !s.busy && s.items.len() >= 5);
+    let content = world.sent()[1].2["messages"][0]["content"].clone();
+    assert_eq!(content[0]["type"], "image");
+    assert_eq!(content[1]["source"]["data"], "牛乳を買う");
+
+    // 会話を消すと、置いた中身も消える
+    cx.update(|cx| session.update(cx, |s, cx| s.delete_chat(&first, cx)));
+    assert!(!stored.exists());
 }

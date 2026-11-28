@@ -3,6 +3,7 @@
 use std::ops::Range;
 use std::time::Duration;
 
+use crate::fonts::MonoFont;
 use crate::press::{button, Unpressed};
 use gpui_kit::base::{TestSupportExt, TextSelection};
 use gpui_kit::component::button::ButtonVariants;
@@ -19,10 +20,13 @@ use gpui_kit::*;
 use malakt_ai::ansi::{self, Color};
 use malakt_ai::{Effort, Provider};
 
-use crate::ai::{self, Decision, Item, KeyState, LineKind, Run, Session, ShellPlace, ToolState};
+use crate::ai::{
+    self, AttachedFile, Decision, Item, KeyState, LineKind, Run, Session, ShellPlace, ShownFile,
+    ToolState,
+};
 use crate::db::{self, Db};
 use crate::feel::{self, Grip, Lit};
-use crate::render::{app_icon, remove_x, workspace_icon};
+use crate::render::{app_icon, file_icon, remove_x, workspace_icon};
 use crate::scroll::{self, Menus};
 use crate::shadow::{Elevate, Elevation};
 use crate::shell_keys;
@@ -167,10 +171,162 @@ pub fn run_details(run: &Run, theme: &gpui_kit::component::Theme) -> Div {
             Item::User(text) | Item::Assistant(text) | Item::Notice(text) => {
                 (text.clone(), theme.foreground)
             }
+            Item::Files(files) => (
+                files
+                    .iter()
+                    .map(|f| format!("「{}」", f.name))
+                    .collect::<String>()
+                    .into(),
+                theme.foreground,
+            ),
         };
         body = body.child(div().text_color(color).child(text));
     }
     body
+}
+
+/// 貼り付けたものにファイルか画像があれば、チャットに添える。添えたら `true`（文字は貼らない）。
+/// 文字と画像が一緒にあるとき（表計算のセルのコピーなど）は、文字として貼る。
+fn paste_files(session: &WeakEntity<Session>, item: &ClipboardItem, cx: &mut App) -> bool {
+    let mut paths: Vec<std::path::PathBuf> = Vec::new();
+    let mut images: Vec<(String, Vec<u8>)> = Vec::new();
+    let mut text = false;
+    for entry in item.entries() {
+        match entry {
+            ClipboardEntry::ExternalPaths(p) => paths.extend(p.paths().iter().cloned()),
+            ClipboardEntry::Image(image) => {
+                let ext = match image.format {
+                    ImageFormat::Jpeg => "jpg",
+                    ImageFormat::Webp => "webp",
+                    ImageFormat::Gif => "gif",
+                    ImageFormat::Svg => "svg",
+                    ImageFormat::Bmp => "bmp",
+                    ImageFormat::Tiff => "tiff",
+                    ImageFormat::Ico => "ico",
+                    _ => "png",
+                };
+                images.push((format!("貼り付けた画像.{ext}"), image.bytes.clone()));
+            }
+            ClipboardEntry::String(s) => text |= !s.text().trim().is_empty(),
+        }
+    }
+    if paths.is_empty() && (images.is_empty() || text) {
+        return false;
+    }
+    session
+        .update(cx, |s, cx| {
+            if !paths.is_empty() {
+                s.attach_paths(paths, cx);
+            } else {
+                for (name, bytes) in images {
+                    s.attach_bytes(&name, bytes, cx);
+                }
+            }
+        })
+        .is_ok()
+}
+
+/// 入力欄に添えたファイル。画像は小さな絵、ほかは種類のアイコン。読み込み中は回る印。
+fn file_chip(ix: usize, file: &AttachedFile, cx: &mut Context<AiPane>) -> AnyElement {
+    let theme = cx.theme().clone();
+    let id = file.id;
+    let lead: AnyElement = match &file.part {
+        None => Spinner::new().xsmall().into_any_element(),
+        Some(part) if part.is_image() => img(part.path.clone())
+            .size(px(14.))
+            .flex_none()
+            .rounded(px(2.))
+            .object_fit(ObjectFit::Cover)
+            .into_any_element(),
+        Some(_) => app_icon(file_icon(&file.name))
+            .size_3()
+            .flex_none()
+            .into_any_element(),
+    };
+    row()
+        .id(("ai-file", ix))
+        .max_w_full()
+        .gap_1()
+        .pl_2()
+        .pr_0p5()
+        .h_6()
+        .items_center()
+        .rounded(feel::md())
+        .bg(theme.secondary)
+        .text_xs()
+        .child(lead)
+        .child(div().min_w_0().truncate().child(file.name.clone()))
+        .child(
+            remove_x(
+                ("ai-file-remove", ix),
+                "ファイルを外す",
+                cx.listener(move |this, _, _, cx| {
+                    this.session.update(cx, |s, cx| s.detach_file(id, cx));
+                }),
+                cx,
+            )
+            .test_support(),
+        )
+        .test_support()
+        .into_any_element()
+}
+
+/// 会話に出す、送ったファイル。画像は絵で、ほかは名前で出し、押すとほかのアプリで開く。
+fn sent_file(n: usize, file: &ShownFile, session: &Entity<Session>, cx: &App) -> AnyElement {
+    let theme = cx.theme();
+    let (path, name, session) = (file.path.clone(), file.name.clone(), session.downgrade());
+    let open = move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+        if path.exists() {
+            cx.open_with_system(&path);
+        } else {
+            // チャットがもうなければ、知らせる先もない
+            let _ = session.update(cx, |s, cx| s.file_gone(&name, cx));
+        }
+    };
+    let tip = file.name.clone();
+    let tooltip = move |window: &mut Window, cx: &mut App| {
+        gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
+    };
+    if file.image && file.path.exists() {
+        return div()
+            .id(("ai-sent-file", n))
+            .size(px(96.))
+            .rounded(feel::lg())
+            .overflow_hidden()
+            .border_1()
+            .border_color(theme.border)
+            .cursor_pointer()
+            .hover(|s| s.border_color(theme.primary))
+            .child(
+                img(file.path.clone())
+                    .size_full()
+                    .object_fit(ObjectFit::Cover),
+            )
+            .tooltip(tooltip)
+            .on_click(open)
+            .test_support()
+            .into_any_element();
+    }
+    row()
+        .id(("ai-sent-file", n))
+        .max_w(relative(0.9))
+        .gap_1p5()
+        .px_2()
+        .h_8()
+        .items_center()
+        .rounded(feel::lg())
+        .border_1()
+        .border_color(theme.border)
+        .bg(theme.background)
+        .cursor_pointer()
+        .hover(|s| s.border_color(theme.primary))
+        .text_sm()
+        .child(app_icon(file_icon(&file.name)).size_4().flex_none())
+        .child(div().min_w_0().truncate().child(file.name.clone()))
+        .tooltip(tooltip)
+        .on_click(open)
+        .test_support()
+        .into_any_element()
 }
 
 pub(crate) fn icon_button(id: &'static str, icon: &str, tip: &'static str) -> Unpressed {
@@ -786,6 +942,33 @@ impl AiPane {
 
     pub fn focus_input(&self, window: &mut Window, cx: &mut Context<Self>) {
         self.input.update(cx, |s, cx| s.focus(window, cx));
+    }
+
+    /// ファイルを選んで、入力欄に添える。
+    pub fn pick_files(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let chosen = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: true,
+            prompt: Some("添える".into()),
+        });
+        let session = self.session.clone();
+        cx.spawn_in(window, async move |_, cx| {
+            let paths = match chosen.await {
+                Ok(Ok(Some(paths))) => paths,
+                // 選ばずに閉じた
+                Ok(Ok(None)) | Err(_) => return,
+                Ok(Err(error)) => {
+                    session.update(cx, |s, cx| {
+                        s.error = Some(format!("ファイルを選べませんでした: {error}").into());
+                        cx.notify();
+                    });
+                    return;
+                }
+            };
+            session.update(cx, |s, cx| s.attach_paths(paths, cx));
+        })
+        .detach();
     }
 
     pub fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1414,6 +1597,18 @@ impl AiPane {
     fn render_item(&self, ix: usize, item: &Item, cx: &App) -> AnyElement {
         let theme = cx.theme();
         match item {
+            Item::Files(files) => row()
+                .id(("ai-files", ix))
+                .justify_end()
+                .flex_wrap()
+                .gap_1()
+                .children(
+                    files
+                        .iter()
+                        .enumerate()
+                        .map(|(n, file)| sent_file(n, file, &self.session, cx)),
+                )
+                .into_any_element(),
             Item::User(text) => row()
                 .justify_end()
                 .child(
@@ -2094,6 +2289,8 @@ impl AiPane {
         let tray = self.render_tray(cx);
         let pills = self.render_pills(cx);
         let attached = self.session.read(cx).attached.clone();
+        let files = self.session.read(cx).files.clone();
+        let files_loading = self.session.read(cx).files_loading();
         // 添えたワークスペースは、左のメニューと同じアイコンで出す。消えたものは、ふつうのアイコンで
         let attached_ws: Vec<(String, SharedString, Option<String>, Option<String>)> = {
             let store = &self.db.read(cx).store;
@@ -2115,6 +2312,11 @@ impl AiPane {
         col()
             .id("ai-chat")
             .key_context("AiChat")
+            // ファイルはチャットのどこに落としても添える
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
+                let paths = paths.paths().to_vec();
+                this.session.update(cx, |s, cx| s.attach_paths(paths, cx));
+            }))
             .on_action(cx.listener(|this, _: &StopAi, window, cx| {
                 // 会話の文字を選んでいれば、Ctrl+C はコピーにする（macOS のコピーは ⌘C のまま）
                 if cfg!(not(target_os = "macos")) && copy_chat_selection(window, cx) {
@@ -2198,96 +2400,129 @@ impl AiPane {
                             .elevate(Elevation::Mid, cx)
                             .p_1()
                             .gap_1()
-                            .when(!attached.is_empty() || !attached_ws.is_empty(), |d| {
-                                d.child(
-                                    row()
-                                        .gap_1()
-                                        .flex_wrap()
-                                        .px_1()
-                                        .pt_1()
-                                        .children(attached.iter().enumerate().map(
-                                            |(ix, (id, title))| {
-                                                let id = id.clone();
-                                                row()
-                                                    .id(("ai-attached", ix))
-                                                    .max_w_full()
-                                                    .gap_1()
-                                                    .pl_2()
-                                                    .pr_0p5()
-                                                    .h_6()
-                                                    .items_center()
-                                                    .rounded(feel::md())
-                                                    .bg(theme.secondary)
-                                                    .text_xs()
-                                                    .child(
-                                                        app_icon("list-todo").size_3().flex_none(),
-                                                    )
-                                                    .child(
-                                                        div()
-                                                            .min_w_0()
-                                                            .truncate()
-                                                            .child(title.clone()),
-                                                    )
-                                                    .child(
-                                                        remove_x(
-                                                            ("ai-attached-remove", ix),
-                                                            "タスクを外す",
-                                                            cx.listener(move |this, _, _, cx| {
-                                                                this.session.update(cx, |s, cx| {
-                                                                    s.detach_task(&id, cx)
-                                                                });
-                                                            }),
-                                                            cx,
-                                                        )
-                                                        .test_support(),
-                                                    )
-                                                    .test_support()
-                                            },
-                                        ))
-                                        .children(attached_ws.iter().enumerate().map(
-                                            |(ix, (id, name, icon, color))| {
-                                                let id = id.clone();
-                                                row()
-                                                    .id(("ai-attached-ws", ix))
-                                                    .max_w_full()
-                                                    .gap_1()
-                                                    .pl_2()
-                                                    .pr_0p5()
-                                                    .h_6()
-                                                    .items_center()
-                                                    .rounded(feel::md())
-                                                    .bg(theme.secondary)
-                                                    .text_xs()
-                                                    .child(workspace_icon(
-                                                        icon.as_deref(),
-                                                        color.as_deref(),
-                                                        px(12.),
-                                                        cx,
-                                                    ))
-                                                    .child(
-                                                        div()
-                                                            .min_w_0()
-                                                            .truncate()
-                                                            .child(name.clone()),
-                                                    )
-                                                    .child(
-                                                        remove_x(
-                                                            ("ai-attached-ws-remove", ix),
-                                                            "ワークスペースを外す",
-                                                            cx.listener(move |this, _, _, cx| {
-                                                                this.session.update(cx, |s, cx| {
-                                                                    s.detach_workspace(&id, cx)
-                                                                });
-                                                            }),
-                                                            cx,
-                                                        )
-                                                        .test_support(),
-                                                    )
-                                                    .test_support()
-                                            },
-                                        )),
-                                )
+                            // ファイルをドラッグしている間も、落とせることを色で出す
+                            .drag_over::<ExternalPaths>(|style, _, _, cx| {
+                                style
+                                    .border_color(cx.theme().primary)
+                                    .bg(cx.theme().primary.opacity(0.15))
                             })
+                            .when(
+                                !attached.is_empty()
+                                    || !attached_ws.is_empty()
+                                    || !files.is_empty(),
+                                |d| {
+                                    d.child(
+                                        row()
+                                            .gap_1()
+                                            .flex_wrap()
+                                            .px_1()
+                                            .pt_1()
+                                            .children(attached.iter().enumerate().map(
+                                                |(ix, (id, title))| {
+                                                    let id = id.clone();
+                                                    row()
+                                                        .id(("ai-attached", ix))
+                                                        .max_w_full()
+                                                        .gap_1()
+                                                        .pl_2()
+                                                        .pr_0p5()
+                                                        .h_6()
+                                                        .items_center()
+                                                        .rounded(feel::md())
+                                                        .bg(theme.secondary)
+                                                        .text_xs()
+                                                        .child(
+                                                            app_icon("list-todo")
+                                                                .size_3()
+                                                                .flex_none(),
+                                                        )
+                                                        .child(
+                                                            div()
+                                                                .min_w_0()
+                                                                .truncate()
+                                                                .child(title.clone()),
+                                                        )
+                                                        .child(
+                                                            remove_x(
+                                                                ("ai-attached-remove", ix),
+                                                                "タスクを外す",
+                                                                cx.listener(
+                                                                    move |this, _, _, cx| {
+                                                                        this.session.update(
+                                                                            cx,
+                                                                            |s, cx| {
+                                                                                s.detach_task(
+                                                                                    &id, cx,
+                                                                                )
+                                                                            },
+                                                                        );
+                                                                    },
+                                                                ),
+                                                                cx,
+                                                            )
+                                                            .test_support(),
+                                                        )
+                                                        .test_support()
+                                                },
+                                            ))
+                                            .children(attached_ws.iter().enumerate().map(
+                                                |(ix, (id, name, icon, color))| {
+                                                    let id = id.clone();
+                                                    row()
+                                                        .id(("ai-attached-ws", ix))
+                                                        .max_w_full()
+                                                        .gap_1()
+                                                        .pl_2()
+                                                        .pr_0p5()
+                                                        .h_6()
+                                                        .items_center()
+                                                        .rounded(feel::md())
+                                                        .bg(theme.secondary)
+                                                        .text_xs()
+                                                        .child(workspace_icon(
+                                                            icon.as_deref(),
+                                                            color.as_deref(),
+                                                            px(12.),
+                                                            cx,
+                                                        ))
+                                                        .child(
+                                                            div()
+                                                                .min_w_0()
+                                                                .truncate()
+                                                                .child(name.clone()),
+                                                        )
+                                                        .child(
+                                                            remove_x(
+                                                                ("ai-attached-ws-remove", ix),
+                                                                "ワークスペースを外す",
+                                                                cx.listener(
+                                                                    move |this, _, _, cx| {
+                                                                        this.session.update(
+                                                                            cx,
+                                                                            |s, cx| {
+                                                                                s.detach_workspace(
+                                                                                    &id, cx,
+                                                                                )
+                                                                            },
+                                                                        );
+                                                                    },
+                                                                ),
+                                                                cx,
+                                                            )
+                                                            .test_support(),
+                                                        )
+                                                        .test_support()
+                                                },
+                                            ))
+                                            .children(
+                                                files
+                                                    .iter()
+                                                    .enumerate()
+                                                    .map(|(ix, file)| file_chip(ix, file, cx)),
+                                            ),
+                                    )
+                                },
+                            )
                             .child(
                                 // 入力欄と送信を 1 行に置く
                                 row()
@@ -2296,12 +2531,35 @@ impl AiPane {
                                     .pr_1()
                                     .pb_1()
                                     .child(
+                                        div().pl_0p5().child(feel::gloss(
+                                            icon_button(
+                                                "ai-attach-file",
+                                                "paperclip",
+                                                "ファイルを添える",
+                                            )
+                                            .on_click(
+                                                cx.listener(|this, _, window, cx| {
+                                                    this.pick_files(window, cx)
+                                                }),
+                                            ),
+                                        )),
+                                    )
+                                    .child(
                                         div()
                                             .id("ai-input")
                                             .mb(px(-4.))
                                             .flex_1()
                                             .min_w_0()
-                                            .child(Textarea::new(&self.input).appearance(false))
+                                            .child(
+                                                Textarea::new(&self.input)
+                                                    .appearance(false)
+                                                    .on_paste({
+                                                        let session = self.session.downgrade();
+                                                        move |item, _, cx| {
+                                                            paste_files(&session, item, cx)
+                                                        }
+                                                    }),
+                                            )
                                             .test_support(),
                                     )
                                     .when(busy && !typed, |d| {
@@ -2317,6 +2575,8 @@ impl AiPane {
                                         d.child(feel::gloss(
                                             icon_button("ai-send", "arrow-up", "送信（Enter）")
                                                 .primary()
+                                                // ファイルを読み込んでいる間は、読み込み終わるまで送らない
+                                                .loading(files_loading)
                                                 .on_click(cx.listener(|this, _, window, cx| {
                                                     this.submit(window, cx)
                                                 })),
@@ -2768,7 +3028,7 @@ impl AiPane {
                         .py_2()
                         .bg(rgb(TERM_BG))
                         .text_color(rgb(TERM_FG))
-                        .font_family(theme.mono_font_family.clone())
+                        .mono_font(cx)
                         .text_size(term_font(cx))
                         .cursor_text()
                         // どこをクリックしても、入力行に打てる

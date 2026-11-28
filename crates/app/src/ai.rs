@@ -2,11 +2,13 @@
 //!
 //! API キーを保存して送信するまで、通信はしない。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use gpui_kit::*;
 use malakt_ai::ansi;
+use malakt_ai::files::{FilePart, Shelf};
 use malakt_ai::github::{self, Link};
 use malakt_ai::keys::{self, KeyStore, Source};
 use malakt_ai::provider::{self, CatalogModel, Endpoint};
@@ -152,6 +154,25 @@ pub struct Queued {
     place: String,
     attached: Vec<(String, SharedString)>,
     attached_workspaces: Vec<(String, SharedString)>,
+    files: Vec<AttachedFile>,
+}
+
+/// 入力欄に添えたファイル。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttachedFile {
+    /// 添えた順の番号。読み込みの結果を、同じものに戻すために使う。
+    pub id: u64,
+    pub name: SharedString,
+    /// 読み込んだ中身。読み込み中は `None`。
+    pub part: Option<FilePart>,
+}
+
+/// 会話に出す、送ったファイル。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShownFile {
+    pub name: SharedString,
+    pub path: PathBuf,
+    pub image: bool,
 }
 
 /// 並列で動かしている、別の会話。
@@ -224,6 +245,12 @@ pub struct Run {
 fn item_json(item: &Item) -> Value {
     match item {
         Item::User(t) => serde_json::json!({"k": "user", "t": t}),
+        Item::Files(files) => serde_json::json!({
+            "k": "files",
+            "f": files.iter().map(|f| serde_json::json!({
+                "name": f.name, "path": f.path.to_string_lossy(), "image": f.image,
+            })).collect::<Vec<_>>(),
+        }),
         Item::Assistant(t) => serde_json::json!({"k": "assistant", "t": t}),
         Item::Notice(t) => serde_json::json!({"k": "notice", "t": t}),
         Item::Error(t) => serde_json::json!({"k": "error", "t": t}),
@@ -243,6 +270,18 @@ fn item_from(v: &Value) -> Item {
     let t: SharedString = v["t"].as_str().unwrap_or_default().to_owned().into();
     match v["k"].as_str() {
         Some("user") => Item::User(t),
+        Some("files") => Item::Files(
+            v["f"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|f| ShownFile {
+                    name: f["name"].as_str().unwrap_or_default().to_owned().into(),
+                    path: PathBuf::from(f["path"].as_str().unwrap_or_default()),
+                    image: f["image"].as_bool().unwrap_or(false),
+                })
+                .collect(),
+        ),
         Some("assistant") => Item::Assistant(t),
         Some("notice") => Item::Notice(t),
         Some("tool") => Item::Tool {
@@ -255,6 +294,19 @@ fn item_from(v: &Value) -> Item {
         },
         _ => Item::Error(t),
     }
+}
+
+/// 保存した会話の中の、添えたファイルのハッシュ。会話を全部読み解かず、印だけを探す。
+fn hashes_in(text: &str) -> Vec<String> {
+    const MARK: &str = "\"hash\":\"";
+    text.match_indices(MARK)
+        .filter_map(|(at, _)| {
+            let rest = &text[at + MARK.len()..];
+            let end = rest.find('"')?;
+            let hash = &rest[..end];
+            (!hash.is_empty()).then(|| hash.to_owned())
+        })
+        .collect()
 }
 
 fn clip_chars(text: &str, max: usize) -> String {
@@ -297,6 +349,8 @@ pub fn arrange_note_label(note: &str) -> &'static str {
 pub const MAX_ATTACHED_TASKS: usize = 10;
 /// 入力欄に添えられるワークスペースの数。1 つでタスクの一覧ごと渡すので、タスクより少なくする。
 pub const MAX_ATTACHED_WORKSPACES: usize = 3;
+/// 1 回に添えられるファイルの数。
+pub const MAX_ATTACHED_FILES: usize = 20;
 
 /// 新しいタスクを AI が整えるとき、1 回で扱うタスクの数。
 const MAX_ARRANGE_TASKS: usize = 5;
@@ -491,6 +545,16 @@ pub struct AiConfig {
     pub whoami: Arc<dyn Fn(bool) -> Vec<Spec> + Send + Sync>,
     /// 定期チェックで、issue とプルリクエストの進展を読むコマンド（[`malakt_ai::watch::commands`]）。
     pub gh_progress: Arc<ProgressFn>,
+    /// チャットに添えたファイルの中身を置く場所。
+    pub files: PathBuf,
+}
+
+/// チャットに添えたファイルを置く場所。データベースの隣。
+pub fn files_dir() -> PathBuf {
+    let db = crate::database_path();
+    db.parent()
+        .map(|dir| dir.join("ai-files"))
+        .unwrap_or_else(|| PathBuf::from("ai-files"))
 }
 
 impl Default for AiConfig {
@@ -504,6 +568,7 @@ impl Default for AiConfig {
             slack: Arc::new(slack::Link::commands),
             whoami: Arc::new(github::whoami),
             gh_progress: Arc::new(malakt_ai::watch::commands),
+            files: files_dir(),
         }
     }
 }
@@ -577,6 +642,8 @@ pub enum ToolState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Item {
     User(SharedString),
+    /// ユーザーが送ったファイル。すぐ後ろの発言と一緒に送った。
+    Files(Vec<ShownFile>),
     Assistant(SharedString),
     Tool {
         summary: SharedString,
@@ -738,6 +805,12 @@ pub struct Session {
     pub attached: Vec<(String, SharedString)>,
     /// 入力欄に添えたワークスペース（ID と名前）。送るときに、サブワークスペースとタスクを AI に渡す。
     pub attached_workspaces: Vec<(String, SharedString)>,
+    /// 入力欄に添えたファイル。
+    pub files: Vec<AttachedFile>,
+    /// 次に添えるファイルの番号。
+    next_file: u64,
+    /// 送っている途中で、まだ会話に入っていないファイルのハッシュ。整理で消さない。
+    sending_files: Vec<String>,
     /// ユーザーが今開いているワークスペース。画面が書き込む。
     pub workspace: Option<String>,
     /// 並列の会話を動かすための、裏の会話。保存も自動の処理もしない。
@@ -1045,6 +1118,9 @@ impl Session {
             place: String::new(),
             attached: Vec::new(),
             attached_workspaces: Vec::new(),
+            files: Vec::new(),
+            next_file: 0,
+            sending_files: Vec::new(),
             workspace: None,
             worker,
             coordinators,
@@ -1091,6 +1167,8 @@ impl Session {
                     next.attached_workspaces
                         .append(&mut this.attached_workspaces);
                     this.attached_workspaces = next.attached_workspaces;
+                    next.files.append(&mut this.files);
+                    this.files = next.files;
                     if !this.send(&next.text, next.place, cx) && this.error.is_none() {
                         this.error = Some(
                             format!("「{}」を送れませんでした", clip_chars(&next.text, 20)).into(),
@@ -1119,6 +1197,8 @@ impl Session {
         // 今あるタスクは、もう見たものにする
         this.tasks_changed(cx);
         this.comments_changed(cx);
+        // 前の起動で使われなくなった、添えたファイルの中身を消す
+        this.sweep_files(cx);
         this
     }
 
@@ -1261,6 +1341,15 @@ impl Session {
                     )),
                     _ => None,
                 })
+                // ファイルだけを送った会話は、そのファイルの名前
+                .or_else(|| {
+                    self.items.iter().find_map(|item| match item {
+                        Item::Files(files) => {
+                            files.first().map(|f| clip_chars(&f.name, MAX_TITLE_CHARS))
+                        }
+                        _ => None,
+                    })
+                })
                 .unwrap_or_else(|| "新しいチャット".to_owned())
                 .into(),
         };
@@ -1285,12 +1374,17 @@ impl Session {
 
     /// 古い会話から消すので、増え続けない。
     fn trim_chats(&mut self, cx: &mut Context<Self>) -> bool {
+        let mut trimmed = false;
         while self.chats.len() > MAX_CHATS {
             let last = self.chats[self.chats.len() - 1].id.clone();
             if !self.remove_setting(&chat_key(&last), cx) {
                 return false;
             }
             self.chats.pop();
+            trimmed = true;
+        }
+        if trimmed {
+            self.sweep_files(cx);
         }
         true
     }
@@ -1403,6 +1497,7 @@ impl Session {
             turns: &turns,
             tools: &[],
             fallbacks: false,
+            prefix_ttl: None,
         };
         let conversation = malakt_core::new_id();
         let (_, reply) =
@@ -1447,6 +1542,7 @@ impl Session {
             ) = copy;
             w.attached = queued.attached.clone();
             w.attached_workspaces = queued.attached_workspaces.clone();
+            w.files = queued.files.clone();
             w
         });
         let sent = worker.update(cx, |w, cx| w.send(&queued.text, queued.place.clone(), cx));
@@ -1698,6 +1794,10 @@ impl Session {
         for (ix, turn) in self.turns.iter().enumerate().rev() {
             let value = match turn {
                 Turn::User(text) => serde_json::json!({"k": "user", "t": text}),
+                Turn::Files(parts) => serde_json::json!({
+                    "k": "files",
+                    "files": parts.iter().map(FilePart::to_json).collect::<Vec<_>>(),
+                }),
                 Turn::Assistant { text, calls, .. } => serde_json::json!({
                     "k": "assistant",
                     "t": text,
@@ -1719,7 +1819,7 @@ impl Session {
                 break;
             }
             turns.push(value);
-            if matches!(turn, Turn::User(_)) {
+            if matches!(turn, Turn::User(_) | Turn::Files(_)) {
                 start = ix;
             }
         }
@@ -1732,12 +1832,21 @@ impl Session {
 
     fn load_chat(&mut self, chat: &Value) {
         let text = |v: &Value| v["t"].as_str().unwrap_or_default().to_owned();
+        let shelf = Shelf::new(self.config.files.clone());
         for v in chat["items"].as_array().into_iter().flatten() {
             self.items.push(item_from(v));
         }
         for v in chat["turns"].as_array().into_iter().flatten() {
             self.turns.push(match v["k"].as_str() {
                 Some("user") => Turn::User(text(v)),
+                Some("files") => Turn::Files(
+                    v["files"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .map(|f| shelf.load(f))
+                        .collect(),
+                ),
                 Some("assistant") => Turn::Assistant {
                     text: text(v),
                     calls: v["calls"]
@@ -2409,6 +2518,7 @@ impl Session {
             turns: &turns,
             tools: &[],
             fallbacks: false,
+            prefix_ttl: None,
         };
         let conversation = malakt_core::new_id();
         let (_, reply) =
@@ -2713,6 +2823,7 @@ impl Session {
 
     /// 進行の後始末。
     fn finish(&mut self) {
+        self.sending_files.clear();
         self.end_auto();
         self.settle();
         self.busy = false;
@@ -3261,6 +3372,7 @@ impl Session {
         self.allow_shell = false;
         self.attached.clear();
         self.attached_workspaces.clear();
+        self.files.clear();
         self.conversation = malakt_core::new_id();
         self.chat_task = None;
         self.error = None;
@@ -3319,6 +3431,7 @@ impl Session {
             self.saved_chat = self.chat_mark();
         }
         self.save_index(cx);
+        self.sweep_files(cx);
         cx.notify();
     }
 
@@ -3391,10 +3504,188 @@ impl Session {
         cx.notify();
     }
 
+    // ---- 添えたファイル ----
+
+    /// 添えたファイルの置き場所。
+    fn shelf(&self) -> Shelf {
+        Shelf::new(self.config.files.clone())
+    }
+
+    /// 読み込み中のファイルがあるか。終わるまで送らない。
+    pub fn files_loading(&self) -> bool {
+        self.files.iter().any(|f| f.part.is_none())
+    }
+
+    /// 添えられる残りの数。超えた分は、そのことをエラーに出す。
+    fn file_room(&mut self, wanted: usize) -> usize {
+        let room = MAX_ATTACHED_FILES.saturating_sub(self.files.len());
+        if wanted > room {
+            self.error =
+                Some(format!("一度に添えられるファイルは {MAX_ATTACHED_FILES} 件までです").into());
+        }
+        wanted.min(room)
+    }
+
+    /// 読み込み中の印を入力欄に出し、番号を返す。
+    fn loading_file(&mut self, name: &str) -> u64 {
+        let id = self.next_file;
+        self.next_file += 1;
+        self.files.push(AttachedFile {
+            id,
+            name: name.to_owned().into(),
+            part: None,
+        });
+        id
+    }
+
+    /// 読み込みの結果を、添えたファイルに戻す。読めなければ外して、そのことを出す。
+    fn file_loaded(&mut self, id: u64, result: Result<FilePart, String>, cx: &mut Context<Self>) {
+        match result {
+            Ok(part) => {
+                if let Some(file) = self.files.iter_mut().find(|f| f.id == id) {
+                    file.name = part.name.clone().into();
+                    file.part = Some(part);
+                }
+                self.sweep_files(cx);
+            }
+            Err(error) => {
+                self.files.retain(|f| f.id != id);
+                self.add_error(error);
+            }
+        }
+        cx.notify();
+    }
+
+    /// エラーを、前のエラーに続けて出す（いくつも同時に起きたとき、全部を出す）。
+    fn add_error(&mut self, error: String) {
+        self.error = Some(match self.error.take() {
+            Some(before) => format!("{before}\n{error}").into(),
+            None => error.into(),
+        });
+    }
+
+    /// ファイルを入力欄に添える（ファイルを選ぶ、ドロップ、コピーしたファイルの貼り付け）。
+    pub fn attach_paths(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
+        let room = self.file_room(paths.len());
+        for path in paths.into_iter().take(room) {
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let id = self.loading_file(&name);
+            let shelf = self.shelf();
+            let read = cx
+                .background_executor()
+                .spawn(async move { shelf.put_path(&path) });
+            cx.spawn(async move |this, cx| {
+                let result = read.await;
+                // チャットがもうなければ、戻す先もない
+                let _ = this.update(cx, |this, cx| this.file_loaded(id, result, cx));
+            })
+            .detach();
+        }
+        cx.notify();
+    }
+
+    /// 中身を入力欄に添える（貼り付けた画像）。
+    pub fn attach_bytes(&mut self, name: &str, bytes: Vec<u8>, cx: &mut Context<Self>) {
+        if self.file_room(1) == 0 {
+            cx.notify();
+            return;
+        }
+        let id = self.loading_file(name);
+        let (shelf, name) = (self.shelf(), name.to_owned());
+        let read = cx.background_executor().spawn(async move {
+            shelf
+                .put(&name, bytes)
+                .map_err(|e| format!("「{name}」を添えられませんでした: {e}"))
+        });
+        cx.spawn(async move |this, cx| {
+            let result = read.await;
+            // チャットがもうなければ、戻す先もない
+            let _ = this.update(cx, |this, cx| this.file_loaded(id, result, cx));
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// 送ったファイルを開こうとしたら、置いた中身がもうなかった。
+    pub fn file_gone(&mut self, name: &str, cx: &mut Context<Self>) {
+        self.error = Some(format!("「{name}」は、保存の上限を超えたので整理で消えました").into());
+        cx.notify();
+    }
+
+    /// 添えたファイルを外す。
+    pub fn detach_file(&mut self, id: u64, cx: &mut Context<Self>) {
+        self.files.retain(|f| f.id != id);
+        cx.notify();
+    }
+
+    /// 添えたファイルの置き場所を整理する。保存した会話・今の会話・入力欄・並列の会話の
+    /// どれからも使われていないものを消し、合計が上限を超えていれば古いものから消す。
+    pub fn sweep_files(&mut self, cx: &mut Context<Self>) {
+        // 読み込み中のファイルは、置いたあとで入力欄に戻るまで印がない。読み込み終わってから整理する
+        if self.worker || self.files_loading() {
+            return;
+        }
+        let mut keep: HashSet<String> = HashSet::new();
+        let mut pinned: HashSet<String> = HashSet::new();
+        let mut errors = Vec::new();
+        {
+            let store = &self.db.read(cx).store;
+            for chat in &self.chats {
+                match store.setting(&chat_key(&chat.id)) {
+                    Ok(Some(text)) => keep.extend(hashes_in(&text)),
+                    Ok(None) => {}
+                    Err(e) => errors.push(format!("会話「{}」: {e}", chat.title)),
+                }
+            }
+        }
+        let mut pin = |turns: &[Turn], files: &[AttachedFile]| {
+            for turn in turns {
+                if let Turn::Files(parts) = turn {
+                    pinned.extend(parts.iter().map(|p| p.hash.clone()));
+                }
+            }
+            pinned.extend(
+                files
+                    .iter()
+                    .filter_map(|f| Some(f.part.as_ref()?.hash.clone())),
+            );
+        };
+        pin(&self.turns, &self.files);
+        pin(&self.held_turns, &[]);
+        for queued in &self.queued {
+            pin(&[], &queued.files);
+        }
+        for parallel in &self.parallel {
+            let worker = parallel.session.read(cx);
+            pin(&worker.turns, &worker.files);
+        }
+        pinned.extend(self.sending_files.iter().cloned());
+        pinned.remove("");
+        if !errors.is_empty() {
+            // 読めなかった会話のファイルを消してしまわないよう、整理しない
+            self.add_error(format!(
+                "添えたファイルを整理できませんでした（会話を読めません）: {}",
+                errors.join(" / ")
+            ));
+            return;
+        }
+        let shelf = self.shelf();
+        if let Err(error) = shelf.sweep(&keep, &pinned) {
+            self.add_error(error);
+        }
+    }
+
     /// 送信する。`place` は、ユーザーが今開いている場所の説明。
     pub fn send(&mut self, text: &str, place: String, cx: &mut Context<Self>) -> bool {
         let text = text.trim().to_owned();
-        if text.is_empty() || !self.db.read(cx).unlocked {
+        if (text.is_empty() && self.files.is_empty()) || !self.db.read(cx).unlocked {
+            return false;
+        }
+        // 読み込み中のファイルがあれば、読み込み終わるまで送らない
+        if self.files_loading() {
             return false;
         }
         // 考え中でも送れる。今の会話の続きか、並列の別の会話かを振り分ける
@@ -3404,6 +3695,7 @@ impl Session {
                 place,
                 attached: std::mem::take(&mut self.attached),
                 attached_workspaces: std::mem::take(&mut self.attached_workspaces),
+                files: std::mem::take(&mut self.files),
             };
             // 自動の処理やシェルのコマンドの間、Cursor のときは、終わるのを待って送る
             if self.auto || self.own_command || self.provider == Provider::Cursor {
@@ -3461,11 +3753,31 @@ impl Session {
         }
         self.attached.clear();
         self.attached_workspaces.clear();
+        let parts: Vec<FilePart> = std::mem::take(&mut self.files)
+            .into_iter()
+            .filter_map(|f| f.part)
+            .collect();
+        self.sending_files = parts.iter().map(|p| p.hash.clone()).collect();
         self.busy = true;
         self.error = None;
-        self.items.push(Item::User(format!("{shown}{text}").into()));
+        if !parts.is_empty() {
+            self.items.push(Item::Files(
+                parts
+                    .iter()
+                    .map(|p| ShownFile {
+                        name: p.name.clone().into(),
+                        path: p.path.clone(),
+                        image: p.is_image(),
+                    })
+                    .collect(),
+            ));
+        }
+        let shown = format!("{shown}{text}");
+        if !shown.trim().is_empty() {
+            self.items.push(Item::User(shown.into()));
+        }
         self.task = Some(cx.spawn(async move |this, cx| {
-            let result = Self::run(&this, text, extra, place, cx).await;
+            let result = Self::run(&this, text, extra, parts, place, cx).await;
             let _ = this.update(cx, |this, cx| {
                 if let Err(error) = result {
                     this.items.push(Item::Error(error.into()));
@@ -3536,7 +3848,7 @@ impl Session {
                 Turn::Assistant { calls, .. } => {
                     open.extend(calls.iter().map(|c| (c.id.clone(), c.name.clone())))
                 }
-                Turn::User(_) => {}
+                Turn::User(_) | Turn::Files(_) => {}
             }
         }
         open.retain(|(id, _)| !answered.contains(&id.as_str()));
@@ -3684,6 +3996,7 @@ impl Session {
         this: &WeakEntity<Self>,
         text: String,
         extra: String,
+        parts: Vec<FilePart>,
         place: String,
         cx: &mut AsyncApp,
     ) -> Result<(), String> {
@@ -3706,8 +4019,13 @@ impl Session {
                 }
             }
         }
-        this.update(cx, |s, _| s.turns.push(Turn::User(message)))
-            .map_err(gone)?;
+        this.update(cx, |s, _| {
+            if !parts.is_empty() {
+                s.turns.push(Turn::Files(parts));
+            }
+            s.turns.push(Turn::User(message))
+        })
+        .map_err(gone)?;
         Self::converse(this, &config, &place, cx).await
     }
 
@@ -3878,6 +4196,7 @@ impl Session {
             turns: &turns,
             tools: &definitions,
             fallbacks: false,
+            prefix_ttl: None,
         };
         Self::request(this, config, provider, key, conversation, request, cx).await
     }
@@ -3949,6 +4268,7 @@ impl Session {
             None => provider::endpoint(provider, model, key)?,
         };
         request.fallbacks = endpoint.fallbacks;
+        request.prefix_ttl = endpoint.prefix_ttl;
         let body = wire::body(endpoint.wire, &request);
         let post = config.post.clone();
         let wire = endpoint.wire;

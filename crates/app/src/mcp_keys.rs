@@ -18,6 +18,7 @@ use malakt_core::access::{
 use malakt_core::{view, Id};
 
 use crate::feel::{self, Lit};
+use crate::fonts::MonoFont;
 use crate::press::button;
 use crate::render::{app_icon, col, px, row, Framed};
 use crate::state::{LimitField, MainView};
@@ -475,7 +476,7 @@ impl MainView {
                     div()
                         .text_sm()
                         .text_color(theme.muted_foreground)
-                        .font_family(theme.mono_font_family.clone())
+                        .mono_font(cx)
                         .child(key.masked()),
                 )
                 .tooltip(move |window, cx| {
@@ -833,7 +834,7 @@ impl MainView {
                             .flex_1()
                             .min_w_0()
                             .text_sm()
-                            .font_family(theme.mono_font_family.clone())
+                            .mono_font(cx)
                             .overflow_x_hidden()
                             .child(secret.to_owned())
                             .test_support(),

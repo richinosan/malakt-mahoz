@@ -2,6 +2,7 @@
 
 use serde_json::{json, Map, Value};
 
+use crate::files::{self, FilePart, Kind};
 use crate::provider::Effort;
 
 /// API の形式。
@@ -28,6 +29,8 @@ pub struct ToolCall {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Turn {
     User(String),
+    /// ユーザーが添えたファイル。すぐ後ろの [`Turn::User`] と 1 つのメッセージにして送る。
+    Files(Vec<FilePart>),
     Assistant {
         text: String,
         calls: Vec<ToolCall>,
@@ -80,6 +83,9 @@ pub struct Request<'a> {
     pub tools: &'a [ToolDef],
     /// Messages API で、断られたときの回し先をサーバーに任せる（`fallbacks: "default"`）。
     pub fallbacks: bool,
+    /// Messages API で、ツールと最初の指示のキャッシュを残す時間（`"1h"` など）。
+    /// `None` なら API の標準（5 分）。
+    pub prefix_ttl: Option<&'static str>,
 }
 
 /// Messages API の 1 回の返事の上限。ストリーミングなしで時間切れにならない大きさにする。
@@ -123,18 +129,183 @@ fn text_of(value: &Value, key: &str) -> String {
         .to_owned()
 }
 
+/// 添えたファイルと、それを 1 つのメッセージにまとめるユーザーの発言。
+/// `inline` はファイルごとに、中身をこのリクエストに入れるか。
+struct Message<'a> {
+    files: &'a [FilePart],
+    inline: &'a [bool],
+    text: &'a str,
+}
+
+/// 会話のファイルのうち、中身をこのリクエストに入れるもの。`Turn::Files` ごとに並ぶ。
+fn inline_of(turns: &[Turn]) -> Vec<Vec<bool>> {
+    let groups: Vec<&[FilePart]> = turns
+        .iter()
+        .filter_map(|t| match t {
+            Turn::Files(parts) => Some(parts.as_slice()),
+            _ => None,
+        })
+        .collect();
+    files::inline_flags(groups.into_iter())
+}
+
+/// 会話の順に、ファイルをすぐ後ろの発言とまとめながら回る。
+/// ファイルのあとに発言がなければ、文字が空の発言として渡す。
+fn each_turn<'a>(turns: &'a [Turn], flags: &'a [Vec<bool>], mut f: impl FnMut(Step<'a>)) {
+    let mut pending: Option<(&'a [FilePart], &'a [bool])> = None;
+    let mut group = 0;
+    for turn in turns {
+        match turn {
+            Turn::Files(parts) => {
+                if let Some((files, inline)) = pending.take() {
+                    f(Step::User(Message {
+                        files,
+                        inline,
+                        text: "",
+                    }));
+                }
+                pending = Some((parts.as_slice(), flags[group].as_slice()));
+                group += 1;
+            }
+            Turn::User(text) => {
+                let (files, inline) = pending.take().unwrap_or((&[], &[]));
+                f(Step::User(Message {
+                    files,
+                    inline,
+                    text,
+                }));
+            }
+            other => {
+                if let Some((files, inline)) = pending.take() {
+                    f(Step::User(Message {
+                        files,
+                        inline,
+                        text: "",
+                    }));
+                }
+                f(Step::Other(other));
+            }
+        }
+    }
+    if let Some((files, inline)) = pending.take() {
+        f(Step::User(Message {
+            files,
+            inline,
+            text: "",
+        }));
+    }
+}
+
+enum Step<'a> {
+    User(Message<'a>),
+    Other(&'a Turn),
+}
+
+/// ファイルの説明と発言を 1 つの文にする。
+fn user_text(message: &Message, text_below: bool) -> String {
+    if message.files.is_empty() {
+        return message.text.to_owned();
+    }
+    let note = files::describe(message.files, message.inline, text_below);
+    format!("{note}\n{}", message.text)
+}
+
+/// Messages API のユーザーのメッセージの中身。画像と PDF と文字にした文書のブロックを先に置く。
+/// 文字列ではなくブロックで送る。最後のメッセージにはキャッシュの区切りを付けるので、
+/// 次の回も同じ形にしておく
+fn messages_user(message: &Message) -> Value {
+    let mut blocks = Vec::new();
+    for (part, &inline) in message.files.iter().zip(message.inline) {
+        match (part.kind, &part.data, &part.text) {
+            (Kind::Image, Some(data), _) if inline => blocks.push(json!({
+                "type": "image",
+                "source": {"type": "base64", "media_type": part.mime, "data": files::base64(data)},
+            })),
+            (Kind::Pdf, Some(data), _) if inline => blocks.push(json!({
+                "type": "document",
+                "source": {"type": "base64", "media_type": "application/pdf", "data": files::base64(data)},
+                "title": part.name,
+            })),
+            (Kind::Text, _, Some(text)) => blocks.push(json!({
+                "type": "document",
+                "source": {"type": "text", "media_type": "text/plain", "data": &**text},
+                "title": part.name,
+            })),
+            _ => {}
+        }
+    }
+    blocks.push(json!({"type": "text", "text": user_text(message, false)}));
+    Value::Array(blocks)
+}
+
+/// Chat Completions API のユーザーのメッセージの中身。文字にした文書は文の中に続ける。
+fn chat_user(message: &Message) -> Value {
+    if message.files.is_empty() {
+        return Value::String(message.text.to_owned());
+    }
+    let mut parts = vec![json!({"type": "text", "text": user_text(message, true)})];
+    for (part, &inline) in message.files.iter().zip(message.inline) {
+        match (part.kind, &part.data) {
+            (Kind::Image, Some(data)) if inline => parts.push(json!({
+                "type": "image_url",
+                "image_url": {"url": files::data_url(&part.mime, data)},
+            })),
+            (Kind::Pdf, Some(data)) if inline => parts.push(json!({
+                "type": "file",
+                "file": {"filename": part.name, "file_data": files::data_url(&part.mime, data)},
+            })),
+            _ => {}
+        }
+    }
+    Value::Array(parts)
+}
+
+/// Responses API のユーザーのメッセージの中身。
+fn responses_user(message: &Message) -> Value {
+    if message.files.is_empty() {
+        return Value::String(message.text.to_owned());
+    }
+    let mut parts = vec![json!({"type": "input_text", "text": user_text(message, true)})];
+    for (part, &inline) in message.files.iter().zip(message.inline) {
+        match (part.kind, &part.data) {
+            (Kind::Image, Some(data)) if inline => parts.push(json!({
+                "type": "input_image",
+                "image_url": files::data_url(&part.mime, data),
+            })),
+            (Kind::Pdf, Some(data)) if inline => parts.push(json!({
+                "type": "input_file",
+                "filename": part.name,
+                "file_data": files::data_url(&part.mime, data),
+            })),
+            _ => {}
+        }
+    }
+    Value::Array(parts)
+}
+
 // ---- Messages API ----
 
 fn messages_body(request: &Request) -> Value {
     let mut messages: Vec<Value> = Vec::new();
     // ツールの結果は、続いているものを 1 つの user メッセージにまとめる
     let mut results: Vec<Value> = Vec::new();
-    for turn in request.turns {
+    let flags = inline_of(request.turns);
+    each_turn(request.turns, &flags, |step| {
+        let turn = match step {
+            Step::User(message) => {
+                if !results.is_empty() {
+                    messages.push(json!({"role": "user", "content": std::mem::take(&mut results)}));
+                }
+                messages.push(json!({"role": "user", "content": messages_user(&message)}));
+                return;
+            }
+            Step::Other(turn) => turn,
+        };
         if !matches!(turn, Turn::Tool { .. }) && !results.is_empty() {
             messages.push(json!({"role": "user", "content": std::mem::take(&mut results)}));
         }
         match turn {
-            Turn::User(text) => messages.push(json!({"role": "user", "content": text})),
+            Turn::User(_) | Turn::Files(_) => {}
             Turn::Assistant { text, calls, raw } => {
                 let content = match raw {
                     Some((Wire::Messages, raw)) => raw.clone(),
@@ -170,22 +341,47 @@ fn messages_body(request: &Request) -> Value {
                 "is_error": is_error,
             })),
         }
-    }
+    });
     if !results.is_empty() {
         messages.push(json!({"role": "user", "content": results}));
     }
-    let tools: Vec<Value> = request
+    let mut tools: Vec<Value> = request
         .tools
         .iter()
         .map(|t| json!({"name": t.name, "description": t.description, "input_schema": t.schema}))
         .collect();
+    // プロンプトキャッシュ。並びは tools → system → messages で、前から同じ部分を読み直さずに済む。
+    // 区切りは 3 つ: ツールの最後（最初の指示を変えても、ツールの分は残る）、最初の指示の最後
+    // （会話をまたいで同じ）、最後のメッセージの最後（同じ会話の次の回が、ここまでを読む）
+    let mut prefix = json!({"type": "ephemeral"});
+    if let Some(ttl) = request.prefix_ttl {
+        prefix["ttl"] = ttl.into();
+    }
+    if let Some(last) = tools.last_mut() {
+        last["cache_control"] = prefix.clone();
+    }
+    if let Some(block) = messages
+        .last_mut()
+        .filter(|m| m["role"] == "user")
+        .and_then(|m| m["content"].as_array_mut())
+        .and_then(|blocks| blocks.last_mut())
+    {
+        block["cache_control"] = json!({"type": "ephemeral"});
+    }
     let mut body = json!({
         "model": request.model,
         "max_tokens": MAX_TOKENS,
-        "system": request.system,
         "messages": messages,
         "tools": tools,
     });
+    // 空の文のブロックはサーバーが断るので、最初の指示がなければ送らない
+    if !request.system.is_empty() {
+        body["system"] = json!([{
+            "type": "text",
+            "text": request.system,
+            "cache_control": prefix,
+        }]);
+    }
     if let Some(effort) = request.effort.wire() {
         body["output_config"] = json!({"effort": effort});
     }
@@ -232,12 +428,20 @@ fn messages_parse(response: &Value) -> Result<Reply, String> {
 
 fn chat_body(request: &Request) -> Value {
     let mut messages = vec![json!({"role": "system", "content": request.system})];
-    for turn in request.turns {
+    let flags = inline_of(request.turns);
+    each_turn(request.turns, &flags, |step| {
+        let turn = match step {
+            Step::User(message) => {
+                messages.push(json!({"role": "user", "content": chat_user(&message)}));
+                return;
+            }
+            Step::Other(turn) => turn,
+        };
         match turn {
-            Turn::User(text) => messages.push(json!({"role": "user", "content": text})),
+            Turn::User(_) | Turn::Files(_) => {}
             Turn::Assistant { text, calls, .. } => {
                 if text.is_empty() && calls.is_empty() {
-                    continue;
+                    return;
                 }
                 let mut message = Map::new();
                 message.insert("role".into(), "assistant".into());
@@ -261,7 +465,7 @@ fn chat_body(request: &Request) -> Value {
                 messages.push(json!({"role": "tool", "tool_call_id": id, "content": output}))
             }
         }
-    }
+    });
     let tools: Vec<Value> = request
         .tools
         .iter()
@@ -329,9 +533,17 @@ fn chat_parse(response: &Value) -> Result<Reply, String> {
 
 fn responses_body(request: &Request) -> Value {
     let mut input: Vec<Value> = Vec::new();
-    for turn in request.turns {
+    let flags = inline_of(request.turns);
+    each_turn(request.turns, &flags, |step| {
+        let turn = match step {
+            Step::User(message) => {
+                input.push(json!({"role": "user", "content": responses_user(&message)}));
+                return;
+            }
+            Step::Other(turn) => turn,
+        };
         match turn {
-            Turn::User(text) => input.push(json!({"role": "user", "content": text})),
+            Turn::User(_) | Turn::Files(_) => {}
             Turn::Assistant { text, calls, raw } => match raw {
                 Some((Wire::Responses, Value::Array(items))) => input.extend(items.iter().cloned()),
                 _ => {
@@ -354,7 +566,7 @@ fn responses_body(request: &Request) -> Value {
                 "output": output,
             })),
         }
-    }
+    });
     let tools: Vec<Value> = request
         .tools
         .iter()
@@ -443,6 +655,7 @@ fn cursor_prompt(request: &Request) -> String {
     prompt.push_str(
         "\n\n# ツールの使い方\n\
          あなた自身のファイル操作やシェルは使わず、下のツールだけを使ってください。\n\
+         ただし、ユーザーが添えたファイルは、書いてあるパスのファイルを読んでかまいません。\n\
          ツールを使うときは、次の形のコードブロックを返事に書きます（1 回の返事にいくつ書いてもかまいません）。\n\
          ```malakt-tool\n{\"name\": \"ツール名\", \"arguments\": {}}\n```\n\
          ブロックを書いたら、そこで返事を終えてください。結果が次の入力で届きます。\n\
@@ -455,9 +668,25 @@ fn cursor_prompt(request: &Request) -> String {
         ));
     }
     prompt.push_str("\n# これまでの会話\n");
+    // CLI には画像や PDF を渡せないので、すべてパスで伝え、文字にしたものは文の中に続ける
+    let flags: Vec<Vec<bool>> = inline_of(request.turns)
+        .into_iter()
+        .map(|g| vec![false; g.len()])
+        .collect();
+    let mut texts: Vec<String> = Vec::new();
+    each_turn(request.turns, &flags, |step| {
+        if let Step::User(message) = step {
+            texts.push(user_text(&message, true));
+        }
+    });
+    let mut texts = texts.into_iter();
     for turn in request.turns {
         match turn {
-            Turn::User(text) => prompt.push_str(&format!("## ユーザー\n{text}\n\n")),
+            Turn::Files(_) => {}
+            Turn::User(_) => {
+                let text = texts.next().unwrap_or_default();
+                prompt.push_str(&format!("## ユーザー\n{text}\n\n"))
+            }
             Turn::Assistant { text, calls, .. } => {
                 prompt.push_str("## アシスタント\n");
                 if !text.is_empty() {
@@ -606,6 +835,7 @@ mod tests {
             turns,
             tools,
             fallbacks: false,
+            prefix_ttl: None,
         }
     }
 
@@ -614,7 +844,10 @@ mod tests {
         let (turns, tools) = (conversation(None), tools());
         let body = body(Wire::Messages, &request(&turns, &tools, Effort::High));
         assert_eq!(body["model"], "m");
-        assert_eq!(body["system"], "system");
+        assert_eq!(
+            body["system"],
+            json!([{"type": "text", "text": "system", "cache_control": {"type": "ephemeral"}}])
+        );
         assert_eq!(body["max_tokens"], 16000);
         assert_eq!(body["output_config"], json!({"effort": "high"}));
         assert_eq!(body["tools"][0]["input_schema"]["type"], "object");
@@ -622,7 +855,7 @@ mod tests {
         assert_eq!(messages.len(), 4);
         assert_eq!(
             messages[0],
-            json!({"role": "user", "content": "一覧を見せて"})
+            json!({"role": "user", "content": [{"type": "text", "text": "一覧を見せて"}]})
         );
         assert_eq!(
             messages[1]["content"],
@@ -640,6 +873,70 @@ mod tests {
             ]})
         );
         assert_eq!(messages[3]["role"], "assistant");
+    }
+
+    /// プロンプトキャッシュの区切りは、ツールの最後・最初の指示・最後のメッセージの 3 つ。
+    /// 区切りを外せば、前の回の本文が次の回の本文の頭とそのまま同じになる。
+    #[test]
+    fn messages_body_marks_cache_breakpoints() {
+        let mut turns = vec![Turn::User("一覧を見せて".into())];
+        let mut tools = tools();
+        tools.push(ToolDef {
+            name: "list_people",
+            description: "担当者の一覧",
+            schema: json!({"type": "object", "properties": {}}),
+        });
+        let mut long = request(&turns, &tools, Effort::Default);
+        long.prefix_ttl = Some("1h");
+        let first = body(Wire::Messages, &long);
+        let hour = json!({"type": "ephemeral", "ttl": "1h"});
+        assert!(first["tools"][0].get("cache_control").is_none());
+        assert_eq!(first["tools"][1]["cache_control"], hour);
+        assert_eq!(first["system"][0]["cache_control"], hour);
+        assert_eq!(
+            first["messages"][0]["content"][0]["cache_control"],
+            json!({"type": "ephemeral"}),
+            "会話の区切りは 5 分（長いものが先、の決まりを守る）"
+        );
+        let breakpoints = |body: &Value| body.to_string().matches("cache_control").count();
+        assert_eq!(breakpoints(&first), 3, "区切りは 4 つまで");
+
+        // ツールを呼んで、結果を返す 2 回目。区切りは最後のツールの結果に移る
+        turns.extend(conversation(None)[1..4].iter().cloned());
+        let mut long = request(&turns, &tools, Effort::Default);
+        long.prefix_ttl = Some("1h");
+        let second = body(Wire::Messages, &long);
+        assert_eq!(breakpoints(&second), 3);
+        let results = second["messages"][2]["content"].as_array().unwrap();
+        assert!(results[0].get("cache_control").is_none());
+        assert_eq!(results[1]["cache_control"], json!({"type": "ephemeral"}));
+
+        fn strip(value: &mut Value) {
+            match value {
+                Value::Object(map) => {
+                    map.remove("cache_control");
+                    map.values_mut().for_each(strip);
+                }
+                Value::Array(items) => items.iter_mut().for_each(strip),
+                _ => {}
+            }
+        }
+        let (mut first, mut second) = (first, second);
+        strip(&mut first);
+        strip(&mut second);
+        assert_eq!(first["tools"], second["tools"]);
+        assert_eq!(first["system"], second["system"]);
+        assert_eq!(first["messages"][0], second["messages"][0]);
+
+        // 標準の 5 分なら ttl は送らない。最初の指示が空なら system ごと送らない
+        let mut short = request(&turns, &tools, Effort::Default);
+        short.system = "";
+        let short = body(Wire::Messages, &short);
+        assert_eq!(
+            short["tools"][1]["cache_control"],
+            json!({"type": "ephemeral"})
+        );
+        assert!(short.get("system").is_none());
     }
 
     #[test]
@@ -901,5 +1198,76 @@ mod tests {
             Some("短い".into())
         );
         assert_eq!(error_message(&json!({"ok": true})), None);
+    }
+
+    fn attached() -> Vec<Turn> {
+        let part = |name: &str, mime: &str, kind: Kind, data: Option<&[u8]>, text: Option<&str>| {
+            FilePart {
+                name: name.into(),
+                mime: mime.into(),
+                kind,
+                size: 3,
+                hash: "h".into(),
+                path: std::path::PathBuf::from(format!("/files/{name}")),
+                data: data.map(|d| std::sync::Arc::new(d.to_vec())),
+                text: text.map(std::sync::Arc::from),
+                note: None,
+            }
+        };
+        vec![
+            Turn::Files(vec![
+                part("a.png", "image/png", Kind::Image, Some(b"png"), None),
+                part("b.pdf", "application/pdf", Kind::Pdf, Some(b"pdf"), None),
+                part("c.txt", "text/plain", Kind::Text, None, Some("中身")),
+                part("d.mp3", "audio/mpeg", Kind::Other, None, None),
+            ]),
+            Turn::User("これを見て".into()),
+        ]
+    }
+
+    #[test]
+    fn files_go_into_the_user_message_of_each_format() {
+        let (turns, tools) = (attached(), tools());
+        let req = request(&turns, &tools, Effort::Default);
+
+        let messages = body(Wire::Messages, &req);
+        let content = &messages["messages"][0]["content"];
+        assert_eq!(messages["messages"].as_array().unwrap().len(), 1);
+        assert_eq!(content[0]["type"], "image");
+        assert_eq!(content[0]["source"]["data"], "cG5n");
+        assert_eq!(content[0]["source"]["media_type"], "image/png");
+        assert_eq!(content[1]["type"], "document");
+        assert_eq!(content[1]["source"]["media_type"], "application/pdf");
+        assert_eq!(content[1]["title"], "b.pdf");
+        assert_eq!(
+            content[2]["source"],
+            json!({"type": "text", "media_type": "text/plain", "data": "中身"})
+        );
+        let text = content[3]["text"].as_str().unwrap();
+        assert!(text.contains("「d.mp3」"), "{text}");
+        assert!(text.contains("/files/d.mp3"), "{text}");
+        assert!(text.ends_with("これを見て"), "{text}");
+
+        let chat = body(Wire::Chat, &req);
+        let content = &chat["messages"][1]["content"];
+        let text = content[0]["text"].as_str().unwrap();
+        assert!(text.contains("[「c.txt」の中身]\n中身"), "{text}");
+        assert_eq!(content[1]["image_url"]["url"], "data:image/png;base64,cG5n");
+        assert_eq!(
+            content[2]["file"]["file_data"],
+            "data:application/pdf;base64,cGRm"
+        );
+
+        let responses = body(Wire::Responses, &req);
+        let content = &responses["input"][0]["content"];
+        assert_eq!(content[0]["type"], "input_text");
+        assert_eq!(content[1]["image_url"], "data:image/png;base64,cG5n");
+        assert_eq!(content[2]["filename"], "b.pdf");
+
+        let cursor = body(Wire::Cursor, &req);
+        let prompt = cursor.as_str().unwrap();
+        assert!(prompt.contains("パス: /files/a.png"), "{prompt}");
+        assert!(prompt.contains("[「c.txt」の中身]\n中身"), "{prompt}");
+        assert!(!prompt.contains("cG5n"));
     }
 }

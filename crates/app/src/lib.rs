@@ -14,6 +14,7 @@ pub mod db;
 pub mod downloads;
 pub mod drops;
 mod feel;
+pub mod fonts;
 mod history_view;
 pub mod icons;
 pub mod mcp;

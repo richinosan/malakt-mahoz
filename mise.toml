@@ -22,6 +22,10 @@ run = "cargo test --workspace --locked --no-fail-fast"
 description = "画面のボタンを全部押して、押したら何かが変わることを確かめる（重いので手で回す）"
 run = "cargo test --locked -p malakt-mahoz --test buttons -- --ignored"
 
+[tasks.cache-check]
+description = "本物の Claude API に 2 回送り、プロンプトキャッシュが効いているかを確かめる（ANTHROPIC_API_KEY が要る。少しお金がかかる）"
+run = "cargo test --locked -p malakt-ai --test cache_live -- --ignored --nocapture"
+
 [tasks.lint]
 description = "書式と clippy を確かめる"
 run = [
