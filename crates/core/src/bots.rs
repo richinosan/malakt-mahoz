@@ -100,6 +100,9 @@ pub struct AiBot {
     pub position: i64,
     pub created_at: i64,
     pub updated_at: i64,
+    /// 毎日この時刻（`HH:MM`、手元の時刻）に、bot から声をかける。`None` なら声をかけない。
+    #[serde(default)]
+    pub check_in: Option<String>,
 }
 
 impl AiBot {
@@ -126,10 +129,12 @@ pub struct BotPatch {
     pub motion: Option<Motion>,
     /// 覚えたことを丸ごと置き換える。
     pub memory: Option<String>,
+    /// `Some(None)` で声かけをやめる。
+    pub check_in: Option<Option<String>>,
 }
 
-const COLUMNS: &str =
-    "id, name, instructions, icon, color, motion, memory, position, created_at, updated_at";
+const COLUMNS: &str = "id, name, instructions, icon, color, motion, memory, position, \
+                       created_at, updated_at, check_in";
 
 fn from_row(r: &Row) -> rusqlite::Result<AiBot> {
     let motion: String = r.get(5)?;
@@ -144,6 +149,7 @@ fn from_row(r: &Row) -> rusqlite::Result<AiBot> {
         position: r.get(7)?,
         created_at: r.get(8)?,
         updated_at: r.get(9)?,
+        check_in: r.get(10)?,
     })
 }
 
@@ -189,6 +195,27 @@ fn clean_color(color: Option<&str>) -> Result<Option<String>> {
     }
 }
 
+/// 声かけの時刻を `HH:MM` に整える。空なら声をかけない。
+fn clean_check_in(time: Option<&str>) -> Result<Option<String>> {
+    let Some(time) = time.map(str::trim).filter(|t| !t.is_empty()) else {
+        return Ok(None);
+    };
+    let digits = |t: &str| (1..=2).contains(&t.len()) && t.bytes().all(|b| b.is_ascii_digit());
+    let parsed = time
+        .split_once(':')
+        .filter(|(h, m)| digits(h) && digits(m))
+        .and_then(|(h, m)| {
+            let (h, m) = (h.parse::<u32>().ok()?, m.parse::<u32>().ok()?);
+            (h < 24 && m < 60).then_some((h, m))
+        });
+    match parsed {
+        Some((h, m)) => Ok(Some(format!("{h:02}:{m:02}"))),
+        None => Err(Error::Invalid(format!(
+            "声かけの時刻「{time}」は HH:MM（例: 09:00）で書いてください"
+        ))),
+    }
+}
+
 /// 覚えたことを 1 行ずつに整え、上限を超えたら古い行（上）から消す。
 fn clean_memory(text: &str) -> String {
     let lines: Vec<String> = normalize(text)
@@ -219,6 +246,7 @@ pub(crate) fn clean(bot: &AiBot) -> Result<AiBot> {
         icon: clean_icon(bot.icon.as_deref()),
         color: clean_color(bot.color.as_deref())?,
         memory: clean_memory(&bot.memory),
+        check_in: clean_check_in(bot.check_in.as_deref())?,
         ..bot.clone()
     })
 }
@@ -226,11 +254,12 @@ pub(crate) fn clean(bot: &AiBot) -> Result<AiBot> {
 /// ID が同じものは上書きし、なければ足す（インポート用）。
 pub(crate) fn save(conn: &Connection, bot: &AiBot) -> Result<()> {
     conn.prepare_cached(&format!(
-        "INSERT INTO ai_bots({COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) \
+        "INSERT INTO ai_bots({COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11) \
          ON CONFLICT(id) DO UPDATE SET name = excluded.name, \
          instructions = excluded.instructions, icon = excluded.icon, color = excluded.color, \
          motion = excluded.motion, memory = excluded.memory, position = excluded.position, \
-         created_at = excluded.created_at, updated_at = excluded.updated_at"
+         created_at = excluded.created_at, updated_at = excluded.updated_at, \
+         check_in = excluded.check_in"
     ))?
     .execute(params![
         bot.id,
@@ -242,7 +271,8 @@ pub(crate) fn save(conn: &Connection, bot: &AiBot) -> Result<()> {
         bot.memory,
         bot.position,
         bot.created_at,
-        bot.updated_at
+        bot.updated_at,
+        bot.check_in
     ])?;
     Ok(())
 }
@@ -304,6 +334,7 @@ impl Store {
             position: last.map_or(0, |p| p + 1),
             created_at: now,
             updated_at: now,
+            check_in: None,
         };
         save(&self.conn, &bot)?;
         Ok(bot)
@@ -329,6 +360,9 @@ impl Store {
         }
         if let Some(memory) = &patch.memory {
             bot.memory = clean_memory(memory);
+        }
+        if let Some(time) = &patch.check_in {
+            bot.check_in = clean_check_in(time.as_deref())?;
         }
         if bot == before {
             return Ok(bot);
@@ -443,6 +477,55 @@ mod tests {
         store.delete_ai_bot(&bots[0].id).unwrap();
         assert_eq!(store.ai_bots().unwrap(), vec![second.clone()]);
         assert_eq!(store.ai_bot_or_first(Some("消えた")).unwrap(), second);
+    }
+
+    #[test]
+    fn check_in_times_are_cleaned_and_noticed() {
+        let mut store = Store::open_in_memory().unwrap();
+        let id = store.ai_bots().unwrap()[0].id.clone();
+        let set = |store: &mut Store, time: Option<&str>| {
+            store.update_ai_bot(
+                &id,
+                &BotPatch {
+                    check_in: Some(time.map(str::to_owned)),
+                    ..Default::default()
+                },
+            )
+        };
+        assert_eq!(
+            set(&mut store, Some("9:5")).unwrap().check_in.as_deref(),
+            Some("09:05")
+        );
+        assert_eq!(
+            set(&mut store, Some(" 18:30 "))
+                .unwrap()
+                .check_in
+                .as_deref(),
+            Some("18:30")
+        );
+        for bad in ["24:00", "12:60", "9時", "12:005"] {
+            assert!(set(&mut store, Some(bad)).is_err(), "{bad}");
+        }
+        assert_eq!(
+            store.ai_bot(&id).unwrap().check_in.as_deref(),
+            Some("18:30")
+        );
+        assert_eq!(set(&mut store, Some("")).unwrap().check_in, None);
+
+        // 声かけの通知は、同じ鍵では 1 回だけ。押すと開く会話を持つ
+        assert!(store
+            .add_bot_check_in_notice("AI bot から", "今日は 2 件です", "chat-1", "check:1")
+            .unwrap());
+        assert!(!store
+            .add_bot_check_in_notice("AI bot から", "今日は 2 件です", "chat-2", "check:1")
+            .unwrap());
+        let notices = store.notices(10).unwrap();
+        assert_eq!(notices.len(), 1);
+        assert_eq!(notices[0].kind, crate::notice::NoticeKind::BotCheckIn);
+        assert_eq!(notices[0].headline(), "AI bot から");
+        assert_eq!(notices[0].excerpt, "今日は 2 件です");
+        assert_eq!(notices[0].chat_id.as_deref(), Some("chat-1"));
+        assert_eq!(notices[0].task_id, None);
     }
 
     #[test]

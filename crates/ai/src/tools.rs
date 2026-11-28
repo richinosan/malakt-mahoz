@@ -327,6 +327,7 @@ fn bot_json(b: &AiBot) -> Value {
         "color": b.color,
         "motion": b.motion.as_str(),
         "memories": b.memories().collect::<Vec<_>>(),
+        "check_in": b.check_in,
     })
 }
 
@@ -342,6 +343,8 @@ fn bot_patch(args: &Value) -> Result<BotPatch, String> {
         name: optional(args, "name").map(str::to_owned),
         instructions: optional(args, "instructions").map(str::to_owned),
         motion,
+        check_in: optional(args, "check_in")
+            .map(|t| Some(t.to_owned()).filter(|t| !t.trim().is_empty())),
         ..Default::default()
     })
 }
@@ -3724,6 +3727,26 @@ mod tests {
             (json!("相棒"), json!("spin"))
         );
         assert_eq!(changed["instructions"], "敬語で短く答える");
+        assert_eq!(changed["check_in"], Value::Null);
+        let timed = run(
+            &mut store,
+            "update_ai_bot",
+            json!({"id": id, "check_in": "7:30"}),
+        );
+        assert_eq!(timed["check_in"], "07:30");
+        let off = run(
+            &mut store,
+            "update_ai_bot",
+            json!({"id": id, "check_in": ""}),
+        );
+        assert_eq!(off["check_in"], Value::Null);
+        assert!(execute(
+            &mut store,
+            None,
+            "update_ai_bot",
+            &json!({"id": id, "check_in": "25:00"})
+        )
+        .is_err());
         assert!(execute(
             &mut store,
             None,
