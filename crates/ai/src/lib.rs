@@ -1,8 +1,9 @@
-//! AI チャットの中身。画面には依存しない。
+//! AI bot の中身。画面には依存しない。
 //!
 //! API キーを設定して送信するまで、通信はしない。
 //!
 //! - `provider`: 対応しているサービスと、送り先の決め方
+//! - `local`: 手元で動かす AI のサーバー（Ollama、LM Studio、llama.cpp など）の探し方とモデルの一覧
 //! - `wire`: 各 API の形式への変換（リクエストの組み立てと、返事の読み取り）
 //! - `api`: ツールの定義（`api/*.tsp` から作った一覧）
 //! - `files`: チャットに添えるファイルの見分け方、AI への渡し方、置き場所
@@ -12,14 +13,17 @@
 //! - `slack`: Slack のリンクの検出と、取得のためのコマンド
 //! - `shell`: コマンドの実行と強制終了
 //! - `keys`: API キーの保存（OS のキーチェーン）
+//! - `chatgpt`: ChatGPT のアカウントでのサインイン（API キーの代わりに ChatGPT のプランを使う）
 //! - `http`: HTTPS の呼び出し
 
 pub mod ansi;
 pub mod api;
+pub mod chatgpt;
 pub mod files;
 pub mod github;
 pub mod http;
 pub mod keys;
+pub mod local;
 pub mod provider;
 pub mod shell;
 pub mod slack;

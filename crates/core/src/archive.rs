@@ -61,6 +61,8 @@ pub struct Data {
     pub task_alerts: Vec<crate::alert::TaskAlerts>,
     /// AI のルール（グローバルとワークスペースごと）。
     pub ai_rules: Vec<crate::rules::AiRule>,
+    /// AI bot。
+    pub ai_bots: Vec<crate::bots::AiBot>,
     /// タスクに付けた繰り返し。
     pub repeats: Vec<crate::repeat::Repeat>,
     /// 定時タスク。
@@ -307,6 +309,7 @@ pub fn export<W: Write + Seek>(store: &Store, out: W) -> Result<Manifest> {
         serde_json::to_vec(&data.attachments)?,
     )?;
     put("data/ai_rules.json", serde_json::to_vec(&data.ai_rules)?)?;
+    put("data/ai_bots.json", serde_json::to_vec(&data.ai_bots)?)?;
     put("data/repeats.json", serde_json::to_vec(&data.repeats)?)?;
     put("data/schedules.json", serde_json::to_vec(&data.schedules)?)?;
     put(
@@ -418,6 +421,11 @@ fn read_zip<R: Read + Seek>(zip: &mut ZipArchive<R>) -> Result<(Manifest, Data)>
         .iter()
         .map(crate::rules::clean)
         .collect::<Result<_>>()?;
+    let ai_bots: Vec<crate::bots::AiBot> = read_optional(zip, "data/ai_bots.json")?;
+    let ai_bots = ai_bots
+        .iter()
+        .map(crate::bots::clean)
+        .collect::<Result<_>>()?;
     let repeats: Vec<crate::repeat::Repeat> = read_optional(zip, "data/repeats.json")?;
     let repeats = repeats
         .iter()
@@ -466,6 +474,7 @@ fn read_zip<R: Read + Seek>(zip: &mut ZipArchive<R>) -> Result<(Manifest, Data)>
         task_defaults,
         task_alerts,
         ai_rules,
+        ai_bots,
         repeats,
         schedules,
         schedule_files,

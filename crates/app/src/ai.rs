@@ -1,4 +1,4 @@
-//! AI チャットの状態と進行。すべてのウィンドウで 1 つを共有する。描画は `ai_view` にある。
+//! AI bot の状態と進行。すべてのウィンドウで 1 つを共有する。描画は `ai_view` にある。
 //!
 //! API キーを保存して送信するまで、通信はしない。
 
@@ -8,15 +8,18 @@ use std::sync::Arc;
 
 use gpui_kit::*;
 use malakt_ai::ansi;
+use malakt_ai::chatgpt;
 use malakt_ai::files::{FilePart, Shelf};
 use malakt_ai::github::{self, Link};
 use malakt_ai::keys::{self, KeyStore, Source};
+use malakt_ai::local::{self, Lack, Server};
 use malakt_ai::provider::{self, CatalogModel, Endpoint};
 use malakt_ai::shell::{self, Shell, Spec};
 use malakt_ai::slack;
 use malakt_ai::watch;
-use malakt_ai::wire::{self, Reply, ToolCall, Turn, Wire};
+use malakt_ai::wire::{self, Media, Reply, ToolCall, Turn, Wire};
 use malakt_ai::{clip_tail, tools, Effort, Provider, MAX_TOOL_OUTPUT_CHARS};
+use malakt_core::bots::AiBot;
 use serde_json::Value;
 
 use crate::db::{self, Db};
@@ -124,6 +127,8 @@ const EFFORTS_SETTING: &str = "ai.efforts";
 const LEGACY_EFFORT_SETTING: &str = "ai.effort";
 const MAX_MODEL_NAMES: usize = 300;
 const CHATS_SETTING: &str = "ai.chats";
+/// 最後に選んだ AI bot の ID。新しい会話は、この bot と話す。
+const BOT_SETTING: &str = "ai.bot";
 /// アプリが自動で始めた AI の実行の記録。
 const RUNS_SETTING: &str = "ai.runs";
 /// 残しておく会話の数。超えたら、古いものから消す。
@@ -138,7 +143,7 @@ const MAX_TITLE_CHARS: usize = 40;
 pub const MAX_PARALLEL: usize = 3;
 
 /// 振り分け役への指示。
-const ROUTE_PROMPT: &str = "あなたは、タスク管理アプリの AI チャットの振り分け役です。\n\
+const ROUTE_PROMPT: &str = "あなたは、タスク管理アプリの AI bot の振り分け役です。\n\
 ユーザーは AI と話している途中で、AI が答え終わる前に次のメッセージを送りました。\n\
 次のメッセージが、今の会話の続き（今の話題への追加、訂正、補足、質問）なら CONTINUE、\n\
 今の会話と関係のない別の依頼なら NEW とだけ答えてください。ほかのことは書かないでください。";
@@ -195,6 +200,8 @@ pub struct ChatInfo {
     pub title: SharedString,
     /// この会話を始めたタスク。
     pub task: Option<String>,
+    /// この会話の AI bot。前の版の会話にはない（最初の bot と話したものにする）。
+    pub bot: Option<String>,
     pub updated: i64,
 }
 
@@ -518,6 +525,13 @@ pub type EnvFn = dyn Fn(&str) -> Option<String> + Send + Sync;
 pub type PostFn = dyn Fn(&str, &Headers, &Value) -> Result<Value, String> + Send + Sync;
 /// GET して、本文を受け取る。
 pub type GetFn = dyn Fn(&str, &Headers) -> Result<String, String> + Send + Sync;
+/// 手元のサーバーに GET して、状態コードと本文を受け取る。つながらなければ `Err`。短く待つ。
+pub type ProbeFn = dyn Fn(&str, &[(&str, String)]) -> Result<(u16, String), String> + Send + Sync;
+
+/// ローカル AI のサーバーの URL を保存する設定の名前。空なら手元のポートを探す。
+const LOCAL_URL_SETTING: &str = "ai.local.url";
+/// ツールを使えないモデルに、最初の指示に添えること。
+const NO_TOOLS_NOTE: &str = "\n\nこのモデルではツールを使えません。アプリの操作を頼まれたら、ユーザーが画面で操作する手順を短く伝えてください。";
 
 /// ワークスペースのアイコンを選ぶときの、AI への指示。
 const ICON_PROMPT: &str = "ワークスペース（タスクをまとめるフォルダ）の名前を受け取り、その名前に合うアイコンを探すための英単語を答えます。\n\
@@ -537,6 +551,10 @@ pub struct AiConfig {
     pub env: Arc<EnvFn>,
     pub post: Arc<PostFn>,
     pub get: Arc<GetFn>,
+    /// ローカル AI のサーバーを探す・モデルの一覧を読む。
+    pub probe: Arc<ProbeFn>,
+    /// フォームの POST（ChatGPT のサインインのトークン）。
+    pub form: Arc<chatgpt::FormFn>,
     /// GitHub のリンクを取りに行くコマンド。
     pub gh: Arc<dyn Fn(&Link) -> Spec + Send + Sync>,
     /// Slack のリンクを取りに行くコマンド。前のものが起動できなければ、次のものを試す。
@@ -564,6 +582,8 @@ impl Default for AiConfig {
             env: Arc::new(|name| std::env::var(name).ok()),
             post: Arc::new(malakt_ai::http::post_json),
             get: Arc::new(malakt_ai::http::get_text),
+            probe: Arc::new(malakt_ai::http::probe),
+            form: Arc::new(malakt_ai::http::post_form),
             gh: Arc::new(Link::gh),
             slack: Arc::new(slack::Link::commands),
             whoami: Arc::new(github::whoami),
@@ -629,6 +649,17 @@ pub enum KeyState {
     Failed(SharedString),
 }
 
+/// ChatGPT のアカウントでのサインインの途中か。
+#[derive(Debug, Clone, Default)]
+pub enum ChatGptSignIn {
+    #[default]
+    Idle,
+    /// ブラウザでのサインインを待っている。立てると待つのをやめる
+    Waiting(Arc<std::sync::atomic::AtomicBool>),
+    /// サインアウトしている（ChatGPT の側でトークンを無効にしている）
+    SigningOut,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToolState {
     Running,
@@ -673,8 +704,8 @@ pub struct ShellLine {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Decision {
     Allow,
-    /// このチャットの間、シェルのコマンドを確認なしで実行する
-    AllowShellAlways,
+    /// このチャットの間、同じ種類の操作（ツール）を確認なしで実行する
+    AllowAlways,
     Deny,
 }
 
@@ -682,6 +713,8 @@ pub enum Decision {
 pub struct Pending {
     pub text: SharedString,
     pub shell: bool,
+    /// 確認しているツールの名前。「このチャットでは常に許可」で、この名前を覚える。
+    pub tool: String,
     answer: async_channel::Sender<Decision>,
 }
 
@@ -711,6 +744,10 @@ pub struct Session {
     /// モデルごとに選んだ考える深さ。キーは `effort_key`
     efforts: HashMap<String, Effort>,
     pub key: KeyState,
+    /// ChatGPT のアカウントでのサインインの途中か。
+    pub chatgpt: ChatGptSignIn,
+    /// ChatGPT のサインインとサインアウトの失敗。「ChatGPT アカウント」の行に出す。
+    pub chatgpt_error: Option<SharedString>,
     github: GithubAccount,
     /// アカウントを読みに行った回数。古い結果を使わないために数える。
     github_read: u64,
@@ -719,6 +756,22 @@ pub struct Session {
     /// サービスの一覧にあった、モデルの表示名。
     model_names: HashMap<String, String>,
     catalog: Option<(Provider, Arc<Vec<CatalogModel>>)>,
+    /// ローカル AI のサーバーの URL。空なら手元のポートを探して、最初に見つけたものを使う。
+    pub local_url: String,
+    /// 手元で見つけたサーバー。
+    pub local_found: Vec<Server>,
+    /// 今使っているサーバー。
+    pub local_server: Option<Server>,
+    /// サーバーを探している、モデルの一覧を読んでいる。
+    pub local_searching: bool,
+    /// サーバーが見つからなかった、モデルの一覧を読めなかった理由。
+    pub local_error: Option<SharedString>,
+    /// 探した回数。古い結果を使わないために数える。
+    local_search: u64,
+    /// 送ってみて、モデルが受け付けなかったもの。モデルの ID ごと。
+    local_lacks: HashMap<String, HashSet<Lack>>,
+    /// この会話で、モデルが受け付けないものを知らせた。
+    lack_noticed: HashSet<Lack>,
     turns: Vec<Turn>,
     pub items: Vec<Item>,
     pub busy: bool,
@@ -736,8 +789,8 @@ pub struct Session {
     running: Option<shell::Handle>,
     /// 今動いているのは、シェルに自分で打ったコマンド。
     pub own_command: bool,
-    /// シェルのコマンドを、確認なしで実行する（このチャットの間）。
-    pub allow_shell: bool,
+    /// このチャットの間、確認なしで実行するツールの名前（「このチャットでは常に許可」を選んだもの）。
+    pub allowed: Vec<String>,
     /// AI のコマンドが動くシェル。メッセージを送るたびに、開いているタブから決めて AI に伝える。
     pub turn_shell: Shell,
     /// オート実行。オンの間、コマンドの実行とタスクの削除を確認なしで行う。標準はオフ。
@@ -813,6 +866,8 @@ pub struct Session {
     sending_files: Vec<String>,
     /// ユーザーが今開いているワークスペース。画面が書き込む。
     pub workspace: Option<String>,
+    /// 今の会話の AI bot の ID。`None` や消えた bot なら、最初の bot と話す。
+    pub bot: Option<String>,
     /// 並列の会話を動かすための、裏の会話。保存も自動の処理もしない。
     worker: bool,
     /// 振り分けに使うモデル（サービスごと）。なければ今のモデル。
@@ -880,6 +935,7 @@ impl Session {
         let mut chats = Vec::new();
         let mut model_names = HashMap::new();
         let mut current = None;
+        let bot;
         let mut legacy_chat = false;
         let mut runs = Vec::new();
         let arrange;
@@ -956,6 +1012,7 @@ impl Session {
                     ],
                 })
                 .unwrap_or_default();
+            bot = read(BOT_SETTING).filter(|b| !b.is_empty());
             if let Some(names) =
                 read(MODEL_NAMES_SETTING).and_then(|v| serde_json::from_str(&v).ok())
             {
@@ -971,6 +1028,7 @@ impl Session {
                             id: id.to_owned(),
                             title: v["title"].as_str().unwrap_or_default().to_owned().into(),
                             task: v["task"].as_str().map(str::to_owned),
+                            bot: v["bot"].as_str().map(str::to_owned),
                             updated: v["updated"].as_i64().unwrap_or(0),
                         });
                     }
@@ -1042,6 +1100,15 @@ impl Session {
         if efforts_error.is_some() {
             error = efforts_error;
         }
+        let local_url = db
+            .read(cx)
+            .store
+            .setting(LOCAL_URL_SETTING)
+            .unwrap_or_else(|e| {
+                error = Some(format!("AI の設定を読めませんでした: {e}").into());
+                None
+            })
+            .unwrap_or_default();
         let mut this = Self {
             db,
             config,
@@ -1050,11 +1117,21 @@ impl Session {
             effort,
             efforts,
             key: KeyState::Unknown,
+            chatgpt: ChatGptSignIn::Idle,
+            chatgpt_error: None,
             github: GithubAccount::Unknown,
             github_read: 0,
             listed: Vec::new(),
             model_names,
             catalog: None,
+            local_url,
+            local_found: Vec::new(),
+            local_server: None,
+            local_searching: false,
+            local_error: None,
+            local_search: 0,
+            local_lacks: HashMap::new(),
+            lack_noticed: HashSet::new(),
             turns: Vec::new(),
             items: Vec::new(),
             busy: false,
@@ -1069,7 +1146,7 @@ impl Session {
             history: Vec::new(),
             running: None,
             own_command: false,
-            allow_shell: false,
+            allowed: Vec::new(),
             turn_shell: Shell::standard(),
             auto_run,
             chat_window: None,
@@ -1122,6 +1199,7 @@ impl Session {
             next_file: 0,
             sending_files: Vec::new(),
             workspace: None,
+            bot,
             worker,
             coordinators,
             routing: Vec::new(),
@@ -1311,7 +1389,8 @@ impl Session {
             .iter()
             .map(|c| {
                 serde_json::json!({
-                    "id": c.id, "title": c.title, "task": c.task, "updated": c.updated,
+                    "id": c.id, "title": c.title, "task": c.task, "bot": c.bot,
+                    "updated": c.updated,
                 })
             })
             .collect();
@@ -1360,6 +1439,7 @@ impl Session {
                 id,
                 title,
                 task: self.chat_task.as_ref().map(|(id, _)| id.clone()),
+                bot: self.bot.clone(),
                 updated: malakt_core::now_ms(),
             },
         );
@@ -1498,6 +1578,8 @@ impl Session {
             tools: &[],
             fallbacks: false,
             prefix_ttl: None,
+            media: Media::All,
+            plan: false,
         };
         let conversation = malakt_core::new_id();
         let (_, reply) =
@@ -1515,6 +1597,65 @@ impl Session {
 
     /// 別の会話を裏で始める。終わったら、会話の一覧に足す。
     fn start_parallel(&mut self, queued: Queued, cx: &mut Context<Self>) {
+        let bot = self.bot.clone();
+        self.start_parallel_as(queued, bot, None, cx);
+    }
+
+    /// 別の bot に仕事を渡す（`hand_off_to_bot`）。その bot の並列の会話で動き、終わると会話の一覧に残る。
+    pub(crate) fn hand_off(
+        &mut self,
+        bot_id: &str,
+        message: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<String, String> {
+        if self.worker {
+            return Err("並列の会話からは、ほかの bot に渡せません".into());
+        }
+        let message = message.trim();
+        if message.is_empty() {
+            return Err("message が空です".into());
+        }
+        let bot = self
+            .db
+            .read(cx)
+            .store
+            .ai_bot(bot_id)
+            .map_err(|e| e.to_string())?;
+        if self.current_bot(cx)?.id == bot.id {
+            return Err(format!("「{}」は今話している bot です", bot.name));
+        }
+        if self.running_parallel() >= MAX_PARALLEL {
+            return Err(format!(
+                "並列の会話が {MAX_PARALLEL} つ動いています。終わってから渡してください"
+            ));
+        }
+        let queued = Queued {
+            text: message.to_owned(),
+            place: self.place.clone(),
+            attached: Vec::new(),
+            attached_workspaces: Vec::new(),
+            files: Vec::new(),
+        };
+        let before = self.parallel.len();
+        self.start_parallel_as(queued, Some(bot.id.clone()), Some(&bot.name), cx);
+        if self.parallel.len() == before {
+            return Err(self.error.take().map_or_else(
+                || format!("「{}」に渡せませんでした", bot.name),
+                |e| e.to_string(),
+            ));
+        }
+        cx.notify();
+        Ok(serde_json::json!({"started": true, "bot": bot.name}).to_string())
+    }
+
+    /// 並列の会話を `bot` で始める。`label` があれば、入力欄の上の題の前に出す（渡した先の bot の名前）。
+    fn start_parallel_as(
+        &mut self,
+        queued: Queued,
+        bot: Option<String>,
+        label: Option<&str>,
+        cx: &mut Context<Self>,
+    ) {
         let (db, config) = (self.db.clone(), self.config.clone());
         let copy = (
             self.provider,
@@ -1527,6 +1668,7 @@ impl Session {
             self.catalog.clone(),
             self.model_names.clone(),
         );
+        let local = (self.local_server.clone(), self.local_lacks.clone());
         let worker = cx.new(|cx| {
             let mut w = Session::create(db, config, true, cx);
             (
@@ -1540,6 +1682,9 @@ impl Session {
                 w.catalog,
                 w.model_names,
             ) = copy;
+            w.local_server = local.0;
+            w.local_lacks = local.1;
+            w.bot = bot;
             w.attached = queued.attached.clone();
             w.attached_workspaces = queued.attached_workspaces.clone();
             w.files = queued.files.clone();
@@ -1561,13 +1706,16 @@ impl Session {
         let watch = cx.observe(&worker, |this, worker, cx| {
             this.parallel_changed(&worker, cx)
         });
+        let title = clip_chars(
+            queued.text.lines().next().unwrap_or_default(),
+            MAX_TITLE_CHARS,
+        );
         self.parallel.push(Parallel {
             session: worker,
-            title: clip_chars(
-                queued.text.lines().next().unwrap_or_default(),
-                MAX_TITLE_CHARS,
-            )
-            .into(),
+            title: match label {
+                Some(name) => format!("{name}: {title}").into(),
+                None => title.into(),
+            },
             done: false,
             error: None,
             _watch: watch,
@@ -1587,7 +1735,7 @@ impl Session {
         if w.busy {
             return;
         }
-        let (id, json) = (w.conversation.clone(), w.chat_json());
+        let (id, json, bot) = (w.conversation.clone(), w.chat_json(), w.bot.clone());
         let error = w.items.iter().rev().find_map(|item| match item {
             Item::Error(e) => Some(e.clone()),
             _ => None,
@@ -1601,6 +1749,7 @@ impl Session {
                     id,
                     title,
                     task: None,
+                    bot,
                     updated: malakt_core::now_ms(),
                 },
             );
@@ -1827,7 +1976,10 @@ impl Session {
         let turns = turns.split_off(turns.len() - (self.turns.len() - start));
         let skip = self.items.len().saturating_sub(MAX_SAVED_ITEMS);
         let items: Vec<Value> = self.items[skip..].iter().map(item_json).collect();
-        serde_json::json!({"id": self.conversation, "items": items, "turns": turns}).to_string()
+        serde_json::json!({
+            "id": self.conversation, "bot": self.bot, "items": items, "turns": turns,
+        })
+        .to_string()
     }
 
     fn load_chat(&mut self, chat: &Value) {
@@ -1872,6 +2024,52 @@ impl Session {
         if let Some(id) = chat["id"].as_str().filter(|id| !id.is_empty()) {
             self.conversation = id.to_owned();
         }
+        if let Some(bot) = chat["bot"].as_str().filter(|b| !b.is_empty()) {
+            self.bot = Some(bot.to_owned());
+        }
+    }
+
+    // ---- AI bot ----
+
+    /// 今の会話の AI bot。
+    pub fn current_bot(&self, cx: &App) -> Result<AiBot, String> {
+        self.db
+            .read(cx)
+            .store
+            .ai_bot_or_first(self.bot.as_deref())
+            .map_err(|e| format!("AI bot を読めませんでした: {e}"))
+    }
+
+    /// 話す AI bot を変える。今の会話が空ならそのまま、話していたら、その bot のいちばん新しい会話を
+    /// 開く（なければ新しい会話にする）。今の会話は一覧に残る。
+    pub fn set_bot(&mut self, id: &str, cx: &mut Context<Self>) {
+        let (first, exists) = {
+            let store = &self.db.read(cx).store;
+            let first = store.ai_bot_or_first(None).map(|b| b.id).ok();
+            (first, store.ai_bot(id).is_ok())
+        };
+        if !exists {
+            self.error = Some(format!("AI bot {id} がありません").into());
+            cx.notify();
+            return;
+        }
+        let now = self.current_bot(cx).map(|b| b.id).ok();
+        if now.as_deref() == Some(id) {
+            return;
+        }
+        if !self.save_setting(BOT_SETTING, id, cx) {
+            return;
+        }
+        if !self.items.is_empty() || self.busy {
+            let of_bot = |c: &ChatInfo| c.bot.as_deref().or(first.as_deref()) == Some(id);
+            match self.chats.iter().find(|c| of_bot(c)).map(|c| c.id.clone()) {
+                Some(chat) => self.open_chat(&chat, cx),
+                None => self.clear(cx),
+            }
+        }
+        self.bot = Some(id.to_owned());
+        self.save_index(cx);
+        cx.notify();
     }
 
     /// この実行で使うルール。グローバルのものは最初の指示に、ワークスペースのものはメッセージに添える。
@@ -2519,6 +2717,8 @@ impl Session {
             tools: &[],
             fallbacks: false,
             prefix_ttl: None,
+            media: Media::All,
+            plan: false,
         };
         let conversation = malakt_core::new_id();
         let (_, reply) =
@@ -3018,6 +3218,26 @@ impl Session {
         }
     }
 
+    /// ローカル AI のモデルで使えるもの（印のアイコンと名前）。分からないものは出さない。
+    pub fn model_abilities(&self, id: &str) -> Vec<(&'static str, &'static str)> {
+        let Some((Provider::Local, catalog)) = &self.catalog else {
+            return Vec::new();
+        };
+        let Some(entry) = catalog.iter().find(|m| m.id == id) else {
+            return Vec::new();
+        };
+        let lacks = self.local_lacks.get(id);
+        let lacks = |lack| lacks.is_some_and(|l| l.contains(&lack));
+        let mut out = Vec::new();
+        if entry.tools == Some(true) && !lacks(Lack::Tools) {
+            out.push(("wrench", "ツール"));
+        }
+        if entry.vision == Some(true) && !lacks(Lack::Images) {
+            out.push(("image", "画像"));
+        }
+        out
+    }
+
     pub fn model(&self) -> &str {
         self.models
             .get(&self.provider)
@@ -3108,6 +3328,14 @@ impl Session {
     /// API キーがなければ通信しない。
     fn load_catalog(&mut self, cx: &mut Context<Self>) {
         let provider = self.provider;
+        if provider == Provider::Local {
+            let loaded = self.local_server.is_some()
+                && self.catalog.as_ref().is_some_and(|(p, _)| *p == provider);
+            if !loaded && !self.local_searching {
+                self.search_local(cx);
+            }
+            return;
+        }
         let Some(url) = provider.catalog_url() else {
             return;
         };
@@ -3176,6 +3404,95 @@ impl Session {
         cx.notify();
     }
 
+    /// ローカル AI のサーバーを探し、使うサーバーのモデルの一覧を読む。手元のポートと、
+    /// 入力された URL にだけ通信する。
+    pub fn search_local(&mut self, cx: &mut Context<Self>) {
+        self.local_search += 1;
+        let search = self.local_search;
+        self.local_searching = true;
+        let (config, url) = (self.config.clone(), self.local_url.clone());
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let (found, result) = cx
+                .background_executor()
+                .spawn(async move { find_local(&config, &url) })
+                .await;
+            // チャットがもうなければ、知らせる先もない
+            let _ = this.update(cx, |this, cx| {
+                // あとから探し直していたら、そちらの結果を使う
+                if this.local_search != search {
+                    return;
+                }
+                this.local_searching = false;
+                this.local_found = found;
+                match result {
+                    Ok((server, catalog)) => {
+                        this.local_error = None;
+                        this.use_local(server, catalog, cx);
+                    }
+                    Err(e) => {
+                        this.local_error = Some(e.into());
+                        this.local_server = None;
+                        if this.provider == Provider::Local {
+                            this.listed.clear();
+                        }
+                        if this
+                            .catalog
+                            .as_ref()
+                            .is_some_and(|(p, _)| *p == Provider::Local)
+                        {
+                            this.catalog = None;
+                        }
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// 見つけたサーバーとモデルの一覧を使う。モデルを選んでいなければ、一覧の最初のモデルにする。
+    fn use_local(&mut self, server: Server, catalog: Vec<CatalogModel>, cx: &mut Context<Self>) {
+        for m in &catalog {
+            if let Some(name) = m.name.as_ref().filter(|n| !n.is_empty()) {
+                self.model_names.insert(m.id.clone(), name.clone());
+            }
+        }
+        if self.provider == Provider::Local {
+            self.listed = catalog.iter().map(|m| m.id.clone().into()).collect();
+        }
+        let first = catalog.first().map(|m| m.id.clone());
+        self.local_server = Some(server);
+        self.catalog = Some((Provider::Local, Arc::new(catalog)));
+        let unset = self
+            .models
+            .get(&Provider::Local)
+            .is_none_or(|m| m.is_empty());
+        if let Some(first) = first.filter(|_| unset && self.provider == Provider::Local) {
+            self.set_model(&first, cx);
+        }
+    }
+
+    /// ローカル AI のサーバーの URL を変える。空にすると、手元のポートを探す。
+    pub fn set_local_url(&mut self, url: &str, cx: &mut Context<Self>) {
+        let url = local::normalize(url);
+        if url == self.local_url {
+            return;
+        }
+        let saved = self.db.update(cx, |db, _| {
+            db.store
+                .set_setting(LOCAL_URL_SETTING, (!url.is_empty()).then_some(url.as_str()))
+        });
+        if let Err(e) = saved {
+            self.local_error = Some(format!("AI の設定を保存できませんでした: {e}").into());
+            cx.notify();
+            return;
+        }
+        self.local_url = url;
+        self.local_server = None;
+        self.search_local(cx);
+    }
+
     /// 選んでいるサービスのキーがあるかを調べ直す。
     pub fn refresh_key(&mut self, cx: &mut Context<Self>) {
         let (config, provider) = (self.config.clone(), self.provider);
@@ -3193,7 +3510,7 @@ impl Session {
                 }
                 this.key = match found {
                     Ok(Some((key, source))) => KeyState::Present {
-                        masked: keys::masked(&key).into(),
+                        masked: keys::shown(&key, source).into(),
                         source,
                     },
                     Ok(None) => KeyState::Missing,
@@ -3272,8 +3589,106 @@ impl Session {
         cx.notify();
     }
 
-    /// サービスにモデルの一覧を聞く（Claude と OpenCode）。
+    /// ChatGPT のアカウントでサインインする。ブラウザでサインインの画面を開き、戻ってくるのを待つ。
+    pub fn sign_in_chatgpt(&mut self, cx: &mut Context<Self>) {
+        if !matches!(self.chatgpt, ChatGptSignIn::Idle) {
+            return;
+        }
+        let keys = self.config.keys.clone();
+        let sign_in = match chatgpt::SignIn::begin(&*keys) {
+            Ok(sign_in) => sign_in,
+            Err(e) => {
+                self.chatgpt_error = Some(e.into());
+                cx.notify();
+                return;
+            }
+        };
+        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.chatgpt = ChatGptSignIn::Waiting(cancel.clone());
+        self.chatgpt_error = None;
+        cx.open_url(&sign_in.url);
+        let form = self.config.form.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let callback = sign_in.wait(&cancel, chatgpt::SIGN_IN_TIMEOUT)?;
+                    sign_in.finish(callback, &*keys, &*form)
+                })
+                .await;
+            // チャットがもうなければ、知らせる先もない
+            let _ = this.update(cx, |this, cx| {
+                this.chatgpt = ChatGptSignIn::Idle;
+                match result {
+                    Ok(_) => {
+                        this.chatgpt_error = None;
+                        if this.provider == Provider::OpenAi {
+                            this.refresh_key(cx);
+                        }
+                    }
+                    // 自分でキャンセルしたときは、何も出さない
+                    Err(e) if e == chatgpt::CANCELED => {}
+                    Err(e) => this.chatgpt_error = Some(e.into()),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// ブラウザでのサインインを待つのをやめる。
+    pub fn cancel_chatgpt(&mut self) {
+        if let ChatGptSignIn::Waiting(cancel) = &self.chatgpt {
+            cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    /// ChatGPT のアカウントからサインアウトする。
+    pub fn sign_out_chatgpt(&mut self, cx: &mut Context<Self>) {
+        if !matches!(self.chatgpt, ChatGptSignIn::Idle) {
+            return;
+        }
+        self.chatgpt = ChatGptSignIn::SigningOut;
+        self.chatgpt_error = None;
+        let config = self.config.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { chatgpt::sign_out(&*config.keys, &*config.form, &*config.get) })
+                .await;
+            // チャットがもうなければ、知らせる先もない
+            let _ = this.update(cx, |this, cx| {
+                this.chatgpt = ChatGptSignIn::Idle;
+                this.chatgpt_error = result.err().map(Into::into);
+                if this.provider == Provider::OpenAi {
+                    this.refresh_key(cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// 選んでいるサービスを、ChatGPT のアカウントで使っているか。
+    pub fn on_chatgpt_plan(&self) -> bool {
+        matches!(
+            self.key,
+            KeyState::Present {
+                source: Source::ChatGpt,
+                ..
+            }
+        )
+    }
+
+    /// サービスにモデルの一覧を聞く（Claude と OpenCode、ChatGPT のアカウント）。
     pub fn fetch_models(&mut self, cx: &mut Context<Self>) {
+        // ローカル AI は、サーバーを探し直してモデルの一覧を読み直す（入れたばかりのモデルも出る）
+        if self.provider == Provider::Local {
+            self.search_local(cx);
+            return;
+        }
         let (config, provider) = (self.config.clone(), self.provider);
         cx.spawn(async move |this, cx| {
             let result = cx
@@ -3286,6 +3701,13 @@ impl Session {
                             .filter(|m| m.api.is_some())
                             .map(|m| (m.id.clone(), m.name.clone()))
                             .collect::<Vec<_>>());
+                    }
+                    if provider == Provider::OpenAi {
+                        let found = keys::lookup(&*config.keys, provider, |n| (config.env)(n))?;
+                        if found.is_some_and(|(_, source)| source == Source::ChatGpt) {
+                            let token = chatgpt::access_token(&*config.keys, &*config.form)?;
+                            return chatgpt::models(&token, &*config.get);
+                        }
                     }
                     if provider != Provider::Claude {
                         return Err(format!(
@@ -3369,13 +3791,14 @@ impl Session {
     fn reset_chat(&mut self) {
         self.turns.clear();
         self.items.clear();
-        self.allow_shell = false;
+        self.allowed.clear();
         self.attached.clear();
         self.attached_workspaces.clear();
         self.files.clear();
         self.conversation = malakt_core::new_id();
         self.chat_task = None;
         self.error = None;
+        self.lack_noticed.clear();
     }
 
     /// 新しい会話を始める。今の会話は一覧に残る。
@@ -3867,8 +4290,8 @@ impl Session {
         let Some(pending) = self.pending.take() else {
             return;
         };
-        if decision == Decision::AllowShellAlways {
-            self.allow_shell = true;
+        if decision == Decision::AllowAlways && !self.allowed.contains(&pending.tool) {
+            self.allowed.push(pending.tool.clone());
         }
         // 待っている側がもう止まっていれば、答えは要らない
         let _ = pending.answer.try_send(decision);
@@ -4064,6 +4487,15 @@ impl Session {
         let system = this
             .update(cx, |s, cx| {
                 let (global, mut extra) = s.rules(cx)?;
+                // アプリが始めた実行は、bot ではなくアプリとして動く
+                let bot = if s.auto {
+                    None
+                } else {
+                    Some(s.current_bot(cx)?)
+                };
+                if let Some(bot) = &bot {
+                    extra = format!("{}\n{extra}", tools::bot_memory_note(bot));
+                }
                 if let GithubAccount::Login(login) = &s.github {
                     extra = format!("{}\n{extra}", github::account_note(login));
                 }
@@ -4075,7 +4507,7 @@ impl Session {
                 if let Some(Turn::User(message)) = s.turns.last_mut() {
                     message.push_str(&note);
                 }
-                Ok::<_, String>(tools::system_prompt(&global))
+                Ok::<_, String>(tools::system_prompt_as(bot.as_ref(), &global))
             })
             .map_err(gone)??;
         let mut recovered = false;
@@ -4197,6 +4629,8 @@ impl Session {
             tools: &definitions,
             fallbacks: false,
             prefix_ttl: None,
+            media: Media::All,
+            plan: false,
         };
         Self::request(this, config, provider, key, conversation, request, cx).await
     }
@@ -4212,6 +4646,10 @@ impl Session {
         cx: &mut AsyncApp,
     ) -> Result<(Wire, Reply), String> {
         let (model, effort) = (request.model, request.effort);
+
+        if provider == Provider::Local {
+            return Self::request_local(this, config, key, request, cx).await;
+        }
 
         if provider == Provider::Cursor {
             let Value::String(prompt) = wire::body(Wire::Cursor, &request) else {
@@ -4265,10 +4703,20 @@ impl Session {
                 };
                 provider::opencode_endpoint(&catalog, model, effort, key, conversation)?
             }
+            None if chatgpt::Account::from_secret(key).is_some() => {
+                // ChatGPT のアカウント。アクセストークンは切れそうなら更新する（通信するので裏で）
+                let config = config.clone();
+                let token = cx
+                    .background_executor()
+                    .spawn(async move { chatgpt::access_token(&*config.keys, &*config.form) })
+                    .await?;
+                chatgpt::endpoint(&token)
+            }
             None => provider::endpoint(provider, model, key)?,
         };
         request.fallbacks = endpoint.fallbacks;
         request.prefix_ttl = endpoint.prefix_ttl;
+        request.plan = endpoint.plan;
         let body = wire::body(endpoint.wire, &request);
         let post = config.post.clone();
         let wire = endpoint.wire;
@@ -4277,6 +4725,157 @@ impl Session {
             .spawn(async move { post(&endpoint.url, &endpoint.headers, &body) })
             .await?;
         wire::parse(wire, &response).map(|reply| (wire, reply))
+    }
+
+    /// ローカル AI に 1 回問い合わせる。モデルがツールや画像を受け付けなければ、外して送り直す。
+    async fn request_local(
+        this: &WeakEntity<Self>,
+        config: &AiConfig,
+        key: &str,
+        mut request: wire::Request<'_>,
+        cx: &mut AsyncApp,
+    ) -> Result<(Wire, Reply), String> {
+        let model = request.model.to_owned();
+        if model.is_empty() {
+            return Err(
+                "ローカル AI のモデルを選んでください。「設定」の「モデル」で選べます".into(),
+            );
+        }
+        let (server, catalog, url) = this
+            .read_with(cx, |s, _| {
+                (
+                    s.local_server.clone(),
+                    s.catalog
+                        .as_ref()
+                        .filter(|(p, _)| *p == Provider::Local)
+                        .map(|(_, c)| c.clone()),
+                    s.local_url.clone(),
+                )
+            })
+            .map_err(gone)?;
+        let (server, catalog) = match (server, catalog) {
+            (Some(server), Some(catalog)) => (server, catalog),
+            _ => {
+                let config = config.clone();
+                let (found, result) = cx
+                    .background_executor()
+                    .spawn(async move { find_local(&config, &url) })
+                    .await;
+                let (server, catalog) = result?;
+                let catalog = Arc::new(catalog);
+                this.update(cx, |s, cx| {
+                    s.local_found = found;
+                    s.local_error = None;
+                    s.local_server = Some(server.clone());
+                    s.catalog = Some((Provider::Local, catalog.clone()));
+                    cx.notify();
+                })
+                .map_err(gone)?;
+                (server, catalog)
+            }
+        };
+        let entry = catalog.iter().find(|m| m.id == model);
+        let context = entry.and_then(|m| m.context);
+        let endpoint = local::endpoint(&server, key);
+        let wire = endpoint.wire;
+        let (auto, label, mut lacks) = this
+            .read_with(cx, |s, _| {
+                (
+                    s.auto,
+                    s.model_label(&model),
+                    s.local_lacks.get(&model).cloned().unwrap_or_default(),
+                )
+            })
+            .map_err(gone)?;
+        // 一覧に書いてあることは、送る前に使う
+        if entry.and_then(|m| m.tools) == Some(false) {
+            lacks.insert(Lack::Tools);
+        }
+        if entry.and_then(|m| m.vision) == Some(false) {
+            lacks.insert(Lack::Images);
+        }
+        let wants_tools = !request.tools.is_empty();
+        let has_images = request.turns.iter().any(|t| {
+            matches!(t, Turn::Files(parts)
+                if parts.iter().any(|p| p.kind == malakt_ai::files::Kind::Image && p.data.is_some()))
+        });
+        loop {
+            let no_tools = wants_tools && lacks.contains(&Lack::Tools);
+            if no_tools {
+                // 自動の処理は、ツールで結果を書くので進められない
+                if auto {
+                    return Err(format!(
+                        "{label} はツールを使えないモデルなので、タスクを読み書きできません。ツールを使えるモデルを「設定」で選んでください"
+                    ));
+                }
+                request.tools = &[];
+            }
+            request.media = if lacks.contains(&Lack::Images) {
+                Media::None
+            } else {
+                Media::Images
+            };
+            let mut body = wire::body(wire, &request);
+            if no_tools {
+                if let Some(Value::String(system)) = body.pointer_mut("/messages/0/content") {
+                    system.push_str(NO_TOOLS_NOTE);
+                }
+            }
+            if wire == Wire::Ollama {
+                local::fit_context(&mut body, context);
+            }
+            if !auto {
+                let notices: Vec<(Lack, String)> = [
+                    (
+                        no_tools,
+                        Lack::Tools,
+                        format!("{label} はツールを使えないので、アプリを操作せずに答えます"),
+                    ),
+                    (
+                        has_images && lacks.contains(&Lack::Images),
+                        Lack::Images,
+                        format!("{label} は画像を読めないので、画像は置いた場所だけを伝えます"),
+                    ),
+                ]
+                .into_iter()
+                .filter(|(on, _, _)| *on)
+                .map(|(_, lack, text)| (lack, text))
+                .collect();
+                this.update(cx, |s, cx| {
+                    for (lack, text) in notices {
+                        if s.lack_noticed.insert(lack) {
+                            s.items.push(Item::Notice(text.into()));
+                            cx.notify();
+                        }
+                    }
+                })
+                .map_err(gone)?;
+            }
+            let (post, url, headers) = (
+                config.post.clone(),
+                endpoint.url.clone(),
+                endpoint.headers.clone(),
+            );
+            let response = cx
+                .background_executor()
+                .spawn(async move { post(&url, &headers, &body) })
+                .await;
+            match response {
+                Ok(response) => return wire::parse(wire, &response).map(|reply| (wire, reply)),
+                Err(error) => match local::lacking(&error) {
+                    // 受け付けないと分かったものを外して、送り直す。モデルごとに覚える
+                    Some(lack) if !lacks.contains(&lack) => {
+                        lacks.insert(lack);
+                        let model = model.clone();
+                        this.update(cx, |s, _| {
+                            s.local_lacks.entry(model).or_default().insert(lack);
+                        })
+                        .map_err(gone)?;
+                    }
+                    _ => return Err(error),
+                },
+            }
+        }
     }
 
     /// ツールを 1 つ実行する。外側の `Err` は、チャットがなくなったとき。
@@ -4312,7 +4911,7 @@ impl Session {
             let (tx, rx) = async_channel::bounded(1);
             let asked = this
                 .update(cx, |s, cx| {
-                    if s.auto_run || name == tools::RUN_SHELL && s.allow_shell {
+                    if s.auto_run || s.allowed.iter().any(|t| t == name) {
                         return false;
                     }
                     let text = if app_tool {
@@ -4328,6 +4927,7 @@ impl Session {
                     s.pending = Some(Pending {
                         text: text.into(),
                         shell: name == tools::RUN_SHELL,
+                        tool: name.to_owned(),
                         answer: tx,
                     });
                     cx.notify();
@@ -4804,6 +5404,56 @@ fn without_fetch_notes(store: &malakt_core::Store, args: &Value) -> Value {
 
 fn gone<E>(_: E) -> String {
     String::new()
+}
+
+/// 手元で見つけたサーバーと、使うサーバーとそのモデルの一覧。
+type LocalFound = (Vec<Server>, Result<(Server, Vec<CatalogModel>), String>);
+
+/// ローカル AI のサーバーを探し、使うサーバーとそのモデルの一覧を返す。見つけたサーバーも返す。
+/// `url` が空なら、手元で最初に見つけたサーバーを使う。
+fn find_local(config: &AiConfig, url: &str) -> LocalFound {
+    let key = match keys::lookup(&*config.keys, Provider::Local, |n| (config.env)(n)) {
+        Ok(found) => found.map(|(key, _)| key).unwrap_or_default(),
+        Err(e) => return (Vec::new(), Err(e)),
+    };
+    let probe: local::Probe = &*config.probe;
+    let found = local::detect(probe, &key);
+    let url = local::normalize(url);
+    let server = if url.is_empty() {
+        found.first().cloned().ok_or_else(|| {
+            "手元に AI のサーバーが見つかりません。Ollama や LM Studio などを起動するか、サーバーの URL を入れてください".to_owned()
+        })
+    } else {
+        found
+            .iter()
+            .find(|s| s.base == url)
+            .cloned()
+            .or_else(|| local::identify(probe, &url, &key))
+            .ok_or_else(|| {
+                format!("{url} に AI のサーバーが見つかりません。サーバーが動いているか、URL を確認してください")
+            })
+    };
+    let result = server.and_then(|server| {
+        let post = config.post.clone();
+        let post = move |url: &str, headers: &[(&'static str, String)], body: &Value| {
+            post(url, headers, body)
+        };
+        let catalog = local::catalog(probe, &post, &server, &key).map_err(|e| {
+            format!(
+                "{} のモデルの一覧を読めませんでした: {e}",
+                server.kind.label()
+            )
+        })?;
+        if catalog.is_empty() {
+            return Err(format!(
+                "{}（{}）に、チャットに使えるモデルが入っていません",
+                server.kind.label(),
+                server.address()
+            ));
+        }
+        Ok((server, catalog))
+    });
+    (found, result)
 }
 
 fn fetch_catalog(config: &AiConfig, url: &str) -> Result<Vec<CatalogModel>, String> {

@@ -1554,6 +1554,7 @@ impl Store {
             task_defaults: self.all_task_defaults()?,
             task_alerts: self.all_task_alerts()?,
             ai_rules: self.all_ai_rules()?,
+            ai_bots: self.ai_bots()?,
             repeats: self.all_repeats()?,
             schedules: self.all_schedules()?,
             schedule_files: self.all_schedule_files()?,
@@ -1650,6 +1651,9 @@ impl Store {
         }
         for r in &data.ai_rules {
             crate::rules::save(&tx, r)?;
+        }
+        for b in &data.ai_bots {
+            crate::bots::save(&tx, b)?;
         }
         for r in &data.repeats {
             // 同じタスクに別の繰り返しがあれば、取り込む側にする

@@ -8,7 +8,7 @@
 //! モデルを変えるときは `MALAKT_CACHE_MODEL=claude-haiku-5-5` のように指定する。
 
 use malakt_ai::provider::{self, Effort, Provider};
-use malakt_ai::wire::{self, Request, Turn, Wire};
+use malakt_ai::wire::{self, Media, Request, Turn, Wire};
 use malakt_ai::{http, tools};
 use serde_json::Value;
 
@@ -37,6 +37,8 @@ fn the_second_request_reads_the_cache() {
             tools: &definitions,
             fallbacks: endpoint.fallbacks,
             prefix_ttl: endpoint.prefix_ttl,
+            media: Media::All,
+            plan: false,
         };
         let body = wire::body(Wire::Messages, &request);
         let response = http::post_json(&endpoint.url, &endpoint.headers, &body).unwrap();

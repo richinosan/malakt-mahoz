@@ -1,4 +1,4 @@
-//! AI チャットとシェルの画面。メインのウィンドウの右にも、別のウィンドウにも出せる。
+//! AI bot とシェルの画面。メインのウィンドウの右にも、別のウィンドウにも出せる。
 
 use std::ops::Range;
 use std::time::Duration;
@@ -33,6 +33,7 @@ use crate::shell_keys;
 use crate::state::{DropTarget, MainView};
 use crate::term::{self, TermPane};
 use crate::{ClearShell, StopAi};
+use malakt_core::bots::AiBot;
 
 /// 参照する寸法を、画面全体の拡大率に合わせる。
 const fn px(value: f32) -> Pixels {
@@ -1859,10 +1860,17 @@ impl AiPane {
         let provider = session.provider;
         let model = session.model().to_owned();
         let effort = session.effort;
+        // ローカル AI は、サーバーに入っているモデルをそのまま並べる
+        let installed: &[SharedString] = if provider == Provider::Local {
+            &session.listed
+        } else {
+            &[]
+        };
         let models: Vec<SharedString> = provider
             .models()
             .iter()
             .map(|m| SharedString::from(*m))
+            .chain(installed.iter().cloned())
             .chain((!model.is_empty()).then(|| SharedString::from(model.clone())))
             .fold(Vec::new(), |mut all, m| {
                 if !all.contains(&m) {
@@ -1989,6 +1997,105 @@ impl AiPane {
         pills
     }
 
+    /// 上のバーの、今の bot。押すと bot を選ぶメニューが開く。考えている間は bot が動く。
+    fn bot_picker(
+        &self,
+        bot: Option<&AiBot>,
+        bots: &[AiBot],
+        busy: bool,
+        pane: WeakEntity<AiPane>,
+        cx: &App,
+    ) -> AnyElement {
+        let theme = cx.theme().clone();
+        let name: SharedString = bot.map_or("AI bot".into(), |b| b.name.clone().into());
+        let face = match bot {
+            Some(bot) => crate::bot_look::avatar("ai-bot-face", bot, px(16.), busy, cx),
+            None => app_icon("bot").size_4().into_any_element(),
+        };
+        let current = bot.map(|b| b.id.clone());
+        let bots: Vec<AiBot> = bots.to_vec();
+        button("ai-bot-pick")
+            .ghost()
+            .small()
+            .min_w_0()
+            .child(
+                row()
+                    .min_w_0()
+                    .gap_2()
+                    .child(face)
+                    .child(div().min_w_0().truncate().text_sm().child(name))
+                    .child(
+                        app_icon("chevron-down")
+                            .xsmall()
+                            .text_color(theme.muted_foreground),
+                    ),
+            )
+            .tooltip("bot を選ぶ")
+            .pop_menu_at(Anchor::TopLeft, move |mut menu, _, _| {
+                for (ix, bot) in bots.iter().enumerate() {
+                    let pane = pane.clone();
+                    let look = bot.clone();
+                    let id = bot.id.clone();
+                    menu = menu.item(
+                        PopupMenuItem::element(move |_, cx| {
+                            row()
+                                .gap_2()
+                                .child(crate::bot_look::avatar(
+                                    ("ai-bot-menu-face", ix),
+                                    &look,
+                                    px(16.),
+                                    false,
+                                    cx,
+                                ))
+                                .child(look.name.clone())
+                        })
+                        .checked(current.as_deref() == Some(bot.id.as_str()))
+                        .on_click(move |_, _, cx| {
+                            // チャットを閉じたあとなら、反映する先がない
+                            let _ = pane.update(cx, |this, cx| {
+                                this.session.update(cx, |s, cx| s.set_bot(&id, cx));
+                            });
+                        }),
+                    );
+                }
+                let (add, edit) = (pane.clone(), pane.clone());
+                let editing = current.clone();
+                menu.separator()
+                    .item(
+                        PopupMenuItem::new("bot を追加")
+                            .icon(app_icon("plus"))
+                            .on_click(move |_, window, cx| {
+                                let _ = add.update(cx, |this, cx| {
+                                    this.settings_open = true;
+                                    // メニューから足した bot と、そのまま話せるようにする
+                                    if let Some(bot) =
+                                        this.settings.update(cx, |s, cx| s.add_bot(window, cx))
+                                    {
+                                        this.session.update(cx, |s, cx| s.set_bot(&bot.id, cx));
+                                    }
+                                    cx.notify();
+                                });
+                            }),
+                    )
+                    .item(
+                        PopupMenuItem::new("bot を編集")
+                            .icon(app_icon("square-pen"))
+                            .on_click(move |_, window, cx| {
+                                let editing = editing.clone();
+                                let _ = edit.update(cx, |this, cx| {
+                                    this.settings_open = true;
+                                    if let Some(id) = editing {
+                                        this.settings
+                                            .update(cx, |s, cx| s.open_bot(&id, window, cx));
+                                    }
+                                    cx.notify();
+                                });
+                            }),
+                    )
+            })
+            .into_any_element()
+    }
+
     fn render_chat(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let session = self.session.read(cx);
@@ -2002,6 +2109,17 @@ impl AiPane {
         };
         let mode = self.mode;
         let pane = cx.entity().downgrade();
+        // 今の会話の bot。読めなければ、名前だけの bot として出し、上に理由を出す
+        let (bot, bots, bot_error) = {
+            let store = &self.db.read(cx).store;
+            match session
+                .current_bot(cx)
+                .and_then(|bot| Ok((bot, store.ai_bots().map_err(|e| e.to_string())?)))
+            {
+                Ok((bot, bots)) => (Some(bot), bots, None),
+                Err(error) => (None, Vec::new(), Some(SharedString::from(error))),
+            }
+        };
         let close = (mode == PaneMode::Docked).then(|| {
             feel::gloss(icon_button("ai-close", "x", "閉じる").on_click(cx.listener(
                 |this, _, _, cx| {
@@ -2076,15 +2194,14 @@ impl AiPane {
                 .children(close)
         } else {
             bar()
-                .child(app_icon("sparkles").size_4())
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .pl_1()
-                        .text_sm()
-                        .child("AI チャット"),
-                )
+                .pl_1()
+                .child(div().flex_1().min_w_0().flex().child(self.bot_picker(
+                    bot.as_ref(),
+                    &bots,
+                    busy,
+                    pane.clone(),
+                    cx,
+                )))
                 .children(badge)
                 .child(feel::gloss(
                     icon_button("ai-chats", "history", "会話の一覧").on_click(cx.listener(
@@ -2155,11 +2272,40 @@ impl AiPane {
         if session.shown_items().is_empty() {
             let has_key = matches!(session.key, KeyState::Present { .. });
             let mut start = col().id("ai-empty").items_center().gap_2().pt_10().child(
-                div()
-                    .text_color(theme.muted_foreground)
-                    .child(app_icon("sparkles").size_8()),
+                div().text_color(theme.muted_foreground).child(match &bot {
+                    Some(bot) => crate::bot_look::avatar("ai-empty-bot", bot, px(32.), true, cx),
+                    None => app_icon("bot").size_8().into_any_element(),
+                }),
             );
-            if has_key {
+            // ローカル AI は、サーバーとモデルが見つかってから使える
+            let local = session.provider == malakt_ai::Provider::Local;
+            let local_ready = session.local_server.is_some();
+            if local && !local_ready && session.local_searching {
+                start = start.child(Spinner::new().small());
+            } else if local && !local_ready {
+                start = start
+                    .child(feel::gloss(
+                        button("ai-empty-server")
+                            .icon(app_icon("server"))
+                            .label("サーバーを設定")
+                            .outline()
+                            .small()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.settings_open = true;
+                                cx.notify();
+                            })),
+                    ))
+                    .when_some(session.local_error.clone(), |d, error| {
+                        d.child(
+                            div()
+                                .max_w(px(320.))
+                                .text_xs()
+                                .text_center()
+                                .text_color(theme.danger)
+                                .child(error),
+                        )
+                    });
+            } else if has_key {
                 // 押すと、そのまま送る
                 for (ix, text) in SUGGESTIONS.into_iter().enumerate() {
                     start = start.child(feel::gloss(
@@ -2226,7 +2372,13 @@ impl AiPane {
                     .text_xs()
                     .text_color(theme.muted_foreground)
                     .px_1()
-                    .child(Spinner::new().small())
+                    .child(match &bot {
+                        // 考えている間は、bot が動く
+                        Some(bot) => {
+                            crate::bot_look::avatar("ai-working-bot", bot, px(16.), true, cx)
+                        }
+                        None => Spinner::new().small().into_any_element(),
+                    })
                     .child(if session.command_running() {
                         "コマンドを実行中"
                     } else {
@@ -2261,18 +2413,15 @@ impl AiPane {
                                 }),
                             ),
                         ))
-                        .when(pending.shell, |d| {
-                            d.child(feel::gloss(
-                                button("ai-allow-always")
-                                    .label("このチャットでは常に許可")
-                                    .small()
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.session.update(cx, |s, cx| {
-                                            s.answer(Decision::AllowShellAlways, cx)
-                                        });
-                                    })),
-                            ))
-                        })
+                        .child(feel::gloss(
+                            button("ai-allow-always")
+                                .label("このチャットでは常に許可")
+                                .small()
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.session
+                                        .update(cx, |s, cx| s.answer(Decision::AllowAlways, cx));
+                                })),
+                        ))
                         .child(feel::gloss(
                             button("ai-deny")
                                 .label("拒否")
@@ -2285,7 +2434,7 @@ impl AiPane {
                 )
                 .test_support()
         });
-        let error = session.error.clone();
+        let error = session.error.clone().or(bot_error);
         let tray = self.render_tray(cx);
         let pills = self.render_pills(cx);
         let attached = self.session.read(cx).attached.clone();
@@ -2601,7 +2750,7 @@ impl AiPane {
         let title: SharedString = match self.mode {
             // タブの場所だけのウィンドウは、見ているタブの名前
             PaneMode::ShellWindow => term::shared(cx).read(cx).active_label(),
-            PaneMode::ChatWindow => "AI チャット".into(),
+            PaneMode::ChatWindow => "AI bot".into(),
             PaneMode::Docked => return None,
         };
         // OS がタイトルバーを描いているときは、そちらに任せる

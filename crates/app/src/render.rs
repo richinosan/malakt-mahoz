@@ -409,6 +409,7 @@ enum SettingKey {
     AutoUpdate,
     Export,
     Import,
+    Download(crate::download_settings::DownloadRow),
     BrowserData,
     AlertTimed,
     AlertDate,
@@ -1105,7 +1106,7 @@ fn field_label(text: &'static str, cx: &App) -> Div {
 }
 
 /// ワークスペースのアイコンの色。`None` は文字と同じ色。
-fn workspace_color(color: Option<&str>) -> Option<Hsla> {
+pub(crate) fn workspace_color(color: Option<&str>) -> Option<Hsla> {
     let hex = match color? {
         "red" => 0xe5484d,
         "orange" => 0xf76b15,
@@ -1611,10 +1612,9 @@ impl MainView {
                 this.open_workspace_schedules(&id, window, cx)
             }))
             .separator()
-            .item(item(
-                "AI チャットに添える",
-                |this, id, window, cx| this.attach_workspace_to_chat(&id, window, cx),
-            ))
+            .item(item("AI bot に添える", |this, id, window, cx| {
+                this.attach_workspace_to_chat(&id, window, cx)
+            }))
             .item(item("コピー", |this, id, _, cx| {
                 this.copy_workspace_link(&id, cx)
             }))
@@ -2532,7 +2532,7 @@ impl MainView {
                         .loading(self.ai_session.read(cx).busy)
                         .ghost()
                         .small()
-                        .tooltip("AI チャット")
+                        .tooltip("AI bot")
                         .on_click(cx.listener(|this, _, window, cx| this.toggle_ai(window, cx))),
                 ))
                 // 新しい版を取ってあるときだけ出る。閉じても同じ版に入れ替わる
@@ -2546,7 +2546,6 @@ impl MainView {
                             .on_click(cx.listener(|this, _, _, cx| this.update_now(cx))),
                     )
                 }))
-                .children(self.downloads_button(cx))
                 .child(
                     div()
                         .relative()
@@ -2586,396 +2585,6 @@ impl MainView {
                 ))
                 .children(controls),
         )
-    }
-
-    /// 上のバーの、ダウンロードのアイコン。一覧に何かあるときだけ出す。
-    /// まだ見ていない数を右上に出し、ダウンロード中は下に進み具合の線を出す。
-    fn downloads_button(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let downloads = crate::downloads::shared(cx);
-        let (empty, unseen, activity) = {
-            let d = downloads.read(cx);
-            (d.items.is_empty(), d.unseen(), d.activity())
-        };
-        if empty {
-            return None;
-        }
-        let theme = cx.theme().clone();
-        let bar = activity.map(|ratio| {
-            let track = div()
-                .absolute()
-                .left(px(6.))
-                .right(px(6.))
-                .bottom(px(3.))
-                .h(gpui_kit::px(2.))
-                .rounded_full()
-                .overflow_hidden()
-                .bg(theme.muted);
-            match ratio {
-                Some(ratio) => track.child(
-                    div()
-                        .h_full()
-                        .w(relative(ratio.max(0.04)))
-                        .rounded_full()
-                        .bg(theme.primary),
-                ),
-                None => track.child(crate::browser::loading_line(theme.primary)),
-            }
-        });
-        let anchor = self.downloads_anchor.clone();
-        Some(
-            div()
-                .relative()
-                .child(
-                    canvas(move |bounds, _, _| anchor.set(bounds), |_, _, _, _| {})
-                        .absolute()
-                        .inset_0(),
-                )
-                .child(feel::gloss(
-                    button("open-downloads")
-                        .icon(app_icon("download"))
-                        .ghost()
-                        .small()
-                        .tooltip("ダウンロード")
-                        .on_click(
-                            cx.listener(|this, _, window, cx| this.open_downloads(window, cx)),
-                        ),
-                ))
-                .children(bar)
-                .children(count_bubble(
-                    "open-downloads-count",
-                    unseen,
-                    Bubble::Bell,
-                    Some((px(-4.), px(-4.))),
-                    cx,
-                ))
-                // 新しいものが増えるたびに、アイコンを少し弾ませる
-                .with_animation(
-                    ("open-downloads-bump", unseen as usize),
-                    Animation::new(std::time::Duration::from_millis(if self.motion {
-                        360
-                    } else {
-                        1
-                    }))
-                    .with_easing(ease_in_out),
-                    move |d, t| {
-                        if unseen == 0 {
-                            return d;
-                        }
-                        d.top(px(-3. * (t * std::f32::consts::PI).sin()))
-                    },
-                )
-                .into_any_element(),
-        )
-    }
-
-    /// ダウンロードの一覧。項目を押すと、OS のファイルマネージャーでそのファイルを選んで開く。
-    fn render_downloads(&self, cx: &mut Context<Self>) -> Div {
-        let theme = cx.theme().clone();
-        let downloads = crate::downloads::shared(cx);
-        let (items, error) = {
-            let d = downloads.read(cx);
-            (d.items.clone(), d.error.clone())
-        };
-        let now = malakt_core::now_ms();
-        let mut list = col().gap_0p5();
-        for (ix, item) in items.iter().enumerate() {
-            let id = item.id;
-            let running = item.running();
-            let failed = matches!(item.state, crate::downloads::State::Failed { .. });
-            let gone = item.missing || failed;
-            let group = SharedString::from(format!("download-{ix}"));
-            let icon = match item.kind {
-                crate::downloads::Kind::Pdf => "file-text",
-                crate::downloads::Kind::File => file_icon(&item.name()),
-            };
-            let menu_downloads = downloads.clone();
-            let open = !running && !gone;
-            let url = item.url.clone();
-            let detail_color = if failed {
-                theme.danger
-            } else {
-                theme.muted_foreground
-            };
-            list = list.child(
-                row()
-                    .id(("download", ix))
-                    .test_support()
-                    .group(group.clone())
-                    .gap_3()
-                    .px_2()
-                    .py_1p5()
-                    .rounded(feel::md())
-                    .when(open, |d| {
-                        d.cursor_pointer()
-                            .lit(theme.secondary_hover, cx)
-                            .sunk(theme.accent, cx)
-                    })
-                    .child(
-                        div()
-                            .flex_none()
-                            .size_8()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(feel::md())
-                            .bg(theme.muted)
-                            .text_color(if gone {
-                                theme.muted_foreground
-                            } else {
-                                theme.foreground
-                            })
-                            .child(app_icon(if gone { "file-x" } else { icon }).size_4()),
-                    )
-                    .child(
-                        col()
-                            .flex_1()
-                            .min_w_0()
-                            .gap_0p5()
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .truncate()
-                                    .when(gone, |d| {
-                                        d.line_through().text_color(theme.muted_foreground)
-                                    })
-                                    .child(item.name()),
-                            )
-                            .when(running, |d| {
-                                let track = div()
-                                    .h(gpui_kit::px(3.))
-                                    .w_full()
-                                    .rounded_full()
-                                    .overflow_hidden()
-                                    .bg(theme.muted);
-                                d.child(match item.ratio() {
-                                    Some(ratio) => track.child(
-                                        div()
-                                            .h_full()
-                                            .w(relative(ratio.max(0.02)))
-                                            .rounded_full()
-                                            .bg(theme.primary),
-                                    ),
-                                    None => {
-                                        track.child(crate::browser::loading_line(theme.primary))
-                                    }
-                                })
-                            })
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .truncate()
-                                    .text_color(detail_color)
-                                    .child(item.detail(now)),
-                            ),
-                    )
-                    // 乗せたときに出すボタン。「フォルダで表示」と「一覧から削除」は同じ形と動き
-                    .when(open, |d| {
-                        let downloads = downloads.clone();
-                        d.child(
-                            div()
-                                .opacity(0.)
-                                .group_hover(group.clone(), |s| s.opacity(1.))
-                                .child(
-                                    round_icon(
-                                        ("download-reveal", ix),
-                                        "folder-open",
-                                        "フォルダで表示",
-                                        move |_, _, cx| {
-                                            downloads.update(cx, |d, cx| d.reveal(id, cx))
-                                        },
-                                        cx,
-                                    )
-                                    .test_support(),
-                                ),
-                        )
-                    })
-                    .when(!running, |d| {
-                        let downloads = downloads.clone();
-                        d.child(
-                            div()
-                                .opacity(0.)
-                                .group_hover(group.clone(), |s| s.opacity(1.))
-                                .child(
-                                    remove_x(
-                                        ("download-remove", ix),
-                                        "一覧から削除",
-                                        move |_, _, cx| {
-                                            downloads.update(cx, |d, cx| d.remove(id, cx))
-                                        },
-                                        cx,
-                                    )
-                                    .test_support(),
-                                ),
-                        )
-                    })
-                    .when(open, |d| {
-                        let downloads = downloads.clone();
-                        d.on_click(move |_, _, cx| downloads.update(cx, |d, cx| d.reveal(id, cx)))
-                    })
-                    .right_menu(move |menu, _, _| {
-                        let (reveal, opener, remover) = (
-                            menu_downloads.clone(),
-                            menu_downloads.clone(),
-                            menu_downloads.clone(),
-                        );
-                        let url = url.clone();
-                        menu.item(
-                            PopupMenuItem::new("フォルダで表示")
-                                .icon(app_icon("folder-open"))
-                                .disabled(!open)
-                                .on_click(move |_, _, cx| {
-                                    reveal.update(cx, |d, cx| d.reveal(id, cx))
-                                }),
-                        )
-                        .item(
-                            PopupMenuItem::new("開く")
-                                .icon(app_icon("external-link"))
-                                .disabled(!open)
-                                .on_click(move |_, _, cx| {
-                                    opener.update(cx, |d, cx| d.open_file(id, cx))
-                                }),
-                        )
-                        .item(
-                            PopupMenuItem::new("リンクをコピー")
-                                .icon(app_icon("link"))
-                                .disabled(!crate::browser::is_web(&url))
-                                .on_click(move |_, _, cx| {
-                                    cx.write_to_clipboard(ClipboardItem::new_string(url.clone()))
-                                }),
-                        )
-                        .separator()
-                        .item(
-                            PopupMenuItem::new("一覧から削除")
-                                .icon(app_icon("x"))
-                                .disabled(running)
-                                .on_click(move |_, _, cx| {
-                                    remover.update(cx, |d, cx| d.remove(id, cx))
-                                }),
-                        )
-                    }),
-            );
-        }
-        let any_done = items.iter().any(|i| !i.running());
-        let body = col()
-            .gap_3()
-            .min_h_0()
-            .when_some(error, |d, error| {
-                d.child(
-                    div()
-                        .id("downloads-error")
-                        .text_sm()
-                        .text_color(theme.danger)
-                        .child(error)
-                        .test_support(),
-                )
-            })
-            .when(items.is_empty(), |d| {
-                d.child(
-                    div()
-                        .text_sm()
-                        .text_color(theme.muted_foreground)
-                        .child("ダウンロードはまだありません。"),
-                )
-            })
-            .child(
-                div()
-                    .id("downloads-scroll")
-                    .flex_1()
-                    .min_h_0()
-                    .max_h(px(420.))
-                    .overflow_y_scrollbar()
-                    .child(list),
-            )
-            .child(
-                row()
-                    .gap_1()
-                    .justify_end()
-                    .child(feel::gloss(
-                        button("downloads-folder")
-                            .icon(app_icon("folder-open"))
-                            .ghost()
-                            .small()
-                            .tooltip("ダウンロードのフォルダを開く")
-                            .on_click(|_, _, cx| {
-                                cx.open_with_system(&crate::downloads::download_dir(cx))
-                            }),
-                    ))
-                    .when(any_done, |d| {
-                        let downloads = downloads.clone();
-                        d.child(feel::gloss(
-                            button("downloads-clear")
-                                .icon(app_icon("list-x"))
-                                .ghost()
-                                .small()
-                                .tooltip("一覧を消去")
-                                .on_click(move |_, _, cx| {
-                                    downloads.update(cx, |d, cx| d.clear(cx))
-                                }),
-                        ))
-                    }),
-            );
-        self.downloads_bubble(body, cx)
-    }
-
-    /// ダウンロードの一覧を、Chrome と同じく上のバーのボタンのすぐ下に出す。外を押すか Esc で閉じる。
-    /// ボタンをまだ描いていないとき（場所が分からないとき）は、ほかのダイアログと同じく真ん中に出す。
-    fn downloads_bubble(&self, body: Div, cx: &mut Context<Self>) -> Div {
-        let anchor = self.downloads_anchor.get();
-        if anchor.size.width <= px(0.) {
-            return self.dialog("ダウンロード", body, cx);
-        }
-        let theme = cx.theme().clone();
-        let t = self.dialog_t.get();
-        let panel =
-            col()
-                .id("dialog")
-                .occlude()
-                .w(px(380.))
-                .p_3()
-                .gap_2()
-                .when(t < 1., |d| d.relative().top(px(-8.) * (1. - t)))
-                .map(|d| {
-                    if crate::theme::floating_now() {
-                        d.rounded(px(16.))
-                    } else {
-                        d.rounded(feel::lg())
-                    }
-                })
-                .border_1()
-                .border_color(theme.border)
-                .bg(theme.background)
-                .elevate(Elevation::High, cx)
-                .child(
-                    row()
-                        .child(div().flex_1().text_base().child("ダウンロード"))
-                        .child(feel::gloss(
-                            button("dialog-close")
-                                .icon(app_icon("x"))
-                                .tooltip("閉じる")
-                                .ghost()
-                                .small()
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.close_top_dialog(window, cx)
-                                })),
-                        )),
-                )
-                .child(body)
-                .test_support();
-        // 外の所は暗くしない（Chrome のダウンロードと同じ）。押して離すまでがここなら閉じる
-        let backdrop = div()
-            .id("dialog-backdrop")
-            .size_full()
-            .when(t < 1., |d| d.opacity(t))
-            .occlude()
-            .on_click(cx.listener(|this, _, window, cx| this.dismiss_outside(window, cx)))
-            .child(
-                anchored()
-                    .position(point(anchor.right(), anchor.bottom() + px(6.)))
-                    .anchor(Anchor::TopRight)
-                    .snap_to_window_with_margin(px(8.))
-                    .child(panel),
-            );
-        div().absolute().inset_0().child(backdrop)
     }
 
     // ---- ホーム ----
@@ -7325,7 +6934,7 @@ impl MainView {
         } else {
             detail
         };
-        // AI チャット
+        // AI bot
         let chat_panel = chat.then(|| {
             panel()
                 .w(px(46.))
@@ -7507,6 +7116,7 @@ impl MainView {
                 continue;
             }
             let section = match row_kind.group() {
+                crate::ai_settings::AiGroup::Bots => Section::AiBots,
                 crate::ai_settings::AiGroup::Model => Section::AiModel,
                 crate::ai_settings::AiGroup::Behavior => Section::AiBehavior,
                 crate::ai_settings::AiGroup::Rules => Section::AiRules,
@@ -7676,7 +7286,7 @@ impl MainView {
                 ),
             ]);
         }
-        // macOS のリマインダーは「同期」のアカウントに並べる。ここは Windows の通知の予約
+        // macOS のリマインダーは「連携と同期」のアカウントに並べる。ここは Windows の通知の予約
         if let Some(name) =
             crate::reminders::setting_label(cx).filter(|_| !crate::reminders::is_app(cx))
         {
@@ -7815,6 +7425,27 @@ impl MainView {
             ),
             Setting::new(
                 Section::Data,
+                SettingKey::Download(crate::download_settings::DownloadRow::Folder),
+                "ダウンロードの保存先",
+                Some("アプリ内ブラウザのダウンロードと PDF の保存先"),
+                list(&["ダウンロード", "保存先", "フォルダー", "PDF"]),
+            ),
+            Setting::new(
+                Section::Data,
+                SettingKey::Download(crate::download_settings::DownloadRow::Ask),
+                "保存先を毎回確認する",
+                None,
+                list(&["ダウンロード", "保存先", "確認", "名前を付けて保存", "PDF"]),
+            ),
+            Setting::new(
+                Section::Data,
+                SettingKey::Download(crate::download_settings::DownloadRow::Subfolder),
+                "日付のフォルダ",
+                Some("保存先の中に日付のフォルダを作る（yyyy・yy・mm・dd が日付、/ で区切ると入れ子）"),
+                list(&["ダウンロード", "日付", "フォルダー", "形式", "yyyy-mm-dd", "PDF"]),
+            ),
+            Setting::new(
+                Section::Data,
                 SettingKey::BrowserData,
                 "ブラウザのデータ",
                 Some("アプリ内ブラウザのログインの情報とキャッシュ"),
@@ -7849,6 +7480,19 @@ impl MainView {
                 return edge(div().py_3())
                     .child(self.layout_tiles(cx))
                     .into_any_element();
+            }
+            SettingKey::Download(row_kind) => {
+                let control = self
+                    .download_settings
+                    .update(cx, |settings, cx| settings.control(row_kind, cx));
+                return setting_line(
+                    item.name,
+                    item.note,
+                    control,
+                    row_kind.wide(),
+                    first,
+                    &theme,
+                );
             }
             SettingKey::Ai(row_kind) => {
                 let control = self
@@ -7965,6 +7609,7 @@ impl MainView {
                 SettingKey::Themes
                 | SettingKey::Layouts
                 | SettingKey::Ai(_)
+                | SettingKey::Download(_)
                 | SettingKey::AlertTimed
                 | SettingKey::AlertDate
                 | SettingKey::People
@@ -8719,7 +8364,7 @@ impl MainView {
         )
     }
 
-    /// レイアウトの見本。一覧・詳細・AI チャットの並び方を、小さい図で出す。
+    /// レイアウトの見本。一覧・詳細・AI bot の並び方を、小さい図で出す。
     fn layout_tiles(&self, cx: &mut Context<Self>) -> Div {
         let theme = cx.theme().clone();
         let chat = self.ai_docked(cx);
@@ -9620,24 +9265,34 @@ impl MainView {
                             )),
                     )
                     .child(
+                        Checkbox::new("ai-promo-never")
+                            .py(px(4.))
+                            .my(px(-4.))
+                            .label("今後は表示しない")
+                            .checked(self.ai_promo_never)
+                            .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                                this.set_ai_promo_never(*checked, cx)
+                            })),
+                    )
+                    // ボタンが 3 つあるので、チェックとは別の行で右に寄せる
+                    .child(
                         row()
                             .gap_2()
-                            .child(
-                                Checkbox::new("ai-promo-never")
-                                    .py(px(4.))
-                                    .my(px(-4.))
-                                    .label("今後は表示しない")
-                                    .checked(self.ai_promo_never)
-                                    .on_click(cx.listener(|this, checked: &bool, _, cx| {
-                                        this.set_ai_promo_never(*checked, cx)
-                                    })),
-                            )
-                            .child(div().flex_1())
+                            .justify_end()
                             .child(cancel(cx))
+                            // 手元で動かす AI なら、API キーも通信もいらない
+                            .child(feel::gloss(
+                                button("ai-promo-local")
+                                    .icon(app_icon("server"))
+                                    .label("ローカル AI を使う")
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.use_local_ai_from_promo(window, cx)
+                                    })),
+                            ))
                             .child(feel::gloss(
                                 button("ai-promo-open")
                                     .icon(app_icon("sparkles"))
-                                    .label("AI チャットを開く")
+                                    .label("AI bot を開く")
                                     .primary()
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.open_ai_from_promo(window, cx)
@@ -9933,7 +9588,6 @@ impl MainView {
                         });
                 self.dialog("通知", body, cx)
             }
-            Modal::Downloads => self.render_downloads(cx),
             Modal::BulkDue => {
                 let body = col()
                     .gap_3()
@@ -10464,7 +10118,7 @@ impl MainView {
     /// 一覧と詳細の分け方。`own_width` は一覧と詳細を置く場所の幅。
     ///
     /// 詳細は一覧の右に並ぶカラムで、一覧はその残りの幅に収まる。幅が足りないときは、
-    /// 詳細を `PANEL_MIN` まで狭めて一覧に `LIST_ROOM` を残す（1920 幅の画面で AI チャットを
+    /// 詳細を `PANEL_MIN` まで狭めて一覧に `LIST_ROOM` を残す（1920 幅の画面で AI bot を
     /// 右に並べても、一覧・詳細・チャットの 3 つが並ぶ）。詳細を `PANEL_MIN` にしても一覧に
     /// `LIST_MIN` を残せない狭さでは、詳細が全面を使う（`None`）。返すのは詳細の幅。
     fn panel_split(&self, own_width: Pixels) -> Option<Pixels> {
@@ -10688,7 +10342,7 @@ impl MainView {
 
 impl Render for MainView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // 「アカウントを追加」を Esc や外側で閉じたら、調べている途中の結果を捨てる。
+        // 「連携を追加」を Esc や外側で閉じたら、調べている途中の結果を捨てる。
         // 前に描いたときに出していたかで見る（開いた直後は、まだ `sub_modal` に入っていない）
         if self.sub_seen == Some(SubModal::AddAccount)
             && self.sub_modal != Some(SubModal::AddAccount)
@@ -10704,7 +10358,7 @@ impl Render for MainView {
         if std::mem::take(&mut self.ai_promo_focus) {
             self.focus.focus(window, cx);
         }
-        // 落とせる場所を覚え直す。描かれなかったペインと AI チャットの場所は残さない
+        // 落とせる場所を覚え直す。描かれなかったペインと AI bot の場所は残さない
         self.drops.begin(crate::drops::ROOT);
         for child in self.children.values() {
             child.read(cx).drops.clear();
@@ -10714,7 +10368,7 @@ impl Render for MainView {
         }
         let theme = cx.theme().clone();
         let window_width = window.viewport_size().width;
-        // 右に AI チャットを置いた分、タスクの画面は狭くなる
+        // 右に AI bot を置いた分、タスクの画面は狭くなる
         let ai = self.ai_docked(cx).then(|| self.ai_pane.clone()).flatten();
         let ai_width = ai.as_ref().and_then(|_| {
             let s = self.ai_session.read(cx);
@@ -10793,7 +10447,7 @@ impl Render for MainView {
 
         // 詳細は右から入って右へ抜け、ダイアログはふわっと出る
         let panel = self.render_panel_motion(panel_width, window, cx);
-        // 幅が足りないときは、AI チャットを上のバーの下で、タスクの画面の右に重ねる
+        // 幅が足りないときは、AI bot を上のバーの下で、タスクの画面の右に重ねる
         let (ai_beside, ai_over) = if ai_width.is_some() {
             (ai, None)
         } else {
@@ -10812,11 +10466,6 @@ impl Render for MainView {
                 }),
             )
             .on_action(cx.listener(|this, _: &ToggleAi, window, cx| this.toggle_ai(window, cx)))
-            .on_action(
-                cx.listener(|this, _: &crate::shell_keys::ShowDownloads, window, cx| {
-                    this.open_downloads(window, cx)
-                }),
-            )
             .on_action(cx.listener(|this, _: &PanePrefix, _, cx| {
                 this.pane_prefix = true;
                 cx.notify();
@@ -10855,7 +10504,7 @@ impl Render for MainView {
                     .items_stretch()
                     .when(wide, |d| d.child(self.render_side(cx)))
                     .child(
-                        // 上のバーの下に、タスクの画面と AI チャットを横に並べる
+                        // 上のバーの下に、タスクの画面と AI bot を横に並べる
                         row()
                             .flex_1()
                             .min_h_0()
@@ -10873,7 +10522,7 @@ impl Render for MainView {
                                     .min_w_0()
                                     .h_full()
                                     .relative()
-                                    // 浮かせたカードはタスクの画面だけを包み、右に並べた AI チャットの
+                                    // 浮かせたカードはタスクの画面だけを包み、右に並べた AI bot の
                                     // 手前で角丸の端として閉じる。分けているときは、ペインごとにカードを置く
                                     .when(
                                         crate::theme::floating(cx)

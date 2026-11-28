@@ -1,4 +1,4 @@
-//! AI の設定。「設定」のウィンドウ（モデル・動作・GitHub のカテゴリ）と、AI チャットのペインの
+//! AI の設定。「設定」のウィンドウ（モデル・動作・GitHub のカテゴリ）と、AI bot のペインの
 //! 設定の両方に、同じ行を出す。どちらも自分の入力欄を持つので、1 つずつ作る。
 
 use crate::press::button;
@@ -20,6 +20,7 @@ use crate::feel::{self, Lit};
 use crate::render::app_icon;
 use crate::shadow::{Elevate, Elevation};
 
+mod bots;
 mod rules;
 mod schedules;
 
@@ -42,6 +43,7 @@ fn col() -> Div {
 /// AI の設定のまとまり。「設定」のウィンドウでは、左のカテゴリ 1 つずつになる。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AiGroup {
+    Bots,
     Model,
     Behavior,
     Rules,
@@ -50,7 +52,8 @@ pub enum AiGroup {
 }
 
 impl AiGroup {
-    pub const ALL: [AiGroup; 5] = [
+    pub const ALL: [AiGroup; 6] = [
+        AiGroup::Bots,
         AiGroup::Model,
         AiGroup::Behavior,
         AiGroup::Rules,
@@ -60,6 +63,7 @@ impl AiGroup {
 
     pub fn label(self) -> &'static str {
         match self {
+            AiGroup::Bots => "bot",
             AiGroup::Model => "モデル",
             AiGroup::Behavior => "動作",
             AiGroup::Rules => "ルール",
@@ -72,10 +76,14 @@ impl AiGroup {
 /// AI の設定の 1 行。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AiRow {
+    Bots,
     Service,
+    /// ローカル AI のサーバー
+    Server,
     Model,
     Effort,
     Coordinator,
+    ChatGpt,
     Key,
     AutoRun,
     Rules,
@@ -90,9 +98,12 @@ pub enum AiRow {
 }
 
 impl AiRow {
-    pub const ALL: [AiRow; 15] = [
+    pub const ALL: [AiRow; 18] = [
+        AiRow::Bots,
         AiRow::Service,
+        AiRow::Server,
         // キーはサービスごとなので、サービスのすぐ下に置く
+        AiRow::ChatGpt,
         AiRow::Key,
         AiRow::Model,
         AiRow::Effort,
@@ -111,9 +122,14 @@ impl AiRow {
 
     pub fn group(self) -> AiGroup {
         match self {
-            AiRow::Service | AiRow::Model | AiRow::Effort | AiRow::Coordinator | AiRow::Key => {
-                AiGroup::Model
-            }
+            AiRow::Bots => AiGroup::Bots,
+            AiRow::Service
+            | AiRow::Server
+            | AiRow::Model
+            | AiRow::Effort
+            | AiRow::Coordinator
+            | AiRow::ChatGpt
+            | AiRow::Key => AiGroup::Model,
             AiRow::AutoRun | AiRow::Arrange | AiRow::Track | AiRow::Shell => AiGroup::Behavior,
             AiRow::Rules => AiGroup::Rules,
             AiRow::Schedules => AiGroup::Schedules,
@@ -125,10 +141,13 @@ impl AiRow {
 
     pub fn name(self) -> &'static str {
         match self {
+            AiRow::Bots => "bot",
             AiRow::Service => "サービス",
+            AiRow::Server => "サーバー",
             AiRow::Model => "モデル",
             AiRow::Effort => "考える深さ",
             AiRow::Coordinator => "振り分けのモデル",
+            AiRow::ChatGpt => "ChatGPT アカウント",
             AiRow::Key => "API キー",
             AiRow::AutoRun => "オート実行",
             AiRow::Rules => "ルール",
@@ -147,6 +166,7 @@ impl AiRow {
         Some(match self {
             AiRow::Coordinator => "考え中に送ったメッセージを、続きか並列かに振り分ける",
             AiRow::AutoRun => "コマンド実行とタスク削除を確認なしで行う",
+            AiRow::Bots => "名前・インストラクション・アイコン・動き",
             AiRow::Rules => "AI がいつも従う指示",
             AiRow::Schedules => {
                 "決まった時刻に新しいタスクを作り、AI への指示があれば AI が実行する"
@@ -165,9 +185,14 @@ impl AiRow {
     /// 検索で当たる、名前と補足のほかの言葉。
     pub fn words(self) -> &'static str {
         match self {
-            AiRow::Service => "AI Claude OpenCode Cursor プロバイダー",
+            AiRow::Bots => "AI bot ボット キャラクター 名前 インストラクション 指示 アイコン 動き アニメーション 記憶 覚えたこと",
+            AiRow::Service => "AI Claude OpenCode Cursor プロバイダー ローカル Ollama LM Studio",
+            AiRow::Server => {
+                "AI ローカル Ollama LM Studio llama.cpp vLLM LocalAI Jan URL ポート localhost"
+            }
             AiRow::Model => "AI",
             AiRow::Effort => "AI 考える",
+            AiRow::ChatGpt => "AI ChatGPT OpenAI サインイン ログイン プラン SSO",
             AiRow::Key => "AI キー 鍵",
             AiRow::Shell => "ターミナル シェル",
             AiRow::Account => "gh ログイン",
@@ -183,7 +208,9 @@ impl AiRow {
     pub fn wide(self) -> bool {
         matches!(
             self,
-            AiRow::Service
+            AiRow::Bots
+                | AiRow::Service
+                | AiRow::Server
                 | AiRow::Model
                 | AiRow::Rules
                 | AiRow::Schedules
@@ -195,8 +222,12 @@ impl AiRow {
     pub fn shown(self, cx: &App) -> bool {
         let session = ai::shared(cx).read(cx);
         match self {
+            AiRow::Server => session.provider == Provider::Local,
             AiRow::Effort => session.provider.supports_effort(),
             AiRow::Coordinator => session.provider != Provider::Cursor,
+            AiRow::ChatGpt => session.provider == Provider::OpenAi,
+            // ChatGPT のアカウントでサインインしている間は、API キーを使わない
+            AiRow::Key => !session.on_chatgpt_plan(),
             AiRow::WatchMinutes | AiRow::WatchInstruction => session.watch.enabled,
             _ => true,
         }
@@ -207,11 +238,25 @@ impl AiRow {
 pub struct AiSettings {
     session: Entity<Session>,
     key_input: Entity<InputState>,
+    /// ローカル AI のサーバーの URL。
+    local_input: Entity<InputState>,
+    /// キーの入力欄が、任意のキー（ローカル AI）の案内になっている。
+    key_optional: bool,
     /// 保存済みの API キーを、新しいキーに変えている。
     key_editing: bool,
     model_input: Entity<InputState>,
     /// 定期チェックの指示。
     watch_input: Entity<TextareaState>,
+    /// 開いている（中身を変えている）bot。
+    pub bot_open: Option<String>,
+    bot_name: Entity<InputState>,
+    bot_text: Entity<TextareaState>,
+    /// bot のアイコンを探す欄。
+    bot_icon_query: Entity<InputState>,
+    /// bot のアイコンを選ぶところを開いている。
+    bot_icons_open: bool,
+    /// bot を保存できなかった理由。
+    bots_error: Option<SharedString>,
     /// ルールの一覧で見ている場所。`None` はグローバル（すべてのワークスペース）。
     pub rules_scope: Option<String>,
     /// 開いている（名前と本文を書いている）ルール。
@@ -238,7 +283,18 @@ pub struct AiSettings {
 impl AiSettings {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let session = ai::shared(cx);
-        let key_input = cx.new(|cx| InputState::new(window, cx).masked(true));
+        let optional = !session.read(cx).provider.needs_key();
+        let key_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .masked(true)
+                .placeholder(if optional { "任意" } else { "" })
+        });
+        let local_url = session.read(cx).local_url.clone();
+        let local_input = cx.new(|cx| {
+            let mut state = InputState::new(window, cx).placeholder("自動で探す");
+            state.set_value(local_url, window, cx);
+            state
+        });
         let model_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("検索、またはモデル ID を入力"));
         let instruction = session.read(cx).watch.instruction.clone();
@@ -247,6 +303,12 @@ impl AiSettings {
             state.set_value(instruction, window, cx);
             state
         });
+        let bot_name = cx.new(|cx| InputState::new(window, cx));
+        let bot_text = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .placeholder("例: 敬語で短く答える。タスクの期限には厳しく")
+        });
+        let bot_icon_query = cx.new(|cx| InputState::new(window, cx).placeholder("検索"));
         let rule_name = cx.new(|cx| InputState::new(window, cx));
         let rule_body = cx.new(|cx| {
             TextareaState::new(window, cx).placeholder("例: PR のタスクは優先度を高にする")
@@ -284,9 +346,38 @@ impl AiSettings {
                 },
             ),
             cx.observe(&session, |_, _, cx| cx.notify()),
+            // ローカル AI のキーは任意。サービスに合わせて、入力欄の案内を変える
+            cx.observe_in(&session, window, |this, session, window, cx| {
+                let optional = !session.read(cx).provider.needs_key();
+                if this.key_optional != optional {
+                    this.key_optional = optional;
+                    let placeholder = if optional { "任意" } else { "" };
+                    this.key_input
+                        .update(cx, |s, cx| s.set_placeholder(placeholder, window, cx));
+                }
+            }),
             cx.observe(&crate::term::shared(cx), |_, _, cx| cx.notify()),
             // AI や外のエージェントがルールを変えたら、一覧を読み直す
             cx.observe(&crate::db::shared(cx), |_, _, cx| cx.notify()),
+            cx.subscribe_in(&bot_name, window, |this, _, event: &InputEvent, _, cx| {
+                if matches!(event, InputEvent::PressEnter { .. } | InputEvent::Blur) {
+                    this.save_bot_name(cx);
+                }
+            }),
+            cx.subscribe_in(&bot_text, window, |this, _, event: &InputEvent, _, cx| {
+                if matches!(event, InputEvent::Blur) {
+                    this.save_bot_text(cx);
+                }
+            }),
+            cx.subscribe_in(
+                &bot_icon_query,
+                window,
+                |_, _, event: &InputEvent, _, cx| {
+                    if matches!(event, InputEvent::Change) {
+                        cx.notify();
+                    }
+                },
+            ),
             cx.subscribe_in(&rule_name, window, |this, _, event: &InputEvent, _, cx| {
                 if matches!(event, InputEvent::PressEnter { .. } | InputEvent::Blur) {
                     this.save_rule_name(cx);
@@ -297,6 +388,15 @@ impl AiSettings {
                     this.save_rule_body(cx);
                 }
             }),
+            cx.subscribe_in(
+                &local_input,
+                window,
+                |this, _, event: &InputEvent, _, cx| {
+                    if matches!(event, InputEvent::PressEnter { .. } | InputEvent::Blur) {
+                        this.save_local_url(cx);
+                    }
+                },
+            ),
             cx.subscribe_in(
                 &key_input,
                 window,
@@ -335,9 +435,17 @@ impl AiSettings {
         Self {
             session,
             key_input,
+            local_input,
+            key_optional: optional,
             key_editing: false,
             model_input,
             watch_input,
+            bot_open: None,
+            bot_name,
+            bot_text,
+            bot_icon_query,
+            bot_icons_open: false,
+            bots_error: None,
             rules_scope: None,
             rule_open: None,
             rule_name,
@@ -360,7 +468,9 @@ impl AiSettings {
         if self.model_open {
             self.model_input.update(cx, |s, cx| s.focus(window, cx));
             self.session.update(cx, |s, cx| {
-                if s.listed.is_empty() && matches!(s.key, KeyState::Present { .. }) {
+                // ローカル AI は、開くたびに読み直す（入れたばかりのモデルも出す）
+                let local = s.provider == Provider::Local && !s.local_searching;
+                if local || (s.listed.is_empty() && matches!(s.key, KeyState::Present { .. })) {
                     s.fetch_models(cx);
                 }
             });
@@ -374,6 +484,107 @@ impl AiSettings {
         watch.instruction = self.watch_input.read(cx).value().to_string();
         change(&mut watch);
         self.session.update(cx, |s, cx| s.set_watch(watch, cx));
+    }
+
+    /// 入力欄の URL を、ローカル AI のサーバーにする。空なら手元のポートを探す。
+    fn save_local_url(&mut self, cx: &mut Context<Self>) {
+        let url = self.local_input.read(cx).value().to_string();
+        self.session.update(cx, |s, cx| s.set_local_url(&url, cx));
+    }
+
+    /// 見つけたサーバーを選ぶ。
+    fn pick_server(&mut self, base: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.local_input
+            .update(cx, |s, cx| s.set_value(base.to_owned(), window, cx));
+        self.session.update(cx, |s, cx| s.set_local_url(base, cx));
+    }
+
+    /// ChatGPT のアカウントの行。サインインしていればメールアドレスとサインアウト、
+    /// していなければ「ChatGPT で続ける」。
+    fn chatgpt_row(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let session = self.session.read(cx);
+        let error = session.chatgpt_error.clone();
+        let errors = |d: Div| {
+            d.children(error.clone().map(|e| {
+                div()
+                    .id("ai-chatgpt-error")
+                    .text_xs()
+                    .text_color(theme.danger)
+                    .child(e)
+                    .test_support()
+            }))
+        };
+        if matches!(session.key, KeyState::Unknown) {
+            return div()
+                .id("ai-chatgpt-state")
+                .text_sm()
+                .text_color(theme.muted_foreground)
+                .child("確認中…")
+                .test_support()
+                .into_any_element();
+        }
+        let body = match (&session.chatgpt, &session.key) {
+            (ai::ChatGptSignIn::Waiting(_), _) => row()
+                .gap_1()
+                .child(
+                    button("ai-chatgpt-waiting")
+                        .label("ブラウザでサインイン中")
+                        .outline()
+                        .small()
+                        .loading(true)
+                        .disabled(true)
+                        // 待っている間は押せない。やめるときは ✕
+                        .on_click(|_, _, _| {}),
+                )
+                .child(feel::gloss(
+                    icon_button("ai-chatgpt-cancel", "x", "キャンセル").on_click(cx.listener(
+                        |this, _, _, cx| this.session.update(cx, |s, _| s.cancel_chatgpt()),
+                    )),
+                )),
+            (
+                chatgpt,
+                KeyState::Present {
+                    masked,
+                    source: Source::ChatGpt,
+                },
+            ) => row()
+                .gap_1()
+                .child(
+                    row()
+                        .id("ai-chatgpt-state")
+                        .gap_2()
+                        .pr_1()
+                        .child(
+                            app_icon("circle-user-round")
+                                .size_4()
+                                .text_color(theme.muted_foreground),
+                        )
+                        .child(div().text_sm().child(masked.clone()))
+                        .tooltip(|window, cx| {
+                            gpui_kit::component::tooltip::Tooltip::new("ChatGPT のプランを使用中")
+                                .build(window, cx)
+                        })
+                        .test_support(),
+                )
+                .child(feel::gloss(
+                    icon_button("ai-chatgpt-sign-out", "log-out", "サインアウト")
+                        .disabled(matches!(chatgpt, ai::ChatGptSignIn::SigningOut))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.session.update(cx, |s, cx| s.sign_out_chatgpt(cx));
+                        })),
+                )),
+            _ => row().child(
+                button("ai-chatgpt-sign-in")
+                    .label("ChatGPT で続ける")
+                    .outline()
+                    .small()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.session.update(cx, |s, cx| s.sign_in_chatgpt(cx));
+                    })),
+            ),
+        };
+        errors(col().items_end().gap_1().child(body)).into_any_element()
     }
 
     fn save_key(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -477,6 +688,76 @@ impl AiSettings {
                 }
                 providers.into_any_element()
             }
+            AiRow::Server => {
+                // 見つけたサーバーと、URL で選んだサーバー
+                let mut servers: Vec<malakt_ai::local::Server> = session.local_found.clone();
+                if let Some(used) = &session.local_server {
+                    if !servers.contains(used) {
+                        servers.push(used.clone());
+                    }
+                }
+                let mut chips = row().gap_1().flex_wrap();
+                for (ix, server) in servers.into_iter().enumerate() {
+                    let active = session.local_server.as_ref() == Some(&server);
+                    let address: SharedString = server.address().to_owned().into();
+                    let base = server.base.clone();
+                    chips = chips.child(
+                        chip(("ai-local-server", ix), server.kind.label(), active, cx)
+                            .tooltip(move |window, cx| {
+                                gpui_kit::component::tooltip::Tooltip::new(address.clone())
+                                    .build(window, cx)
+                            })
+                            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                                this.pick_server(&base, window, cx)
+                            }))
+                            .test_support(),
+                    );
+                }
+                let searching = session.local_searching;
+                col()
+                    .w_full()
+                    .gap_2()
+                    .child(
+                        row()
+                            .gap_1()
+                            .child(
+                                Input::new(&self.local_input)
+                                    .id("ai-local-url")
+                                    .aria_label("サーバーの URL")
+                                    .small()
+                                    .flex_1(),
+                            )
+                            .child(if searching {
+                                div()
+                                    .size_6()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .child(gpui_kit::component::spinner::Spinner::new().small())
+                                    .into_any_element()
+                            } else {
+                                feel::gloss(
+                                    icon_button("ai-local-search", "refresh-cw", "探し直す")
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.session.update(cx, |s, cx| s.search_local(cx));
+                                        })),
+                                )
+                                .into_any_element()
+                            }),
+                    )
+                    .child(chips)
+                    .when_some(session.local_error.clone(), |d, error| {
+                        d.child(
+                            div()
+                                .id("ai-local-error")
+                                .text_xs()
+                                .text_color(theme.danger)
+                                .child(error)
+                                .test_support(),
+                        )
+                    })
+                    .into_any_element()
+            }
             AiRow::Model => {
                 let model_open = self.model_open;
                 let button = feel::gloss(
@@ -572,10 +853,13 @@ impl AiSettings {
                     })
                     .into_any_element()
             }
+            AiRow::ChatGpt => self.chatgpt_row(cx),
             AiRow::Key => {
                 // 保存済みなら、伏せたキーを 1 行で出す。入力欄は、未設定のときと変えるときだけ
                 let saved = match &session.key {
-                    KeyState::Present { masked, source } if !self.key_editing => {
+                    KeyState::Present { masked, source }
+                        if !self.key_editing && *source != Source::None =>
+                    {
                         Some((masked.clone(), *source))
                     }
                     _ => None,
@@ -592,10 +876,12 @@ impl AiSettings {
                 if let Some((masked, source)) = saved {
                     let (icon, place): (&str, SharedString) = match source {
                         Source::Keychain => ("key-round", "OS のキーチェーン".into()),
-                        Source::Env => (
+                        Source::Env | Source::None => (
                             "variable",
                             format!("環境変数 {}", provider.env_var()).into(),
                         ),
+                        // ChatGPT のアカウントは「ChatGPT アカウント」の行に出す（この行は出さない）
+                        Source::ChatGpt => ("circle-user-round", "ChatGPT アカウント".into()),
                     };
                     return row()
                         .gap_1()
@@ -629,7 +915,8 @@ impl AiSettings {
                         .into_any_element();
                 }
                 // 保存済みのキーがあるときだけ、変えるのをキャンセルできる
-                let editing = self.key_editing && matches!(session.key, KeyState::Present { .. });
+                let editing = self.key_editing
+                    && matches!(&session.key, KeyState::Present { source, .. } if *source != Source::None);
                 // 読めなかった理由と保存できなかった理由は、入力欄のすぐ下に出す
                 let errors: Vec<SharedString> = [
                     match &session.key {
@@ -699,6 +986,7 @@ impl AiSettings {
                     this.session.update(cx, |s, cx| s.set_auto_run(on, cx));
                 }))
                 .into_any_element(),
+            AiRow::Bots => self.bots_editor(cx),
             AiRow::Rules => self.rules_editor(true, cx),
             AiRow::Schedules => self.schedules_editor(true, cx),
             AiRow::Arrange => Switch::new("ai-arrange")
@@ -884,10 +1172,23 @@ impl AiSettings {
                                 .truncate()
                                 .child(session.model_label(&m)),
                         )
+                        // ローカル AI のモデルは、ツールと画像を使えるかを印で出す
+                        .children(session.model_abilities(&m).into_iter().map(|(icon, _)| {
+                            app_icon(icon).size_3p5().text_color(theme.muted_foreground)
+                        }))
                         .tooltip({
-                            let id = m.clone();
+                            let abilities: Vec<&str> = session
+                                .model_abilities(&m)
+                                .into_iter()
+                                .map(|(_, name)| name)
+                                .collect();
+                            let tip: SharedString = if abilities.is_empty() {
+                                m.clone()
+                            } else {
+                                format!("{m}（{}）", abilities.join("・")).into()
+                            };
                             move |window, cx| {
-                                gpui_kit::component::tooltip::Tooltip::new(id.clone())
+                                gpui_kit::component::tooltip::Tooltip::new(tip.clone())
                                     .build(window, cx)
                             }
                         })
@@ -933,7 +1234,9 @@ impl AiSettings {
                             .flex_1(),
                     )
                     .when(
-                        provider == Provider::Claude || provider.catalog_url().is_some(),
+                        provider == Provider::Claude
+                            || provider.catalog_url().is_some()
+                            || session.on_chatgpt_plan(),
                         |d| {
                             d.child(feel::gloss(
                                 icon_button("ai-fetch-models", "refresh-cw", "モデル一覧を更新")
@@ -1013,7 +1316,7 @@ impl AiSettings {
             )
     }
 
-    /// AI チャットのペインに出す設定。まとまりごとに見出しとカードを並べる。
+    /// AI bot のペインに出す設定。まとまりごとに見出しとカードを並べる。
     pub fn render_all(&self, cx: &mut Context<Self>) -> Div {
         let theme = cx.theme().clone();
         let mut all = col().gap_4();

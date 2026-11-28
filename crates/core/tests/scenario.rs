@@ -423,6 +423,7 @@ fn archive_layout_is_portable() {
     assert_eq!(
         names,
         [
+            "data/ai_bots.json",
             "data/ai_rules.json",
             "data/attachments.json",
             "data/changes.json",

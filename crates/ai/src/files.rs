@@ -914,12 +914,21 @@ pub fn size_label(size: u64) -> String {
 /// 中身をこのリクエストに入れるか（新しいものから、合計の上限まで）。
 /// 戻り値は `turns` の順に、ファイルの順に並ぶ。
 pub fn inline_flags<'a>(groups: impl DoubleEndedIterator<Item = &'a [FilePart]>) -> Vec<Vec<bool>> {
+    inline_flags_where(groups, |_| true)
+}
+
+/// [`inline_flags`] の、送り先が読める種類（`allow`）のファイルだけを入れるもの。
+/// 読めない種類は上限に数えない。
+pub fn inline_flags_where<'a>(
+    groups: impl DoubleEndedIterator<Item = &'a [FilePart]>,
+    allow: impl Fn(&FilePart) -> bool,
+) -> Vec<Vec<bool>> {
     let mut out: Vec<Vec<bool>> = Vec::new();
     let (mut bytes, mut parts) = (0usize, 0usize);
     for group in groups.rev() {
         let mut flags = vec![false; group.len()];
         for (ix, part) in group.iter().enumerate().rev() {
-            let Some(data) = &part.data else {
+            let Some(data) = part.data.as_ref().filter(|_| allow(part)) else {
                 continue;
             };
             if parts < MAX_INLINE_PARTS && bytes + data.len() <= MAX_INLINE_BYTES {

@@ -184,9 +184,11 @@ mod tests {
         ("shortcuts.rs", include_str!("shortcuts.rs")),
         ("history_view.rs", include_str!("history_view.rs")),
         ("browser.rs", include_str!("browser.rs")),
+        ("downloads_ui.rs", include_str!("downloads_ui.rs")),
         ("date_pick.rs", include_str!("date_pick.rs")),
         ("pomodoro.rs", include_str!("pomodoro.rs")),
         ("timing_view.rs", include_str!("timing_view.rs")),
+        ("caldav_settings.rs", include_str!("caldav_settings.rs")),
     ];
 
     /// コメントを除いたコードの行。

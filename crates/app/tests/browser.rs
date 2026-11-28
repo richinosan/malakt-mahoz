@@ -6,7 +6,7 @@ use std::collections::VecDeque;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
-use gpui_kit::test::{ClickOptions, TestQueryExt, TestWindowExt};
+use gpui_kit::test::{ClickOptions, TestEventExt, TestQueryExt, TestWindowExt};
 use gpui_kit::{
     point, px, size, AnyWindowHandle, AppContext, Bounds, Entity, MouseButton, Pixels, Point,
     RenderImage, TestAppContext, WindowBounds, WindowOptions,
@@ -17,7 +17,9 @@ use malakt_ai::Provider;
 use malakt_core::{Store, TaskDraft};
 use malakt_mahoz::ai::{self, ShellPlace};
 use malakt_mahoz::browser::{self, Engine, Event, Factory, Setup, Shot, Zoom};
+use malakt_mahoz::download_rules::{self, Rules};
 use malakt_mahoz::downloads::{self, Note};
+use malakt_mahoz::print_setup::{self, Margins, Pages, PrintSetup};
 use malakt_mahoz::term::{self, Terms};
 use malakt_mahoz::{AiConfig, AiPane, MainView, Modal, Nav};
 use serde_json::{json, Value};
@@ -35,6 +37,8 @@ struct Fake {
     shots: Cell<usize>,
     /// 作っている途中の PDF。テストが終わったことにする。
     pdf: RefCell<Option<browser::PdfDone>>,
+    /// PDF を作るときに受け取った設定と、選んだページ。
+    pdf_setup: RefCell<Vec<(PrintSetup, Option<Vec<u32>>)>>,
 }
 
 struct FakeEngine(Rc<Fake>);
@@ -112,11 +116,21 @@ impl Engine for FakeEngine {
         self.0.calls.borrow_mut().push("print".into());
         Ok(())
     }
-    fn save_pdf(&self, path: &std::path::Path, done: browser::PdfDone) -> Result<(), String> {
+    fn save_pdf(
+        &self,
+        path: &std::path::Path,
+        setup: &PrintSetup,
+        pages: Option<&[u32]>,
+        done: browser::PdfDone,
+    ) -> Result<(), String> {
         self.0
             .calls
             .borrow_mut()
             .push(format!("pdf {}", path.display()));
+        self.0
+            .pdf_setup
+            .borrow_mut()
+            .push((setup.clone(), pages.map(<[u32]>::to_vec)));
         *self.0.pdf.borrow_mut() = Some(done);
         Ok(())
     }
@@ -246,6 +260,8 @@ fn start(cx: &mut TestAppContext, store: Store) -> World {
                 .ok_or_else(|| "テストに返事が用意されていません".into())
         }),
         get: Arc::new(|url, _| Err(format!("テストでは {url} を読めません"))),
+        probe: Arc::new(|url, _| Err(format!("テストでは {url} に接続しません"))),
+        form: Arc::new(|url, _| Err(format!("テストでは {url} に送れません"))),
         gh: Arc::new(|_| Spec::shell("exit 1")),
         slack: Arc::new(|_| Vec::new()),
         whoami: Arc::new(|_| vec![Spec::shell("exit 1")]),
@@ -1192,11 +1208,11 @@ fn ctrl_f_finds_in_the_page(cx: &mut TestAppContext) {
     });
 }
 
-/// ページの中で押したアプリのキー（全画面、AI チャット）も、いつもどおりに働く。
+/// ページの中で押したアプリのキー（全画面、AI bot）も、いつもどおりに働く。
 #[gpui_kit::test]
 fn app_keys_work_inside_the_page(cx: &mut TestAppContext) {
     let world = start(cx, Store::open_in_memory().unwrap());
-    let (window, view) = open(cx);
+    let (window, _view) = open(cx);
     ui(cx, window, |window, cx| window.click("ai-toggle", cx));
     let tab = open_page(cx, window, "https://example.com/a");
     let fullscreen = |cx: &mut TestAppContext| {
@@ -1210,21 +1226,21 @@ fn app_keys_work_inside_the_page(cx: &mut TestAppContext) {
     assert!(fullscreen(cx), "全画面になる");
     // ダウンロードの一覧（Chrome と同じく Ctrl+J、macOS は ⌥⌘L）
     press_in_page(cx, &world, window, tab, key("ctrl-j", "cmd-alt-l"));
-    assert_eq!(
-        cx.update(|cx| view.read(cx).modal.clone()),
-        Modal::Downloads,
-        "ダウンロードの一覧が出る"
-    );
+    ui(cx, window, |window, _| {
+        assert!(
+            window.find("downloads").visible(),
+            "ダウンロードの一覧が出る"
+        )
+    });
     ui(cx, window, |window, cx| window.press("escape", cx));
-    assert_eq!(cx.update(|cx| view.read(cx).modal.clone()), Modal::None);
-    // AI チャットのキー（macOS の ⌘J）。AI チャットを閉じるとページも隠れるので、最後に確かめる
+    ui(cx, window, |window, _| {
+        assert!(window.try_find("downloads").is_none())
+    });
+    // AI bot のキー（macOS の ⌘J）。AI bot を閉じるとページも隠れるので、最後に確かめる
     #[cfg(target_os = "macos")]
     press_in_page(cx, &world, window, tab, "cmd-j");
     #[cfg(target_os = "macos")]
-    assert!(
-        !cx.update(|cx| view.read(cx).ai_open),
-        "AI チャットを閉じる"
-    );
+    assert!(!cx.update(|cx| view.read(cx).ai_open), "AI bot を閉じる");
 }
 
 /// 小さなウィンドウのバーを右クリックすると、ほかのウィンドウと同じメニューが出る。
@@ -1492,6 +1508,56 @@ fn the_small_window_follows_the_page(cx: &mut TestAppContext) {
     );
 }
 
+/// `pages` ページの PDF を書く。`embedded` でなければ、埋め込んでいない Helvetica を使う。
+fn write_pdf(path: &std::path::Path, pages: usize, embedded: bool) {
+    use lopdf::{dictionary, Document, Object, Stream};
+    let mut doc = Document::with_version("1.7");
+    let pages_id = doc.new_object_id();
+    let mut font = dictionary! {
+        "Type" => "Font",
+        "Subtype" => "TrueType",
+        "BaseFont" => "Helvetica",
+    };
+    if embedded {
+        let file = doc.add_object(Stream::new(dictionary! {}, b"font".to_vec()));
+        let descriptor = doc.add_object(dictionary! {
+            "Type" => "FontDescriptor",
+            "FontName" => "Helvetica",
+            "FontFile2" => file,
+        });
+        font.set("FontDescriptor", descriptor);
+    }
+    let font = doc.add_object(font);
+    let resources = doc.add_object(dictionary! { "Font" => dictionary! { "F1" => font } });
+    let kids: Vec<Object> = (0..pages)
+        .map(|i| {
+            let content = doc.add_object(Stream::new(
+                dictionary! {},
+                format!("BT /F1 12 Tf 72 720 Td ({}) Tj ET", i + 1).into_bytes(),
+            ));
+            doc.add_object(dictionary! {
+                "Type" => "Page",
+                "Parent" => pages_id,
+                "Contents" => content,
+            })
+            .into()
+        })
+        .collect();
+    doc.objects.insert(
+        pages_id,
+        Object::Dictionary(dictionary! {
+            "Type" => "Pages",
+            "Kids" => kids,
+            "Count" => pages as i64,
+            "Resources" => resources,
+            "MediaBox" => vec![0.into(), 0.into(), 595.into(), 842.into()],
+        }),
+    );
+    let catalog = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+    doc.trailer.set("Root", catalog);
+    doc.save(path).unwrap();
+}
+
 /// 最後に PDF に保存した場所。
 fn last_pdf(fake: &Fake) -> String {
     fake.calls
@@ -1508,7 +1574,7 @@ fn last_pdf(fake: &Fake) -> String {
 #[gpui_kit::test]
 fn downloads_show_in_the_header_with_a_count(cx: &mut TestAppContext) {
     let world = start(cx, Store::open_in_memory().unwrap());
-    let (window, view) = open(cx);
+    let (window, _view) = open(cx);
     ui(cx, window, |window, cx| window.click("ai-toggle", cx));
     let tab = open_page(cx, window, "https://example.com/files");
     ui(cx, window, |window, _| {
@@ -1522,6 +1588,7 @@ fn downloads_show_in_the_header_with_a_count(cx: &mut TestAppContext) {
         Event::Download(Note::Started {
             url: url.clone(),
             path: path.clone(),
+            ask: false,
         }),
     );
     world.send(
@@ -1543,17 +1610,26 @@ fn downloads_show_in_the_header_with_a_count(cx: &mut TestAppContext) {
     assert_eq!(item(cx).ratio(), Some(0.25));
     // 一覧を開くと、見たことになる
     ui(cx, window, |window, cx| window.click("open-downloads", cx));
-    assert_eq!(
-        cx.update(|cx| view.read(cx).modal.clone()),
-        Modal::Downloads
-    );
     ui(cx, window, |window, _| {
         assert!(window.find(("download", 0usize)).visible());
         assert!(window.try_find("open-downloads-count").is_none());
-        // Chrome と同じく、一覧はボタンのすぐ下に、右の端をそろえて出る
+        // Chrome と同じく、ボタンはブラウザの画面のツールバーの右の端にあり、
+        // 一覧はボタンのすぐ下に、右の端をそろえて出る
+        let browser = window.find("browser").bounds();
         let button = window.find("open-downloads").bounds();
-        let list = window.find("dialog").bounds();
-        assert!(list.top() >= button.bottom(), "{list:?} {button:?}");
+        let url = window.find("browser-url").bounds();
+        assert!(browser.contains(&button.center()), "{browser:?} {button:?}");
+        assert!(button.left() > url.right(), "{url:?} {button:?}");
+        assert!(
+            browser.right() - button.right() < gpui_kit::px(16.),
+            "{browser:?} {button:?}"
+        );
+        let list = window.find("downloads").bounds();
+        // 出てくる間は少し上から下りてくる
+        assert!(
+            list.top() + gpui_kit::px(8.) >= button.bottom(),
+            "{list:?} {button:?}"
+        );
         assert!(
             list.top() - button.bottom() < gpui_kit::px(16.),
             "{list:?} {button:?}"
@@ -1624,6 +1700,7 @@ fn a_failed_download_says_so(cx: &mut TestAppContext) {
         Event::Download(Note::Started {
             url: url.clone(),
             path: "/nowhere/a.zip".into(),
+            ask: false,
         }),
     );
     world.send(
@@ -1688,12 +1765,12 @@ fn ctrl_p_saves_the_page_as_a_pdf(cx: &mut TestAppContext) {
         assert!(window.find("open-downloads-count").visible())
     });
     let done = fake.pdf.borrow_mut().take().expect("PDF を作っている");
-    std::fs::write(&saved, b"%PDF-1.4").unwrap();
+    write_pdf(&saved, 1, true);
     done(Ok(()));
     cx.run_until_parked();
     let item = cx.update(|cx| downloads::shared(cx).read(cx).items[0].clone());
     assert_eq!(item.state, downloads::State::Done);
-    assert_eq!(item.received, 8);
+    assert_eq!(item.received, std::fs::metadata(&saved).unwrap().len());
     // 同じ名前があれば、番号を付ける
     press_in_page(cx, &world, window, tab, key("ctrl-p", "cmd-p"));
     ui(cx, window, |window, cx| {
@@ -1709,4 +1786,347 @@ fn ctrl_p_saves_the_page_as_a_pdf(cx: &mut TestAppContext) {
     });
     let call = last_pdf(&fake);
     assert!(call.ends_with("週次_ 報告.pdf"), "{call}");
+}
+
+/// メニューの項目を押す。
+fn pick(cx: &mut TestAppContext, window: AnyWindowHandle, label: &str) {
+    ui(cx, window, |window, cx| {
+        let center = window.find_by_label(label).bounds().center();
+        window.pointer_move(center, None, cx);
+        window.pointer_down(center, MouseButton::Left, cx);
+        window.pointer_up(center, MouseButton::Left, cx);
+    });
+}
+
+/// PDF を作る準備: ページを開き、ダウンロードのフォルダを決める。
+fn pdf_page(cx: &mut TestAppContext) -> (World, AnyWindowHandle, u64, Rc<Fake>, tempfile::TempDir) {
+    let world = start(cx, Store::open_in_memory().unwrap());
+    let (window, _view) = open(cx);
+    ui(cx, window, |window, cx| window.click("ai-toggle", cx));
+    let tab = open_page(cx, window, "https://example.com/report");
+    let fake = world.fake(tab);
+    let dir = tempfile::tempdir().unwrap();
+    cx.update(|cx| cx.set_global(downloads::DownloadDir(dir.path().to_owned())));
+    world.send(tab, Event::Title("報告".into()));
+    cx.run_until_parked();
+    (world, window, tab, fake, dir)
+}
+
+/// 詳細設定で余白「なし」と背景のグラフィック、レイアウト「横」を選ぶと、その設定で PDF を作る。
+/// 設定は覚えて、次に開いたときも同じ。
+#[gpui_kit::test]
+fn print_settings_reach_the_pdf_and_are_remembered(cx: &mut TestAppContext) {
+    let (world, window, tab, fake, dir) = pdf_page(cx);
+    press_in_page(cx, &world, window, tab, key("ctrl-p", "cmd-p"));
+    ui(cx, window, |window, cx| {
+        assert!(
+            window.try_find("browser-print-margins").is_none(),
+            "最初は畳んでいる"
+        );
+        window.click("browser-print-more", cx);
+    });
+    ui(cx, window, |window, cx| {
+        window.click("browser-print-margins", cx)
+    });
+    pick(cx, window, "なし");
+    ui(cx, window, |window, cx| {
+        window.click("browser-print-layout", cx)
+    });
+    pick(cx, window, "横");
+    ui(cx, window, |window, cx| {
+        window.click("browser-print-backgrounds", cx);
+    });
+    ui(cx, window, |window, cx| {
+        window.click("browser-print-submit", cx)
+    });
+    let (setup, pages) = fake.pdf_setup.borrow().last().cloned().unwrap();
+    assert_eq!(setup.margins, Margins::None);
+    assert!(setup.landscape);
+    assert!(setup.backgrounds);
+    assert_eq!(pages, None);
+    let saved = dir.path().join("報告.pdf");
+    let done = fake.pdf.borrow_mut().take().unwrap();
+    write_pdf(&saved, 1, true);
+    done(Ok(()));
+    cx.run_until_parked();
+    let item = cx.update(|cx| downloads::shared(cx).read(cx).items[0].clone());
+    assert_eq!(item.state, downloads::State::Done);
+    // 覚えた設定で開く（詳細設定も開いたまま）
+    let stored = cx.update(|cx| {
+        malakt_mahoz::db::shared(cx)
+            .read(cx)
+            .store
+            .setting(print_setup::SETTING)
+            .unwrap()
+    });
+    assert!(stored.is_some(), "設定を保存している");
+    press_in_page(cx, &world, window, tab, key("ctrl-p", "cmd-p"));
+    ui(cx, window, |window, _| {
+        assert!(window.find("browser-print-margins").visible());
+    });
+    ui(cx, window, |window, cx| {
+        window.click("browser-print-submit", cx)
+    });
+    let (again, _) = fake.pdf_setup.borrow().last().cloned().unwrap();
+    assert_eq!(again, setup);
+}
+
+/// 奇数ページだけを選ぶと、保存したあとで偶数のページを除く。
+#[gpui_kit::test]
+fn odd_pages_are_kept_after_saving(cx: &mut TestAppContext) {
+    let (world, window, tab, fake, dir) = pdf_page(cx);
+    press_in_page(cx, &world, window, tab, key("ctrl-p", "cmd-p"));
+    ui(cx, window, |window, cx| {
+        window.click("browser-print-pages", cx)
+    });
+    pick(cx, window, "奇数ページのみ");
+    ui(cx, window, |window, cx| {
+        window.click("browser-print-submit", cx)
+    });
+    let (setup, pages) = fake.pdf_setup.borrow().last().cloned().unwrap();
+    assert_eq!(setup.pages, Pages::Odd);
+    assert_eq!(pages, None, "1 回で作り、あとで選ぶ");
+    let saved = dir.path().join("報告.pdf");
+    write_pdf(&saved, 5, true);
+    fake.pdf.borrow_mut().take().unwrap()(Ok(()));
+    cx.run_until_parked();
+    let item = cx.update(|cx| downloads::shared(cx).read(cx).items[0].clone());
+    assert_eq!(item.state, downloads::State::Done);
+    assert_eq!(print_setup::page_count(&saved).unwrap(), 3);
+}
+
+/// ページを選んで 1 枚に 2 ページ並べるときは、先にページの数を数えてから、選んだページで作り直す。
+#[cfg(not(target_os = "macos"))]
+#[gpui_kit::test]
+fn chosen_pages_side_by_side_are_counted_first(cx: &mut TestAppContext) {
+    let (world, window, tab, fake, dir) = pdf_page(cx);
+    press_in_page(cx, &world, window, tab, key("ctrl-p", "cmd-p"));
+    ui(cx, window, |window, cx| {
+        window.click("browser-print-pages", cx)
+    });
+    pick(cx, window, "カスタム");
+    ui(cx, window, |window, cx| {
+        window.click("browser-print-ranges", cx);
+    });
+    ui(cx, window, |window, cx| window.input("2-", cx));
+    ui(cx, window, |window, cx| {
+        window.click("browser-print-more", cx)
+    });
+    ui(cx, window, |window, cx| {
+        window.click("browser-print-per-sheet", cx)
+    });
+    pick(cx, window, "2");
+    ui(cx, window, |window, cx| {
+        window.click("browser-print-submit", cx)
+    });
+    let saved = dir.path().join("報告.pdf");
+    let (first, pages) = fake.pdf_setup.borrow().last().cloned().unwrap();
+    assert_eq!(first.per_sheet, 1, "数えるときは並べない");
+    assert_eq!(pages, None);
+    write_pdf(&saved, 4, true);
+    fake.pdf.borrow_mut().take().unwrap()(Ok(()));
+    cx.run_until_parked();
+    let (second, pages) = fake.pdf_setup.borrow().last().cloned().unwrap();
+    assert_eq!(second.per_sheet, 2);
+    assert_eq!(pages, Some(vec![2, 3, 4]));
+    write_pdf(&saved, 2, true);
+    fake.pdf.borrow_mut().take().unwrap()(Ok(()));
+    cx.run_until_parked();
+    let item = cx.update(|cx| downloads::shared(cx).read(cx).items[0].clone());
+    assert_eq!(item.state, downloads::State::Done);
+    assert_eq!(
+        print_setup::page_count(&saved).unwrap(),
+        2,
+        "並べたあとは選び直さない"
+    );
+}
+
+/// 読めないページの範囲では保存できず、何がおかしいかを出す。
+#[gpui_kit::test]
+fn wrong_page_ranges_cannot_be_saved(cx: &mut TestAppContext) {
+    let (world, window, tab, fake, _dir) = pdf_page(cx);
+    press_in_page(cx, &world, window, tab, key("ctrl-p", "cmd-p"));
+    ui(cx, window, |window, cx| {
+        window.click("browser-print-pages", cx)
+    });
+    pick(cx, window, "カスタム");
+    ui(cx, window, |window, cx| {
+        window.click("browser-print-ranges", cx)
+    });
+    ui(cx, window, |window, cx| window.input("3-1", cx));
+    ui(cx, window, |window, cx| {
+        assert!(window.find("browser-print-problem").visible());
+        assert_eq!(window.find("browser-print-submit").disabled(), Some(true));
+        window.press("enter", cx);
+    });
+    assert!(fake.pdf_setup.borrow().is_empty(), "保存しない");
+    ui(cx, window, |window, _| {
+        assert!(window.find("browser-print").visible())
+    });
+}
+
+/// フォントを埋め込んでいない PDF は失敗にして、ファイルを残さない。
+#[gpui_kit::test]
+fn a_pdf_without_embedded_fonts_fails(cx: &mut TestAppContext) {
+    let (world, window, tab, fake, dir) = pdf_page(cx);
+    press_in_page(cx, &world, window, tab, key("ctrl-p", "cmd-p"));
+    ui(cx, window, |window, cx| {
+        window.click("browser-print-submit", cx)
+    });
+    let saved = dir.path().join("報告.pdf");
+    write_pdf(&saved, 1, false);
+    fake.pdf.borrow_mut().take().unwrap()(Ok(()));
+    cx.run_until_parked();
+    let item = cx.update(|cx| downloads::shared(cx).read(cx).items[0].clone());
+    let downloads::State::Failed { reason } = item.state else {
+        panic!("失敗にする: {:?}", item.state);
+    };
+    assert!(
+        reason.contains("フォントを埋め込めませんでした: Helvetica"),
+        "{reason}"
+    );
+    assert!(!saved.exists());
+}
+
+/// 設定の保存先と日付のフォルダに、PDF を保存する。
+#[gpui_kit::test]
+fn pdfs_follow_the_download_rules(cx: &mut TestAppContext) {
+    let (world, window, tab, fake, _dir) = pdf_page(cx);
+    let chosen = tempfile::tempdir().unwrap();
+    let rules = Rules {
+        folder: Some(chosen.path().to_owned()),
+        ask: false,
+        subfolder: Some("yyyy/mm-dd".into()),
+    };
+    cx.update(|cx| {
+        downloads::shared(cx).update(cx, |d, cx| d.set_rules(rules.clone(), cx).unwrap())
+    });
+    press_in_page(cx, &world, window, tab, key("ctrl-p", "cmd-p"));
+    ui(cx, window, |window, cx| {
+        window.click("browser-print-submit", cx)
+    });
+    let today = download_rules::today();
+    let want = chosen
+        .path()
+        .join(download_rules::subfolder("yyyy/mm-dd", today).unwrap())
+        .join("報告.pdf");
+    assert_eq!(last_pdf(&fake), format!("pdf {}", want.display()));
+    assert!(want.parent().unwrap().is_dir(), "日付のフォルダを作る");
+    // 決まりは覚えている
+    let stored = cx.update(|cx| {
+        malakt_mahoz::db::shared(cx)
+            .read(cx)
+            .store
+            .setting(download_rules::SETTING)
+            .unwrap()
+    });
+    let stored: Rules = serde_json::from_str(&stored.unwrap()).unwrap();
+    assert_eq!(stored, rules);
+}
+
+/// 「保存先を毎回確認する」なら、PDF は選んだ場所に保存する。キャンセルなら作らない。
+#[gpui_kit::test]
+fn pdfs_ask_where_to_save(cx: &mut TestAppContext) {
+    let (world, window, tab, fake, dir) = pdf_page(cx);
+    cx.update(|cx| {
+        downloads::shared(cx).update(cx, |d, cx| {
+            d.set_rules(
+                Rules {
+                    ask: true,
+                    ..Rules::default()
+                },
+                cx,
+            )
+            .unwrap()
+        })
+    });
+    press_in_page(cx, &world, window, tab, key("ctrl-p", "cmd-p"));
+    ui(cx, window, |window, cx| {
+        window.click("browser-print-submit", cx)
+    });
+    assert!(cx.did_prompt_for_new_path());
+    cx.simulate_new_path_selection(|_| None);
+    cx.run_until_parked();
+    assert!(fake.pdf_setup.borrow().is_empty(), "キャンセルなら作らない");
+    press_in_page(cx, &world, window, tab, key("ctrl-p", "cmd-p"));
+    ui(cx, window, |window, cx| {
+        window.click("browser-print-submit", cx)
+    });
+    let target = dir.path().join("選んだ名前.pdf");
+    let chosen = target.clone();
+    cx.simulate_new_path_selection(move |_| Some(chosen));
+    cx.run_until_parked();
+    assert_eq!(last_pdf(&fake), format!("pdf {}", target.display()));
+}
+
+/// 「保存先を毎回確認する」なら、ダウンロードは終わってから選んだ場所へ移す。キャンセルなら消す。
+#[gpui_kit::test]
+fn downloads_move_to_the_chosen_place(cx: &mut TestAppContext) {
+    let world = start(cx, Store::open_in_memory().unwrap());
+    let (window, _view) = open(cx);
+    ui(cx, window, |window, cx| window.click("ai-toggle", cx));
+    let tab = open_page(cx, window, "https://example.com/files");
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("資料.zip");
+    let url = "https://example.com/資料.zip".to_owned();
+    world.send(
+        tab,
+        Event::Download(Note::Started {
+            url: url.clone(),
+            path: path.clone(),
+            ask: true,
+        }),
+    );
+    cx.run_until_parked();
+    assert!(cx.did_prompt_for_new_path());
+    let item =
+        |cx: &mut TestAppContext| cx.update(|cx| downloads::shared(cx).read(cx).items[0].clone());
+    assert!(item(cx).waiting);
+    // 選ぶ前に終わっても、選ぶまで待つ
+    std::fs::write(&path, b"zip").unwrap();
+    world.send(
+        tab,
+        Event::Download(Note::Finished {
+            url: url.clone(),
+            path: Some(path.clone()),
+            ok: true,
+        }),
+    );
+    cx.run_until_parked();
+    assert!(item(cx).running());
+    let target = dir.path().join("まとめ").join("資料 2026.zip");
+    std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+    let chosen = target.clone();
+    cx.simulate_new_path_selection(move |_| Some(chosen));
+    cx.run_until_parked();
+    let done = item(cx);
+    assert_eq!(done.state, downloads::State::Done);
+    assert_eq!(done.path, target);
+    assert!(target.is_file() && !path.exists(), "選んだ場所へ移す");
+    // キャンセルなら、ファイルを消して一覧からも消す
+    let other = dir.path().join("b.zip");
+    world.send(
+        tab,
+        Event::Download(Note::Started {
+            url: "https://example.com/b.zip".into(),
+            path: other.clone(),
+            ask: true,
+        }),
+    );
+    cx.run_until_parked();
+    cx.simulate_new_path_selection(|_| None);
+    cx.run_until_parked();
+    std::fs::write(&other, b"b").unwrap();
+    world.send(
+        tab,
+        Event::Download(Note::Finished {
+            url: "https://example.com/b.zip".into(),
+            path: Some(other.clone()),
+            ok: true,
+        }),
+    );
+    cx.run_until_parked();
+    assert!(!other.exists());
+    let items = cx.update(|cx| downloads::shared(cx).read(cx).items.clone());
+    assert_eq!(items.len(), 1, "{items:?}");
 }

@@ -62,8 +62,6 @@ pub enum Modal {
     BulkCategories,
     /// 通知の一覧
     Notices,
-    /// ブラウザのダウンロードと、PDF に保存したファイルの一覧
-    Downloads,
     /// 完了チケットの発行
     Ticket(Id),
     /// 書体と色
@@ -130,6 +128,7 @@ pub enum CustomizeSection {
     Backdrop,
     Look,
     Display,
+    AiBots,
     AiModel,
     AiBehavior,
     AiRules,
@@ -150,12 +149,13 @@ pub enum CustomizeSection {
 }
 
 impl CustomizeSection {
-    pub const ALL: [CustomizeSection; 22] = [
+    pub const ALL: [CustomizeSection; 23] = [
         CustomizeSection::Theme,
         CustomizeSection::Layout,
         CustomizeSection::Backdrop,
         CustomizeSection::Look,
         CustomizeSection::Display,
+        CustomizeSection::AiBots,
         CustomizeSection::AiModel,
         CustomizeSection::AiBehavior,
         CustomizeSection::AiRules,
@@ -182,6 +182,7 @@ impl CustomizeSection {
             CustomizeSection::Backdrop => "背景",
             CustomizeSection::Look => "色と書体",
             CustomizeSection::Display => "表示",
+            CustomizeSection::AiBots => crate::ai_settings::AiGroup::Bots.label(),
             CustomizeSection::AiModel => crate::ai_settings::AiGroup::Model.label(),
             CustomizeSection::AiBehavior => crate::ai_settings::AiGroup::Behavior.label(),
             CustomizeSection::AiRules => crate::ai_settings::AiGroup::Rules.label(),
@@ -209,6 +210,7 @@ impl CustomizeSection {
             CustomizeSection::Backdrop => "image",
             CustomizeSection::Look => "type",
             CustomizeSection::Display => "rows-3",
+            CustomizeSection::AiBots => "bot-message-square",
             CustomizeSection::AiModel => "sparkles",
             CustomizeSection::AiBehavior => "bot",
             CustomizeSection::AiRules => "scroll-text",
@@ -232,7 +234,8 @@ impl CustomizeSection {
     /// 左に並べるときの見出し。
     pub fn group(self) -> &'static str {
         match self {
-            CustomizeSection::AiModel
+            CustomizeSection::AiBots
+            | CustomizeSection::AiModel
             | CustomizeSection::AiBehavior
             | CustomizeSection::AiRules
             | CustomizeSection::AiSchedules
@@ -257,6 +260,7 @@ impl CustomizeSection {
     pub fn ai_group(self) -> Option<crate::ai_settings::AiGroup> {
         use crate::ai_settings::AiGroup;
         match self {
+            CustomizeSection::AiBots => Some(AiGroup::Bots),
             CustomizeSection::AiModel => Some(AiGroup::Model),
             CustomizeSection::AiBehavior => Some(AiGroup::Behavior),
             CustomizeSection::AiRules => Some(AiGroup::Rules),
@@ -533,7 +537,7 @@ pub struct MainView {
     /// 時間で閉じる知らせの時計。失敗（`error`）は閉じるまで出したままにする
     pub notice_clock: NoticeClock,
     pub sidebar_open: bool,
-    /// このウィンドウの右に AI チャットを出しているか。
+    /// このウィンドウの右に AI bot を出しているか。
     pub ai_open: bool,
     /// タスクの詳細で、AI の記録を開いている。
     pub ai_log_open: bool,
@@ -635,7 +639,8 @@ pub struct MainView {
     pub preview_pick: Option<PreviewPick>,
     /// 「設定」の AI のカテゴリに出す行。
     pub ai_settings: Entity<crate::ai_settings::AiSettings>,
-    /// 「設定」の「同期」。
+    pub download_settings: Entity<crate::download_settings::DownloadSettings>,
+    /// 「設定」の「連携と同期」。
     pub caldav_settings: Entity<crate::caldav_settings::CalDavSettings>,
     pub appearance_scroll: gpui_kit::ScrollHandle,
     /// 自分で保存したテーマ。
@@ -668,8 +673,6 @@ pub struct MainView {
     pub modal_seen: Option<(Modal, Option<crate::panes::PaneOverlay>)>,
     /// 今描いているダイアログの出方。0 で消えていて、1 で出きっている。
     pub dialog_t: std::cell::Cell<f32>,
-    /// 上のバーのダウンロードのボタンの場所。一覧はこの下に出す
-    pub downloads_anchor: Rc<std::cell::Cell<Bounds<Pixels>>>,
     pub today: String,
     pub inputs: Inputs,
     _subscriptions: Vec<Subscription>,
@@ -733,11 +736,14 @@ impl MainView {
 
         let ai_session = ai::shared(cx);
         let ai_settings = cx.new(|cx| crate::ai_settings::AiSettings::new(window, cx));
+        let download_settings =
+            cx.new(|cx| crate::download_settings::DownloadSettings::new(window, cx));
         let caldav_settings = cx.new(|cx| crate::caldav_settings::CalDavSettings::new(window, cx));
         let mut subs = vec![
             cx.observe(&ai_settings, |_, _, cx| cx.notify()),
+            cx.observe(&download_settings, |_, _, cx| cx.notify()),
             cx.observe(&caldav_settings, |_, _, cx| cx.notify()),
-            // 「同期」の「アカウントを追加」は、設定の上に重ねて出す
+            // 「連携と同期」の「連携を追加」は、設定の上に重ねて出す
             cx.subscribe_in(
                 &caldav_settings,
                 window,
@@ -797,13 +803,6 @@ impl MainView {
             ),
             // 新しい版を取ってきたら、上のバーに印を出す
             cx.observe(&crate::update::shared(cx), |_, _, cx| cx.notify()),
-            // ダウンロードの数と進み具合を、上のバーに出す。一覧を出している間に増えたものは、見たことにする
-            cx.observe(&crate::downloads::shared(cx), |this, downloads, cx| {
-                if this.modal == Modal::Downloads && downloads.read(cx).unseen() > 0 {
-                    downloads.update(cx, |d, cx| d.opened(cx));
-                }
-                cx.notify();
-            }),
             // CalDAV の同期で失敗したこと・知らせることを出す
             cx.subscribe(
                 &crate::caldav::shared(cx),
@@ -1182,6 +1181,7 @@ impl MainView {
             appearance_pinned: false,
             preview_pick: None,
             ai_settings,
+            download_settings,
             caldav_settings,
             appearance_scroll: gpui_kit::ScrollHandle::new(),
             own_presets: Vec::new(),
@@ -1204,7 +1204,6 @@ impl MainView {
             sub_seen: None,
             modal_seen: None,
             dialog_t: std::cell::Cell::new(1.),
-            downloads_anchor: Rc::default(),
             today: view::today(),
             inputs,
             _subscriptions: subs,
@@ -1233,7 +1232,7 @@ impl MainView {
             crate::theme::system_changed(window, cx)
         });
         cx.defer_in(window, |this, window, cx| this.deliver_notices(window, cx));
-        // 前に閉じたときの AI チャットとシェルを、最初のウィンドウで戻す
+        // 前に閉じたときの AI bot とシェルを、最初のウィンドウで戻す
         if let Some((chat_window, shell_window)) =
             this.ai_session.update(cx, |s, _| s.restore.take())
         {
@@ -3213,7 +3212,7 @@ impl MainView {
         cx.notify();
     }
 
-    /// レイアウトを使う。AI チャットを並べるレイアウトでは、チャットも開く。
+    /// レイアウトを使う。AI bot を並べるレイアウトでは、チャットも開く。
     pub fn apply_layout(
         &mut self,
         layout: &crate::theme::Layout,
@@ -3667,7 +3666,7 @@ impl MainView {
         cx.notify();
     }
 
-    /// ワークスペースへのリンクをクリップボードに入れる。AI チャットの入力欄に貼ると、そのワークスペースが付く。
+    /// ワークスペースへのリンクをクリップボードに入れる。AI bot の入力欄に貼ると、そのワークスペースが付く。
     pub fn copy_workspace_link(&mut self, id: &str, cx: &mut Context<Self>) {
         cx.write_to_clipboard(ClipboardItem::new_string(malakt_core::wslink::url(id)));
         self.show_notice("リンクをコピーしました。".into());
@@ -4839,9 +4838,9 @@ impl MainView {
         }
     }
 
-    // ---- AI チャット ----
+    // ---- AI bot ----
 
-    /// AI チャットを開く・閉じる。別ウィンドウに出しているときは、そのウィンドウを手前に出す。
+    /// AI bot を開く・閉じる。別ウィンドウに出しているときは、そのウィンドウを手前に出す。
     /// あるタスクについての会話を、チャットに開く。
     pub fn chat_about_task(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         let title = match self.db.read(cx).store.task(id) {
@@ -4857,7 +4856,7 @@ impl MainView {
         self.show_chat_input(window, cx);
     }
 
-    /// ワークスペースを AI チャットの入力欄に添えて、チャットを開く。
+    /// ワークスペースを AI bot の入力欄に添えて、チャットを開く。
     pub fn attach_workspace_to_chat(
         &mut self,
         id: &str,
@@ -4981,17 +4980,6 @@ impl MainView {
         cx.notify();
     }
 
-    /// ダウンロードの一覧を出す（上のバーのアイコン、ブラウザの Ctrl+J）。
-    pub fn open_downloads(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.db.read(cx).unlocked {
-            return;
-        }
-        self.modal = Modal::Downloads;
-        crate::downloads::shared(cx).update(cx, |d, cx| d.opened(cx));
-        self.focus.focus(window, cx);
-        cx.notify();
-    }
-
     pub fn toggle_ai(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(handle) = self.ai_session.read(cx).chat_window {
             if handle
@@ -5083,13 +5071,21 @@ impl MainView {
         cx.notify();
     }
 
-    /// AI のおすすめから、右に AI チャットを開く。キーがなければ、そこから設定に進める。
+    /// AI のおすすめから、右に AI bot を開く。キーがなければ、そこから設定に進める。
     pub fn open_ai_from_promo(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.modal = Modal::None;
         if !self.ai_docked(cx) {
             self.toggle_ai(window, cx);
         }
         cx.notify();
+    }
+
+    /// AI のおすすめから、ローカル AI に切り替えてチャットを開く。手元のサーバーを探し、
+    /// 見つけたサーバーの最初のモデルを使う。
+    pub fn use_local_ai_from_promo(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.ai_session
+            .update(cx, |s, cx| s.set_provider(malakt_ai::Provider::Local, cx));
+        self.open_ai_from_promo(window, cx);
     }
 
     /// このウィンドウの右に、チャットを出すか。
@@ -5512,7 +5508,7 @@ pub enum DropTarget {
     Row(usize),
     /// このワークスペースへ移す。`None` は未所属。
     Workspace(Option<Id>),
-    /// AI チャットの入力欄に添える。
+    /// AI bot の入力欄に添える。
     Chat,
 }
 

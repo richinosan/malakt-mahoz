@@ -38,6 +38,7 @@ pub mod actor;
 pub mod alert;
 pub mod archive;
 pub mod attachment;
+pub mod bots;
 pub mod bulk;
 pub mod caldav;
 pub mod calendar;

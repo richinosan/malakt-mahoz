@@ -99,7 +99,7 @@ pub fn bind(cx: &mut App) {
         keys.push(KeyBinding::new("ctrl-y", Redo, at));
     }
     cx.bind_keys(keys);
-    // 全画面は、AI チャットのウィンドウでも同じキーで切り替える。画面の中で受けなかったときは、前に出ているウィンドウ
+    // 全画面は、AI bot のウィンドウでも同じキーで切り替える。画面の中で受けなかったときは、前に出ているウィンドウ
     cx.on_action(|_: &ToggleFullscreen, cx| {
         if let Some(window) = cx.active_window() {
             // 閉じたばかりのウィンドウなら、切り替える先がない
@@ -134,7 +134,7 @@ pub fn help() -> Vec<(&'static str, &'static str)> {
         (pick("Ctrl+Z", "⌘Z"), "元に戻す"),
         (pick("Ctrl+Y / Ctrl+Shift+Z", "⇧⌘Z"), "やり直す"),
         ("Esc", "閉じる"),
-        (pick("Ctrl+J", "⌘J"), "AI チャット"),
+        (pick("Ctrl+J", "⌘J"), "AI bot"),
         (pick("Ctrl+,", "⌘,"), "設定"),
         (LOCK_KEY, "今すぐロック"),
         (pick("F11", "⌃⌘F"), "全画面"),
@@ -248,7 +248,7 @@ impl MainView {
             || self.pane_resize
     }
 
-    /// 一覧のキーを受けてよいか。入力欄・メニュー・AI チャットにフォーカスがあるときは受けない。
+    /// 一覧のキーを受けてよいか。入力欄・メニュー・AI bot にフォーカスがあるときは受けない。
     fn list_keys(&self, window: &Window) -> bool {
         !self.covered()
             && window

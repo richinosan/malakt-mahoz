@@ -16,6 +16,29 @@ pub enum Wire {
     Responses,
     /// Cursor の CLI（ツールの呼び出しは文章の中の決まった形で受け取る）
     Cursor,
+    /// Ollama の API（`/api/chat`）
+    Ollama,
+}
+
+/// 添えたファイルのうち、中身をそのまま送り先に渡せる種類。渡せないものは、置いた場所だけを伝える。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Media {
+    /// 画像と PDF
+    All,
+    /// 画像だけ（画像を読めるローカルのモデル）
+    Images,
+    /// どちらも渡さない
+    None,
+}
+
+impl Media {
+    fn allows(self, kind: Kind) -> bool {
+        match self {
+            Media::All => true,
+            Media::Images => kind == Kind::Image,
+            Media::None => false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -86,6 +109,11 @@ pub struct Request<'a> {
     /// Messages API で、ツールと最初の指示のキャッシュを残す時間（`"1h"` など）。
     /// `None` なら API の標準（5 分）。
     pub prefix_ttl: Option<&'static str>,
+    /// 中身をそのまま渡せるファイルの種類。
+    pub media: Media,
+    /// Responses API で、ChatGPT のプランで呼ぶ（[`crate::chatgpt`]）。返事はストリームで受け取り、
+    /// ツールは名前空間 [`crate::chatgpt::NAMESPACE`] にまとめる。
+    pub plan: bool,
 }
 
 /// Messages API の 1 回の返事の上限。ストリーミングなしで時間切れにならない大きさにする。
@@ -98,6 +126,7 @@ pub fn body(wire: Wire, request: &Request) -> Value {
         Wire::Chat => chat_body(request),
         Wire::Responses => responses_body(request),
         Wire::Cursor => Value::String(cursor_prompt(request)),
+        Wire::Ollama => ollama_body(request),
     }
 }
 
@@ -108,6 +137,7 @@ pub fn parse(wire: Wire, response: &Value) -> Result<Reply, String> {
         Wire::Chat => chat_parse(response),
         Wire::Responses => responses_parse(response),
         Wire::Cursor => cursor_parse(response),
+        Wire::Ollama => ollama_parse(response),
     }
 }
 
@@ -138,7 +168,7 @@ struct Message<'a> {
 }
 
 /// 会話のファイルのうち、中身をこのリクエストに入れるもの。`Turn::Files` ごとに並ぶ。
-fn inline_of(turns: &[Turn]) -> Vec<Vec<bool>> {
+fn inline_of(turns: &[Turn], media: Media) -> Vec<Vec<bool>> {
     let groups: Vec<&[FilePart]> = turns
         .iter()
         .filter_map(|t| match t {
@@ -146,7 +176,7 @@ fn inline_of(turns: &[Turn]) -> Vec<Vec<bool>> {
             _ => None,
         })
         .collect();
-    files::inline_flags(groups.into_iter())
+    files::inline_flags_where(groups.into_iter(), |part| media.allows(part.kind))
 }
 
 /// 会話の順に、ファイルをすぐ後ろの発言とまとめながら回る。
@@ -289,7 +319,7 @@ fn messages_body(request: &Request) -> Value {
     let mut messages: Vec<Value> = Vec::new();
     // ツールの結果は、続いているものを 1 つの user メッセージにまとめる
     let mut results: Vec<Value> = Vec::new();
-    let flags = inline_of(request.turns);
+    let flags = inline_of(request.turns, request.media);
     each_turn(request.turns, &flags, |step| {
         let turn = match step {
             Step::User(message) => {
@@ -428,7 +458,7 @@ fn messages_parse(response: &Value) -> Result<Reply, String> {
 
 fn chat_body(request: &Request) -> Value {
     let mut messages = vec![json!({"role": "system", "content": request.system})];
-    let flags = inline_of(request.turns);
+    let flags = inline_of(request.turns, request.media);
     each_turn(request.turns, &flags, |step| {
         let turn = match step {
             Step::User(message) => {
@@ -476,7 +506,11 @@ fn chat_body(request: &Request) -> Value {
             })
         })
         .collect();
-    let mut body = json!({"model": request.model, "messages": messages, "tools": tools});
+    let mut body = json!({"model": request.model, "messages": messages});
+    // ツールを渡さないときは、空の一覧も送らない（空の tools を断るサーバーがある）
+    if !tools.is_empty() {
+        body["tools"] = tools.into();
+    }
     if let Some(effort) = request.effort.wire() {
         body["reasoning_effort"] = effort.into();
     }
@@ -533,7 +567,7 @@ fn chat_parse(response: &Value) -> Result<Reply, String> {
 
 fn responses_body(request: &Request) -> Value {
     let mut input: Vec<Value> = Vec::new();
-    let flags = inline_of(request.turns);
+    let flags = inline_of(request.turns, request.media);
     each_turn(request.turns, &flags, |step| {
         let turn = match step {
             Step::User(message) => {
@@ -551,12 +585,16 @@ fn responses_body(request: &Request) -> Value {
                         input.push(json!({"role": "assistant", "content": text}));
                     }
                     for call in calls {
-                        input.push(json!({
+                        let mut item = json!({
                             "type": "function_call",
                             "call_id": call.id,
                             "name": call.name,
                             "arguments": call.args.to_string(),
-                        }));
+                        });
+                        if request.plan {
+                            item["namespace"] = json!(crate::chatgpt::NAMESPACE);
+                        }
+                        input.push(item);
                     }
                 }
             },
@@ -579,6 +617,17 @@ fn responses_body(request: &Request) -> Value {
             })
         })
         .collect();
+    let tools = if request.plan && !tools.is_empty() {
+        // ChatGPT のプランでは、関数のツールを名前空間に入れて渡す
+        vec![json!({
+            "type": "namespace",
+            "name": crate::chatgpt::NAMESPACE,
+            "description": "Malakt Mahoz のタスクと画面を読み書きするツール",
+            "tools": tools,
+        })]
+    } else {
+        tools
+    };
     let mut body = json!({
         "model": request.model,
         "instructions": request.system,
@@ -588,6 +637,10 @@ fn responses_body(request: &Request) -> Value {
         "store": false,
         "include": ["reasoning.encrypted_content"],
     });
+    if request.plan {
+        // ChatGPT のプランは、ストリームでしか受け付けない
+        body["stream"] = json!(true);
+    }
     if let Some(effort) = request.effort.wire() {
         body["reasoning"] = json!({"effort": effort});
     }
@@ -643,6 +696,112 @@ fn responses_parse(response: &Value) -> Result<Reply, String> {
     Ok(reply)
 }
 
+// ---- Ollama の API ----
+
+/// ツールの呼び出しに付ける ID。Ollama の返事には ID がないので、会話の中で重ならないものを作る。
+fn ollama_call_id(index: usize) -> String {
+    format!("ollama-{}-{index}", malakt_core::new_id())
+}
+
+fn ollama_body(request: &Request) -> Value {
+    let mut messages = vec![json!({"role": "system", "content": request.system})];
+    let flags = inline_of(request.turns, request.media);
+    each_turn(request.turns, &flags, |step| {
+        let turn = match step {
+            Step::User(message) => {
+                let mut user = json!({"role": "user", "content": user_text(&message, true)});
+                let images: Vec<Value> = message
+                    .files
+                    .iter()
+                    .zip(message.inline)
+                    .filter_map(|(part, &inline)| match (part.kind, &part.data) {
+                        (Kind::Image, Some(data)) if inline => Some(files::base64(data).into()),
+                        _ => None,
+                    })
+                    .collect();
+                if !images.is_empty() {
+                    user["images"] = images.into();
+                }
+                messages.push(user);
+                return;
+            }
+            Step::Other(turn) => turn,
+        };
+        match turn {
+            Turn::User(_) | Turn::Files(_) => {}
+            Turn::Assistant { text, calls, .. } => {
+                if text.is_empty() && calls.is_empty() {
+                    return;
+                }
+                let mut message = json!({"role": "assistant", "content": text});
+                if !calls.is_empty() {
+                    let calls: Vec<Value> = calls
+                        .iter()
+                        .map(|c| json!({"type": "function", "function": {"name": c.name, "arguments": c.args}}))
+                        .collect();
+                    message["tool_calls"] = calls.into();
+                }
+                messages.push(message);
+            }
+            // Ollama は、結果をツールの名前で呼び出しと結ぶ
+            Turn::Tool { name, output, .. } => {
+                messages.push(json!({"role": "tool", "tool_name": name, "content": output}))
+            }
+        }
+    });
+    let mut body = json!({"model": request.model, "messages": messages, "stream": false});
+    if !request.tools.is_empty() {
+        let tools: Vec<Value> = request
+            .tools
+            .iter()
+            .map(|t| {
+                json!({
+                    "type": "function",
+                    "function": {"name": t.name, "description": t.description, "parameters": t.schema},
+                })
+            })
+            .collect();
+        body["tools"] = tools.into();
+    }
+    // 「標準」は送らず、モデルの標準に任せる（考えるモデルは、標準で考える）
+    if let Some(effort) = request.effort.wire() {
+        body["think"] = effort.into();
+    }
+    body
+}
+
+fn ollama_parse(response: &Value) -> Result<Reply, String> {
+    let message = response
+        .get("message")
+        .ok_or("返事に message がありません")?;
+    let mut reply = Reply {
+        text: text_of(message, "content"),
+        ..Default::default()
+    };
+    for (index, call) in message
+        .get("tool_calls")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .enumerate()
+    {
+        let function = call
+            .get("function")
+            .ok_or("tool_calls に function がありません")?;
+        let name = text_of(function, "name");
+        reply.calls.push(ToolCall {
+            id: ollama_call_id(index),
+            args: parse_arguments(&name, function.get("arguments"))?,
+            name,
+        });
+    }
+    if response.get("done_reason").and_then(Value::as_str) == Some("length") {
+        reply.notice = Some("返事が長さの上限に達して、途中で終わりました。".into());
+        reply.calls.clear();
+    }
+    Ok(reply)
+}
+
 // ---- Cursor の CLI ----
 
 /// ツールの呼び出しを書いてもらうコードブロックの名前。
@@ -669,7 +828,7 @@ fn cursor_prompt(request: &Request) -> String {
     }
     prompt.push_str("\n# これまでの会話\n");
     // CLI には画像や PDF を渡せないので、すべてパスで伝え、文字にしたものは文の中に続ける
-    let flags: Vec<Vec<bool>> = inline_of(request.turns)
+    let flags: Vec<Vec<bool>> = inline_of(request.turns, request.media)
         .into_iter()
         .map(|g| vec![false; g.len()])
         .collect();
@@ -836,6 +995,8 @@ mod tests {
             tools,
             fallbacks: false,
             prefix_ttl: None,
+            media: Media::All,
+            plan: false,
         }
     }
 
@@ -1149,6 +1310,38 @@ mod tests {
         let body = super::body(Wire::Responses, &request(&turns, &tools, Effort::Default));
         assert_eq!(body["input"], response["output"]);
         assert!(body.get("reasoning").is_none());
+        assert!(body.get("stream").is_none());
+    }
+
+    #[test]
+    fn the_chatgpt_plan_streams_and_puts_tools_in_a_namespace() {
+        let (turns, tools) = (conversation(None), tools());
+        let mut plan = request(&turns, &tools, Effort::Default);
+        plan.plan = true;
+        let body = body(Wire::Responses, &plan);
+        assert_eq!(body["stream"], true);
+        assert_eq!(body["store"], false);
+        let namespaces = body["tools"].as_array().unwrap();
+        assert_eq!(namespaces.len(), 1);
+        assert_eq!(namespaces[0]["type"], "namespace");
+        assert_eq!(namespaces[0]["name"], crate::chatgpt::NAMESPACE);
+        assert_eq!(namespaces[0]["tools"][0]["name"], "list_tasks");
+        assert_eq!(namespaces[0]["tools"][0]["type"], "function");
+        // ほかの形式から続けた呼び出しにも、名前空間を付ける
+        assert_eq!(body["input"][2]["namespace"], crate::chatgpt::NAMESPACE);
+        assert_eq!(body["input"][2]["name"], "list_tasks");
+
+        // ツールがなければ、名前空間も送らない
+        let none = super::body(Wire::Responses, &Request { tools: &[], ..plan });
+        assert_eq!(none["tools"], json!([]));
+
+        // 名前空間の中の関数の呼び出しは、名前だけで読む
+        let response = json!({"status": "completed", "output": [
+            {"type": "function_call", "call_id": "c1", "name": "get_task",
+             "namespace": "malakt", "arguments": "{\"id\":\"1\"}"},
+        ]});
+        let reply = parse(Wire::Responses, &response).unwrap();
+        assert_eq!(reply.calls[0].name, "get_task");
     }
 
     #[test]
@@ -1269,5 +1462,79 @@ mod tests {
         assert!(prompt.contains("パス: /files/a.png"), "{prompt}");
         assert!(prompt.contains("[「c.txt」の中身]\n中身"), "{prompt}");
         assert!(!prompt.contains("cG5n"));
+    }
+
+    #[test]
+    fn ollama_body_and_reply() {
+        let (turns, tools) = (conversation(None), tools());
+        let body = body(Wire::Ollama, &request(&turns, &tools, Effort::High));
+        assert_eq!(body["stream"], false);
+        assert_eq!(body["think"], "high");
+        assert_eq!(body["tools"][0]["function"]["name"], "list_tasks");
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(messages[0], json!({"role": "system", "content": "system"}));
+        // 引数は文字列ではなく、JSON のまま
+        assert_eq!(
+            messages[2]["tool_calls"][0],
+            json!({"type": "function", "function": {"name": "list_tasks", "arguments": {"query": "牛乳"}}})
+        );
+        // 結果は、ツールの名前で呼び出しと結ぶ
+        assert_eq!(
+            messages[3],
+            json!({"role": "tool", "tool_name": "list_tasks", "content": "[]"})
+        );
+        let plain = super::body(Wire::Ollama, &request(&turns, &[], Effort::Default));
+        assert!(plain.get("think").is_none() && plain.get("tools").is_none());
+
+        let reply = parse(
+            Wire::Ollama,
+            &json!({"done": true, "done_reason": "stop", "message": {"role": "assistant", "content": "",
+                "tool_calls": [
+                    {"type": "function", "function": {"index": 0, "name": "create_task", "arguments": {"title": "買い物"}}},
+                    {"function": {"name": "list_people", "arguments": {}}},
+                ]}}),
+        )
+        .unwrap();
+        assert_eq!(reply.calls[0].args, json!({"title": "買い物"}));
+        assert_eq!(reply.calls[1].name, "list_people");
+        // ID は返ってこないので作る。会話の中で重ならない
+        assert_ne!(reply.calls[0].id, reply.calls[1].id);
+        assert!(!reply.calls[0].id.is_empty());
+        let cut = parse(
+            Wire::Ollama,
+            &json!({"done_reason": "length", "message": {"content": "途中", "tool_calls": [
+                {"function": {"name": "x", "arguments": {}}}]}}),
+        )
+        .unwrap();
+        assert!(cut.notice.is_some() && cut.calls.is_empty());
+        assert!(parse(Wire::Ollama, &json!({"error": "x"})).is_err());
+    }
+
+    #[test]
+    fn files_the_model_cannot_read_are_sent_as_paths() {
+        let (turns, tools) = (attached(), tools());
+        let mut req = request(&turns, &tools, Effort::Default);
+        req.media = Media::Images;
+        let ollama = body(Wire::Ollama, &req);
+        let user = &ollama["messages"][1];
+        assert_eq!(user["images"], json!(["cG5n"]));
+        let text = user["content"].as_str().unwrap();
+        assert!(
+            text.contains("「b.pdf」") && text.contains("中身はこのリクエストに入っていません"),
+            "{text}"
+        );
+        let chat = body(Wire::Chat, &req);
+        let parts = chat["messages"][1]["content"].as_array().unwrap();
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[1]["type"], "image_url");
+
+        req.media = Media::None;
+        let ollama = body(Wire::Ollama, &req);
+        assert!(ollama["messages"][1].get("images").is_none());
+        let chat = body(Wire::Chat, &req);
+        assert_eq!(chat["messages"][1]["content"].as_array().unwrap().len(), 1);
+        // ツールを渡さないときは、tools を送らない
+        req.tools = &[];
+        assert!(body(Wire::Chat, &req).get("tools").is_none());
     }
 }

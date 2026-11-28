@@ -2468,16 +2468,7 @@ fn the_gear_opens_settings_with_everything_inside(cx: &mut TestAppContext) {
         assert!(view.appearance_pinned);
         assert_eq!(view.appearance_section, Section::People);
     });
-    // キー操作
-    ui(cx, window, |window, cx| {
-        window.click(nav(Section::Keys), cx)
-    });
-    ui(cx, window, |window, _| {
-        assert!(window.find("app-keys").visible())
-    });
-
-    // 新しいウィンドウ。目次の下のほうは、目次をスクロールして出す
-    let before = cx.update(|cx| cx.windows().len());
+    // キー操作。目次の下のほうは、目次をスクロールして出す
     ui(cx, window, |window, cx| {
         window.scroll(
             nav(Section::People),
@@ -2485,6 +2476,15 @@ fn the_gear_opens_settings_with_everything_inside(cx: &mut TestAppContext) {
             cx,
         )
     });
+    ui(cx, window, |window, cx| {
+        window.click(nav(Section::Keys), cx)
+    });
+    ui(cx, window, |window, _| {
+        assert!(window.find("app-keys").visible())
+    });
+
+    // 新しいウィンドウ
+    let before = cx.update(|cx| cx.windows().len());
     ui(cx, window, |window, cx| {
         window.click(nav(Section::Window), cx)
     });
@@ -3880,7 +3880,7 @@ fn themes_are_chosen_and_saved_in_settings(cx: &mut TestAppContext) {
     assert_eq!(hex(cx.update(|cx| cx.theme().background)), "#fdf1f5");
 }
 
-/// 「カスタマイズ」でレイアウトを選ぶと、詳細の出し方・一覧の形・パネルの形・AI チャットの並びが変わる。
+/// 「カスタマイズ」でレイアウトを選ぶと、詳細の出し方・一覧の形・パネルの形・AI bot の並びが変わる。
 #[gpui_kit::test]
 fn layouts_are_chosen_in_settings(cx: &mut TestAppContext) {
     use malakt_mahoz::theme::{self, Layout};
@@ -3962,7 +3962,7 @@ fn layouts_are_chosen_in_settings(cx: &mut TestAppContext) {
     assert_eq!(saved(cx, "panels.float").as_deref(), Some("1"));
     assert_eq!(list(cx), full);
 
-    // 3 カラムは AI チャットも右に並べ、「一覧と詳細」はチャットを閉じる
+    // 3 カラムは AI bot も右に並べ、「一覧と詳細」はチャットを閉じる
     choose(cx, "3 カラム");
     assert_eq!(saved(cx, "panels.float"), None);
     assert_eq!(saved(cx, "panel.overlay").as_deref(), Some("0"));
@@ -4055,7 +4055,11 @@ fn customize_settings_are_searched(cx: &mut TestAppContext) {
     });
     ui(cx, window, |window, cx| {
         assert!(!nav(window, 0));
-        window.click(("customize-nav", 6usize), cx)
+        let behavior = CustomizeSection::ALL
+            .iter()
+            .position(|s| *s == CustomizeSection::AiBehavior)
+            .unwrap();
+        window.click(("customize-nav", behavior), cx)
     });
     assert!(cx.update(|cx| {
         let v = view.read(cx);
@@ -4074,7 +4078,7 @@ fn customize_settings_are_searched(cx: &mut TestAppContext) {
     assert!(cx.update(|cx| view.read(cx).modal == Modal::None));
 }
 
-/// 1920 幅の画面でも、3 カラムにすると一覧・詳細・AI チャットの 3 つが並ぶ。
+/// 1920 幅の画面でも、3 カラムにすると一覧・詳細・AI bot の 3 つが並ぶ。
 #[gpui_kit::test]
 fn three_columns_fit_a_1920_wide_screen(cx: &mut TestAppContext) {
     use malakt_mahoz::state::PANEL_MIN;
@@ -5472,11 +5476,11 @@ fn reminders(
     os
 }
 
-/// 「設定」の「同期」の「アカウントを追加」でリマインダーを選び、設定を閉じる。
+/// 「設定」の「連携と同期」の「連携を追加」でリマインダーを選び、設定を閉じる。
 fn start_reminders_sync(cx: &mut TestAppContext, window: AnyWindowHandle, view: &Entity<MainView>) {
     pick_sync_provider(cx, window, view, "caldav-pick-reminders");
     ui(cx, window, |window, _| {
-        // 選ぶとダイアログが閉じ、「同期」の一覧にリマインダーが出る
+        // 選ぶとダイアログが閉じ、「連携と同期」の一覧にリマインダーが出る
         assert!(window.try_find("caldav-pick-other").is_none());
         assert!(window.find("reminders-account").visible());
     });
@@ -5484,7 +5488,7 @@ fn start_reminders_sync(cx: &mut TestAppContext, window: AnyWindowHandle, view: 
     ui(cx, window, |window, cx| window.click("dialog-close", cx));
 }
 
-/// 「設定」の「同期」で、リマインダーのごみ箱の「同期をやめる」を選ぶ。
+/// 「設定」の「連携と同期」で、リマインダーのごみ箱の「同期をやめる」を選ぶ。
 fn stop_reminders_sync(cx: &mut TestAppContext, window: AnyWindowHandle, view: &Entity<MainView>) {
     ui(cx, window, |window, cx| window.click("open-settings", cx));
     ui(cx, window, |window, cx| {
@@ -5893,7 +5897,7 @@ fn a_bad_download_is_reported_but_being_offline_is_not(cx: &mut TestAppContext) 
 }
 
 /// どの幅でも、一覧の上のボタンは重ならず、タイトルは読める幅で残る。サブワークスペースの見出しも出る。
-/// AI チャットを開いても、列を広げても同じ。
+/// AI bot を開いても、列を広げても同じ。
 #[gpui_kit::test]
 fn narrow_widths_keep_the_title_and_never_overlap(cx: &mut TestAppContext) {
     use malakt_mahoz::state::{Column, COLUMN_MAX, TITLE_MIN};
@@ -5942,7 +5946,7 @@ fn narrow_widths_keep_the_title_and_never_overlap(cx: &mut TestAppContext) {
                 })
             })
             .unwrap();
-            let case = format!("幅 {width}、AI チャット {ai}、列を広げた {widened}");
+            let case = format!("幅 {width}、AI bot {ai}、列を広げた {widened}");
             ui(cx, window, |window, _| {
                 // 右のボタンは、たがいに重ならない
                 let mut right = px(0.);
@@ -5960,7 +5964,7 @@ fn narrow_widths_keep_the_title_and_never_overlap(cx: &mut TestAppContext) {
                         right = button.right();
                     }
                 }
-                // AI チャットがウィンドウを覆う幅では、一覧は見えない
+                // AI bot がウィンドウを覆う幅では、一覧は見えない
                 let chat = window.try_find("ai-resize").map(|e| e.bounds().left());
                 if chat.is_some_and(|left| left < px(200.)) {
                     return;
@@ -5970,7 +5974,7 @@ fn narrow_widths_keep_the_title_and_never_overlap(cx: &mut TestAppContext) {
                     .try_find(("folder", 0usize))
                     .unwrap_or_else(|| panic!("{case}: サブワークスペースの見出しが出ていない"))
                     .bounds();
-                // タイトルは、表でもカードでも読める幅がある。重ねた AI チャットにも隠れない
+                // タイトルは、表でもカードでも読める幅がある。重ねた AI bot にも隠れない
                 let title = window
                     .try_find(("title", 0usize))
                     .unwrap_or_else(|| panic!("{case}: タイトルが出ていない"))
@@ -7248,7 +7252,7 @@ fn clicking_outside_closes_the_top_dialog(cx: &mut TestAppContext) {
     assert_eq!(comment(cx), "");
 }
 
-/// メインのウィンドウを閉じると、追加のウィンドウと AI チャットのウィンドウも閉じる。
+/// メインのウィンドウを閉じると、追加のウィンドウと AI bot のウィンドウも閉じる。
 /// 閉じたメインのウィンドウは、次の起動で追加のウィンドウと一緒に戻る。
 #[gpui_kit::test]
 fn closing_main_window_closes_the_others(cx: &mut TestAppContext) {
@@ -7419,8 +7423,12 @@ fn the_ai_shell_is_chosen_in_customize(cx: &mut TestAppContext) {
     ui(cx, window, |window, cx| {
         view.update(cx, |v, cx| v.open_appearance(window, cx))
     });
+    let behavior = malakt_mahoz::state::CustomizeSection::ALL
+        .iter()
+        .position(|s| *s == malakt_mahoz::state::CustomizeSection::AiBehavior)
+        .unwrap();
     ui(cx, window, |window, cx| {
-        window.click(("customize-nav", 6usize), cx)
+        window.click(("customize-nav", behavior), cx)
     });
     ui(cx, window, |window, cx| {
         assert!(window.find("shell-choice").visible());
@@ -8152,7 +8160,7 @@ fn caldav(
     (server, secrets)
 }
 
-/// 「設定」の「同期」を開き、「アカウントを追加」でプロバイダを選ぶ。
+/// 「設定」の「連携と同期」を開き、「連携を追加」でプロバイダを選ぶ。
 fn pick_sync_provider(
     cx: &mut TestAppContext,
     window: AnyWindowHandle,
@@ -8171,7 +8179,7 @@ fn pick_sync_provider(
 
 /// 「その他の CalDAV アカウント」を選び、サーバー（`https://` は省く）・ユーザー名・
 /// パスワード・説明を入れて Enter で足す。
-fn add_caldav_account(cx: &mut TestAppContext, window: AnyWindowHandle, view: &Entity<MainView>) {
+fn fill_caldav_form(cx: &mut TestAppContext, window: AnyWindowHandle, view: &Entity<MainView>) {
     pick_sync_provider(cx, window, view, "caldav-pick-other");
     // サーバーの欄から書き始める
     ui(cx, window, |window, cx| {
@@ -8186,6 +8194,16 @@ fn add_caldav_account(cx: &mut TestAppContext, window: AnyWindowHandle, view: &E
         window.input("チーム", cx);
         window.press("enter", cx);
     });
+    cx.run_until_parked();
+}
+
+/// アカウントの欄を書いて「次へ」、見つかったカレンダー（最初は全部チェック）のまま「追加」。
+fn add_caldav_account(cx: &mut TestAppContext, window: AnyWindowHandle, view: &Entity<MainView>) {
+    fill_caldav_form(cx, window, view);
+    ui(cx, window, |window, _| {
+        assert!(window.find(("caldav-new-on", 0usize)).visible());
+    });
+    ui(cx, window, |window, cx| window.click("caldav-finish", cx));
     cx.run_until_parked();
     wait_sub_closed(cx, window);
 }
@@ -8218,24 +8236,27 @@ fn caldav_calendar_syncs_with_a_workspace(cx: &mut TestAppContext) {
     assert_eq!(accounts.len(), 1);
     assert_eq!(accounts[0].label(), "チーム");
     ui(cx, window, |window, _| {
-        // 足したら重ねたダイアログは閉じ、「同期」の一覧にアカウントが出る
+        // 足したら重ねたダイアログは閉じ、「連携と同期」の一覧にアカウントが出る
         assert!(window.try_find("caldav-name").is_none());
         assert!(window.find(("caldav-account", 0usize)).visible());
     });
     use malakt_mahoz::caldav::Secrets;
     assert_eq!(secrets.get(&accounts[0].id).unwrap().as_deref(), Some("pw"));
-    // つなぐまでは同期しない
-    assert!(server.lock().calls.is_empty());
 
-    ui(cx, window, |window, cx| {
-        window.click(("caldav-link", 0usize), cx)
-    });
-    pick(cx, window, "新しいワークスペース");
-    cx.run_until_parked();
-    let w = store(cx, |s| s.workspaces().unwrap())
-        .into_iter()
+    // アカウントの名前のワークスペースの下に、カレンダーの名前のサブワークスペースができ、
+    // すぐ同期する
+    let workspaces = store(cx, |s| s.workspaces().unwrap());
+    let parent = workspaces
+        .iter()
+        .find(|w| w.name == "チーム")
+        .expect("アカウントの名前のワークスペース");
+    assert_eq!(parent.parent_id, None);
+    let w = workspaces
+        .iter()
         .find(|w| w.name == "イベントの準備")
-        .expect("カレンダーの名前のワークスペース");
+        .expect("カレンダーの名前のワークスペース")
+        .clone();
+    assert_eq!(w.parent_id.as_ref(), Some(&parent.id));
     let task = store(cx, |s| {
         s.tasks(w.id.as_str(), &TaskFilter::default()).unwrap()
     })
@@ -8291,7 +8312,7 @@ fn caldav_account_that_fails_is_not_added(cx: &mut TestAppContext) {
     caldav(cx, Some("ユーザー名かパスワードが違います"));
     let (window, view) = open(cx, wide());
     cx.run_until_parked();
-    add_caldav_account(cx, window, &view);
+    fill_caldav_form(cx, window, &view);
     assert!(store(cx, |s| s.caldav_accounts().unwrap()).is_empty());
     ui(cx, window, |window, _| {
         assert!(window.find("caldav-add-error").visible());
@@ -8337,6 +8358,104 @@ fn caldav_account_closed_while_connecting_is_not_added(cx: &mut TestAppContext) 
         assert!(window.try_find("caldav-url").is_none());
         assert!(window.find("caldav-add").visible());
     });
+}
+
+/// 追加のときにチェックを外したカレンダーはつながない。あとから一覧のチェックボックスで
+/// つなぐと、アカウントの名前のワークスペースの下にサブワークスペースを作る。外すと
+/// 「接続しない」になり、付け直すと前のワークスペースにつなぎ直す。
+#[gpui_kit::test]
+fn caldav_calendars_are_checked_on_and_off(cx: &mut TestAppContext) {
+    start(cx);
+    let (server, _) = caldav(cx, None);
+    let (window, view) = open(cx, wide());
+    cx.run_until_parked();
+    fill_caldav_form(cx, window, &view);
+    ui(cx, window, |window, cx| {
+        window.click(("caldav-new-on", 0usize), cx)
+    });
+    ui(cx, window, |window, cx| window.click("caldav-finish", cx));
+    cx.run_until_parked();
+    wait_sub_closed(cx, window);
+    assert_eq!(store(cx, |s| s.caldav_accounts().unwrap()).len(), 1);
+    assert!(store(cx, |s| s.workspaces().unwrap()).is_empty());
+    assert!(server.lock().calls.is_empty());
+    ui(cx, window, |window, _| {
+        assert!(window.try_find(("caldav-link", 0usize)).is_none())
+    });
+
+    // チェックを付けると、親とサブワークスペースを作ってつなぎ、同期する
+    ui(cx, window, |window, cx| {
+        window.click(("caldav-on", 0usize), cx)
+    });
+    cx.run_until_parked();
+    let first = store(cx, |s| s.workspaces().unwrap());
+    assert_eq!(first.len(), 2);
+    let parent = first
+        .iter()
+        .find(|w| w.name == "チーム")
+        .unwrap()
+        .id
+        .clone();
+    assert!(!server.lock().calls.is_empty());
+    ui(cx, window, |window, _| {
+        assert!(window.find(("caldav-link", 0usize)).visible())
+    });
+
+    // 外すと接続しない。ワークスペースは残る
+    ui(cx, window, |window, cx| {
+        window.click(("caldav-on", 0usize), cx)
+    });
+    cx.run_until_parked();
+    let cals = store(cx, |s| {
+        let a = s.caldav_accounts().unwrap().remove(0);
+        s.caldav_calendars(&a.id).unwrap()
+    });
+    assert_eq!(cals[0].workspace_id, None);
+    ui(cx, window, |window, _| {
+        assert!(window.try_find(("caldav-link", 0usize)).is_none())
+    });
+
+    // チェックを付け直すと、前のワークスペースにつなぎ直す（同じ名前を増やさない）
+    ui(cx, window, |window, cx| {
+        window.click(("caldav-on", 0usize), cx)
+    });
+    cx.run_until_parked();
+    let all = store(cx, |s| s.workspaces().unwrap());
+    assert_eq!(all.len(), 2);
+    let child = all
+        .iter()
+        .find(|w| w.parent_id.as_ref() == Some(&parent))
+        .unwrap()
+        .id
+        .clone();
+    let cals = store(cx, |s| {
+        let a = s.caldav_accounts().unwrap().remove(0);
+        s.caldav_calendars(&a.id).unwrap()
+    });
+    assert_eq!(cals[0].workspace_id.as_ref(), Some(&child));
+    // メニューの「新しいワークスペース」は、同じ親の下にもう 1 つ作る
+    ui(cx, window, |window, cx| {
+        window.click(("caldav-link", 0usize), cx)
+    });
+    pick(cx, window, "新しいワークスペース");
+    let all = store(cx, |s| s.workspaces().unwrap());
+    assert_eq!(all.iter().filter(|w| w.name == "チーム").count(), 1);
+    assert_eq!(
+        all.iter()
+            .filter(|w| w.parent_id.as_ref() == Some(&parent))
+            .count(),
+        2
+    );
+    // メニューの「接続しない」でも外せる
+    ui(cx, window, |window, cx| {
+        window.click(("caldav-link", 0usize), cx)
+    });
+    pick(cx, window, "接続しない");
+    let cals = store(cx, |s| {
+        let a = s.caldav_accounts().unwrap().remove(0);
+        s.caldav_calendars(&a.id).unwrap()
+    });
+    assert_eq!(cals[0].workspace_id, None);
 }
 
 /// サーバーが決まっているプロバイダ（Fastmail）は、サーバーの欄を出さずにそのサーバーへ

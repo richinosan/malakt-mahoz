@@ -34,6 +34,7 @@ const TABLES: &[&str] = &[
     "task_links",
     "tickets",
     "ai_rules",
+    "ai_bots",
     "task_repeats",
     "schedules",
     "schedule_files",

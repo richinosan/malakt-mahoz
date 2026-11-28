@@ -5,6 +5,7 @@ pub mod ai_settings;
 pub mod ai_tools;
 pub mod ai_view;
 pub mod autostart;
+mod bot_look;
 pub mod browser;
 pub mod browser_popup;
 pub mod caldav;
@@ -14,7 +15,10 @@ pub mod cli;
 pub(crate) mod clock;
 pub mod date_pick;
 pub mod db;
+pub mod download_rules;
+pub mod download_settings;
 pub mod downloads;
+pub mod downloads_ui;
 pub mod drops;
 pub mod estimate_pick;
 mod feel;
@@ -33,6 +37,7 @@ pub mod plugins;
 pub mod pomodoro;
 pub mod pr_times;
 mod press;
+pub mod print_setup;
 pub mod reminders;
 mod render;
 mod repeat_view;
@@ -224,7 +229,7 @@ pub fn init_with(store: malakt_core::Store, ai: AiConfig, cx: &mut App) {
         cx.quit()
     });
     cx.on_action(|_: &LockNow, cx| lock_now_or_settings(cx));
-    // メインのウィンドウの外（小さなウィンドウ、シェルのウィンドウ）では、メインのウィンドウに出す
+    // ブラウザの画面の外（リンクから開いた小さなウィンドウ）では、ブラウザの画面に出す
     cx.on_action(|_: &shell_keys::ShowDownloads, cx| show_downloads(cx));
     cx.set_menus([Menu {
         name: APP_NAME.into(),
@@ -236,7 +241,7 @@ pub fn init_with(store: malakt_core::Store, ai: AiConfig, cx: &mut App) {
             MenuItem::action("元に戻す", shortcuts::Undo),
             MenuItem::action("やり直す", shortcuts::Redo),
             MenuItem::action("検索", shortcuts::Find),
-            MenuItem::action("AI チャット", ToggleAi),
+            MenuItem::action("AI bot", ToggleAi),
             MenuItem::action("全画面", shortcuts::ToggleFullscreen),
             MenuItem::action("キー操作", shortcuts::ShowKeys),
             MenuItem::action("今すぐロック", LockNow),
@@ -373,7 +378,7 @@ fn follow_main(main: &mut Window, cx: &mut App) {
 }
 
 /// メインのウィンドウ（最初に開いた 1 枚）を閉じたら、ほかのウィンドウ（追加のウィンドウ、
-/// 別ウィンドウに出したペイン、AI チャット、シェル）もすべて閉じて終了する。
+/// 別ウィンドウに出したペイン、AI bot、シェル）もすべて閉じて終了する。
 /// 閉じたウィンドウは次の起動で戻す。新しい版を取ってあれば、ここで入れ替える。
 pub fn quit_when_main_closes(cx: &mut App) {
     cx.on_window_closed(|cx, _| {
@@ -463,31 +468,11 @@ fn open_settings_now(
     });
 }
 
-/// ダウンロードの一覧を、今のウィンドウかメインのウィンドウに出して、手前に出す。
+/// ダウンロードの一覧を、ブラウザの画面のツールバーの下に出す。次に描くブラウザの画面が出す。
 pub(crate) fn show_downloads(cx: &mut App) {
-    // キーから呼ぶときは、そのウィンドウを更新している最中なので、終わってから開く
-    cx.defer(|cx| {
-        let mut windows = cx.windows();
-        for first in [session::main_window(cx), cx.active_window()]
-            .into_iter()
-            .flatten()
-        {
-            if let Some(ix) = windows.iter().position(|w| *w == first) {
-                let window = windows.remove(ix);
-                windows.insert(0, window);
-            }
-        }
-        let Some((handle, view)) = windows
-            .into_iter()
-            .find_map(|handle| Some((handle, main_view_in(handle, cx)?)))
-        else {
-            return;
-        };
-        // 探したあとに閉じたウィンドウなら、開く先がない
-        let _ = handle.update(cx, |_, window, cx| {
-            window.activate_window();
-            view.update(cx, |this, cx| this.open_downloads(window, cx));
-        });
+    term::shared(cx).update(cx, |terms, cx| {
+        terms.show_downloads = true;
+        cx.notify();
     });
 }
 
@@ -496,7 +481,7 @@ pub fn window_title(name: &str) -> String {
     format!("{name} - {APP_NAME}")
 }
 
-/// AI チャット、またはシェルだけのウィンドウを開く。
+/// AI bot、またはシェルだけのウィンドウを開く。
 pub fn open_ai_window(mode: PaneMode, cx: &mut App) -> Result<AnyWindowHandle> {
     let px = |value: f32| px(value * UI_SCALE);
     let (title, window_size) = match mode {
@@ -504,7 +489,7 @@ pub fn open_ai_window(mode: PaneMode, cx: &mut App) -> Result<AnyWindowHandle> {
             window_title(&term::shared(cx).read(cx).active_label()),
             size(px(640.), px(480.)),
         ),
-        _ => (window_title("AI チャット"), size(px(860.), px(720.))),
+        _ => (window_title("AI bot"), size(px(860.), px(720.))),
     };
     let offset = px(28.) * (cx.windows().len() % 8) as f32;
     // 前に置いていた位置と大きさがあれば、そこに開く

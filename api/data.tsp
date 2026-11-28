@@ -577,6 +577,55 @@ op update_ai_rule(
 op delete_ai_rule(id: string): void;
 
 /**
+ * AI bot の一覧を返す。bot ごとに名前・インストラクション・アイコン・色・動き（motion）・覚えたこと（memories）がある。
+ * ユーザーは bot を選んで話し、選んだ bot のインストラクションに従って答える。
+ */
+op list_ai_bots(): void;
+
+/** AI bot を足す。アイコンは set_bot_icon で変える。 */
+@writes
+op create_ai_bot(
+  /** 名前（40 文字まで） */
+  name?: string,
+
+  /** この bot への指示。口調・役割・得意なことなど（8000 文字まで） */
+  instructions?: string,
+
+  /** アイコンの動き。なし / ふわふわ / ぴょんぴょん / ゆらゆら / くるくる / どきどき */
+  motion?: "still" | "float" | "bounce" | "sway" | "spin" | "pulse",
+): void;
+
+/** AI bot を変える。渡した項目だけが変わる。アイコンと色は set_bot_icon で変える。 */
+@writes
+op update_ai_bot(
+  id: string,
+
+  /** 名前（40 文字まで） */
+  name?: string,
+
+  /** この bot への指示（8000 文字まで） */
+  instructions?: string,
+
+  /** アイコンの動き。なし / ふわふわ / ぴょんぴょん / ゆらゆら / くるくる / どきどき */
+  motion?: "still" | "float" | "bounce" | "sway" | "spin" | "pulse",
+): void;
+
+/** AI bot を削除する。最後の 1 つは消せない。 */
+@writes
+op delete_ai_bot(id: string): void;
+
+/**
+ * bot に覚えさせる。ユーザーの好み、直されたこと、これから先も覚えておいてほしいことを 1 文で書く。
+ * 覚えたことは、その bot と話すたびにメッセージに添えられる。同じものは 1 つだけ残る。
+ */
+@writes
+op remember_for_bot(bot_id: string, fact: string): void;
+
+/** bot が覚えたことを 1 つ消す。fact は list_ai_bots の memories にある文そのまま。 */
+@writes
+op forget_for_bot(bot_id: string, fact: string): void;
+
+/**
  * ポモドーロタイマーの今の状態（段 phase: work / short_break / long_break、run: ready / running / paused、残り秒、作業しているタスク、済んだ作業の数）、設定、今日の作業の合計を返す。
  */
 op get_pomodoro(): void;

@@ -13,7 +13,7 @@
 <table>
 <tr><td><picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/home-dark.webp"><img alt="ホーム" src="docs/images/home-light.webp"></picture><br><sub>ホーム</sub></td><td><picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/detail-dark.webp"><img alt="タスクの詳細" src="docs/images/detail-light.webp"></picture><br><sub>タスクの詳細</sub></td></tr>
 <tr><td><picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/date-dark.webp"><img alt="開始と期限の入力" src="docs/images/date-light.webp"></picture><br><sub>開始と期限の入力</sub></td><td><picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/panes-dark.webp"><img alt="ペイン" src="docs/images/panes-light.webp"></picture><br><sub>ペイン</sub></td></tr>
-<tr><td><picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/stats-dark.webp"><img alt="統計" src="docs/images/stats-light.webp"></picture><br><sub>統計</sub></td><td><picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/ai-dark.webp"><img alt="AI チャットとターミナル" src="docs/images/ai-light.webp"></picture><br><sub>AI チャットとターミナル</sub></td></tr>
+<tr><td><picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/stats-dark.webp"><img alt="統計" src="docs/images/stats-light.webp"></picture><br><sub>統計</sub></td><td><picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/ai-dark.webp"><img alt="AI bot とターミナル" src="docs/images/ai-light.webp"></picture><br><sub>AI bot とターミナル</sub></td></tr>
 <tr><td><picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/browser-dark.webp"><img alt="アプリ内ブラウザのダウンロード" src="docs/images/browser-light.webp"></picture><br><sub>アプリ内ブラウザのダウンロード</sub></td><td><picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/settings-dark.webp"><img alt="設定" src="docs/images/settings-light.webp"></picture><br><sub>設定</sub></td></tr>
 <tr><td colspan="2" align="center"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/pomodoro-dark.webp"><img alt="ポモドーロ（別ウィンドウ）" src="docs/images/pomodoro-light.webp" width="320"></picture><br><sub>ポモドーロ（別ウィンドウ）</sub></td></tr>
 </table>
@@ -45,7 +45,7 @@
 - **CalDAV との同期**（標準はオフ）: Fastmail・Nextcloud などのサーバーのタスクを、ワークスペースと両方向に同期（[docs/caldav.md](docs/caldav.md)）
 - **自動アップデート**: GitHub Releases の新しい版に入れ替え（[docs/update.md](docs/update.md)）
 - **完了チケット**: コマンドからタスクを完了にする（[docs/tickets.md](docs/tickets.md)）
-- **AI チャット**: `Ctrl/⌘ + J`（[docs/ai.md](docs/ai.md)）
+- **AI bot**: `Ctrl/⌘ + J`（[docs/ai.md](docs/ai.md)）
 - **ターミナル**: アプリの中で WSL や zsh を開き、Claude Code などをそのまま動かす（[docs/terminal.md](docs/terminal.md)）
 - **MCP サーバー**: Claude Code などのエージェントからタスクを読み書き。アクセスキーで、エージェントごとに読み取りのみ・ロック中も使えるかを選べる。キーなしで使える条件（時間帯・ロック中）も決められ、HTTP のポートでも開ける（[docs/mcp.md](docs/mcp.md)）
 - **プラグイン**: WASM のプラグインで、タスクやワークスペースの右クリックにコマンドを足す。有効にするのは、許すことを確かめて承認したものだけ（[docs/plugins.md](docs/plugins.md)）
@@ -88,7 +88,7 @@ mise run api        # API の定義（api/*.tsp）からツールの一覧を作
 - [繰り返しのタスク](docs/repeat.md)
 - [定時タスク](docs/schedule.md)
 - [完了チケット](docs/tickets.md)
-- [AI チャット](docs/ai.md)
+- [AI bot](docs/ai.md)
 - [ターミナル](docs/terminal.md)
 - [Claude Code などから使う（MCP）](docs/mcp.md)
 - [API の定義（TypeSpec）](docs/api.md)

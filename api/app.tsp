@@ -79,7 +79,7 @@ model ColumnSetting {
 
 /**
  * 今の画面の状態を返す。
- * 開いている場所、開いているタスク、一覧の絞り込みと並び順、表の列、左のメニューと詳細の幅、AI チャットとシェル、ペイン、ロック・リマインダー・自動アップデートの設定、開けるシェル、最前面に表示しているウィンドウ（on_top）。
+ * 開いている場所、開いているタスク、一覧の絞り込みと並び順、表の列、左のメニューと詳細の幅、AI bot とシェル、ペイン、ロック・リマインダー・自動アップデートの設定、開けるシェル、最前面に表示しているウィンドウ（on_top）。
  */
 @view
 op get_screen(): void;
@@ -139,7 +139,7 @@ op set_columns(columns?: ColumnSetting[], order?: Column[]): void;
 
 /**
  * 画面の部分を出す・隠す、幅を変える。
- * sidebar は左のメニュー、chat は AI チャット、shell はシェルの場所（AI のタブ、ターミナル、ブラウザのタブ）。
+ * sidebar は左のメニュー、chat は AI bot、shell はシェルの場所（AI のタブ、ターミナル、ブラウザのタブ）。
  * 幅は null で最初の幅。
  * expanded は左のメニューのワークスペースを開く・閉じる（ID と true / false）。
  */
@@ -221,7 +221,7 @@ op open_window(kind?: "main" | "pomodoro" | "timer"): void;
 
 /**
  * ウィンドウを常に最前面に表示する（on が true）、または元に戻す（false）。
- * window は task（操作しているタスクのウィンドウ。標準）、pomodoro（ポモドーロ）、timer（タイマー）、chat（AI チャットだけのウィンドウ）、shell（シェルだけのウィンドウ）。
+ * window は task（操作しているタスクのウィンドウ。標準）、pomodoro（ポモドーロ）、timer（タイマー）、chat（AI bot だけのウィンドウ）、shell（シェルだけのウィンドウ）。
  * 開いていないウィンドウは、次に開いたときに最前面に出す。
  * 今の状態は get_screen の on_top にある。
  */
@@ -329,7 +329,7 @@ op undo(): void;
 @view
 op redo(): void;
 
-/** ワークスペースに付けられるアイコンを探す。query は英語か日本語の言葉。 */
+/** ワークスペースと AI bot に付けられるアイコンを探す。query は英語か日本語の言葉。 */
 @view
 op find_icons(query: string, @minValue(1) @maxValue(100) limit?: int32): void;
 
@@ -340,6 +340,18 @@ op find_icons(query: string, @minValue(1) @maxValue(100) limit?: int32): void;
  */
 @view
 op set_workspace_icon(
+  id: string,
+  icon?: string | null,
+  image_path?: string,
+  color?: string | null,
+): void;
+
+/**
+ * AI bot のアイコンと色を変える。icon・image_path・color の書き方は set_workspace_icon と同じ。
+ * 渡した項目だけが変わる。
+ */
+@view
+op set_bot_icon(
   id: string,
   icon?: string | null,
   image_path?: string,
@@ -410,14 +422,14 @@ op set_appearance(
 ): void;
 
 /**
- * AI チャットの設定（サービス、モデル、effort、振り分けのモデル、新しいタスクを整える、コメントから進捗を更新する、GitHub の定期チェック、オート実行）を返す。
+ * AI bot の設定（サービス、モデル、effort、振り分けのモデル、新しいタスクを整える、コメントから進捗を更新する、GitHub の定期チェック、オート実行）を返す。
  * AI のルールは list_ai_rules で読む。
  */
 @session
 op get_ai_settings(): void;
 
 /**
- * AI チャットの設定を変える。
+ * AI bot の設定を変える。
  * 渡した項目だけが変わり、次のメッセージから使う。
  * provider は claude / chatgpt / opencode / opencode_go / cursor。
  * effort はモデルごとに覚え、model を変えるとそのモデルで前に選んだ effort に戻る（model と effort を一緒に渡すと、新しいモデルの effort になる）。
@@ -449,6 +461,14 @@ op set_ai_settings(
   /** コマンドの実行と削除を確認なしで行う */
   auto_run?: boolean,
 ): void;
+
+/**
+ * ほかの AI bot に仕事を渡す。渡した bot が並列の会話で message を受け取って動き、終わると会話の一覧に残る。
+ * ユーザーが別の bot に頼むよう言ったときや、ほかの bot のインストラクションに合う仕事のときに使う。
+ * bot_id は list_ai_bots で調べる。message には、渡した先の bot がそれだけで動けるように、頼むことを全部書く。
+ */
+@session
+op hand_off_to_bot(bot_id: string, message: string): void;
 
 /** GitHub の定期チェックを今すぐ 1 回行う。 */
 @session
