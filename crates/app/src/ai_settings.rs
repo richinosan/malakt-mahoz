@@ -92,10 +92,11 @@ pub enum AiRow {
 impl AiRow {
     pub const ALL: [AiRow; 15] = [
         AiRow::Service,
+        // キーはサービスごとなので、サービスのすぐ下に置く
+        AiRow::Key,
         AiRow::Model,
         AiRow::Effort,
         AiRow::Coordinator,
-        AiRow::Key,
         AiRow::AutoRun,
         AiRow::Arrange,
         AiRow::Track,
@@ -184,7 +185,6 @@ impl AiRow {
             self,
             AiRow::Service
                 | AiRow::Model
-                | AiRow::Key
                 | AiRow::Rules
                 | AiRow::Schedules
                 | AiRow::WatchInstruction
@@ -207,6 +207,8 @@ impl AiRow {
 pub struct AiSettings {
     session: Entity<Session>,
     key_input: Entity<InputState>,
+    /// 保存済みの API キーを、新しいキーに変えている。
+    key_editing: bool,
     model_input: Entity<InputState>,
     /// 定期チェックの指示。
     watch_input: Entity<TextareaState>,
@@ -234,11 +236,7 @@ pub struct AiSettings {
 impl AiSettings {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let session = ai::shared(cx);
-        let key_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .masked(true)
-                .placeholder("API キー")
-        });
+        let key_input = cx.new(|cx| InputState::new(window, cx).masked(true));
         let model_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("検索、またはモデル ID を入力"));
         let instruction = session.read(cx).watch.instruction.clone();
@@ -333,6 +331,7 @@ impl AiSettings {
         Self {
             session,
             key_input,
+            key_editing: false,
             model_input,
             watch_input,
             rules_scope: None,
@@ -378,7 +377,31 @@ impl AiSettings {
         if self.session.read(cx).error.is_none() {
             self.key_input
                 .update(cx, |s, cx| s.set_value("", window, cx));
+            self.key_editing = false;
+            cx.notify();
         }
+    }
+
+    /// キーの入力欄に書けるようにする（「API キーを設定」から来たとき）。保存済みなら何もしない。
+    pub fn focus_key(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !matches!(self.session.read(cx).key, KeyState::Present { .. }) {
+            self.key_input.update(cx, |s, cx| s.focus(window, cx));
+        }
+    }
+
+    /// 保存済みのキーを、新しいキーに変え始める。
+    fn edit_key(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.key_editing = true;
+        self.key_input.update(cx, |s, cx| s.focus(window, cx));
+        cx.notify();
+    }
+
+    /// 書きかけの新しいキーを捨てて、保存済みのキーの表示に戻す。
+    fn cancel_key(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.key_editing = false;
+        self.key_input
+            .update(cx, |s, cx| s.set_value("", window, cx));
+        cx.notify();
     }
 
     /// 検索の言葉に合うモデル。おすすめを先に、残りは名前の頭でまとめる。
@@ -545,59 +568,92 @@ impl AiSettings {
                     .into_any_element()
             }
             AiRow::Key => {
-                let (key_text, key_color, deletable): (SharedString, Hsla, bool) =
-                    match &session.key {
-                        KeyState::Unknown => ("確認中…".into(), theme.muted_foreground, false),
-                        KeyState::Missing => ("未設定".into(), theme.muted_foreground, false),
-                        KeyState::Present {
-                            masked,
-                            source: Source::Keychain,
-                        } => (
-                            format!("保存済み {masked}（OS のキーチェーン）").into(),
-                            theme.success,
-                            true,
+                // 保存済みなら、伏せたキーを 1 行で出す。入力欄は、未設定のときと変えるときだけ
+                let saved = match &session.key {
+                    KeyState::Present { masked, source } if !self.key_editing => {
+                        Some((masked.clone(), *source))
+                    }
+                    _ => None,
+                };
+                if matches!(session.key, KeyState::Unknown) {
+                    return div()
+                        .id("ai-key-state")
+                        .text_sm()
+                        .text_color(theme.muted_foreground)
+                        .child("確認中…")
+                        .test_support()
+                        .into_any_element();
+                }
+                if let Some((masked, source)) = saved {
+                    let (icon, place): (&str, SharedString) = match source {
+                        Source::Keychain => ("key-round", "OS のキーチェーン".into()),
+                        Source::Env => (
+                            "variable",
+                            format!("環境変数 {}", provider.env_var()).into(),
                         ),
-                        KeyState::Present {
-                            masked,
-                            source: Source::Env,
-                        } => (
-                            format!("環境変数 {} を使用 {masked}", provider.env_var()).into(),
-                            theme.success,
-                            false,
-                        ),
-                        KeyState::Failed(e) => (e.clone(), theme.danger, false),
                     };
-                // 保存できなかった理由は、キーの欄のすぐ下に出す
-                let error = session.error.clone();
+                    return row()
+                        .gap_1()
+                        .child(
+                            row()
+                                .id("ai-key-state")
+                                .gap_2()
+                                .pr_1()
+                                .child(app_icon(icon).size_4().text_color(theme.muted_foreground))
+                                .child(div().text_sm().child(masked))
+                                .tooltip(move |window, cx| {
+                                    gpui_kit::component::tooltip::Tooltip::new(place.clone())
+                                        .build(window, cx)
+                                })
+                                .test_support(),
+                        )
+                        .child(feel::gloss(
+                            icon_button("ai-key-edit", "pen", "API キーを変更").on_click(
+                                cx.listener(|this, _, window, cx| this.edit_key(window, cx)),
+                            ),
+                        ))
+                        .when(source == Source::Keychain, |d| {
+                            d.child(feel::gloss(
+                                icon_button("ai-key-delete", "trash", "API キーを削除").on_click(
+                                    cx.listener(|this, _, _, cx| {
+                                        this.session.update(cx, |s, cx| s.delete_key(cx));
+                                    }),
+                                ),
+                            ))
+                        })
+                        .into_any_element();
+                }
+                // 保存済みのキーがあるときだけ、変えるのをキャンセルできる
+                let editing = self.key_editing && matches!(session.key, KeyState::Present { .. });
+                // 読めなかった理由と保存できなかった理由は、入力欄のすぐ下に出す
+                let errors: Vec<SharedString> = [
+                    match &session.key {
+                        KeyState::Failed(e) => Some(e.clone()),
+                        _ => None,
+                    },
+                    session.error.clone(),
+                ]
+                .into_iter()
+                .flatten()
+                .collect();
+                // 狭くて名前の下に回ったときは、横いっぱいに広げる
                 col()
-                    .w_full()
-                    .gap_2()
+                    .flex_1()
+                    .min_w(CONTROL_WIDTH)
+                    .gap_1()
                     .child(
                         row()
+                            .id("ai-key-editor")
+                            .w_full()
                             .gap_1()
-                            .child(
-                                div()
-                                    .id("ai-key-state")
-                                    .flex_1()
-                                    .min_w_0()
-                                    .text_xs()
-                                    .text_color(key_color)
-                                    .truncate()
-                                    .child(key_text)
-                                    .test_support(),
-                            )
-                            .when(deletable, |d| {
-                                d.child(feel::gloss(
-                                    icon_button("ai-key-delete", "trash", "API キーを削除")
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.session.update(cx, |s, cx| s.delete_key(cx));
-                                        })),
+                            // Esc は、書きかけの新しいキーを捨てるだけ（設定は閉じない）
+                            .when(editing, |d| {
+                                d.key_context("AiKeyEditor").on_action(cx.listener(
+                                    |this, _: &crate::CancelKeyEdit, window, cx| {
+                                        this.cancel_key(window, cx)
+                                    },
                                 ))
-                            }),
-                    )
-                    .child(
-                        row()
-                            .gap_1()
+                            })
                             .child(
                                 Input::new(&self.key_input)
                                     .id("ai-key-input")
@@ -613,11 +669,22 @@ impl AiSettings {
                                             this.save_key(window, cx)
                                         }),
                                     ),
-                            )),
+                            ))
+                            .when(editing, |d| {
+                                d.child(feel::gloss(
+                                    icon_button("ai-key-cancel", "x", "キャンセル").on_click(
+                                        cx.listener(|this, _, window, cx| {
+                                            this.cancel_key(window, cx)
+                                        }),
+                                    ),
+                                ))
+                            }),
                     )
-                    .when_some(error, |d, error| {
-                        d.child(div().text_xs().text_color(theme.danger).child(error))
-                    })
+                    .children(
+                        errors
+                            .into_iter()
+                            .map(|error| div().text_xs().text_color(theme.danger).child(error)),
+                    )
                     .into_any_element()
             }
             AiRow::AutoRun => Switch::new("ai-auto")

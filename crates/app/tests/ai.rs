@@ -426,12 +426,37 @@ fn the_key_is_saved_to_the_keychain_from_settings(cx: &mut TestAppContext) {
             source: Source::Keychain
         }
     );
+    // 保存したら入力欄はなくなり、伏せたキーだけが出る
     ui(cx, window, |window, _| {
-        let input = window.find("ai-key-input");
-        assert!(
-            input.value().is_none_or(|v| v.is_empty()),
-            "入力欄は空に戻る"
-        );
+        assert!(window.find("ai-key-state").visible());
+        assert!(window.try_find("ai-key-input").is_none());
+    });
+    // 変えるときだけ入力欄が出る。Esc で書きかけを捨てて、元の表示に戻る
+    ui(cx, window, |window, cx| {
+        window.click("ai-key-edit", cx);
+        window.input("sk-ant-other", cx);
+        window.press("escape", cx);
+    });
+    ui(cx, window, |window, _| {
+        assert!(window.try_find("ai-key-input").is_none());
+        assert!(window.find("ai-key-state").visible());
+    });
+    assert_eq!(
+        world.keys.get(Provider::Claude).unwrap().as_deref(),
+        Some("sk-ant-test-12345678")
+    );
+    // 新しいキーを入れて Enter で保存する
+    ui(cx, window, |window, cx| {
+        window.click("ai-key-edit", cx);
+        window.input("sk-ant-next-87654321", cx);
+        window.press("enter", cx);
+    });
+    assert_eq!(
+        world.keys.get(Provider::Claude).unwrap().as_deref(),
+        Some("sk-ant-next-87654321")
+    );
+    ui(cx, window, |window, _| {
+        assert!(window.try_find("ai-key-input").is_none());
     });
     // データベースには入れない（エクスポートにも入らない）
     let leaked = cx.update(|cx| {

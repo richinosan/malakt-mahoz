@@ -1985,8 +1985,9 @@ impl AiPane {
                         .label("API キーを設定")
                         .outline()
                         .small()
-                        .on_click(cx.listener(|this, _, _, cx| {
+                        .on_click(cx.listener(|this, _, window, cx| {
                             this.settings_open = true;
+                            this.settings.update(cx, |s, cx| s.focus_key(window, cx));
                             cx.notify();
                         })),
                 ));
