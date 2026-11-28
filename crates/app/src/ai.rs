@@ -1403,6 +1403,7 @@ impl Session {
             turns: &turns,
             tools: &[],
             fallbacks: false,
+            prefix_ttl: None,
         };
         let conversation = malakt_core::new_id();
         let (_, reply) =
@@ -2409,6 +2410,7 @@ impl Session {
             turns: &turns,
             tools: &[],
             fallbacks: false,
+            prefix_ttl: None,
         };
         let conversation = malakt_core::new_id();
         let (_, reply) =
@@ -3878,6 +3880,7 @@ impl Session {
             turns: &turns,
             tools: &definitions,
             fallbacks: false,
+            prefix_ttl: None,
         };
         Self::request(this, config, provider, key, conversation, request, cx).await
     }
@@ -3949,6 +3952,7 @@ impl Session {
             None => provider::endpoint(provider, model, key)?,
         };
         request.fallbacks = endpoint.fallbacks;
+        request.prefix_ttl = endpoint.prefix_ttl;
         let body = wire::body(endpoint.wire, &request);
         let post = config.post.clone();
         let wire = endpoint.wire;

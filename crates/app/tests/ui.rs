@@ -2859,6 +2859,8 @@ fn due_picker_takes_days_times_and_spellings(cx: &mut TestAppContext) {
     use chrono::{Datelike, NaiveDate};
     use malakt_core::view::{add_days, today};
     start(cx);
+    // 詳細を開いたまま一覧の期限のセルも押すので、詳細を一覧の右のカラムにする「一覧と詳細」で確かめる
+    cx.update(|cx| malakt_mahoz::theme::set_overlay(false, cx).unwrap());
     let (window, view) = open(cx, wide());
     ui(cx, window, |window, cx| {
         window.click("nav-all", cx);

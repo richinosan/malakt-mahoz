@@ -528,10 +528,24 @@ fn the_ai_creates_a_task_and_the_list_updates(cx: &mut TestAppContext) {
     assert_eq!(first["model"], "claude-opus-5-5");
     assert!(first.get("output_config").is_none(), "effort は標準のまま");
     // 今の画面は、最初の指示ではなくメッセージに添える
-    let first_message = first["messages"][0]["content"].as_str().unwrap();
+    let first_message = first["messages"][0]["content"][0]["text"].as_str().unwrap();
     assert!(first_message.contains("すべてのタスク"), "{first_message}");
-    assert!(!first["system"].as_str().unwrap().contains("すべてのタスク"));
+    assert!(!first["system"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("すべてのタスク"));
     assert!(first["tools"].as_array().unwrap().len() >= 10);
+    // プロンプトキャッシュ: ツールと最初の指示は 1 時間、会話は 5 分
+    let hour = json!({"type": "ephemeral", "ttl": "1h"});
+    assert_eq!(
+        first["tools"].as_array().unwrap().last().unwrap()["cache_control"],
+        hour
+    );
+    assert_eq!(first["system"][0]["cache_control"], hour);
+    assert_eq!(
+        first["messages"][0]["content"][0]["cache_control"],
+        json!({"type": "ephemeral"})
+    );
     // 2 回目は、返ってきたブロックをそのまま返し、ツールの結果を付ける
     let messages = sent[1].2["messages"].as_array().unwrap();
     assert_eq!(messages.len(), 3);
@@ -703,7 +717,7 @@ fn ctrl_c_kills_the_running_command(cx: &mut TestAppContext) {
     let messages = world.sent()[1].2["messages"].as_array().unwrap().clone();
     assert_eq!(messages[2]["content"][0]["tool_use_id"], "t1");
     assert_eq!(messages[2]["content"][0]["is_error"], true);
-    assert!(messages[3]["content"]
+    assert!(messages[3]["content"][0]["text"]
         .as_str()
         .unwrap()
         .starts_with("もういいよ\n\n（アプリからの補足）"));
@@ -793,7 +807,9 @@ fn github_links_are_fetched_before_sending(cx: &mut TestAppContext) {
         cmd_line("echo 'fetched https://github.com/o/r/issues/3'")
     );
     let sent = world.sent();
-    let message = sent[0].2["messages"][0]["content"].as_str().unwrap();
+    let message = sent[0].2["messages"][0]["content"][0]["text"]
+        .as_str()
+        .unwrap();
     assert!(message.starts_with("https://github.com/o/r/issues/3 をタスクにして"));
     assert!(message.contains("[https://github.com/o/r/issues/3 の中身]"));
     assert!(message.contains("fetched https://github.com/o/r/issues/3"));
@@ -837,7 +853,9 @@ fn slack_links_are_fetched_before_sending(cx: &mut TestAppContext) {
     say(cx, window, &pane, &format!("{URL} をタスクにして"));
     wait(cx, "返事が出る", |s| !s.busy);
     let sent = world.sent();
-    let message = sent[0].2["messages"][0]["content"].as_str().unwrap();
+    let message = sent[0].2["messages"][0]["content"][0]["text"]
+        .as_str()
+        .unwrap();
     assert!(
         message.contains(&format!("[{URL} の中身]\nU01 ")),
         "{message}"
@@ -1387,7 +1405,9 @@ fn progress_on_github_is_summarized_into_a_task_comment(cx: &mut TestAppContext)
     tick(cx, 1440);
     let sent = world.sent();
     assert_eq!(sent.len(), 2);
-    let message = sent[0].2["messages"][0]["content"].as_str().unwrap();
+    let message = sent[0].2["messages"][0]["content"][0]["text"]
+        .as_str()
+        .unwrap();
     assert!(
         message.contains("## https://github.com/o/r/pull/7"),
         "{message}"
@@ -1422,7 +1442,9 @@ fn progress_on_github_is_summarized_into_a_task_comment(cx: &mut TestAppContext)
     tick(cx, 1440);
     let sent = world.sent();
     assert_eq!(sent.len(), 3);
-    let message = sent[2].2["messages"][0]["content"].as_str().unwrap();
+    let message = sent[2].2["messages"][0]["content"][0]["text"]
+        .as_str()
+        .unwrap();
     assert!(
         message.contains("状態: マージ済み（前回のチェックでは オープン）"),
         "{message}"
@@ -1907,12 +1929,21 @@ fn a_new_task_is_arranged_by_the_ai(cx: &mut TestAppContext) {
 
     let sent = world.sent();
     assert_eq!(sent.len(), 2);
-    let message = sent[0].2["messages"][0]["content"].as_str().unwrap();
+    let message = sent[0].2["messages"][0]["content"][0]["text"]
+        .as_str()
+        .unwrap();
     assert!(message.contains(&format!("## タスク（id: {task}）")));
     assert!(message.contains("fetched https://github.com/o/r/pull/7"));
     // 今見ている画面も伝える
     assert!(message.contains("すべてのタスク"), "{message}");
     assert!(message.contains("のレビュー（ID: "), "{message}");
+    // アプリが始めた実行も、プロンプトキャッシュを使う。2 回目は 1 回目の結果の後ろに区切りが移る
+    assert_eq!(sent[0].2["system"][0]["cache_control"]["ttl"], "1h");
+    let results = sent[1].2["messages"][2]["content"].as_array().unwrap();
+    assert_eq!(
+        results.last().unwrap()["cache_control"],
+        json!({"type": "ephemeral"})
+    );
     assert_eq!(all_tasks(cx)[0].title, "ログインを直す PR のレビュー");
     assert!(read(cx, |s| s.arranging.is_empty()));
     ui(cx, window, |window, _| {
@@ -1997,7 +2028,10 @@ fn rules_written_in_settings_reach_the_ai(cx: &mut TestAppContext) {
     world.reply(text_reply("はい。"));
     say(cx, window, &pane, "こんにちは");
     wait(cx, "返事が来る", |s| !s.busy && s.items.len() >= 2);
-    let system = world.sent()[0].2["system"].as_str().unwrap().to_owned();
+    let system = world.sent()[0].2["system"][0]["text"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     assert!(
         system.ends_with("いつも従ってください。\n## 優先度\nPR のタスクは優先度を高にする"),
         "{system}"
@@ -2013,7 +2047,10 @@ fn rules_written_in_settings_reach_the_ai(cx: &mut TestAppContext) {
     world.reply(text_reply("はい。"));
     say(cx, window, &pane, "もう一度");
     wait(cx, "返事が来る", |s| !s.busy && s.items.len() >= 4);
-    let system = world.sent()[1].2["system"].as_str().unwrap().to_owned();
+    let system = world.sent()[1].2["system"][0]["text"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     assert!(!system.contains("ユーザーが決めたルール"), "{system}");
 
     // ごみ箱は、乗せたときと開いているときに出る
@@ -2138,9 +2175,12 @@ fn workspace_rules_reach_the_ai_in_that_workspace(cx: &mut TestAppContext) {
     world.reply(text_reply("はい。"));
     say(cx, window, &pane, "こんにちは");
     wait(cx, "返事が来る", |s| !s.busy && s.items.len() >= 2);
-    let system = world.sent()[0].2["system"].as_str().unwrap().to_owned();
+    let system = world.sent()[0].2["system"][0]["text"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     assert!(system.ends_with("## 敬語\n敬語で答える"), "{system}");
-    let first = world.sent()[0].2["messages"][0]["content"]
+    let first = world.sent()[0].2["messages"][0]["content"][0]["text"]
         .as_str()
         .unwrap()
         .to_owned();
@@ -2157,8 +2197,10 @@ fn workspace_rules_reach_the_ai_in_that_workspace(cx: &mut TestAppContext) {
     wait(cx, "返事が来る", |s| !s.busy && s.items.len() >= 4);
     // 最初の指示は変えず、ワークスペースの分はメッセージに添える
     let second = world.sent()[1].2.clone();
-    assert_eq!(second["system"].as_str().unwrap(), system);
-    let message = second["messages"][2]["content"].as_str().unwrap();
+    assert_eq!(second["system"][0]["text"].as_str().unwrap(), system);
+    let message = second["messages"][2]["content"][0]["text"]
+        .as_str()
+        .unwrap();
     assert!(
         message.ends_with(
             "ワークスペース「仕事」のルールです。いつも従ってください。\n## 優先度\nPR のタスクは優先度を高にする"
@@ -2166,7 +2208,12 @@ fn workspace_rules_reach_the_ai_in_that_workspace(cx: &mut TestAppContext) {
         "{message}"
     );
     // 前のメッセージは、送ったときのまま
-    assert_eq!(second["messages"][0]["content"].as_str().unwrap(), first);
+    assert_eq!(
+        second["messages"][0]["content"][0]["text"]
+            .as_str()
+            .unwrap(),
+        first
+    );
 }
 
 /// ワークスペースのメニューの「AI のルール」は、設定のルールをそのワークスペースのものにして開く。
@@ -2301,7 +2348,7 @@ fn a_task_dropped_on_the_chat_is_attached(cx: &mut TestAppContext) {
     world.reply(text_reply("見ました。"));
     say(cx, window, &pane, "これを見て");
     wait(cx, "返事が来る", |s| !s.busy && s.items.len() >= 2);
-    let message = world.sent()[0].2["messages"][0]["content"]
+    let message = world.sent()[0].2["messages"][0]["content"][0]["text"]
         .as_str()
         .unwrap()
         .to_owned();
@@ -2336,7 +2383,7 @@ fn enter_sends_and_shift_enter_breaks_the_line(cx: &mut TestAppContext) {
     wait(cx, "返事が来る", |s| !s.busy && s.items.len() >= 2);
     let sent = world.sent();
     assert_eq!(sent.len(), 1);
-    assert!(sent[0].2["messages"][0]["content"]
+    assert!(sent[0].2["messages"][0]["content"][0]["text"]
         .as_str()
         .unwrap()
         .starts_with("1 行目\n2 行目\n\n（アプリからの補足）"));
@@ -2401,7 +2448,9 @@ fn a_task_with_a_slack_link_is_arranged_by_the_ai(cx: &mut TestAppContext) {
     world.reply(text_reply("タイトルを付け直しました。"));
     wait(cx, "AI が整え終わる", |s| !s.busy);
     let sent = world.sent();
-    let message = sent[0].2["messages"][0]["content"].as_str().unwrap();
+    let message = sent[0].2["messages"][0]["content"][0]["text"]
+        .as_str()
+        .unwrap();
     assert!(
         message.contains(&format!("### {URL} の中身\nU01 ")),
         "{message}"
@@ -2456,7 +2505,7 @@ fn fetch_notes_never_reach_the_task(cx: &mut TestAppContext) {
         !s.busy && !s.runs.is_empty()
     });
     assert_eq!(world.sent().len(), 2);
-    let message = world.sent()[0].2["messages"][0]["content"]
+    let message = world.sent()[0].2["messages"][0]["content"][0]["text"]
         .as_str()
         .unwrap()
         .to_owned();
@@ -2858,7 +2907,7 @@ fn a_pasted_task_link_is_attached(cx: &mut TestAppContext) {
         Item::User("「会場を予約する」\nmalakt-mahoz://task/nothing どう進める？".into())
     );
     let sent = world.sent();
-    let message = sent.last().unwrap().2["messages"][0]["content"]
+    let message = sent.last().unwrap().2["messages"][0]["content"][0]["text"]
         .as_str()
         .unwrap()
         .to_owned();
@@ -3027,7 +3076,9 @@ fn a_comment_updates_the_progress(cx: &mut TestAppContext) {
 
     let sent = world.sent();
     assert_eq!(sent.len(), 2);
-    let message = sent[0].2["messages"][0]["content"].as_str().unwrap();
+    let message = sent[0].2["messages"][0]["content"][0]["text"]
+        .as_str()
+        .unwrap();
     assert!(
         message.contains(&format!("## タスク（id: {task}）")),
         "{message}"
@@ -3096,7 +3147,7 @@ fn comments_are_sent_once_after_a_pause(cx: &mut TestAppContext) {
     world.reply(text_reply("更新しました。"));
     settle_comments(cx);
     assert_eq!(world.sent().len(), 2);
-    let message = world.sent()[0].2["messages"][0]["content"]
+    let message = world.sent()[0].2["messages"][0]["content"][0]["text"]
         .as_str()
         .unwrap()
         .to_owned();
@@ -3715,7 +3766,7 @@ fn commands_run_in_the_shell_of_the_open_tab(cx: &mut TestAppContext) {
     );
     ui(cx, window, |window, cx| window.click("ai-allow", cx));
     wait(cx, "コマンドが終わる", |s| !s.busy);
-    let message = world.sent()[0].2["messages"][0]["content"]
+    let message = world.sent()[0].2["messages"][0]["content"][0]["text"]
         .as_str()
         .unwrap()
         .to_owned();
@@ -3960,7 +4011,7 @@ fn event_workspace(cx: &mut TestAppContext) -> String {
 }
 
 fn last_message(world: &World) -> String {
-    world.sent().last().unwrap().2["messages"][0]["content"]
+    world.sent().last().unwrap().2["messages"][0]["content"][0]["text"]
         .as_str()
         .unwrap()
         .to_owned()
@@ -4264,7 +4315,7 @@ fn a_repeat_runs_its_ai_instruction_on_the_new_copy(cx: &mut TestAppContext) {
     wait(cx, "定期実行が終わる", |s| {
         s.runs.iter().any(|r| r.kind == RunKind::Repeat)
     });
-    let message = world.sent()[0].2["messages"][0]["content"]
+    let message = world.sent()[0].2["messages"][0]["content"][0]["text"]
         .as_str()
         .unwrap()
         .to_owned();
@@ -4506,7 +4557,7 @@ fn a_schedule_makes_a_new_task_and_runs_its_ai_instruction(cx: &mut TestAppConte
     assert_eq!(comments_of(cx, &task), vec![draft.to_owned()]);
     // AI に渡ったのは指示の実行だけ（整理には回っていない）
     assert_eq!(world.sent().len(), 2);
-    let message = world.sent()[0].2["messages"][0]["content"]
+    let message = world.sent()[0].2["messages"][0]["content"][0]["text"]
         .as_str()
         .unwrap()
         .to_owned();
