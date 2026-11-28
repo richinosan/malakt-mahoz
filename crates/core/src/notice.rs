@@ -1,7 +1,8 @@
 //! 通知。
 //!
-//! 自分の操作では作らない。作るのは、時間で起きること（期限が近い。いつ知らせるかは [`crate::alert`]）と、
-//! 自分以外から届いた変更（完了チケットでの報告、取り込んだデータでの割り当て）だけ。
+//! 自分の操作では作らない。作るのは、時間で起きること（期限が近い。いつ知らせるかは [`crate::alert`]。
+//! タイマーとポモドーロの段が終わった）と、自分以外から届いた変更（完了チケットでの報告、
+//! 取り込んだデータでの割り当て）だけ。
 //! 画面の通知一覧に出し、OS の通知にも 1 回だけ出す。
 
 use rusqlite::{params, Connection, Row};
@@ -24,6 +25,10 @@ pub enum NoticeKind {
     Due,
     /// メンションされた
     Mentioned,
+    /// タイマー（[`crate::timer`]）が終わった。タスクには付かない
+    Timer,
+    /// ポモドーロ（[`crate::pomodoro`]）の段が終わった。タスクには付かない
+    Pomodoro,
 }
 
 impl NoticeKind {
@@ -35,6 +40,8 @@ impl NoticeKind {
             NoticeKind::DueToday => "due_today",
             NoticeKind::Due => "due",
             NoticeKind::Mentioned => "mentioned",
+            NoticeKind::Timer => "timer",
+            NoticeKind::Pomodoro => "pomodoro",
         }
     }
 
@@ -46,6 +53,8 @@ impl NoticeKind {
             "due_today" => NoticeKind::DueToday,
             "due" => NoticeKind::Due,
             "mentioned" => NoticeKind::Mentioned,
+            "timer" => NoticeKind::Timer,
+            "pomodoro" => NoticeKind::Pomodoro,
             _ => return None,
         })
     }
@@ -55,7 +64,8 @@ impl NoticeKind {
 pub struct Notice {
     pub id: Id,
     pub kind: NoticeKind,
-    pub task_id: Id,
+    /// 通知の相手のタスク。タイマーとポモドーロの通知では `None`。
+    pub task_id: Option<Id>,
     /// 通知を作った時点のタイトル。
     pub task_title: String,
     /// 操作をした人の、その時点の名前。人の操作でなければ空。
@@ -73,6 +83,8 @@ pub struct Notice {
     pub read_at: Option<i64>,
     /// 期限の通知のときの、その時点の期限。
     pub due: Option<String>,
+    /// タスクに付かない通知の 1 行（タイマーとポモドーロ）。
+    pub text: String,
 }
 
 impl Notice {
@@ -89,6 +101,7 @@ impl Notice {
             format!("{} さん", self.actor)
         };
         match self.kind {
+            NoticeKind::Timer | NoticeKind::Pomodoro => self.text.clone(),
             NoticeKind::DueToday => format!("「{title}」の期限は今日です"),
             NoticeKind::Due => match self.due.as_deref() {
                 Some(due) => crate::alert::headline(title, due, self.created_at),
@@ -148,7 +161,7 @@ pub const MAX_NOTICES: usize = 500;
 pub const EXCERPT_CHARS: usize = 200;
 
 const COLUMNS: &str = "id, kind, task_id, task_title, actor, comment_id, excerpt, status, \
-                       done_count, total_count, created_at, read_at, due";
+                       done_count, total_count, created_at, read_at, due, text";
 
 fn from_row(r: &Row<'_>) -> rusqlite::Result<Notice> {
     let kind: String = r.get(1)?;
@@ -168,6 +181,7 @@ fn from_row(r: &Row<'_>) -> rusqlite::Result<Notice> {
         created_at: r.get(10)?,
         read_at: r.get(11)?,
         due: r.get(12)?,
+        text: r.get(13)?,
     })
 }
 
@@ -198,6 +212,26 @@ pub(crate) fn insert(conn: &Connection, kind: NoticeKind, new: &NewNotice<'_>) -
             new.dedupe,
             new.due
         ])?;
+    Ok(n > 0)
+}
+
+/// タスクに付かない通知（タイマーとポモドーロ）を作る。同じ `dedupe` の通知がすでにあれば作らない。
+/// 作ったら `true`。`excerpt` は 2 行目に出す文。
+pub(crate) fn insert_plain(
+    conn: &Connection,
+    kind: NoticeKind,
+    text: &str,
+    excerpt: &str,
+    dedupe: &str,
+    at: i64,
+) -> Result<bool> {
+    let excerpt: String = excerpt.chars().take(EXCERPT_CHARS).collect();
+    let n = conn
+        .prepare_cached(
+            "INSERT OR IGNORE INTO notices(id, kind, task_id, task_title, excerpt, created_at, \
+             dedupe, text) VALUES (?1, ?2, NULL, '', ?3, ?4, ?5, ?6)",
+        )?
+        .execute(params![new_id(), kind.as_str(), excerpt, at, dedupe, text])?;
     Ok(n > 0)
 }
 
@@ -436,7 +470,10 @@ mod tests {
         assert_eq!(s.sweep_due_alerts(at("2026-12-24 12:00")).unwrap().made, 0);
         assert_eq!(s.sweep_due_alerts(at("2026-12-24 18:00")).unwrap().made, 1);
         let notices = s.notices(10).unwrap();
-        let ids: Vec<&str> = notices.iter().map(|n| n.task_id.as_str()).collect();
+        let ids: Vec<&str> = notices
+            .iter()
+            .filter_map(|n| n.task_id.as_deref())
+            .collect();
         assert_eq!(ids, [timed.id.as_str(), mine.id.as_str()]);
         assert!(notices
             .iter()
@@ -550,7 +587,7 @@ mod tests {
         let base = Notice {
             id: "n".into(),
             kind: NoticeKind::Commented,
-            task_id: "t".into(),
+            task_id: Some("t".into()),
             task_title: "告知".into(),
             actor: "佐藤".into(),
             comment_id: None,
@@ -561,6 +598,7 @@ mod tests {
             created_at: 0,
             read_at: None,
             due: None,
+            text: String::new(),
         };
         let with = |f: &dyn Fn(&mut Notice)| {
             let mut n = base.clone();
@@ -626,7 +664,7 @@ mod tests {
         let notices = mine.notices(10).unwrap();
         assert_eq!(notices.len(), 1);
         assert_eq!(notices[0].kind, NoticeKind::Assigned);
-        assert_eq!(notices[0].task_id, t.id);
+        assert_eq!(notices[0].task_id.as_ref(), Some(&t.id));
         assert_eq!(
             notices[0].headline(),
             "「受付を頼みたい」の担当になりました"
@@ -659,7 +697,7 @@ mod tests {
         assert!(n.is_unread());
         s.mark_notice_read(&n.id).unwrap();
         let n = s.notices(10).unwrap().remove(0);
-        assert_eq!(n.task_id, t.id);
+        assert_eq!(n.task_id.as_ref(), Some(&t.id));
         assert!(!n.is_unread());
     }
 
@@ -705,7 +743,7 @@ mod tests {
         let other = task(&mut s, "もう一つ", None, &[&me]);
         assert_eq!(s.notify_newly_assigned(&[t.id.clone()]).unwrap(), 1);
         assert_eq!(s.notices(10).unwrap().len(), 2);
-        assert_eq!(s.notices(10).unwrap()[0].task_id, other.id);
+        assert_eq!(s.notices(10).unwrap()[0].task_id.as_ref(), Some(&other.id));
     }
 
     #[test]

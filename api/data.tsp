@@ -587,6 +587,32 @@ op pomodoro(
 ): void;
 
 /**
+ * タイマーの今の状態を返す。mode（countdown: 決めた時間から 0 まで / stopwatch: 0 から数える）、
+ * run（ready / running / paused / done。done はカウントダウンが 0 になって止まった）、
+ * カウントダウンの長さ length_seconds、画面に出している時間 shown_seconds（カウントダウンは残り、ストップウォッチは進んだ時間）と、その文字 shown_text。
+ */
+op get_timer(): void;
+
+/**
+ * タイマーを操作する。
+ * start（始める。一時停止していれば続きから、終わっていれば最初から）、pause（一時停止）、reset（止めて最初に戻す）、
+ * set（seconds か text でカウントダウンの長さを決めて最初に戻す。mode も渡せる）、add（カウントダウンに seconds 秒足す。動いていればそのまま続く）。
+ * mode だけを渡して set にすると、カウントダウンとストップウォッチを切り替える（最初に戻る）。
+ * start や set に seconds や text を渡すと、mode を渡さなければカウントダウンになる（ストップウォッチのときも）。
+ * カウントダウンが 0 になると、通知（アプリの通知と OS の通知）が出る。
+ */
+op timer(
+  action: "start" | "pause" | "reset" | "set" | "add",
+  mode?: "countdown" | "stopwatch",
+
+  /** 秒。1〜359999（99 時間 59 分 59 秒） */
+  @minValue(1) @maxValue(359999) seconds?: int32,
+
+  /** 長さを文字で（「5」は 5 分、「1:30」「1:00:00」「1時間30分」「90秒」） */
+  text?: string,
+): void;
+
+/**
  * ポモドーロで測った作業の記録を新しい順に返す。
  * task_id でそのタスクだけ、since（YYYY-MM-DD）でその日以降だけ。
  * 合計の秒数も返す。

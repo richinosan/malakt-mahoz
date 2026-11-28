@@ -627,6 +627,26 @@ impl Store {
              ORDER BY ended_at DESC, id DESC LIMIT -1 OFFSET ?1)",
             params![MAX_LOGS],
         )?;
+        // 時刻が来て段が終わったら、通知を 1 回作る（どのプロセスが進めても同じ）
+        if timer.ended > before.ended {
+            let at = timer.ended_at.unwrap_or(now);
+            let ended = timer.last_ended.unwrap_or(Phase::Work);
+            let next = timer.phase;
+            let minutes = settings.minutes(next);
+            let excerpt = if timer.running() {
+                format!("{} {minutes} 分を始めました", next.label())
+            } else {
+                format!("次は{} {minutes} 分", next.label())
+            };
+            crate::notice::insert_plain(
+                &tx,
+                crate::notice::NoticeKind::Pomodoro,
+                &format!("{}が終わりました", ended.label()),
+                &excerpt,
+                &format!("pomodoro:{at}:{}", timer.ended),
+                at,
+            )?;
+        }
         put(&tx, TIMER_KEY, &serde_json::to_string(&timer)?)?;
         tx.commit()?;
         self.undo_skip()?;
@@ -907,6 +927,40 @@ mod tests {
         assert!(store.undo().unwrap());
         assert!(store.task(&task.id).is_err());
         assert!(!store.can_undo());
+    }
+
+    #[test]
+    fn 段が終わると通知が1回だけできる() {
+        use crate::notice::NoticeKind;
+        let mut store = Store::open_in_memory().unwrap();
+        store.pomodoro(Op::Start { task: None }, 0).unwrap();
+        store.pomodoro_now(24 * MIN).unwrap();
+        assert!(store.notices(10).unwrap().is_empty());
+        store.pomodoro_now(26 * MIN).unwrap();
+        store.pomodoro_now(27 * MIN).unwrap();
+        let notices = store.notices(10).unwrap();
+        assert_eq!(notices.len(), 1);
+        assert_eq!(notices[0].kind, NoticeKind::Pomodoro);
+        assert_eq!(notices[0].task_id, None);
+        assert_eq!(notices[0].headline(), "作業が終わりました");
+        assert_eq!(notices[0].excerpt, "次は休憩 5 分");
+        assert_eq!(notices[0].created_at, 25 * MIN);
+        // 飛ばしたときは知らせない
+        store.pomodoro(Op::Skip, 28 * MIN).unwrap();
+        assert_eq!(store.notices(10).unwrap().len(), 1);
+        // 休憩を自動で始めるなら、始めたことを書く
+        let s = Settings {
+            auto_break: true,
+            ..Settings::default()
+        };
+        store.set_pomodoro_settings(&s).unwrap();
+        store.pomodoro(Op::Start { task: None }, 30 * MIN).unwrap();
+        store.pomodoro_now(56 * MIN).unwrap();
+        let notices = store.notices(10).unwrap();
+        assert_eq!(notices.len(), 2);
+        assert_eq!(notices[0].excerpt, "休憩 5 分を始めました");
+        // まだ OS に出していない
+        assert_eq!(store.undelivered_notices().unwrap().len(), 2);
     }
 
     #[test]

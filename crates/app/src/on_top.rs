@@ -27,6 +27,7 @@ pub enum Kind {
     /// タスクのウィンドウ。MCP からはメインのウィンドウ（最初に開いた 1 枚）
     Task,
     Pomodoro,
+    Timer,
     /// AI チャットだけのウィンドウ
     Chat,
     /// シェル（ターミナルとブラウザのタブ）だけのウィンドウ
@@ -34,13 +35,20 @@ pub enum Kind {
 }
 
 impl Kind {
-    pub const ALL: [Kind; 4] = [Kind::Task, Kind::Pomodoro, Kind::Chat, Kind::Shell];
+    pub const ALL: [Kind; 5] = [
+        Kind::Task,
+        Kind::Pomodoro,
+        Kind::Timer,
+        Kind::Chat,
+        Kind::Shell,
+    ];
 
     /// API（api/app.tsp と api/mcp.tsp の OnTopWindow）で使う名前。
     pub fn key(self) -> &'static str {
         match self {
             Kind::Task => "task",
             Kind::Pomodoro => "pomodoro",
+            Kind::Timer => "timer",
             Kind::Chat => "chat",
             Kind::Shell => "shell",
         }
@@ -50,7 +58,9 @@ impl Kind {
         Kind::ALL
             .into_iter()
             .find(|kind| kind.key() == key)
-            .ok_or_else(|| format!("window は task / pomodoro / chat / shell のどれかです: {key}"))
+            .ok_or_else(|| {
+                format!("window は task / pomodoro / timer / chat / shell のどれかです: {key}")
+            })
     }
 
     /// 文の中で使う名前。
@@ -58,6 +68,7 @@ impl Kind {
         match self {
             Kind::Task => "タスクのウィンドウ",
             Kind::Pomodoro => "ポモドーロのウィンドウ",
+            Kind::Timer => "タイマーのウィンドウ",
             Kind::Chat => "AI チャットのウィンドウ",
             Kind::Shell => "シェルのウィンドウ",
         }
@@ -97,7 +108,9 @@ pub fn set(window: &mut Window, on: bool, cx: &mut App) -> Result<(), String> {
     // ヘッダーのピンを出し直す
     window.refresh();
     match kind {
-        Some(kind @ (Kind::Pomodoro | Kind::Chat | Kind::Shell)) => remember(kind, on, cx),
+        Some(kind @ (Kind::Pomodoro | Kind::Timer | Kind::Chat | Kind::Shell)) => {
+            remember(kind, on, cx)
+        }
         // タスクのウィンドウは、画面の状態と一緒に覚える（MainView::track_session）
         _ => Ok(()),
     }
@@ -232,6 +245,7 @@ pub fn find(kind: Kind, cx: &App) -> Option<AnyWindowHandle> {
     let handle = match kind {
         Kind::Task => crate::session::main_window(cx),
         Kind::Pomodoro => crate::pomodoro::window(cx),
+        Kind::Timer => crate::timer::window(cx),
         Kind::Chat => crate::ai::shared(cx).read(cx).chat_window,
         Kind::Shell => match crate::ai::shared(cx).read(cx).shell_place {
             crate::ai::ShellPlace::Window(handle) => Some(handle),

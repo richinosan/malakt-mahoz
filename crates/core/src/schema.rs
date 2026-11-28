@@ -449,6 +449,52 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     r#"
     ALTER TABLE tasks ADD COLUMN pr TEXT;
     "#,
+    // 26: タスクに付かない通知（タイマーとポモドーロの終わり）。task_id を空にでき、文は text に置く
+    r#"
+    CREATE TABLE notices_new (
+        id TEXT PRIMARY KEY NOT NULL,
+        kind TEXT NOT NULL,
+        task_id TEXT REFERENCES tasks(id) ON DELETE CASCADE,
+        task_title TEXT NOT NULL,
+        actor TEXT NOT NULL DEFAULT '',
+        comment_id TEXT REFERENCES comments(id) ON DELETE SET NULL,
+        excerpt TEXT NOT NULL DEFAULT '',
+        status TEXT,
+        done_count INTEGER NOT NULL DEFAULT 0,
+        total_count INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL,
+        read_at INTEGER,
+        delivered_at INTEGER,
+        dedupe TEXT UNIQUE,
+        due TEXT,
+        text TEXT NOT NULL DEFAULT ''
+    ) STRICT;
+    INSERT INTO notices_new(id, kind, task_id, task_title, actor, comment_id, excerpt, status,
+                            done_count, total_count, created_at, read_at, delivered_at, dedupe, due)
+        SELECT id, kind, task_id, task_title, actor, comment_id, excerpt, status,
+               done_count, total_count, created_at, read_at, delivered_at, dedupe, due
+        FROM notices;
+    DROP TABLE notices;
+    ALTER TABLE notices_new RENAME TO notices;
+    CREATE INDEX notices_created ON notices(created_at);
+    CREATE INDEX notices_task ON notices(task_id);
+    "#,
+    // 27: キーなしの接続を、キーと同じ表の決まり（keyless = 1）にする。secret_hash は 'keyless:' と id。
+    //     前の設定 mcp.keyless（標準・full は読み書き、read は読み取りのみ、off はなし）を決まりに移す
+    r#"
+    ALTER TABLE access_keys ADD COLUMN keyless INTEGER NOT NULL DEFAULT 0;
+    INSERT INTO access_keys(id, name, secret_hash, hint, read_only, while_locked, created_at, keyless)
+    SELECT id, 'キーなし', 'keyless:' || id, '', v IS 'read', 0,
+           CAST(strftime('%s', 'now') AS INTEGER) * 1000, 1
+    FROM (SELECT upper(hex(randomblob(13))) AS id,
+                 (SELECT value FROM settings WHERE key = 'mcp.keyless') AS v)
+    WHERE v IS NULL OR v IN ('full', 'read');
+    DELETE FROM settings WHERE key = 'mcp.keyless';
+    "#,
+    // 28: CalDAV のアカウントに付ける名前（「説明」）。空なら `ユーザー名@ホスト名` で出す
+    r#"
+    ALTER TABLE caldav_accounts ADD COLUMN name TEXT NOT NULL DEFAULT '';
+    "#,
 ];
 
 pub(crate) fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
@@ -500,6 +546,70 @@ mod tests {
         assert_eq!((roles.as_str(), done), ("R", None));
         // もう一度開いても何もしない
         super::migrate(&mut conn).unwrap();
+    }
+
+    /// 前の設定「キーなしの接続」は、キーなしの接続の決まりになって設定から消える。
+    #[test]
+    fn moves_the_keyless_setting_into_rules() {
+        for (value, rules) in [
+            (None, Some(false)),
+            (Some("full"), Some(false)),
+            (Some("read"), Some(true)),
+            (Some("off"), None),
+            (Some("maybe"), None),
+        ] {
+            let mut conn = Connection::open_in_memory().unwrap();
+            for sql in &super::MIGRATIONS[..26] {
+                conn.execute_batch(sql).unwrap();
+            }
+            conn.pragma_update(None, "user_version", 26).unwrap();
+            if let Some(value) = value {
+                conn.execute(
+                    "INSERT INTO settings(key, value) VALUES ('mcp.keyless', ?1)",
+                    [value],
+                )
+                .unwrap();
+            }
+            conn.execute_batch(
+                "INSERT INTO access_keys(id, name, secret_hash, hint, created_at) \
+                 VALUES ('k', '鍵', 'h', 'abcd', 0);",
+            )
+            .unwrap();
+            super::migrate(&mut conn).unwrap();
+            let found: Vec<(String, bool, bool, String)> = conn
+                .prepare(
+                    "SELECT name, read_only, while_locked, secret_hash FROM access_keys \
+                     WHERE keyless = 1",
+                )
+                .unwrap()
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap();
+            assert_eq!(found.len(), usize::from(rules.is_some()), "{value:?}");
+            if let (Some(read_only), Some(rule)) = (rules, found.first()) {
+                assert_eq!(
+                    (rule.0.as_str(), rule.1, rule.2),
+                    ("キーなし", read_only, false)
+                );
+                assert!(rule.3.starts_with("keyless:"));
+            }
+            let left: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM settings WHERE key = 'mcp.keyless'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(left, 0);
+            // 前からあるキーは、キーのまま
+            let keyless: bool = conn
+                .query_row("SELECT keyless FROM access_keys WHERE id = 'k'", [], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            assert!(!keyless);
+        }
     }
 
     /// 設定に書いていた「AI に伝えること」は、ルールになって設定から消える。
@@ -606,5 +716,58 @@ mod tests {
                 ("old".into(), None, Some(100)),
             ]
         );
+    }
+
+    /// 通知の表を作り直しても、今までの通知はそのまま残り、タスクのない通知も入れられる。
+    #[test]
+    fn keeps_notices_and_allows_ones_without_a_task() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
+        for sql in &super::MIGRATIONS[..25] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 25).unwrap();
+        conn.execute_batch(
+            r#"INSERT INTO tasks(id, title, description, status, priority, position, created_at, updated_at)
+             VALUES ('t', '請求書', '', 'needs_action', 0, 0, 100, 0);
+             INSERT INTO notices(id, kind, task_id, task_title, created_at, read_at, delivered_at, dedupe, due)
+             VALUES ('n', 'due', 't', '請求書', 200, NULL, 210, 'due:t:2026-11-28:0', '2026-11-28');"#,
+        )
+        .unwrap();
+        super::migrate(&mut conn).unwrap();
+        let kept: (String, Option<String>, Option<i64>, String, String) = conn
+            .query_row(
+                "SELECT kind, task_id, delivered_at, dedupe, text FROM notices WHERE id = 'n'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            kept,
+            (
+                "due".into(),
+                Some("t".into()),
+                Some(210),
+                "due:t:2026-11-28:0".into(),
+                String::new()
+            )
+        );
+        conn.execute(
+            "INSERT INTO notices(id, kind, task_id, task_title, created_at, text) \
+             VALUES ('x', 'timer', NULL, '', 300, 'タイマーが終わりました')",
+            [],
+        )
+        .unwrap();
+        // タスクを消すと、そのタスクの通知だけが消える
+        conn.execute("DELETE FROM tasks WHERE id = 't'", [])
+            .unwrap();
+        let ids: Vec<String> = conn
+            .prepare("SELECT id FROM notices")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(ids, ["x"]);
     }
 }

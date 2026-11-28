@@ -3329,37 +3329,44 @@ impl AiPane {
                     Anchor::TopRight,
                     |menu, _, _| {
                         use crate::mcp_register::Agent;
+                        use crate::state::CustomizeSection;
                         let typed = |name: &'static str, agent: Agent| {
                             PopupMenuItem::new(name)
-                                .icon(app_icon("terminal"))
+                                .icon(app_icon("square-terminal"))
                                 .on_click(move |_, _, cx| {
                                     term::shared(cx).update(cx, |terms, cx| {
                                         terms.type_mcp_command(agent, cx);
                                     })
                                 })
                         };
-                        menu.item(typed("Claude Code", Agent::Claude))
+                        let settings = |name: &'static str, icon: &'static str, section| {
+                            PopupMenuItem::new(name).icon(app_icon(icon)).on_click(
+                                move |_, _, cx| crate::open_settings_in(None, Some(section), cx),
+                            )
+                        };
+                        menu.label("MCP に登録")
+                            .item(typed("Claude Code", Agent::Claude))
                             .item(typed("Codex", Agent::Codex))
                             .item(
                                 PopupMenuItem::new("Cursor")
-                                    .icon(app_icon("plug"))
+                                    .icon(app_icon("file-cog"))
                                     .on_click(|_, _, cx| {
                                         term::shared(cx)
                                             .update(cx, |terms, cx| terms.add_to_cursor(cx))
                                     }),
                             )
                             .separator()
-                            .item(
-                                PopupMenuItem::new("アクセスキーを設定")
-                                    .icon(app_icon("key-round"))
-                                    .on_click(|_, _, cx| {
-                                        crate::open_settings_in(
-                                            None,
-                                            Some(crate::state::CustomizeSection::AccessKeys),
-                                            cx,
-                                        )
-                                    }),
-                            )
+                            .label("設定")
+                            .item(settings(
+                                "アクセスキー",
+                                "key-round",
+                                CustomizeSection::AccessKeys,
+                            ))
+                            .item(settings(
+                                "MCP の接続",
+                                "plug",
+                                CustomizeSection::McpConnection,
+                            ))
                     },
                 ))
             })

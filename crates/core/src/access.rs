@@ -3,8 +3,11 @@
 //! キーは画面で発行し、エージェントには環境変数で渡す。キーごとに、読み取りのみにするか、
 //! アプリがロックしている間も使えるかを選べる。失効させると、動いているサーバーもすぐ使えなくなる。
 //!
-//! キーを付けずにつないできたものをどう扱うかは [`keyless`] で選ぶ。標準は「読み書き」で、
-//! アクセスキーを入れる前と同じ（ロックを解除している間だけ、すべてのツールが使える）。
+//! キーを付けずにつないできたものは、「キーなしの接続」の決まり（[`Store::keyless_rules`]）で決める。
+//! 決まりごとに、読み取りのみか、ロック中も使えるか、使える期間と時間帯を選べる。どれか 1 つに
+//! 当てはまれば使え、当てはまるものに読み書きがあれば読み書き。決まりがなければ、キーが必要。
+//! 標準は「読み書き・いつでも」の 1 つで、アクセスキーを入れる前と同じ
+//! （ロックを解除している間だけ、すべてのツールが使える）。
 //!
 //! キーごとに、使える期間（開始と期限）と、使える時間帯（曜日と時刻、[`Window`]）も決められる。
 //! 期間と時間帯は、その PC の時刻で見る。
@@ -30,58 +33,10 @@ pub const NEW_KEY_NAME: &str = "新規アクセスキー";
 /// 「最後に使った時刻」を書き直す間隔（ミリ秒）。呼び出しのたびにディスクに書かない。
 const TOUCH_EVERY_MS: i64 = 60_000;
 
-/// キーを付けずにつないできたものを、どう扱うか。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Keyless {
-    /// すべてのツールが使える（アクセスキーを入れる前と同じ）
-    #[default]
-    Full,
-    /// 読み取りのツールだけ
-    ReadOnly,
-    /// 使えない。アクセスキーが要る
-    Off,
-}
-
-impl Keyless {
-    pub const ALL: [Keyless; 3] = [Keyless::Full, Keyless::ReadOnly, Keyless::Off];
-
-    pub fn code(self) -> &'static str {
-        match self {
-            Keyless::Full => "full",
-            Keyless::ReadOnly => "read",
-            Keyless::Off => "off",
-        }
-    }
-
-    pub fn parse(code: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|k| k.code() == code)
-    }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Keyless::Full => "読み書き",
-            Keyless::ReadOnly => "読み取りのみ",
-            Keyless::Off => "使えない",
-        }
-    }
-}
-
-const KEYLESS_KEY: &str = "mcp.keyless";
-
-/// キーを付けずにつないできたものの扱い。読めない値が入っていたら（手で書き換えたなど）、使えないものとして扱う。
-pub fn keyless(store: &Store) -> Result<Keyless> {
-    Ok(match store.setting(KEYLESS_KEY)? {
-        None => Keyless::Full,
-        Some(code) => Keyless::parse(&code).unwrap_or(Keyless::Off),
-    })
-}
-
-pub fn set_keyless(store: &mut Store, keyless: Keyless) -> Result<()> {
-    match keyless {
-        Keyless::Full => store.set_setting(KEYLESS_KEY, None),
-        other => store.set_setting(KEYLESS_KEY, Some(other.code())),
-    }
-}
+/// キーなしの接続の決まりの名前。画面と、使えない理由の文に出す。
+pub const KEYLESS_NAME: &str = "キーなし";
+/// キーなしの接続の決まりの数。
+pub const MAX_RULES: usize = 20;
 
 /// 1 つのキーに付けられる時間帯の数。
 pub const MAX_WINDOWS: usize = 20;
@@ -272,6 +227,22 @@ impl AccessKey {
         self.starts.is_some() || self.expires.is_some() || !self.windows.is_empty()
     }
 
+    /// 使える期間と時間帯の表示（「2026/12/31 まで・平日 9:00〜18:00」）。絞っていなければ「いつでも」。
+    pub fn when_label(&self) -> String {
+        let mut parts = Vec::new();
+        if let Some(starts) = &self.starts {
+            parts.push(format!("{} から", moment_label(starts)));
+        }
+        if let Some(expires) = &self.expires {
+            parts.push(format!("{} まで", moment_label(expires)));
+        }
+        parts.extend(self.windows.iter().map(Window::label));
+        if parts.is_empty() {
+            return "いつでも".into();
+        }
+        parts.join("・")
+    }
+
     /// その時刻（その PC の時刻）に、期間と時間帯の上で使えるか。
     pub fn usable_at(&self, at: NaiveDateTime) -> std::result::Result<(), Denied> {
         if let Some(expires) = self.expires.as_deref() {
@@ -360,6 +331,8 @@ pub enum Denied {
     NotYet { name: String, from: String },
     /// キーを使える時間帯の外
     OutsideHours { name: String, hours: String },
+    /// キーなしの接続を使える時間の外（`hours` は使えるとき）
+    KeylessHours { hours: String },
 }
 
 impl std::fmt::Display for Denied {
@@ -369,7 +342,7 @@ impl std::fmt::Display for Denied {
                 "malakt-mahoz はロックされています。アプリを開いて、ロックを解除してください。",
             ),
             Denied::NeedsKey => f.write_str(
-                "malakt-mahoz にはアクセスキーが必要です。アプリの設定の「アクセスキー」でキーを発行して、環境変数 MALAKT_MAHOZ_KEY に入れてください。",
+                "malakt-mahoz にはアクセスキーが必要です。アプリの設定の「アクセスキー」でキーを発行して、環境変数 MALAKT_MAHOZ_KEY（HTTP では Authorization: Bearer）で渡してください。",
             ),
             Denied::BadKey => f.write_str(
                 "アクセスキーが違うか、失効しています。アプリの設定の「アクセスキー」でキーを発行し直してください。",
@@ -383,6 +356,10 @@ impl std::fmt::Display for Denied {
             Denied::OutsideHours { name, hours } => {
                 write!(f, "アクセスキー「{name}」を使える時間帯は {hours} です。")
             }
+            Denied::KeylessHours { hours } => write!(
+                f,
+                "malakt-mahoz をアクセスキーなしで使えるのは {hours} です。ほかのときはアクセスキーが必要です。"
+            ),
         }
     }
 }
@@ -435,9 +412,11 @@ impl Store {
         while_locked: bool,
     ) -> Result<IssuedKey> {
         let name = clean_name(name)?;
-        let count: usize = self
-            .conn
-            .query_row("SELECT COUNT(*) FROM access_keys", [], |r| r.get(0))?;
+        let count: usize = self.conn.query_row(
+            "SELECT COUNT(*) FROM access_keys WHERE keyless = 0",
+            [],
+            |r| r.get(0),
+        )?;
         if count >= MAX_KEYS {
             return Err(Error::Invalid(format!(
                 "アクセスキーは {MAX_KEYS} 個までです。使っていないキーを失効させてください"
@@ -476,12 +455,69 @@ impl Store {
     /// 発行したキー。発行した順。
     pub fn access_keys(&self) -> Result<Vec<AccessKey>> {
         let mut stmt = self.conn.prepare_cached(&format!(
-            "SELECT {COLUMNS} FROM access_keys ORDER BY created_at, id"
+            "SELECT {COLUMNS} FROM access_keys WHERE keyless = 0 ORDER BY created_at, id"
         ))?;
         let keys = stmt
             .query_map([], key_row)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(keys)
+    }
+
+    /// キーなしの接続の決まり。足した順。名前は [`KEYLESS_NAME`]。
+    pub fn keyless_rules(&self) -> Result<Vec<AccessKey>> {
+        let mut stmt = self.conn.prepare_cached(&format!(
+            "SELECT {COLUMNS} FROM access_keys WHERE keyless = 1 ORDER BY created_at, id"
+        ))?;
+        let rules = stmt
+            .query_map([], key_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rules)
+    }
+
+    /// キーなしの接続の決まりを足す。最初はいつでも使え、ロック中は使えない。
+    /// 開始・期限・時間帯などは、キーと同じく [`Store::update_access_key`] で変える。
+    pub fn add_keyless_rule(&mut self, read_only: bool) -> Result<AccessKey> {
+        let count: usize = self.conn.query_row(
+            "SELECT COUNT(*) FROM access_keys WHERE keyless = 1",
+            [],
+            |r| r.get(0),
+        )?;
+        if count >= MAX_RULES {
+            return Err(Error::Invalid(format!(
+                "キーなしの接続の決まりは {MAX_RULES} 個までです"
+            )));
+        }
+        let rule = AccessKey {
+            id: new_id(),
+            name: KEYLESS_NAME.into(),
+            hint: String::new(),
+            read_only,
+            while_locked: false,
+            created_at: now_ms(),
+            used_at: None,
+            starts: None,
+            expires: None,
+            windows: Vec::new(),
+        };
+        // secret_hash は一意でなければならない。どのキーのハッシュとも重ならない形にする
+        self.conn.execute(
+            "INSERT INTO access_keys(id, name, secret_hash, hint, read_only, while_locked, \
+             created_at, keyless) VALUES (?1, ?2, 'keyless:' || ?1, '', ?3, 0, ?4, 1)",
+            params![rule.id, rule.name, rule.read_only, rule.created_at],
+        )?;
+        Ok(rule)
+    }
+
+    /// キーなしの接続の決まりを外す。
+    pub fn remove_keyless_rule(&mut self, id: &str) -> Result<()> {
+        let removed = self.conn.execute(
+            "DELETE FROM access_keys WHERE id = ?1 AND keyless = 1",
+            params![id],
+        )?;
+        if removed == 0 {
+            return Err(Error::NotFound(format!("キーなしの接続の決まり {id}")));
+        }
+        Ok(())
     }
 
     pub fn access_key(&self, id: &str) -> Result<AccessKey> {
@@ -547,9 +583,10 @@ impl Store {
 
     /// キーを失効させる（消す）。元に戻せない。
     pub fn revoke_access_key(&mut self, id: &str) -> Result<()> {
-        let removed = self
-            .conn
-            .execute("DELETE FROM access_keys WHERE id = ?1", params![id])?;
+        let removed = self.conn.execute(
+            "DELETE FROM access_keys WHERE id = ?1 AND keyless = 0",
+            params![id],
+        )?;
         if removed == 0 {
             return Err(Error::NotFound(format!("アクセスキー {id}")));
         }
@@ -563,7 +600,7 @@ impl Store {
         Ok(self
             .conn
             .prepare_cached(&format!(
-                "SELECT {COLUMNS} FROM access_keys WHERE secret_hash = ?1"
+                "SELECT {COLUMNS} FROM access_keys WHERE secret_hash = ?1 AND keyless = 0"
             ))?
             .query_row(params![hash_of(secret.as_bytes())], key_row)
             .optional()?)
@@ -588,17 +625,7 @@ pub fn check(
 ) -> Result<std::result::Result<Grant, Denied>> {
     let secret = secret.map(str::trim).filter(|s| !s.is_empty());
     let Some(secret) = secret else {
-        let mode = keyless(store)?;
-        if mode == Keyless::Off {
-            return Ok(Err(Denied::NeedsKey));
-        }
-        if !lock::allows_outside(store, now)? {
-            return Ok(Err(Denied::Locked));
-        }
-        return Ok(Ok(Grant {
-            key: None,
-            read_only: mode == Keyless::ReadOnly,
-        }));
+        return keyless_check(store, now);
     };
     let Some(mut key) = store.access_key_by_secret(secret)? else {
         return Ok(Err(Denied::BadKey));
@@ -620,6 +647,35 @@ pub fn check(
     Ok(Ok(Grant {
         read_only: key.read_only,
         key: Some(key),
+    }))
+}
+
+/// キーなしでつないできたものを、キーなしの接続の決まりで確かめる。
+fn keyless_check(store: &mut Store, now: i64) -> Result<std::result::Result<Grant, Denied>> {
+    let rules = store.keyless_rules()?;
+    if rules.is_empty() {
+        return Ok(Err(Denied::NeedsKey));
+    }
+    let at = local(now);
+    // 期間と時間帯に入っている決まり
+    let open: Vec<&AccessKey> = rules.iter().filter(|r| r.usable_at(at).is_ok()).collect();
+    if open.is_empty() {
+        return Ok(Err(Denied::KeylessHours {
+            hours: rules
+                .iter()
+                .map(AccessKey::when_label)
+                .collect::<Vec<_>>()
+                .join("、"),
+        }));
+    }
+    let unlocked = lock::allows_outside(store, now)?;
+    let allowed: Vec<&&AccessKey> = open.iter().filter(|r| unlocked || r.while_locked).collect();
+    if allowed.is_empty() {
+        return Ok(Err(Denied::Locked));
+    }
+    Ok(Ok(Grant {
+        key: None,
+        read_only: allowed.iter().all(|r| r.read_only),
     }))
 }
 
@@ -776,10 +832,32 @@ mod tests {
         assert_eq!(s.access_keys().unwrap().len(), MAX_KEYS);
     }
 
+    /// キーなしの接続の決まりを、すべて外す。
+    fn no_keyless(s: &mut Store) {
+        for rule in s.keyless_rules().unwrap() {
+            s.remove_keyless_rule(&rule.id).unwrap();
+        }
+    }
+
+    /// その PC の時刻を、UNIX 秒にする。
+    fn unix(text: &str) -> i64 {
+        use chrono::TimeZone;
+        chrono::Local
+            .from_local_datetime(&at(text))
+            .earliest()
+            .unwrap()
+            .timestamp()
+    }
+
     #[test]
     fn keyless_connections_work_as_before_unless_changed() {
         let mut s = Store::open_in_memory().unwrap();
-        assert_eq!(keyless(&s).unwrap(), Keyless::Full);
+        // 標準は「読み書き・いつでも」の決まりが 1 つ
+        let rules = s.keyless_rules().unwrap();
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].name, KEYLESS_NAME);
+        assert!(!rules[0].read_only && !rules[0].while_locked && !rules[0].limited());
+        assert!(s.access_keys().unwrap().is_empty());
         let full = Grant {
             key: None,
             read_only: false,
@@ -793,8 +871,14 @@ mod tests {
         lock::mark_open(&mut s, 1_000).unwrap();
         assert_eq!(check(&mut s, None, 1_000).unwrap(), Ok(full));
 
-        set_keyless(&mut s, Keyless::ReadOnly).unwrap();
-        assert_eq!(keyless(&s).unwrap(), Keyless::ReadOnly);
+        s.update_access_key(
+            &rules[0].id,
+            &KeyPatch {
+                read_only: Some(true),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         assert_eq!(
             check(&mut s, None, 1_000).unwrap(),
             Ok(Grant {
@@ -802,22 +886,125 @@ mod tests {
                 read_only: true
             })
         );
-        set_keyless(&mut s, Keyless::Off).unwrap();
+        no_keyless(&mut s);
         assert_eq!(check(&mut s, None, 1_000).unwrap(), Err(Denied::NeedsKey));
-        set_keyless(&mut s, Keyless::Full).unwrap();
-        assert!(s.setting(KEYLESS_KEY).unwrap().is_none());
-        // 読めない値は、使えないのと同じ
-        s.set_setting(KEYLESS_KEY, Some("maybe")).unwrap();
-        assert_eq!(keyless(&s).unwrap(), Keyless::Off);
-        for k in Keyless::ALL {
-            assert_eq!(Keyless::parse(k.code()), Some(k));
+    }
+
+    /// キーなしの決まりは、ロック中も使えるものや、時間帯で絞ったものにできる。
+    /// 当てはまる決まりのどれかが読み書きなら、読み書き。
+    #[test]
+    fn keyless_rules_by_lock_and_hours() {
+        let mut s = Store::open_in_memory().unwrap();
+        no_keyless(&mut s);
+        // 平日 9:00〜18:00 は読み書き
+        let work = s.add_keyless_rule(false).unwrap();
+        s.update_access_key(
+            &work.id,
+            &KeyPatch {
+                windows: Some(vec![Window {
+                    days: vec![0, 1, 2, 3, 4],
+                    from: 9 * 60,
+                    to: 18 * 60,
+                }]),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        // 2026-11-30 は月曜
+        let (monday, night, sunday) = (
+            unix("2026-11-30 10:00"),
+            unix("2026-11-30 20:00"),
+            unix("2026-11-29 10:00"),
+        );
+        let grant = |read_only| {
+            Ok(Grant {
+                key: None,
+                read_only,
+            })
+        };
+        assert_eq!(check(&mut s, None, monday).unwrap(), grant(false));
+        let outside = Denied::KeylessHours {
+            hours: "平日 9:00〜18:00".into(),
+        };
+        assert_eq!(check(&mut s, None, night).unwrap(), Err(outside.clone()));
+        assert_eq!(
+            outside.to_string(),
+            "malakt-mahoz をアクセスキーなしで使えるのは 平日 9:00〜18:00 です。ほかのときはアクセスキーが必要です。"
+        );
+        assert!(check(&mut s, None, sunday).unwrap().is_err());
+
+        // いつでも読み取りのみ、ロック中も
+        let read = s.add_keyless_rule(true).unwrap();
+        s.update_access_key(
+            &read.id,
+            &KeyPatch {
+                while_locked: Some(true),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(check(&mut s, None, monday).unwrap(), grant(false));
+        assert_eq!(check(&mut s, None, night).unwrap(), grant(true));
+        lock::enable(&mut s).unwrap();
+        // ロック中は、ロック中も使える決まりだけ
+        assert_eq!(check(&mut s, None, monday).unwrap(), grant(true));
+        s.update_access_key(
+            &read.id,
+            &KeyPatch {
+                while_locked: Some(false),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(check(&mut s, None, monday).unwrap(), Err(Denied::Locked));
+        lock::mark_open(&mut s, monday).unwrap();
+        assert_eq!(check(&mut s, None, monday).unwrap(), grant(false));
+
+        // 期限の切れた決まりは当てはまらない
+        s.remove_keyless_rule(&read.id).unwrap();
+        s.update_access_key(
+            &work.id,
+            &KeyPatch {
+                expires: Some(Some("2000-01-01".into())),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            check(&mut s, None, monday).unwrap(),
+            Err(Denied::KeylessHours { hours }) if hours == "2000/01/01 まで・平日 9:00〜18:00"
+        ));
+    }
+
+    /// キーと決まりは、互いの一覧に出ず、互いの消し方では消えない。
+    #[test]
+    fn rules_and_keys_stay_apart() {
+        let mut s = Store::open_in_memory().unwrap();
+        let rule = s.keyless_rules().unwrap().remove(0);
+        let key = s.issue_access_key("鍵", false, false).unwrap().key;
+        assert_eq!(s.access_keys().unwrap(), vec![key.clone()]);
+        assert_eq!(s.keyless_rules().unwrap(), vec![rule.clone()]);
+        assert!(s.revoke_access_key(&rule.id).is_err());
+        assert!(s.remove_keyless_rule(&key.id).is_err());
+        // 決まりの secret_hash では、キーとして通らない
+        assert_eq!(
+            check(&mut s, Some(&format!("keyless:{}", rule.id)), 1_000).unwrap(),
+            Err(Denied::BadKey)
+        );
+        for _ in 1..MAX_RULES {
+            s.add_keyless_rule(false).unwrap();
         }
+        let error = s.add_keyless_rule(false).unwrap_err();
+        assert!(error.to_string().contains("20 個まで"), "{error}");
+        // 決まりの数は、キーの数に入らない
+        s.issue_access_key("もう 1 つ", false, false).unwrap();
+        assert_eq!(s.access_keys().unwrap().len(), 2);
     }
 
     #[test]
     fn keys_decide_lock_and_writes() {
         let mut s = Store::open_in_memory().unwrap();
-        set_keyless(&mut s, Keyless::Off).unwrap();
+        no_keyless(&mut s);
         let plain = s.issue_access_key("ふつう", false, false).unwrap();
         let locked = s.issue_access_key("ロック中も", true, true).unwrap();
 
@@ -857,7 +1044,7 @@ mod tests {
             Err(Denied::BadKey)
         );
         // キーなしの扱いを変えても、キーの扱いは変わらない
-        set_keyless(&mut s, Keyless::Full).unwrap();
+        s.add_keyless_rule(false).unwrap();
         assert!(
             check(&mut s, Some(&locked.secret), 1_000)
                 .unwrap()
