@@ -60,6 +60,8 @@ Windows のアプリは、起動のときに黒い窓を出さないように作
 
 ## ツール
 
+ツールの定義は `api/*.tsp`（TypeSpec）にあり、`malakt-mahoz api` で JSON の一覧を出せます（[docs/api.md](api.md)）。
+
 | ツール | すること |
 | --- | --- |
 | `list_workspaces` / `list_people` | ワークスペース、担当者の一覧 |

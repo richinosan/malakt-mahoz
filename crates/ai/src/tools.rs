@@ -10,6 +10,7 @@ use malakt_core::{
 };
 use serde_json::{json, Value};
 
+use crate::api::{self, Group};
 use crate::shell::Shell;
 use crate::wire::ToolDef;
 
@@ -48,643 +49,32 @@ pub fn expand_dir(text: &str) -> PathBuf {
     }
 }
 
-fn object(properties: Value, required: &[&str]) -> Value {
-    json!({
-        "type": "object",
-        "properties": properties,
-        "required": required,
-        "additionalProperties": false,
-    })
-}
-
-fn task_fields() -> Value {
-    json!({
-        "title": {"type": "string"},
-        "description": {"type": "string"},
-        "status": {"type": "string", "enum": ["needs_action", "in_process", "completed", "cancelled"],
-                   "description": "未着手 / 進行中 / 完了 / 中止"},
-        "priority": {"type": "string", "enum": ["none", "high", "mid", "low"]},
-        "start": {"type": ["string", "null"], "description": "開始日 YYYY-MM-DD。時刻つきなら YYYY-MM-DD HH:MM。null でなくす"},
-        "due": {"type": ["string", "null"], "description": "期限 YYYY-MM-DD。時刻つきなら YYYY-MM-DD HH:MM。null でなくす"},
-        "percent": {"type": "integer", "minimum": 0, "maximum": 100, "description": "進捗"},
-        "parent_id": {"type": ["string", "null"], "description": "親のタスクの ID（サブタスクにする）"},
-        "assignee_ids": {"type": "array", "items": {"type": "string"},
-                         "description": "担当者の ID。足した人の役は R。役も決めるときは assignees を使う"},
-        "assignees": {
-            "type": "array",
-            "description": "担当者と役（RACI）。渡すと担当者がこの並びになる（assignee_ids と一緒には渡さない）。\
-                            person は担当者の ID か名前。登録されていない名前は、その場で担当者に登録する",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "person": {"type": "string", "description": "担当者の ID か名前（敬称は付けない）"},
-                    "roles": roles_schema("省くと、もう担当の人は今の役のまま、新しい人は R"),
-                },
-                "required": ["person"],
-                "additionalProperties": false,
-            },
-        },
-        "categories": {"type": "array", "items": {"type": "string"}},
-        "urls": {"type": "array", "items": {"type": "string"},
-                 "description": "タスクに付ける URL。渡すと URL がこの並びになる（足すだけなら add_urls）"},
-        "add_urls": {"type": "array", "items": {"type": "string"},
-                     "description": "今の URL の後ろに足す URL。同じものは足さない"},
-        "remove_urls": {"type": "array", "items": {"type": "string"}, "description": "外す URL"},
-    })
-}
-
-/// RACI の説明。ツールの説明とシステムの指示で同じ文を使う。
+/// RACI の説明。ツールの説明（api/data.tsp）とシステムの指示で同じ文を使う。
 const RACI: &str = "R=実行責任者、A=説明責任者（1 つのタスクに 1 人まで）、C=相談先、I=報告先";
 
-fn roles_schema(extra: &str) -> Value {
-    json!({
-        "type": "array",
-        "items": {"type": "string", "enum": ["R", "A", "C", "I"]},
-        "description": format!("役。{RACI}。{extra}"),
-    })
-}
-
-/// AI のルールの項目。
-fn rule_fields(extra: Value) -> Value {
-    with(
-        json!({
-            "name": {"type": "string", "description": format!("名前（{} 文字まで）", malakt_core::rules::MAX_NAME_CHARS)},
-            "body": {"type": "string", "description": format!("AI への指示（{} 文字まで）", malakt_core::rules::MAX_RULE_CHARS)},
-            "enabled": {"type": "boolean", "description": "false で使わない"},
-            "apply": {"type": "string", "enum": ["always", "chat", "auto"],
-                      "description": "使う場面。いつも / ユーザーとのチャットだけ / 自動の処理（新しいタスクを整える、コメントから更新、GitHub の定期チェック）だけ"},
-        }),
-        extra,
-    )
-}
-
-fn schedule_fields(extra: Value) -> Value {
-    let max_days = malakt_core::schedule::MAX_DUE_DAYS;
-    with(
-        json!({
-            "title": {"type": "string", "description": format!("作るタスクのタイトル（{} 文字まで）", malakt_core::schedule::MAX_TITLE_CHARS)},
-            "schedule": {
-                "type": "object",
-                "description": "いつタスクを作るか",
-                "properties": {
-                    "unit": {"type": "string", "enum": ["day", "week", "month", "year"]},
-                    "every": {"type": "integer", "minimum": 1, "maximum": malakt_core::repeat::MAX_EVERY, "description": "何日・何週間・何か月・何年ごとか（標準は 1）"},
-                    "weekdays": {"type": "array", "items": {"type": "integer", "minimum": 0, "maximum": 6}, "description": "unit が week のときの曜日。0 = 月 … 6 = 日。省くと起点の曜日"},
-                    "from": {"type": "string", "description": "数え始めの日 YYYY-MM-DD。毎月・毎年の日付になる。省くと今日（変えるときは今の起点）"},
-                    "time": {"type": "string", "description": "タスクを作る時刻 HH:MM。空で 0:00"},
-                },
-                "required": ["unit"],
-            },
-            "ai_instruction": {"type": "string", "description": "作ったタスクで AI に頼むこと。空で頼まない"},
-            "enabled": {"type": "boolean", "description": "false で止める"},
-            // ここから下は、作るタスクの項目（create_task と同じもの）
-            "description": {"type": ["string", "null"], "description": "作るタスクの説明。null でワークスペースの既定値"},
-            "status": {"type": "string", "enum": ["needs_action", "in_process", "completed", "cancelled"],
-                       "description": "作るタスクの状態。未着手 / 進行中 / 完了 / 中止"},
-            "priority": {"type": ["string", "null"], "enum": ["none", "high", "mid", "low", null],
-                         "description": "作るタスクの優先度。null でワークスペースの既定値"},
-            "start_days": {"type": ["integer", "null"], "minimum": 0, "maximum": max_days, "description": "開始日を作った日の何日後にするか（0 で当日）。null で開始日なし"},
-            "start_time": {"type": ["string", "null"], "description": "開始日の時刻 HH:MM。null か空で日付だけ"},
-            "due_days": {"type": ["integer", "null"], "minimum": 0, "maximum": max_days, "description": "期限を作った日の何日後にするか（0 で当日）。null でワークスペースの既定値"},
-            "due_time": {"type": ["string", "null"], "description": "期限の時刻 HH:MM。null か空で日付だけ"},
-            "due_alerts": {
-                "type": ["object", "null"],
-                "description": "作るタスクの、期限をいつ知らせるか（set_due_alerts と同じ）。null で全体の標準",
-                "properties": {
-                    "timed_minutes": {"type": ["array", "null"], "items": {"type": "integer", "minimum": 0, "maximum": malakt_core::alert::MAX_MINUTES}, "description": "時刻つきの期限の何分前か。[] で知らせない、null で標準"},
-                    "date_days": {"type": ["array", "null"], "items": {"type": "integer", "minimum": 0, "maximum": malakt_core::alert::MAX_DAYS}, "description": "日付だけの期限の何日前か。[] で知らせない、null で標準"},
-                },
-            },
-            "percent": {"type": "integer", "minimum": 0, "maximum": 100, "description": "作るタスクの進捗"},
-            "parent_id": {"type": ["string", "null"], "description": "親のタスクの ID（作るタスクをそのサブタスクにする）。null で親なし"},
-            "assignee_ids": {"type": "array", "items": {"type": "string"}, "description": "作るタスクの担当者の ID。[] でワークスペースの既定値。足した人の役は R。役も決めるときは assignees を使う"},
-            "assignees": {
-                "type": "array",
-                "description": "作るタスクの担当者と役（RACI）。渡すと担当者がこの並びになる（assignee_ids と一緒には渡さない）。\
-                                person は担当者の ID か名前。登録されていない名前は、その場で担当者に登録する",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "person": {"type": "string", "description": "担当者の ID か名前（敬称は付けない）"},
-                        "roles": roles_schema("省くと、もう担当の人は今の役のまま、新しい人は R"),
-                    },
-                    "required": ["person"],
-                    "additionalProperties": false,
-                },
-            },
-            "categories": {"type": ["array", "null"], "items": {"type": "string"}, "description": "作るタスクのカテゴリ。null でワークスペースの既定値"},
-            "urls": {"type": "array", "items": {"type": "string"},
-                     "description": "作るタスクに付ける URL。渡すと URL がこの並びになる（足すだけなら add_urls）"},
-            "add_urls": {"type": "array", "items": {"type": "string"}, "description": "今の URL の後ろに足す URL。同じものは足さない"},
-            "remove_urls": {"type": "array", "items": {"type": "string"}, "description": "外す URL"},
-            "linked_workspace_ids": {"type": ["array", "null"], "items": {"type": "string"},
-                                     "description": "作るタスクを、入れるワークスペースのほかにも出すワークスペース（link_task と同じ）。null でワークスペースの既定値"},
-            "subtasks": {"type": "array", "items": {"type": "string"}, "description": format!("作るタスクのサブタスクのタイトル（{} 件まで）。渡すとこの並びになる", malakt_core::schedule::MAX_SUBTASKS)},
-        }),
-        extra,
-    )
-}
-
-fn with(mut base: Value, extra: Value) -> Value {
-    if let (Some(base), Value::Object(extra)) = (base.as_object_mut(), extra) {
-        base.extend(extra);
-    }
-    base
-}
-
-/// AI に見せるツールの一覧。
+/// AI に見せるツールの一覧。定義は api/data.tsp。
 pub fn definitions() -> Vec<ToolDef> {
-    vec![
-        ToolDef {
-            name: "list_workspaces",
-            description: "ワークスペース（タスクをまとめる単位。入れ子にできる）の一覧を返す。",
-            schema: object(json!({}), &[]),
-        },
-        ToolDef {
-            name: "list_people",
-            description: "担当者の一覧を返す。workspace_ids が空の人はすべてのワークスペースで、\
-                          そうでない人はそのワークスペース（とサブワークスペース）で選べる。",
-            schema: object(json!({}), &[]),
-        },
-        ToolDef {
-            name: "list_tasks",
-            description: "タスクの一覧を返す。workspace_id を省くと全部、\"unfiled\" でどのワークスペースにも入っていないもの。",
-            schema: object(
-                json!({
-                    "workspace_id": {"type": "string"},
-                    "query": {"type": "string", "description": "タイトルと説明の部分一致"},
-                    "include_done": {"type": "boolean", "description": "完了・中止も含める（標準は含めない）"},
-                }),
-                &[],
-            ),
-        },
-        ToolDef {
-            name: "get_task",
-            description: "タスク 1 件の内容と、コメント、サブタスク、添付、変更履歴を返す。",
-            schema: object(json!({"id": {"type": "string"}}), &["id"]),
-        },
-        ToolDef {
-            name: "get_workspace",
-            description: "ワークスペース 1 つの中身を返す。上からの道筋、サブワークスペース（入れ子の全部）と\
-                          それぞれのタスクの数、サブワークスペースも含めたタスクの一覧。\
-                          多いときはタスクの一部だけを返す（tasks_total と tasks_shown を見る）。",
-            schema: object(
-                json!({
-                    "id": {"type": "string"},
-                    "include_done": {"type": "boolean", "description": "完了・中止のタスクも一覧に含める（標準は含めない）"},
-                }),
-                &["id"],
-            ),
-        },
-        ToolDef {
-            name: "create_task",
-            description: "タスクを作る。workspace_id を省くと、どのワークスペースにも入れない。",
-            schema: object(
-                with(task_fields(), json!({"workspace_id": {"type": "string"}})),
-                &["title"],
-            ),
-        },
-        ToolDef {
-            name: "update_task",
-            description: "タスクを書き換える。渡した項目だけが変わる。",
-            schema: object(with(task_fields(), json!({"id": {"type": "string"}})), &["id"]),
-        },
-        ToolDef {
-            name: "set_assignee",
-            description: SET_ASSIGNEE_TOOL,
-            schema: object(
-                json!({
-                    "task_id": {"type": "string"},
-                    "person": {"type": "string", "description": "担当者の ID か名前（敬称は付けない）"},
-                    "roles": roles_schema("A を付けると、ほかの人の A は外れる。空にすると担当から外す"),
-                }),
-                &["task_id", "person", "roles"],
-            ),
-        },
-        ToolDef {
-            name: "set_assignee_done",
-            description: "担当者 1 人の「自分の分」の完了を付ける・外す。自分の分もほかの人の分も変えられる。\
-                          全員の分がそろうとタスクが完了になる。完了したタスクで誰かの分を外すと、タスクは進行中に戻る。",
-            schema: object(
-                json!({
-                    "task_id": {"type": "string"},
-                    "person": {"type": "string", "description": "タスクの担当者の ID か名前（敬称は付けない）"},
-                    "done": {"type": "boolean", "description": "true で完了にする、false で完了を外す"},
-                }),
-                &["task_id", "person", "done"],
-            ),
-        },
-        ToolDef {
-            name: "move_task",
-            description: "タスクを別のワークスペースへ移す。workspace_id が null なら、どこにも入れない。",
-            schema: object(
-                json!({"id": {"type": "string"}, "workspace_id": {"type": ["string", "null"]}}),
-                &["id", "workspace_id"],
-            ),
-        },
-        ToolDef {
-            name: "delete_task",
-            description: "タスクを削除する。元に戻せないので、実行の前にユーザーに確認が出る。",
-            schema: object(json!({"id": {"type": "string"}}), &["id"]),
-        },
-        ToolDef {
-            name: "add_comment",
-            description: COMMENT_TOOL,
-            schema: object(
-                json!({
-                    "task_id": {"type": "string"},
-                    "body": {"type": "string"},
-                    "reply_to": {"type": "string", "description": "返信するレビューのスレッドのルートのコメントの ID"},
-                    "review": {"type": "boolean", "description": "レビューコメント（返信と解決ができるスレッド）にする"},
-                }),
-                &["task_id", "body"],
-            ),
-        },
-        ToolDef {
-            name: "create_workspace",
-            description: "ワークスペースを作る。parent_id を渡すと、その中に作る。",
-            schema: object(
-                json!({"name": {"type": "string"}, "parent_id": {"type": "string"}}),
-                &["name"],
-            ),
-        },
-        ToolDef {
-            name: "create_person",
-            description: "担当者を登録する。workspace_id を渡すと、そのワークスペース（のいちばん上の親とサブワークスペース）で選べる担当者になり、省くとすべてのワークスペースで選べる担当者になる。",
-            schema: object(
-                json!({"name": {"type": "string"}, "workspace_id": {"type": "string"}}),
-                &["name"],
-            ),
-        },
-        ToolDef {
-            name: "update_workspace",
-            description: "ワークスペースの名前を変える、別のワークスペースの中へ移す、並び順を変える。parent_id が null なら、いちばん上に出す。index は、同じ親の中で何番目に置くか（0 が先頭。自分を除いて数え、多すぎると末尾）。渡した項目だけが変わる。",
-            schema: object(
-                json!({
-                    "id": {"type": "string"},
-                    "name": {"type": "string"},
-                    "parent_id": {"type": ["string", "null"]},
-                    "index": {"type": "integer", "minimum": 0},
-                }),
-                &["id"],
-            ),
-        },
-        ToolDef {
-            name: "delete_workspace",
-            description: "ワークスペースを、サブワークスペースとタスクごと削除する。元に戻せないので、実行の前にユーザーに確認が出る。",
-            schema: object(json!({"id": {"type": "string"}}), &["id"]),
-        },
-        ToolDef {
-            name: "update_person",
-            description: "担当者の名前とメモを変える。workspace_ids で使うワークスペースを決める（空の配列で、すべてのワークスペースで使う）。渡した項目だけが変わる。",
-            schema: object(
-                json!({
-                    "id": {"type": "string"},
-                    "name": {"type": "string"},
-                    "note": {"type": "string"},
-                    "workspace_ids": {"type": "array", "items": {"type": "string"}},
-                }),
-                &["id"],
-            ),
-        },
-        ToolDef {
-            name: "delete_person",
-            description: "担当者を削除する（担当から外れるだけで、タスクは残る）。元に戻せないので、実行の前にユーザーに確認が出る。",
-            schema: object(json!({"id": {"type": "string"}}), &["id"]),
-        },
-        ToolDef {
-            name: "update_comment",
-            description: "コメントを書き直す、ピン留めする・外す、レビューのスレッドを解決済みにする・戻す。渡した項目だけが変わる。",
-            schema: object(
-                json!({
-                    "id": {"type": "string"},
-                    "body": {"type": "string"},
-                    "pinned": {"type": "boolean"},
-                    "resolved": {"type": "boolean", "description": "レビューのスレッドのルートのコメントだけ"},
-                }),
-                &["id"],
-            ),
-        },
-        ToolDef {
-            name: "delete_comment",
-            description: "コメントを削除する。元に戻せないので、実行の前にユーザーに確認が出る。",
-            schema: object(json!({"id": {"type": "string"}}), &["id"]),
-        },
-        ToolDef {
-            name: "link_task",
-            description: "タスクを、入っているワークスペースのほかのワークスペースにも出す（同期する）。linked が false なら、そのワークスペースから外す。",
-            schema: object(
-                json!({
-                    "id": {"type": "string"},
-                    "workspace_id": {"type": "string"},
-                    "linked": {"type": "boolean"},
-                }),
-                &["id", "workspace_id", "linked"],
-            ),
-        },
-        ToolDef {
-            name: "reorder_tasks",
-            description: "タスクを手動の順（並び順「手動の順」）で、渡した ID の順に並べる。",
-            schema: object(
-                json!({"ids": {"type": "array", "items": {"type": "string"}}}),
-                &["ids"],
-            ),
-        },
-        ToolDef {
-            name: "add_attachment",
-            description: "ユーザーの PC のファイルをタスクに添付する。path はファイルの絶対パス（先頭の ~ はホーム）。1 ファイル 10 MiB まで。",
-            schema: object(
-                json!({"task_id": {"type": "string"}, "path": {"type": "string"}}),
-                &["task_id", "path"],
-            ),
-        },
-        ToolDef {
-            name: "delete_attachment",
-            description: "添付を削除する。元に戻せないので、実行の前にユーザーに確認が出る。",
-            schema: object(json!({"id": {"type": "string"}}), &["id"]),
-        },
-        ToolDef {
-            name: "issue_ticket",
-            description: "タスクの完了チケット（ほかの人が malakt-mahoz redeem で完了を報告するための文字列）を発行して返す。person_id はだれの分として報告するか（省くと自分）。",
-            schema: object(
-                json!({"task_id": {"type": "string"}, "person_id": {"type": "string"}}),
-                &["task_id"],
-            ),
-        },
-        ToolDef {
-            name: "revoke_tickets",
-            description: "タスクの、まだ使われていない完了チケットをすべて取り消す。元に戻せないので、実行の前にユーザーに確認が出る。",
-            schema: object(json!({"task_id": {"type": "string"}}), &["task_id"]),
-        },
-        ToolDef {
-            name: "list_categories",
-            description: "タスクに使われているカテゴリの一覧を返す。",
-            schema: object(json!({}), &[]),
-        },
-        ToolDef {
-            name: "list_notices",
-            description: "通知（ベルの一覧）を新しい順に返す。",
-            schema: object(
-                json!({"limit": {"type": "integer", "minimum": 1, "maximum": 200}}),
-                &[],
-            ),
-        },
-        ToolDef {
-            name: "mark_notices_read",
-            description: "通知を既読にする。ids を省くと、すべて既読にする。",
-            schema: object(
-                json!({"ids": {"type": "array", "items": {"type": "string"}}}),
-                &[],
-            ),
-        },
-        ToolDef {
-            name: "get_workspace_settings",
-            description: "ワークスペースの基準日と、タスクを追加したときに入る値（既定値）を返す。",
-            schema: object(json!({"id": {"type": "string"}}), &["id"]),
-        },
-        ToolDef {
-            name: "update_workspace_settings",
-            description: "ワークスペースの基準日と、タスクを追加したときに入る値を変える。渡した項目だけが変わる。",
-            schema: object(
-                json!({
-                    "id": {"type": "string"},
-                    "date": {"type": ["string", "null"], "description": "基準日（開催日など）YYYY-MM-DD。null でなくす"},
-                    "assignee_ids": {"type": "array", "items": {"type": "string"}},
-                    "due": {"type": "string", "enum": ["none", "relative", "fixed"],
-                            "description": "期限の決め方。なし / 基準日からの日数 / 決まった日"},
-                    "due_days": {"type": "integer", "description": "due が relative のとき、基準日からの日数（負は前）"},
-                    "due_date": {"type": "string", "description": "due が fixed のときの日付 YYYY-MM-DD"},
-                    "due_time": {"type": "string", "description": "期限の時刻 HH:MM。空で日付だけ"},
-                    "priority": {"type": ["string", "null"], "enum": ["none", "high", "mid", "low", null],
-                                 "description": "null で指定なし"},
-                    "categories": {"type": "array", "items": {"type": "string"}},
-                    "description": {"type": "string", "description": "説明の雛形"},
-                    "link_workspace_ids": {"type": "array", "items": {"type": "string"},
-                                           "description": "追加したタスクを一緒に表示するワークスペース"},
-                    "terminal_dir": {"type": "string", "description": "このワークスペースのタスクでターミナルを開くフォルダー。空で消す"},
-                }),
-                &["id"],
-            ),
-        },
-        ToolDef {
-            name: "list_ai_rules",
-            description: "AI のルール（ユーザーが決めた、AI がいつも従う指示）の一覧を返す。workspace_id を省くと、すべてのワークスペースで使うグローバルのルールと、ワークスペースごとのルールをすべて返す。ワークスペースのルールは、そのワークスペースとサブワークスペースで使う。",
-            schema: object(json!({"workspace_id": {"type": "string"}}), &[]),
-        },
-        ToolDef {
-            name: "create_ai_rule",
-            description: "AI のルールを足す。workspace_id を省くとグローバル（すべてのワークスペース）、渡すとそのワークスペースとサブワークスペースで使う。",
-            schema: object(rule_fields(json!({"workspace_id": {"type": "string"}})), &[]),
-        },
-        ToolDef {
-            name: "update_ai_rule",
-            description: "AI のルールを変える。渡した項目だけが変わる。",
-            schema: object(rule_fields(json!({"id": {"type": "string"}})), &["id"]),
-        },
-        ToolDef {
-            name: "delete_ai_rule",
-            description: "AI のルールを削除する。使わないだけなら update_ai_rule で enabled を false にする。",
-            schema: object(json!({"id": {"type": "string"}}), &["id"]),
-        },
-        ToolDef {
-            name: "get_pomodoro",
-            description: "ポモドーロタイマーの今の状態（段 phase: work / short_break / long_break、run: ready / running / paused、残り秒、作業しているタスク、済んだ作業の数）、設定、今日の作業の合計を返す。",
-            schema: object(json!({}), &[]),
-        },
-        ToolDef {
-            name: "pomodoro",
-            description: "ポモドーロタイマーを操作する。start（始める。一時停止していれば続きから。task_id を渡すと、そのタスクで測る）、pause（一時停止）、stop（止めて最初の作業に戻す）、skip（今の段を飛ばして次へ）、set_task（作業するタスクを変える。task_id を null か省くとタスクなし）、set_settings（渡した項目だけ変える）。作業の段が終わると、測った時間がタスクの作業の記録に残る。work_media / break_media は、作業 / 休憩を始めたときに OS で再生中の音楽をどうするか（none / play / pause）。",
-            schema: object(
-                json!({
-                    "action": {"type": "string", "enum": ["start", "pause", "stop", "skip", "set_task", "set_settings"]},
-                    "task_id": {"type": ["string", "null"]},
-                    "work_minutes": {"type": "integer", "minimum": malakt_core::pomodoro::MIN_MINUTES, "maximum": malakt_core::pomodoro::MAX_MINUTES},
-                    "short_break_minutes": {"type": "integer", "minimum": malakt_core::pomodoro::MIN_MINUTES, "maximum": malakt_core::pomodoro::MAX_MINUTES},
-                    "long_break_minutes": {"type": "integer", "minimum": malakt_core::pomodoro::MIN_MINUTES, "maximum": malakt_core::pomodoro::MAX_MINUTES},
-                    "rounds": {"type": "integer", "minimum": malakt_core::pomodoro::MIN_ROUNDS, "maximum": malakt_core::pomodoro::MAX_ROUNDS, "description": "長い休憩までの作業の回数"},
-                    "auto_break": {"type": "boolean", "description": "作業が終わったら休憩をそのまま始める"},
-                    "work_media": {"type": "string", "enum": ["none", "play", "pause"]},
-                    "break_media": {"type": "string", "enum": ["none", "play", "pause"]},
-                }),
-                &["action"],
-            ),
-        },
-        ToolDef {
-            name: "list_work_logs",
-            description: "ポモドーロで測った作業の記録を新しい順に返す。task_id でそのタスクだけ、since（YYYY-MM-DD）でその日以降だけ。合計の秒数も返す。",
-            schema: object(
-                json!({
-                    "task_id": {"type": "string"},
-                    "since": {"type": "string"},
-                    "limit": {"type": "integer", "minimum": 1, "maximum": 500},
-                }),
-                &[],
-            ),
-        },
-        ToolDef {
-            name: "get_due_alerts",
-            description: "期限をいつ知らせるか（OS の通知とリマインダー）を返す。task_id を渡すと、そのタスクで使うもの（own が null なら全体の標準のまま）。",
-            schema: object(json!({"task_id": {"type": "string"}}), &[]),
-        },
-        ToolDef {
-            name: "set_due_alerts",
-            description: "期限をいつ知らせるかを変える。渡した項目だけが変わる。task_id を省くと全体の標準、渡すとそのタスクだけの上書き。timed_minutes は時刻つきの期限の何分前か（0 で期限ちょうど、例 [0, 5, 60, 1440]、[] で知らせない）。date_days は日付だけの期限の何日前か（0 で当日、1 で前日、[] で知らせない）。タスクで null を渡すと、その側は標準に合わせる。hour は日付だけの期限を知らせる時刻（0〜23 時、全体だけ）。",
-            schema: object(
-                json!({
-                    "task_id": {"type": "string"},
-                    "timed_minutes": {"type": ["array", "null"], "items": {"type": "integer", "minimum": 0, "maximum": malakt_core::alert::MAX_MINUTES}},
-                    "date_days": {"type": ["array", "null"], "items": {"type": "integer", "minimum": 0, "maximum": malakt_core::alert::MAX_DAYS}},
-                    "hour": {"type": "integer", "minimum": 0, "maximum": 23},
-                }),
-                &[],
-            ),
-        },
-        ToolDef {
-            name: "set_repeat",
-            description: "タスクに繰り返しを付ける・変える・外す。繰り返しのあるタスクは、次の回の時刻になるとアプリがタスクを写して次の回を作り、繰り返しは新しい回へ移る（開始日と期限は回の日に合わせてずれる）。ai_instruction を付けると、回を作ったときにアプリの AI がその指示を実行して、結果をその回のタスクにコメントする（例: 週次の報告の下書き）。アプリが動いている間だけ動く。渡した項目だけが変わる。",
-            schema: object(
-                json!({
-                    "task_id": {"type": "string"},
-                    "repeat": {
-                        "type": ["object", "null"],
-                        "description": "null で繰り返しを外す",
-                        "properties": {
-                            "unit": {"type": "string", "enum": ["day", "week", "month", "year"]},
-                            "every": {"type": "integer", "minimum": 1, "maximum": malakt_core::repeat::MAX_EVERY, "description": "何日・何週間・何か月・何年ごとか（標準は 1）"},
-                            "weekdays": {"type": "array", "items": {"type": "integer", "minimum": 0, "maximum": 6}, "description": "unit が week のときの曜日。0 = 月 … 6 = 日。省くと起点の曜日"},
-                            "from": {"type": "string", "description": "数え始めの日 YYYY-MM-DD。毎月・毎年の日付になる。省くとタスクの開始日か期限（なければ今日）"},
-                            "time": {"type": "string", "description": "次の回を作る時刻 HH:MM。空で 0:00"},
-                        },
-                        "required": ["unit"],
-                    },
-                    "ai_instruction": {"type": "string", "description": "回を作ったときに AI に頼むこと。空で頼まない"},
-                }),
-                &["task_id"],
-            ),
-        },
-        ToolDef {
-            name: "list_schedules",
-            description: "定時タスク（決まった時刻が来るたびに、雛形から新しいタスクを 1 件作る設定）の一覧を返す。workspace_id を省くと、ワークスペースの外に作るものと、ワークスペースごとのものをすべて返す。",
-            schema: object(json!({"workspace_id": {"type": "string"}}), &[]),
-        },
-        ToolDef {
-            name: "create_schedule",
-            description: "定時タスクを足す。時刻が来るたびに、そのワークスペース（workspace_id を省くとワークスペースの外）に新しいタスクを 1 件作る。雛形にはタスクと同じ項目（説明・状態・優先度・担当と役・開始日・期限・通知・進捗・カテゴリ・URL・親タスク・ほかのワークスペース・サブタスク）を決められ、決めていない項目にはワークスペースの既定値が入る。開始日と期限は作った日の何日後か（start_days・due_days）で決める。添付は add_schedule_attachment。ai_instruction を付けると、作ったタスクでアプリの AI がその指示を実行して、結果をそのタスクにコメントする（例: 週次定例の報告の下書き）。前のタスクは書き換えない。1 つのタスクを毎回写すなら set_repeat。アプリが動いている間だけ動く。schedule を省くと今日の曜日の毎週 9:00。",
-            schema: object(schedule_fields(json!({"workspace_id": {"type": "string"}})), &["title"]),
-        },
-        ToolDef {
-            name: "update_schedule",
-            description: "定時タスクを変える。渡した項目だけが変わる（作るタスクの項目も同じ）。schedule を変えたときと、enabled を true にしたときは、次の時刻を今から決め直す。",
-            schema: object(schedule_fields(json!({"id": {"type": "string"}})), &["id"]),
-        },
-        ToolDef {
-            name: "add_schedule_attachment",
-            description: "ユーザーの PC のファイルを定時タスクの雛形に添付する。作るタスクには毎回この添付が付く。path はファイルの絶対パス（先頭の ~ はホーム）。1 ファイル 10 MiB まで。",
-            schema: object(
-                json!({"schedule_id": {"type": "string"}, "path": {"type": "string"}}),
-                &["schedule_id", "path"],
-            ),
-        },
-        ToolDef {
-            name: "delete_schedule_attachment",
-            description: "定時タスクの雛形から添付を外す。作ったタスクの添付は残る。",
-            schema: object(json!({"id": {"type": "string"}}), &["id"]),
-        },
-        ToolDef {
-            name: "delete_schedule",
-            description: "定時タスクを削除する。作ったタスクは残る。止めるだけなら update_schedule で enabled を false にする。",
-            schema: object(json!({"id": {"type": "string"}}), &["id"]),
-        },
-        ToolDef {
-            name: "get_done_notices",
-            description: "ほかの人が完了チケットで完了を報告したときに、通知を作るかの設定を返す。",
-            schema: object(json!({}), &[]),
-        },
-        ToolDef {
-            name: "set_done_notices",
-            description: "ほかの人が完了を報告したときに、通知を作るかを変える。渡した項目だけが変わる。\
-                          enabled は全体のオン・オフ。when は each（1 人が自分の分を完了にするたび）か finished（タスクが完了したときだけ）。\
-                          roles は、完了にした人がこのどれかの役なら知らせる（R・A・C・I、1 つ以上）。\
-                          muted_people は知らせない担当者（ID か名前）、muted_workspaces は知らせないワークスペースの ID（サブワークスペースも知らせない）。どちらも渡すとその並びになり、[] で全員・全部を知らせる。",
-            schema: object(
-                json!({
-                    "enabled": {"type": "boolean"},
-                    "when": {"type": "string", "enum": ["each", "finished"]},
-                    "roles": {"type": "array", "items": {"type": "string", "enum": ["R", "A", "C", "I"]}},
-                    "muted_people": {"type": "array", "items": {"type": "string"}},
-                    "muted_workspaces": {"type": "array", "items": {"type": "string"}},
-                }),
-                &[],
-            ),
-        },
-        ToolDef {
-            name: GITHUB_FETCH,
-            description: "GitHub のリンク（issue、プルリクエスト、リポジトリ、ファイル、コミット）の中身を gh コマンドで取ってくる。",
-            schema: object(json!({"url": {"type": "string"}}), &["url"]),
-        },
-        ToolDef {
-            name: SLACK_FETCH,
-            description: "Slack のメッセージへのリンク（https://〜.slack.com/archives/…）のメッセージと、そのスレッドの返信を Slack CLI で取ってくる。",
-            schema: object(json!({"url": {"type": "string"}}), &["url"]),
-        },
-        ToolDef {
-            name: RUN_SHELL,
-            description: "ユーザーの PC でコマンドを 1 つ実行し、終了コードと出力を返す。動くシェル（PowerShell、bash、WSL など）は、ユーザーのメッセージの最後にアプリが書く。そのシェルの書き方で書く。実行の前にユーザーに確認が出る。",
-            schema: object(json!({"command": {"type": "string"}}), &["command"]),
-        },
-    ]
+    api::definitions(Group::Data)
 }
 
-/// 実行の前にユーザーの確認が要るツールか。
+fn mark(name: &str, pick: fn(&api::Tool) -> bool) -> bool {
+    api::tool(Group::Data, name).is_some_and(pick)
+}
+
+/// 実行の前にユーザーの確認が要るツールか（api/data.tsp の `@confirm`）。
 pub fn needs_confirmation(name: &str) -> bool {
-    matches!(
-        name,
-        "delete_task"
-            | "delete_workspace"
-            | "delete_person"
-            | "delete_comment"
-            | "delete_attachment"
-            | "revoke_tickets"
-            | RUN_SHELL
-    )
+    mark(name, |t| t.confirm)
 }
 
-/// データベースを書き換えるツール。1 回の呼び出しを、元に戻す 1 つの段にする。
-pub const WRITES: &[&str] = &[
-    "create_task",
-    "update_task",
-    "set_assignee",
-    "set_assignee_done",
-    "move_task",
-    "delete_task",
-    "add_comment",
-    "create_workspace",
-    "create_person",
-    "update_workspace",
-    "delete_workspace",
-    "update_person",
-    "delete_person",
-    "update_comment",
-    "delete_comment",
-    "link_task",
-    "reorder_tasks",
-    "add_attachment",
-    "delete_attachment",
-    "issue_ticket",
-    "revoke_tickets",
-    "mark_notices_read",
-    "update_workspace_settings",
-    "set_done_notices",
-    "create_ai_rule",
-    "update_ai_rule",
-    "delete_ai_rule",
-    "set_repeat",
-    "create_schedule",
-    "update_schedule",
-    "add_schedule_attachment",
-    "delete_schedule_attachment",
-    "delete_schedule",
-];
+/// データベースを書き換えるツールか（api/data.tsp の `@writes`）。1 回の呼び出しを、元に戻す 1 つの段にする。
+pub fn writes(name: &str) -> bool {
+    mark(name, |t| t.writes)
+}
+
+/// アプリの中の AI にだけ渡すツールか（api/data.tsp の `@inAppOnly`）。MCP とコマンドには出さない。
+pub fn in_app_only(name: &str) -> bool {
+    mark(name, |t| t.in_app_only)
+}
 
 /// 確認に出す文。`shell` は、[`RUN_SHELL`] のコマンドが動くシェル。
 pub fn confirmation_text(store: &Store, name: &str, args: &Value, shell: &Shell) -> String {
@@ -938,9 +328,6 @@ fn edit_urls(urls: &mut Vec<String>, args: &Value) -> Result<(), String> {
     }
     Ok(())
 }
-
-const SET_ASSIGNEE_TOOL: &str = "タスクの担当者 1 人の役（RACI）を決める。担当でない人は担当に加える。\
-person は担当者の ID か名前。登録されていない名前は、タスクのワークスペースの担当者としてその場で登録する。";
 
 /// 担当者を ID か名前で探した結果。
 enum Who {
@@ -2931,8 +2318,6 @@ pub fn workspace_rules(
 /// コメントに書いてよいこと。アプリの中の AI にも、MCP でつなぐ外のエージェントにも同じ文を渡す。
 pub const COMMENT_RULE: &str = "コメントは、あとでタスクを読む人に要る事実だけを書いてください（決まったこと、分かったこと、変わった状態、次にすること）。「確認しました」「レビューしました」「対応しました」のように、作業をしたことだけを伝える文は書かないでください。「まだ〜していません」「〜は未確認です」のように、していないことも書かないでください。書く事実がなければ、コメントを書かないでください。";
 
-const COMMENT_TOOL: &str = "タスクにコメントを書く。書くのは、あとでタスクを読む人に要る事実だけ（決まったこと、分かったこと、変わった状態、次にすること）。「確認しました」「レビューしました」のように作業をしたことだけを伝える文と、「まだ〜していません」のようにしていないことは書かない。書く事実がなければ呼ばない。";
-
 pub fn system_prompt(rules: &str) -> String {
     let rules = if rules.trim().is_empty() {
         String::new()
@@ -3108,7 +2493,7 @@ mod tests {
             );
         }
         assert_eq!(store.all_schedules().unwrap().len(), 1);
-        assert!(WRITES.contains(&"create_schedule"));
+        assert!(writes("create_schedule"));
         assert_eq!(
             summary("create_schedule", &json!({"title": "日報"})),
             "定時タスクを追加: 日報"
@@ -3221,8 +2606,8 @@ mod tests {
         );
         assert!(store.schedule_files(id).unwrap().is_empty());
         std::fs::remove_dir_all(&dir).unwrap();
-        assert!(WRITES.contains(&"add_schedule_attachment"));
-        assert!(WRITES.contains(&"delete_schedule_attachment"));
+        assert!(writes("add_schedule_attachment"));
+        assert!(writes("delete_schedule_attachment"));
 
         // 正しくない値は何も変えない
         for bad in [
@@ -3523,6 +2908,91 @@ mod tests {
         }
     }
 
+    /// api/data.tsp に書いたツールには、どれも実装がある（アプリの側で動くものは除く）
+    #[test]
+    fn every_defined_tool_is_implemented() {
+        for tool in definitions() {
+            if in_app_only(tool.name) {
+                continue;
+            }
+            let mut store = Store::open_in_memory().unwrap();
+            if let Err(error) = execute(&mut store, None, tool.name, &json!({})) {
+                assert!(
+                    !error.contains("というツールはありません"),
+                    "{}: {error}",
+                    tool.name
+                );
+            }
+        }
+    }
+
+    /// 上限の数は api/data.tsp に書き、core の値と同じであることをここで確かめる
+    #[test]
+    fn limits_in_the_api_match_the_code() {
+        use malakt_core::{alert, pomodoro, repeat, rules, schedule};
+        let tools = definitions();
+        let props = |tool: &str| {
+            tools
+                .iter()
+                .find(|t| t.name == tool)
+                .map(|t| t.schema["properties"].clone())
+                .unwrap()
+        };
+        let alerts = props("set_due_alerts");
+        assert_eq!(
+            alerts["timed_minutes"]["items"]["maximum"],
+            json!(alert::MAX_MINUTES)
+        );
+        assert_eq!(
+            alerts["date_days"]["items"]["maximum"],
+            json!(alert::MAX_DAYS)
+        );
+        let rule = props("set_repeat");
+        assert_eq!(
+            rule["repeat"]["properties"]["every"]["maximum"],
+            json!(repeat::MAX_EVERY)
+        );
+        for tool in ["create_schedule", "update_schedule"] {
+            let p = props(tool);
+            let every = &p["schedule"]["properties"]["every"]["maximum"];
+            assert_eq!(every, &json!(repeat::MAX_EVERY), "{tool}");
+            for key in ["start_days", "due_days"] {
+                assert_eq!(
+                    p[key]["maximum"],
+                    json!(schedule::MAX_DUE_DAYS),
+                    "{tool} {key}"
+                );
+            }
+            let due = &p["due_alerts"]["properties"];
+            assert_eq!(
+                due["timed_minutes"]["items"]["maximum"],
+                json!(alert::MAX_MINUTES)
+            );
+            assert_eq!(due["date_days"]["items"]["maximum"], json!(alert::MAX_DAYS));
+            let title = p["title"]["description"].as_str().unwrap();
+            assert!(title.contains(&format!("（{} 文字まで）", schedule::MAX_TITLE_CHARS)));
+            let subtasks = p["subtasks"]["description"].as_str().unwrap();
+            assert!(subtasks.contains(&format!("（{} 件まで）", schedule::MAX_SUBTASKS)));
+        }
+        for tool in ["create_ai_rule", "update_ai_rule"] {
+            let p = props(tool);
+            let name = p["name"]["description"].as_str().unwrap();
+            assert!(name.contains(&format!("（{} 文字まで）", rules::MAX_NAME_CHARS)));
+            let body = p["body"]["description"].as_str().unwrap();
+            assert!(body.contains(&format!("（{} 文字まで）", rules::MAX_RULE_CHARS)));
+        }
+        let timer = props("pomodoro");
+        for key in ["work_minutes", "short_break_minutes", "long_break_minutes"] {
+            assert_eq!(timer[key]["minimum"], json!(pomodoro::MIN_MINUTES), "{key}");
+            assert_eq!(timer[key]["maximum"], json!(pomodoro::MAX_MINUTES), "{key}");
+        }
+        assert_eq!(timer["rounds"]["minimum"], json!(pomodoro::MIN_ROUNDS));
+        assert_eq!(timer["rounds"]["maximum"], json!(pomodoro::MAX_ROUNDS));
+        // RACI の説明は、システムの指示と同じ文
+        let roles = &props("set_assignee")["roles"]["description"];
+        assert!(roles.as_str().unwrap().contains(RACI), "{roles}");
+    }
+
     #[test]
     fn only_irreversible_tools_ask_first() {
         let asking: Vec<_> = definitions()
@@ -3542,10 +3012,14 @@ mod tests {
                 "run_shell"
             ]
         );
-        // 書き込みのツールは、どれも一覧にある
-        let names: Vec<_> = definitions().iter().map(|t| t.name).collect();
-        for name in WRITES {
-            assert!(names.contains(name), "{name}");
+        // 読むだけのツールは名前が list_ か get_ で始まり（読み取りのみのアクセスキーはこれで分ける）、
+        // ほかはどれも書き込みとして元に戻す段になる。アプリの側で動くもの（@inAppOnly）は除く
+        for tool in definitions() {
+            let reads = tool.name.starts_with("list_") || tool.name.starts_with("get_");
+            // ポモドーロの状態と設定は設定の表にあり、元に戻す相手にしない
+            if !in_app_only(tool.name) && tool.name != "pomodoro" {
+                assert_eq!(writes(tool.name), !reads, "{}", tool.name);
+            }
         }
     }
 

@@ -6,6 +6,7 @@
 //! カスタマイズ、AI の設定、ロック、エクスポートのように、アプリの中でしかできない操作。
 
 use gpui_kit::*;
+use malakt_ai::api::{self, Group};
 use malakt_ai::wire::ToolDef;
 use malakt_core::view::{self, AssigneeFilter, DueFormat, Priority, Sort, Tab};
 use malakt_core::{archive, Status};
@@ -15,61 +16,18 @@ use crate::ai::{Session, Watch, WATCH_MINUTES};
 use crate::state::{Column, MainView, Modal, Nav};
 use crate::theme::{self, Choice, Density, Feel, Layout, Preset, Scene, Slot};
 
-fn object(properties: Value, required: &[&str]) -> Value {
-    json!({
-        "type": "object",
-        "properties": properties,
-        "required": required,
-        "additionalProperties": false,
-    })
+fn mark(name: &str, pick: fn(&api::Tool) -> bool) -> bool {
+    api::tool(Group::App, name).is_some_and(pick)
 }
 
-fn empty() -> Value {
-    object(json!({}), &[])
-}
-
-/// 画面を動かすツール（メインのウィンドウで実行する）。
-const VIEW_TOOLS: &[&str] = &[
-    "get_screen",
-    "navigate",
-    "open_task",
-    "close_task",
-    "set_list_view",
-    "set_columns",
-    "set_panels",
-    "pane",
-    "open_dialog",
-    "open_window",
-    "open_terminal",
-    "browser",
-    "lock",
-    "set_app_options",
-    "update_now",
-    "export_data",
-    "import_data",
-    "undo",
-    "redo",
-    "find_icons",
-    "set_workspace_icon",
-    "get_customization",
-    "list_fonts",
-    "apply_theme",
-    "save_theme",
-    "rename_theme",
-    "delete_theme",
-    "apply_layout",
-    "set_appearance",
-];
-
-/// AI の設定を変えるツール（チャットで実行する）。
-const SESSION_TOOLS: &[&str] = &["get_ai_settings", "set_ai_settings", "check_github"];
-
+/// 画面を動かすツールか（api/app.tsp の `@view`）。メインのウィンドウで実行する。
 pub fn is_view_tool(name: &str) -> bool {
-    VIEW_TOOLS.contains(&name)
+    mark(name, |t| t.view)
 }
 
+/// AI の設定を変えるツールか（api/app.tsp の `@session`）。チャットで実行する。
 pub fn is_session_tool(name: &str) -> bool {
-    SESSION_TOOLS.contains(&name)
+    mark(name, |t| t.session)
 }
 
 pub fn is_app_tool(name: &str) -> bool {
@@ -153,322 +111,18 @@ fn names<T>(table: &[(&'static str, T)]) -> Vec<&'static str> {
     table.iter().map(|(k, _)| *k).collect()
 }
 
-/// AI に見せる、アプリのツールの一覧。
+/// AI に見せる、アプリのツールの一覧。定義は api/app.tsp。
 pub fn definitions() -> Vec<ToolDef> {
-    let columns = names(&COLUMNS);
-    vec![
-        ToolDef {
-            name: "get_screen",
-            description: "今の画面の状態を返す。開いている場所、開いているタスク、一覧の絞り込みと並び順、表の列、左のメニューと詳細の幅、AI チャットとシェル、ペイン、ロック・リマインダー・自動アップデートの設定、開けるシェル。",
-            schema: empty(),
-        },
-        ToolDef {
-            name: "navigate",
-            description: "画面を開く。to は home（ホーム）、all（すべてのタスク）、unfiled（未所属のタスク）、またはワークスペースの ID。",
-            schema: object(json!({"to": {"type": "string"}}), &["to"]),
-        },
-        ToolDef {
-            name: "open_task",
-            description: "タスクの詳細を開く。",
-            schema: object(json!({"id": {"type": "string"}}), &["id"]),
-        },
-        ToolDef {
-            name: "close_task",
-            description: "開いているタスクの詳細を閉じる。",
-            schema: empty(),
-        },
-        ToolDef {
-            name: "set_list_view",
-            description: "タスクの一覧の絞り込みと並び順を変える。渡した項目だけが変わる。clear_filters で絞り込みを外す（タブと並び順は残る）。",
-            schema: object(
-                json!({
-                    "tab": {"type": "string", "enum": ["open", "closed"], "description": "未完了 / 完了"},
-                    "query": {"type": "string", "description": "キーワード。空で外す"},
-                    "status": {"type": ["string", "null"], "enum": ["needs_action", "in_process", "completed", "cancelled", null]},
-                    "assignee": {"type": ["string", "null"], "description": "me（自分）、unassigned（未割り当て）、担当者の ID。null ですべて"},
-                    "priority": {"type": ["string", "null"], "enum": ["none", "high", "mid", "low", null]},
-                    "category": {"type": ["string", "null"]},
-                    "sort": {"type": "string", "enum": names(&SORTS),
-                             "description": "期限が近い順 / 優先度が高い順 / 更新が新しい順 / 作成が新しい順 / タイトル順 / 状態順 / 手動の順"},
-                    "descending": {"type": "boolean", "description": "並び順を逆にする"},
-                    "clear_filters": {"type": "boolean"},
-                    "home_mine_only": {"type": "boolean", "description": "ホームの「期限が近いタスク」を自分の担当だけにする"},
-                }),
-                &[],
-            ),
-        },
-        ToolDef {
-            name: "set_columns",
-            description: "タスクの表の列を出す・隠す、幅を変える、並べ替える。order は列の並び（全部の列でなくてよい。書いた列がその順で先頭に来る）。width は 56〜480、null で最初の幅。",
-            schema: object(
-                json!({
-                    "columns": {"type": "array", "items": {
-                        "type": "object",
-                        "properties": {
-                            "column": {"type": "string", "enum": columns},
-                            "shown": {"type": "boolean"},
-                            "width": {"type": ["number", "null"]},
-                        },
-                        "required": ["column"],
-                        "additionalProperties": false,
-                    }},
-                    "order": {"type": "array", "items": {"type": "string", "enum": columns}},
-                }),
-                &[],
-            ),
-        },
-        ToolDef {
-            name: "set_panels",
-            description: "画面の部分を出す・隠す、幅を変える。sidebar は左のメニュー、chat は AI チャット、shell はシェルの場所（AI のタブ、ターミナル、ブラウザのタブ）。幅は null で最初の幅。expanded は左のメニューのワークスペースを開く・閉じる（ID と true / false）。",
-            schema: object(
-                json!({
-                    "sidebar": {"type": "boolean"},
-                    "sidebar_width": {"type": ["number", "null"], "description": "200〜480"},
-                    "detail_width": {"type": ["number", "null"], "description": "タスクの詳細の幅 400〜1600"},
-                    "chat": {"type": "boolean"},
-                    "shell": {"type": "boolean"},
-                    "expanded": {"type": "object", "additionalProperties": {"type": "boolean"}},
-                }),
-                &[],
-            ),
-        },
-        ToolDef {
-            name: "pane",
-            description: "画面を分けたペインを操作する。split_right / split_down（分ける）、close（今のペインを閉じる）、zoom（今のペインだけを大きく出す・戻す）、focus_next / focus_prev、focus_left / focus_right / focus_up / focus_down、swap_left / swap_right / swap_up / swap_down、duplicate（複製）、pop_out（別ウィンドウに出す）、save_layout（今の配置を保存）、load_layout（name の配置にする。最初からある配置か、保存した配置）、delete_layout（保存した配置 name を削除）。",
-            schema: object(
-                json!({
-                    "action": {"type": "string", "enum": [
-                        "split_right", "split_down", "close", "zoom", "focus_next", "focus_prev",
-                        "focus_left", "focus_right", "focus_up", "focus_down",
-                        "swap_left", "swap_right", "swap_up", "swap_down",
-                        "duplicate", "pop_out", "save_layout", "load_layout", "delete_layout",
-                    ]},
-                    "name": {"type": "string", "description": "load_layout と delete_layout の配置の名前（get_screen の pane_layouts）"},
-                }),
-                &["action"],
-            ),
-        },
-        ToolDef {
-            name: "open_dialog",
-            description: "ダイアログを開く。people（担当者）、customize（カスタマイズ）、lock（ロックの設定）、notices（通知）、keys（キー操作の一覧）、workspace_settings（ワークスペースの設定。workspace_id が要る）、workspace_icon（ワークスペースのアイコン。workspace_id が要る）、history（開いているタスクの変更履歴）、ticket（完了チケット。task_id が要る）。",
-            schema: object(
-                json!({
-                    "name": {"type": "string", "enum": ["people", "customize", "notices", "keys", "workspace_settings", "workspace_icon", "history", "ticket"]},
-                    "workspace_id": {"type": "string"},
-                    "task_id": {"type": "string"},
-                }),
-                &["name"],
-            ),
-        },
-        ToolDef {
-            name: "open_window",
-            description: "新しいウィンドウを開く。kind は main（タスクの画面をもう 1 枚。標準）か pomodoro（ポモドーロタイマー。開いていれば手前に出す。タイマーの操作は pomodoro ツール）。",
-            schema: object(
-                json!({"kind": {"type": "string", "enum": ["main", "pomodoro"]}}),
-                &[],
-            ),
-        },
-        ToolDef {
-            name: "open_terminal",
-            description: "ターミナルを開く。task_id を渡すと、そのタスクのワークスペースのフォルダーで開く。shell は get_screen の terminal_shells の id（選んだシェルは次からも使う）。",
-            schema: object(
-                json!({"task_id": {"type": "string"}, "shell": {"type": "string"}}),
-                &[],
-            ),
-        },
-        ToolDef {
-            name: "browser",
-            description: "アプリ内ブラウザ（シェルの場所のタブ）を操作する。open（url を新しいタブで開いて見せる。同じ場所のタブがあればそれを見せる）、list（開いているタブの一覧）、show（tab を見せる）、navigate（tab で url を開く）、back、forward、reload、close（tab を閉じる）、open_external（url か tab のページを OS のブラウザで開く）、zoom_in / zoom_out（ページの拡大率を 1 段変える）、zoom_reset（100% に戻す）。tab を省くと、見ているタブ。ページの文字は read_browser で読む。",
-            schema: object(
-                json!({
-                    "action": {"type": "string", "enum": ["open", "list", "show", "navigate", "back", "forward", "reload", "close", "open_external", "zoom_in", "zoom_out", "zoom_reset"]},
-                    "url": {"type": "string"},
-                    "tab": {"type": "integer"},
-                }),
-                &["action"],
-            ),
-        },
-        ToolDef {
-            name: crate::browser::READ_TOOL,
-            description: "アプリ内ブラウザのページの文字（url、title、ユーザーが選んでいる文字 selection、本文 text）を読む。tab を省くと、ユーザーが見ているタブ。ログインが要るページも、ユーザーのログインのまま読める。",
-            schema: object(
-                json!({
-                    "tab": {"type": "integer"},
-                    "max_chars": {"type": "integer", "description": "本文の最大の文字数（500〜20000、標準 20000）"},
-                }),
-                &[],
-            ),
-        },
-        ToolDef {
-            name: "lock",
-            description: "ロック。lock_now（今すぐロック）、enable（ロックを有効にする）、disable（ロックを無効にする）、set_options（ロックの設定を変える。渡した項目だけが変わる）。有効と無効は、OS の認証（パスキー）が出て、ユーザーが通したときだけ変わる。auto_lock_minutes は、操作がないまま自動でロックするまでの分数（0 で自動でロックしない）。locked_notices は、ロック中の OS の通知に出すもの（title: 通知の 1 行を出す、hidden: 「新しい通知があります」だけ）。今の値は get_screen の lock にある。",
-            schema: object(
-                json!({
-                    "action": {"type": "string", "enum": ["lock_now", "enable", "disable", "set_options"]},
-                    "auto_lock_minutes": {"type": "integer", "enum": [0, 1, 5, 10, 15, 30, 60, 120]},
-                    "locked_notices": {"type": "string", "enum": ["title", "hidden"]},
-                }),
-                &["action"],
-            ),
-        },
-        ToolDef {
-            name: "set_app_options",
-            description: "アプリの設定を変える。渡した項目だけが変わる。reminders は OS のリマインダーとの連携、autostart は OS にログインしたときにアプリを起動するか（スタートアップ）、auto_update は自動アップデート、pane_keys はペインのキー操作（herdr / tmux）。",
-            schema: object(
-                json!({
-                    "reminders": {"type": "boolean"},
-                    "autostart": {"type": "boolean"},
-                    "auto_update": {"type": "boolean"},
-                    "pane_keys": {"type": "string", "enum": ["herdr", "tmux"]},
-                }),
-                &[],
-            ),
-        },
-        ToolDef {
-            name: "update_now",
-            description: "取ってきてある新しい版に入れ替えて、アプリを起動し直す。",
-            schema: empty(),
-        },
-        ToolDef {
-            name: "export_data",
-            description: "全部のデータ（タスク、ワークスペース、担当者、コメント、添付）を zip に書き出す。path は書き出すファイルの場所（先頭の ~ はホーム）。省くと書類のフォルダー。同じ名前のファイルがあると、上書きの前にユーザーに確認が出る。",
-            schema: object(json!({"path": {"type": "string"}}), &[]),
-        },
-        ToolDef {
-            name: "import_data",
-            description: "エクスポートした zip を取り込む。ID が同じものは上書きするので、実行の前にユーザーに確認が出る。",
-            schema: object(json!({"path": {"type": "string"}}), &["path"]),
-        },
-        ToolDef {
-            name: "undo",
-            description: "直前の変更を 1 つ元に戻す（Ctrl+Z と同じ）。AI の変更も、ツールの呼び出し 1 回が 1 つの段になる。",
-            schema: empty(),
-        },
-        ToolDef {
-            name: "redo",
-            description: "元に戻した変更をやり直す。",
-            schema: empty(),
-        },
-        ToolDef {
-            name: "find_icons",
-            description: "ワークスペースに付けられるアイコンを探す。query は英語か日本語の言葉。",
-            schema: object(
-                json!({"query": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 100}}),
-                &["query"],
-            ),
-        },
-        ToolDef {
-            name: "set_workspace_icon",
-            description: "ワークスペースのアイコンと色を変える。icon は find_icons で見つけた名前（null で最初のアイコン）、image_path は icon の代わりに使う画像ファイル（PNG・JPEG・SVG）の絶対パス（先頭の ~ はホーム）、color は red / orange / yellow / green / teal / blue / purple / pink（null で文字と同じ色）。渡した項目だけが変わる。",
-            schema: object(
-                json!({
-                    "id": {"type": "string"},
-                    "icon": {"type": ["string", "null"]},
-                    "image_path": {"type": "string"},
-                    "color": {"type": ["string", "null"]},
-                }),
-                &["id"],
-            ),
-        },
-        ToolDef {
-            name: "get_customization",
-            description: "カスタマイズ（見た目）の今の値と、選べるテーマ・レイアウト・値を返す。",
-            schema: empty(),
-        },
-        ToolDef {
-            name: "list_fonts",
-            description: "この PC で使える書体の名前を返す。query で絞り込む。",
-            schema: object(json!({"query": {"type": "string"}}), &[]),
-        },
-        ToolDef {
-            name: "apply_theme",
-            description: "テーマ（おすすめのテーマか、自分で保存したテーマ）を名前で選んで使う。",
-            schema: object(json!({"name": {"type": "string"}}), &["name"]),
-        },
-        ToolDef {
-            name: "save_theme",
-            description: "今の見た目を、自分のテーマとして名前を付けて保存する。",
-            schema: object(json!({"name": {"type": "string"}}), &["name"]),
-        },
-        ToolDef {
-            name: "rename_theme",
-            description: "自分で保存したテーマの名前を変える。",
-            schema: object(
-                json!({"name": {"type": "string"}, "new_name": {"type": "string"}}),
-                &["name", "new_name"],
-            ),
-        },
-        ToolDef {
-            name: "delete_theme",
-            description: "自分で保存したテーマを削除する（今の見た目は変わらない）。元に戻せないので、実行の前にユーザーに確認が出る。",
-            schema: object(json!({"name": {"type": "string"}}), &["name"]),
-        },
-        ToolDef {
-            name: "apply_layout",
-            description: "レイアウト（重ねる詳細 / 一覧と詳細 / 3 カラム / カード / 浮いたパネル）を名前で選んで使う。",
-            schema: object(json!({"name": {"type": "string"}}), &["name"]),
-        },
-        ToolDef {
-            name: "set_appearance",
-            description: "見た目を 1 つずつ変える。渡した項目だけが変わる。mode はライト・ダーク、scene は背景の画像（none / sky / forest / dusk か、画像ファイルの絶対パス）、clear は面の透明度 0〜70、blur は背景のぼかし 0〜100、cards は一覧をカードで出す、floating はパネルを浮かせる、overlay は詳細を一覧の上に重ねる、density は行の詰め方、feel はホバーと押したときの描き方、due_format は一覧の期限の出し方（date は「11/24～11/27」、relative は「明日」「あと 3 日」「2 日前」）、fonts は画面の書体の優先順（名前の配列。文字ごとに上から順に、その文字を持つ書体で描く。null で標準の LINE Seed JP）、mono_fonts はターミナルとコードの等幅の書体の優先順（null で標準）、font は書体を 1 つだけにする、accent / light_background / dark_background は #rrggbb の色（null で標準の色）。",
-            schema: object(
-                json!({
-                    "mode": {"type": "string", "enum": names(&MODES)},
-                    "scene": {"type": "string"},
-                    "clear": {"type": "integer", "minimum": 0, "maximum": theme::MAX_CLEAR},
-                    "blur": {"type": "integer", "minimum": 0, "maximum": 100},
-                    "cards": {"type": "boolean"},
-                    "floating": {"type": "boolean"},
-                    "overlay": {"type": "boolean"},
-                    "density": {"type": "string", "enum": names(&DENSITIES), "description": "ゆったり / 標準 / 詰める"},
-                    "feel": {"type": "string", "enum": names(&FEELS), "description": "標準 / ガラス / くっきり / 色づく"},
-                    "due_format": {"type": "string", "enum": names(&DUE_FORMATS), "description": "日付 / 相対"},
-                    "font": {"type": ["string", "null"]},
-                    "fonts": {"type": ["array", "null"], "items": {"type": "string"}},
-                    "mono_fonts": {"type": ["array", "null"], "items": {"type": "string"}},
-                    "accent": {"type": ["string", "null"]},
-                    "light_background": {"type": ["string", "null"]},
-                    "dark_background": {"type": ["string", "null"]},
-                }),
-                &[],
-            ),
-        },
-        ToolDef {
-            name: "get_ai_settings",
-            description: "AI チャットの設定（サービス、モデル、effort、振り分けのモデル、新しいタスクを整える、コメントから進捗を更新する、GitHub の定期チェック、オート実行）を返す。AI のルールは list_ai_rules で読む。",
-            schema: empty(),
-        },
-        ToolDef {
-            name: "set_ai_settings",
-            description: "AI チャットの設定を変える。渡した項目だけが変わり、次のメッセージから使う。provider は claude / chatgpt / opencode / opencode_go / cursor。effort はモデルごとに覚え、model を変えるとそのモデルで前に選んだ effort に戻る（model と effort を一緒に渡すと、新しいモデルの effort になる）。routing_model は空で今のモデルを使う。watch_minutes は 60 / 180 / 360 / 720 / 1440（分）。auto_run をオンにするときは、実行の前にユーザーに確認が出る。API キーはここでは変えられない（チャットの「設定」で入れる）。AI のルールは create_ai_rule / update_ai_rule で変える。",
-            schema: object(
-                json!({
-                    "provider": {"type": "string"},
-                    "model": {"type": "string"},
-                    "effort": {"type": "string"},
-                    "routing_model": {"type": "string"},
-                    "arrange": {"type": "boolean", "description": "新しいタスクを AI が整える"},
-                    "track": {"type": "boolean", "description": "コメントから AI が進捗などを更新する"},
-                    "watch_enabled": {"type": "boolean", "description": "GitHub の定期チェック"},
-                    "watch_minutes": {"type": "integer"},
-                    "watch_instruction": {"type": "string"},
-                    "auto_run": {"type": "boolean", "description": "コマンドの実行と削除を確認なしで行う"},
-                }),
-                &[],
-            ),
-        },
-        ToolDef {
-            name: "check_github",
-            description: "GitHub の定期チェックを今すぐ 1 回行う。",
-            schema: empty(),
-        },
-    ]
+    api::definitions(Group::App)
 }
 
 /// 実行の前にユーザーの確認が要るか。
+/// いつも確認するもの（`@confirm`）は api/app.tsp に、中身で決まるものはここに書く。
 pub fn needs_confirmation(name: &str, args: &Value) -> bool {
+    if mark(name, |t| t.confirm) {
+        return true;
+    }
     match name {
-        "delete_theme" | "import_data" => true,
         "export_data" => export_path(args).is_ok_and(|p| p.exists()),
         "set_ai_settings" => args.get("auto_run").and_then(Value::as_bool) == Some(true),
         _ => false,
@@ -1995,7 +1649,7 @@ mod tests {
     use super::{
         confirmation_text, definitions, is_app_tool, key_of, needs_confirmation, parse_in, summary,
         Choice, Column, Density, DueFormat, Feel, Scene, Sort, COLUMNS, DENSITIES, DUE_FORMATS,
-        FEELS, MODES, SCENES, SESSION_TOOLS, SORTS, VIEW_TOOLS,
+        FEELS, MODES, SCENES, SORTS,
     };
     use serde_json::json;
 
@@ -2017,9 +1671,45 @@ mod tests {
             assert_eq!(tool.schema["additionalProperties"], false, "{}", tool.name);
             assert!(summary(tool.name, &json!({})).is_some(), "{}", tool.name);
         }
-        for name in VIEW_TOOLS.iter().chain(SESSION_TOOLS) {
-            assert!(all.contains(name), "{name}");
-        }
+    }
+
+    /// 候補の並びは api/app.tsp に書き、アプリの表と同じであることをここで確かめる
+    #[test]
+    fn app_enums_match_the_code() {
+        let tools = definitions();
+        let schema = |tool: &str| {
+            tools
+                .iter()
+                .find(|t| t.name == tool)
+                .map(|t| t.schema["properties"].clone())
+                .unwrap()
+        };
+        let list = |v: &serde_json::Value| -> Vec<String> {
+            v["enum"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|x| x.as_str().unwrap().to_owned())
+                .collect()
+        };
+        let owned =
+            |names: Vec<&str>| -> Vec<String> { names.into_iter().map(String::from).collect() };
+        let view = schema("set_list_view");
+        assert_eq!(list(&view["sort"]), owned(super::names(&SORTS)));
+        let columns = schema("set_columns");
+        let column = &columns["columns"]["items"]["properties"]["column"];
+        assert_eq!(list(column), owned(super::names(&COLUMNS)));
+        assert_eq!(
+            list(&columns["order"]["items"]),
+            owned(super::names(&COLUMNS))
+        );
+        let look = schema("set_appearance");
+        assert_eq!(list(&look["mode"]), owned(super::names(&MODES)));
+        assert_eq!(list(&look["density"]), owned(super::names(&DENSITIES)));
+        assert_eq!(list(&look["feel"]), owned(super::names(&FEELS)));
+        assert_eq!(list(&look["due_format"]), owned(super::names(&DUE_FORMATS)));
+        let clear = &look["clear"];
+        assert_eq!(clear["maximum"], json!(crate::theme::MAX_CLEAR));
     }
 
     #[test]

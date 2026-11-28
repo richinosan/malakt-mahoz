@@ -91,17 +91,13 @@ fn unix_now() -> i64 {
         .unwrap_or(0)
 }
 
-/// 外に見せるツールの一覧（`tools/list` の形）。
+/// 外に見せるツールの一覧（`tools/list` の形）。定義は api/data.tsp と api/mcp.tsp。
 pub fn tool_list() -> Vec<Value> {
-    let mut list: Vec<Value> = tools::definitions()
-        .into_iter()
+    use malakt_ai::api::{self, Group};
+    let data = api::tools()
+        .iter()
         // GitHub とシェルは、呼ぶ側（Claude Code）が自分で持っている
-        .filter(|t| {
-            !matches!(
-                t.name,
-                tools::GITHUB_FETCH | tools::SLACK_FETCH | tools::RUN_SHELL
-            )
-        })
+        .filter(|t| t.group == Group::Data && !t.in_app_only)
         .map(|t| {
             // 外のエージェントには確認を出さない。代わりに undo で戻せる
             let description = t.description.replace(
@@ -109,35 +105,12 @@ pub fn tool_list() -> Vec<Value> {
                 "undo で元に戻せる。",
             );
             json!({"name": t.name, "description": description, "inputSchema": t.schema})
-        })
-        .collect();
-    let empty = || json!({"type": "object", "properties": {}, "additionalProperties": false});
-    list.push(json!({
-        "name": GET_AUTOSTART,
-        "description": "OS にログインしたときに malakt-mahoz のアプリを起動するか（スタートアップ）を読む。available が false なら、この OS では登録できない。",
-        "inputSchema": empty(),
-    }));
-    list.push(json!({
-        "name": SET_AUTOSTART,
-        "description": "OS にログインしたときに malakt-mahoz のアプリを起動するか（スタートアップ）を変える。enabled が true で登録、false で外す。undo では戻らないので、戻すときはもう一度呼ぶ。",
-        "inputSchema": {
-            "type": "object",
-            "properties": {"enabled": {"type": "boolean"}},
-            "required": ["enabled"],
-            "additionalProperties": false,
-        },
-    }));
-    list.push(json!({
-        "name": "undo",
-        "description": "このサーバーからの直前の変更を 1 つ元に戻す。続けて呼ぶと、さらに前の変更を戻す。",
-        "inputSchema": empty(),
-    }));
-    list.push(json!({
-        "name": "redo",
-        "description": "undo で戻した変更をやり直す。",
-        "inputSchema": empty(),
-    }));
-    list
+        });
+    let own = api::tools()
+        .iter()
+        .filter(|t| t.group == Group::Mcp)
+        .map(|t| json!({"name": t.name, "description": t.description, "inputSchema": t.schema}));
+    data.chain(own).collect()
 }
 
 /// アクセスキーとロックを確かめてから、ツールを 1 つ実行する。コマンド（`malakt-mahoz call`）と共通。
@@ -195,9 +168,7 @@ fn run_tool(store: &mut Store, name: &str, args: &Value) -> Result<String, Strin
             let done = store.redo().map_err(core)?;
             Ok(json!({"redone": done}).to_string())
         }
-        tools::GITHUB_FETCH | tools::SLACK_FETCH | tools::RUN_SHELL => {
-            Err(format!("{name} というツールはありません"))
-        }
+        _ if tools::in_app_only(name) => Err(format!("{name} というツールはありません")),
         GET_AUTOSTART | SET_AUTOSTART => autostart(&crate::autostart::process(), name, args),
         _ => {
             // 自分が登録されていれば、コメントの書き手にする（AI チャットと同じ）
@@ -207,7 +178,7 @@ fn run_tool(store: &mut Store, name: &str, args: &Value) -> Result<String, Strin
                 .into_iter()
                 .find(|p| p.is_self)
                 .map(|p| p.id);
-            let write = tools::WRITES.contains(&name);
+            let write = tools::writes(name);
             if write {
                 store.undo_mark().map_err(core)?;
             }
@@ -660,8 +631,11 @@ mod tests {
             }
         }
         // 書き込みとして扱うツールは、どれも一覧にある
-        for name in tools::WRITES {
-            assert!(names.contains(name), "{name}");
+        let writes = malakt_ai::api::tools()
+            .iter()
+            .filter(|t| t.group == malakt_ai::api::Group::Data && t.writes);
+        for tool in writes {
+            assert!(names.contains(&tool.name), "{}", tool.name);
         }
         assert!(!missing.exists());
 
@@ -931,8 +905,11 @@ mod tests {
         }
         assert!(read >= 10, "{read}");
         // 書くツールは、どれも読み取りのみで止まる
-        for name in tools::WRITES {
-            assert!(!reads(name), "{name}");
+        let writes = malakt_ai::api::tools()
+            .iter()
+            .filter(|t| t.group == malakt_ai::api::Group::Data && t.writes);
+        for tool in writes {
+            assert!(!reads(tool.name), "{}", tool.name);
         }
         assert_eq!(
             app.tasks(malakt_core::Scope::All, &Default::default())
