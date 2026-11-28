@@ -655,6 +655,8 @@ pub struct MainView {
     pub modal_seen: Option<(Modal, Option<crate::panes::PaneOverlay>)>,
     /// 今描いているダイアログの出方。0 で消えていて、1 で出きっている。
     pub dialog_t: std::cell::Cell<f32>,
+    /// 上のバーのダウンロードのボタンの場所。一覧はこの下に出す
+    pub downloads_anchor: Rc<std::cell::Cell<Bounds<Pixels>>>,
     pub today: String,
     pub inputs: Inputs,
     _subscriptions: Vec<Subscription>,
@@ -1165,6 +1167,7 @@ impl MainView {
             sub_seen: None,
             modal_seen: None,
             dialog_t: std::cell::Cell::new(1.),
+            downloads_anchor: Rc::default(),
             today: view::today(),
             inputs,
             _subscriptions: subs,

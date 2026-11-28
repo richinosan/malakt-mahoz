@@ -1550,6 +1550,18 @@ fn downloads_show_in_the_header_with_a_count(cx: &mut TestAppContext) {
     ui(cx, window, |window, _| {
         assert!(window.find(("download", 0usize)).visible());
         assert!(window.try_find("open-downloads-count").is_none());
+        // Chrome と同じく、一覧はボタンのすぐ下に、右の端をそろえて出る
+        let button = window.find("open-downloads").bounds();
+        let list = window.find("dialog").bounds();
+        assert!(list.top() >= button.bottom(), "{list:?} {button:?}");
+        assert!(
+            list.top() - button.bottom() < gpui_kit::px(16.),
+            "{list:?} {button:?}"
+        );
+        assert!(
+            (list.right() - button.right()).abs() < gpui_kit::px(12.),
+            "{list:?} {button:?}"
+        );
     });
     ui(cx, window, |window, cx| window.press("escape", cx));
     std::fs::write(&path, vec![0u8; 2048]).unwrap();
@@ -1580,6 +1592,13 @@ fn downloads_show_in_the_header_with_a_count(cx: &mut TestAppContext) {
     ui(cx, window, |window, cx| window.click("open-downloads", cx));
     ui(cx, window, |window, cx| {
         window.hover(("download", 0usize), cx)
+    });
+    // 乗せると「フォルダで表示」と「一覧から削除」が同じ大きさのボタンで並ぶ
+    ui(cx, window, |window, _| {
+        let reveal = window.find(("download-reveal", 0usize));
+        let remove = window.find(("download-remove", 0usize));
+        assert!(reveal.visible() && remove.visible());
+        assert_eq!(reveal.bounds().size, remove.bounds().size);
     });
     ui(cx, window, |window, cx| {
         window.click(("download-remove", 0usize), cx)

@@ -175,6 +175,13 @@ const KEY_SCRIPT: &str = r#"(() => {
       else window.top.postMessage({ malaktKey: key }, "*");
     } catch (_) {}
   };
+  // ページの印刷のボタン（window.print）も、Ctrl+P と同じアプリの印刷のダイアログにする。
+  // ダイアログの「プリンター」は、元の window.print を __malaktPrint で呼ぶ
+  try {
+    const print = window.print.bind(window);
+    Object.defineProperty(window, "__malaktPrint", { value: print });
+    window.print = () => send(__PRINT__);
+  } catch (_) {}
   if (top) {
     window.addEventListener("message", (e) => {
       const key = e.data && e.data.malaktKey;
@@ -217,6 +224,10 @@ fn key_script() -> String {
     KEY_SCRIPT
         .replace("__TAKE__", &list(&keys.take))
         .replace("__SOFT__", &list(&keys.soft))
+        .replace(
+            "__PRINT__",
+            &serde_json::Value::from(crate::shell_keys::PRINT_KEY).to_string(),
+        )
 }
 
 /// ページの中を探す。`window.find` は見つけた所を選んで、見える所まで動かす。
@@ -364,6 +375,13 @@ impl Engine for Wry {
     }
 
     fn print(&self) -> Result<(), String> {
+        // Windows の wry は window.print を呼ぶ。ページの window.print はアプリのダイアログを開くので、元のものを呼ぶ
+        #[cfg(windows)]
+        return self
+            .view
+            .evaluate_script("(window.__malaktPrint || window.print)()")
+            .map_err(text);
+        #[cfg(not(windows))]
         self.view.print().map_err(text)
     }
 
@@ -598,6 +616,80 @@ fn watch_downloads(view: &WebView, send: impl Fn(Event) + Clone + 'static) -> Re
     let mut token = 0i64;
     unsafe { webview.add_DownloadStarting(&handler, &mut token) }
         .map_err(|e| format!("ダウンロードの進み具合を読めません: {}", e.message()))
+}
+
+/// Windows: ページの右クリックのメニューの「印刷」を、Ctrl+P と同じアプリの印刷のダイアログにする。
+/// WebView2 の印刷のプレビューから「Microsoft Print to PDF」で保存すると、ファイル名にページの題名が入らない。
+#[cfg(windows)]
+fn print_from_menu(view: &WebView, send: impl Fn(Event) + Clone + 'static) -> Result<(), String> {
+    use webview2_com::Microsoft::Web::WebView2::Win32::{
+        ICoreWebView2Environment9, ICoreWebView2_11, ICoreWebView2_2,
+        COREWEBVIEW2_CONTEXT_MENU_ITEM_KIND_COMMAND,
+    };
+    use webview2_com::{
+        take_pwstr, ContextMenuRequestedEventHandler, CustomItemSelectedEventHandler,
+    };
+    use windows::core::{Interface, HSTRING, PWSTR};
+    use wry::WebViewExtWindows;
+
+    let failed = |e: windows::core::Error| {
+        format!(
+            "右クリックのメニューの印刷を変えられません: {}",
+            e.message()
+        )
+    };
+    let webview = view.webview();
+    let environment: ICoreWebView2Environment9 = webview
+        .cast::<ICoreWebView2_2>()
+        .and_then(|w| unsafe { w.Environment() })
+        .and_then(|e| e.cast())
+        .map_err(failed)?;
+    let handler = ContextMenuRequestedEventHandler::create(Box::new(move |_, args| {
+        let Some(args) = args else {
+            return Ok(());
+        };
+        let items = unsafe { args.MenuItems()? };
+        let mut count = 0u32;
+        unsafe { items.Count(&mut count)? };
+        for index in 0..count {
+            let item = unsafe { items.GetValueAtIndex(index)? };
+            let mut name = PWSTR::null();
+            unsafe { item.Name(&mut name)? };
+            if take_pwstr(name) != "print" {
+                continue;
+            }
+            let mut label = PWSTR::null();
+            unsafe { item.Label(&mut label)? };
+            let label = HSTRING::from(take_pwstr(label));
+            let print = unsafe {
+                environment.CreateContextMenuItem(
+                    &label,
+                    None,
+                    COREWEBVIEW2_CONTEXT_MENU_ITEM_KIND_COMMAND,
+                )?
+            };
+            let send = send.clone();
+            let selected = CustomItemSelectedEventHandler::create(Box::new(move |_, _| {
+                send(Event::Key(crate::shell_keys::PRINT_KEY.to_owned()));
+                Ok(())
+            }));
+            let mut token = 0i64;
+            unsafe {
+                print.add_CustomItemSelected(&selected, &mut token)?;
+                items.RemoveValueAtIndex(index)?;
+                items.InsertValueAtIndex(index, &print)?;
+            }
+            break;
+        }
+        Ok(())
+    }));
+    let mut token = 0i64;
+    unsafe {
+        webview
+            .cast::<ICoreWebView2_11>()
+            .and_then(|w| w.add_ContextMenuRequested(&handler, &mut token))
+    }
+    .map_err(failed)
 }
 
 /// macOS: 部品は進み具合を知らせないので、ダウンロードの一覧がファイルの大きさを見る。
@@ -879,6 +971,8 @@ pub fn create(window: &mut Window, setup: Setup) -> Result<Rc<dyn Engine>, Strin
             .build_as_child(&parent)
             .map_err(|e| format!("ブラウザを開けませんでした: {e}"))?;
         // 進み具合は、部品の知らせから読む（macOS は、ダウンロード中のファイルの大きさを見る）
+        #[cfg(windows)]
+        print_from_menu(&view, send.clone())?;
         watch_downloads(&view, send)?;
         Ok(Rc::new(Wry { view }) as Rc<dyn Engine>)
     })
@@ -958,7 +1052,21 @@ mod linux {
 
 #[cfg(test)]
 mod tests {
-    use super::{popup_url, stays_inside};
+    use super::{key_script, popup_url, stays_inside};
+
+    /// ページのスクリプトに、埋めていない印（__TAKE__ など）が残らない。印刷のボタンは印刷のキーとして知らせる
+    #[test]
+    fn the_key_script_has_every_value_filled_in() {
+        let script = key_script();
+        for mark in ["__TAKE__", "__SOFT__", "__PRINT__"] {
+            assert!(!script.contains(mark), "{mark}");
+        }
+        let print = format!(
+            "window.print = () => send(\"{}\")",
+            crate::shell_keys::PRINT_KEY
+        );
+        assert!(script.contains(&print));
+    }
 
     #[test]
     fn only_web_links_open_in_a_small_window() {

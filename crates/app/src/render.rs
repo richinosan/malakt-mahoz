@@ -709,6 +709,18 @@ pub(crate) fn remove_x(
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     cx: &App,
 ) -> Stateful<Div> {
+    round_icon(id, "x", tip, on_click, cx)
+}
+
+/// 行の中の小さな丸いアイコンのボタン。乗せたときと押したときの動きは [`remove_x`] と同じ。
+/// 同じ行に並べるボタンは、これでそろえる。
+pub(crate) fn round_icon(
+    id: impl Into<ElementId>,
+    icon: &'static str,
+    tip: impl Into<SharedString>,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    cx: &App,
+) -> Stateful<Div> {
     let theme = cx.theme();
     let tip: SharedString = tip.into();
     let ink = theme.accent_foreground;
@@ -724,7 +736,7 @@ pub(crate) fn remove_x(
         .lit(theme.accent, cx)
         .sunk(theme.primary.opacity(0.4), cx)
         .hover(move |s| s.text_color(ink))
-        .child(app_icon("x").size_3p5())
+        .child(app_icon(icon).size_3p5())
         .tooltip(move |window, cx| {
             gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
         })
@@ -2580,9 +2592,15 @@ impl MainView {
                 None => track.child(crate::browser::loading_line(theme.primary)),
             }
         });
+        let anchor = self.downloads_anchor.clone();
         Some(
             div()
                 .relative()
+                .child(
+                    canvas(move |bounds, _, _| anchor.set(bounds), |_, _, _, _| {})
+                        .absolute()
+                        .inset_0(),
+                )
                 .child(feel::gloss(
                     button("open-downloads")
                         .icon(app_icon("download"))
@@ -2721,15 +2739,25 @@ impl MainView {
                                     .child(item.detail(now)),
                             ),
                     )
-                    // フォルダで表示するものは、乗せたときにフォルダの印を出す
+                    // 乗せたときに出すボタン。「フォルダで表示」と「一覧から削除」は同じ形と動き
                     .when(open, |d| {
+                        let downloads = downloads.clone();
                         d.child(
                             div()
-                                .flex_none()
-                                .text_color(theme.muted_foreground)
                                 .opacity(0.)
                                 .group_hover(group.clone(), |s| s.opacity(1.))
-                                .child(app_icon("folder-open").size_4()),
+                                .child(
+                                    round_icon(
+                                        ("download-reveal", ix),
+                                        "folder-open",
+                                        "フォルダで表示",
+                                        move |_, _, cx| {
+                                            downloads.update(cx, |d, cx| d.reveal(id, cx))
+                                        },
+                                        cx,
+                                    )
+                                    .test_support(),
+                                ),
                         )
                     })
                     .when(!running, |d| {
@@ -2857,7 +2885,68 @@ impl MainView {
                         ))
                     }),
             );
-        self.dialog("ダウンロード", body, cx)
+        self.downloads_bubble(body, cx)
+    }
+
+    /// ダウンロードの一覧を、Chrome と同じく上のバーのボタンのすぐ下に出す。外を押すか Esc で閉じる。
+    /// ボタンをまだ描いていないとき（場所が分からないとき）は、ほかのダイアログと同じく真ん中に出す。
+    fn downloads_bubble(&self, body: Div, cx: &mut Context<Self>) -> Div {
+        let anchor = self.downloads_anchor.get();
+        if anchor.size.width <= px(0.) {
+            return self.dialog("ダウンロード", body, cx);
+        }
+        let theme = cx.theme().clone();
+        let t = self.dialog_t.get();
+        let panel =
+            col()
+                .id("dialog")
+                .occlude()
+                .w(px(380.))
+                .p_3()
+                .gap_2()
+                .when(t < 1., |d| d.relative().top(px(-8.) * (1. - t)))
+                .map(|d| {
+                    if crate::theme::floating_now() {
+                        d.rounded(px(16.))
+                    } else {
+                        d.rounded(feel::lg())
+                    }
+                })
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.background)
+                .elevate(Elevation::High, cx)
+                .child(
+                    row()
+                        .child(div().flex_1().text_base().child("ダウンロード"))
+                        .child(feel::gloss(
+                            button("dialog-close")
+                                .icon(app_icon("x"))
+                                .tooltip("閉じる")
+                                .ghost()
+                                .small()
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.close_top_dialog(window, cx)
+                                })),
+                        )),
+                )
+                .child(body)
+                .test_support();
+        // 外の所は暗くしない（Chrome のダウンロードと同じ）。押して離すまでがここなら閉じる
+        let backdrop = div()
+            .id("dialog-backdrop")
+            .size_full()
+            .when(t < 1., |d| d.opacity(t))
+            .occlude()
+            .on_click(cx.listener(|this, _, window, cx| this.dismiss_outside(window, cx)))
+            .child(
+                anchored()
+                    .position(point(anchor.right(), anchor.bottom() + px(6.)))
+                    .anchor(Anchor::TopRight)
+                    .snap_to_window_with_margin(px(8.))
+                    .child(panel),
+            );
+        div().absolute().inset_0().child(backdrop)
     }
 
     // ---- ホーム ----
