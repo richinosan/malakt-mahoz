@@ -34,7 +34,8 @@ pub const USAGE: &str = "\
 
 チケットは、環境変数 MALAKT_MAHOZ_TICKET でも渡せます。
 データベースの場所は、環境変数 MALAKT_MAHOZ_DB で変えられます。
-アクセスキーは、環境変数 MALAKT_MAHOZ_KEY で渡します（アプリの設定の「MCP」で発行）。
+アクセスキーは、環境変数 MALAKT_MAHOZ_KEY で渡します（アプリの設定の「アクセスキー」で発行）。
+終了コードは、成功が 0、失敗が 1、使い方の誤りが 2、ロックやアクセスキーで使えないときが 3 です。
 ロックが有効なときは、アプリでロックを解除している間だけタスクを読み書きできます
 （ロック中も使えるアクセスキーを除く）。
 ";
@@ -44,7 +45,7 @@ pub fn is_command(args: &[String]) -> bool {
     !args.is_empty()
 }
 
-/// 終了コード。0 は成功、1 は失敗、2 は使い方の誤り。
+/// 終了コード。0 は成功、1 は失敗、2 は使い方の誤り、3 はロックやアクセスキーで使えない。
 /// `key` は、環境変数 `MALAKT_MAHOZ_KEY` で渡されたアクセスキー。
 pub fn run(
     args: &[String],
@@ -64,12 +65,18 @@ pub fn run(
             let _ = writeln!(err, "{message}");
             1
         }
+        Err(Failure::Denied(message)) => {
+            let _ = writeln!(err, "{message}");
+            3
+        }
     }
 }
 
 enum Failure {
     Usage(String),
     Failed(String),
+    /// ロックやアクセスキー（期限・時間帯・読み取りのみ）で使えない
+    Denied(String),
 }
 
 impl From<malakt_core::Error> for Failure {
@@ -123,9 +130,17 @@ fn execute(
             let (tool, tool_args) = tool_call(command, rest)?;
             let mut store = open()?;
             store.set_actor(malakt_core::Actor::Command);
-            let text =
-                crate::mcp::call_tool(&mut store, unix_now(), key.as_deref(), &tool, &tool_args)
-                    .map_err(Failure::Failed)?;
+            let text = crate::mcp::call_tool_checked(
+                &mut store,
+                unix_now(),
+                key.as_deref(),
+                &tool,
+                &tool_args,
+            )
+            .map_err(|refused| match refused {
+                crate::mcp::Refused::Denied(text) => Failure::Denied(text),
+                crate::mcp::Refused::Failed(text) => Failure::Failed(text),
+            })?;
             writeln!(out, "{text}")?;
             Ok(())
         }
@@ -421,7 +436,8 @@ mod tests {
             &["call", "create_task", r#"{"title":"x"}"#],
         ] {
             let (code, out, err) = call(&path, args);
-            assert_eq!((code, out.as_str()), (1, ""), "{args:?}");
+            // 使えないときの終了コードは 3（ツールの失敗の 1 と分ける）
+            assert_eq!((code, out.as_str()), (3, ""), "{args:?}");
             assert_eq!(err.trim(), crate::mcp::LOCKED);
         }
 
@@ -441,11 +457,27 @@ mod tests {
             Some(&key),
             &["call", "create_task", r#"{"title":"x"}"#],
         );
-        assert_eq!(code, 1);
+        assert_eq!(code, 3);
         assert!(err.contains("読み取りのみ"), "{err}");
         let (code, _, err) = call_with_key(&path, Some("mmak_nope"), &["tasks"]);
-        assert_eq!(code, 1);
+        assert_eq!(code, 3);
         assert_eq!(err.trim(), crate::mcp::BAD_KEY);
+        // 期限が切れたキーは、期限を添えて断る
+        {
+            let mut s = Store::open(&path).unwrap();
+            let id = s.access_keys().unwrap()[0].id.clone();
+            let patch = malakt_core::access::KeyPatch {
+                expires: Some(Some("2000-01-01 09:00".into())),
+                ..Default::default()
+            };
+            s.update_access_key(&id, &patch).unwrap();
+        }
+        let (code, _, err) = call_with_key(&path, Some(&key), &["tasks"]);
+        assert_eq!(code, 3);
+        assert_eq!(
+            err.trim(),
+            "アクセスキー「スクリプト」の期限が切れています（2000/01/01 09:00 まで）。"
+        );
         // mcp config は、渡したキーを設定に入れる
         let (code, out, _) = call_with_key(&path, Some(&key), &["mcp", "config"]);
         assert_eq!(code, 0);

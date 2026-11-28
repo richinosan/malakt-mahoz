@@ -3042,6 +3042,18 @@ impl AiPane {
                                             .update(cx, |terms, cx| terms.add_to_cursor(cx))
                                     }),
                             )
+                            .separator()
+                            .item(
+                                PopupMenuItem::new("アクセスキーを設定")
+                                    .icon(app_icon("key-round"))
+                                    .on_click(|_, _, cx| {
+                                        crate::open_settings_in(
+                                            None,
+                                            Some(crate::state::CustomizeSection::AccessKeys),
+                                            cx,
+                                        )
+                                    }),
+                            )
                     },
                 ))
             })

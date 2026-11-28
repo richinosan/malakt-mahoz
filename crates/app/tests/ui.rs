@@ -1973,7 +1973,7 @@ fn auto_lock_after_the_chosen_minutes(cx: &mut TestAppContext) {
     });
 }
 
-/// 設定の「MCP」で、アクセスキーを発行し、名前を付け、できることを変え、失効させる。
+/// 設定の「アクセスキー」で、アクセスキーを発行し、名前を付け、できることを変え、失効させる。
 /// キーの文字列は発行した行の下にだけ出て、キーなしの接続の扱いもその場のメニューで選ぶ。
 #[gpui_kit::test]
 fn access_keys_are_issued_named_limited_and_revoked(cx: &mut TestAppContext) {
@@ -1984,7 +1984,7 @@ fn access_keys_are_issued_named_limited_and_revoked(cx: &mut TestAppContext) {
     ui(cx, window, |window, cx| {
         view.update(cx, |v, cx| {
             v.open_appearance(window, cx);
-            v.show_appearance_section(CustomizeSection::Mcp, window, cx);
+            v.show_appearance_section(CustomizeSection::AccessKeys, window, cx);
         })
     });
     let keys = |cx: &mut TestAppContext| store(cx, |s| s.access_keys().unwrap());
@@ -2099,6 +2099,132 @@ fn access_keys_are_issued_named_limited_and_revoked(cx: &mut TestAppContext) {
         assert_eq!(v.modal, Modal::None);
         assert!(v.issued_access_key.is_none());
     });
+}
+
+/// アクセスキーの時計のボタンで、開始・期限・時間帯をその場で決める。
+/// 期限は書いても、今からの長さで選んでもよく、今使えないキーには名前の横に印が出る。
+#[gpui_kit::test]
+fn access_keys_get_a_period_and_hours(cx: &mut TestAppContext) {
+    use malakt_core::access::Window as Hours;
+    use malakt_mahoz::state::CustomizeSection;
+    start(cx);
+    let (window, view) = open(cx, wide());
+    cx.update(|cx| {
+        db::shared(cx).update(cx, |db, _| {
+            db.store
+                .issue_access_key("Claude Code", false, false)
+                .unwrap();
+        })
+    });
+    ui(cx, window, |window, cx| {
+        view.update(cx, |v, cx| {
+            v.open_appearance(window, cx);
+            v.show_appearance_section(CustomizeSection::AccessKeys, window, cx);
+        })
+    });
+    let key = |cx: &mut TestAppContext| store(cx, |s| s.access_keys().unwrap().remove(0));
+    ui(cx, window, |window, cx| {
+        assert!(window.try_find("access-key-expires").is_none());
+        window.click(("access-key-limits", 0usize), cx);
+    });
+
+    // 期限を書く。過ぎた期限なら、名前の横に印が出る
+    ui(cx, window, |window, cx| {
+        window.click("access-key-expires", cx)
+    });
+    ui(cx, window, |window, cx| {
+        window.input("2000/1/1 9:00", cx);
+        window.press("enter", cx);
+    });
+    assert_eq!(key(cx).expires.as_deref(), Some("2000-01-01 09:00"));
+    // 開き直すと見えている書き方で入っていて、そのまま Enter しても変わらない
+    ui(cx, window, |window, cx| {
+        window.click("access-key-expires", cx)
+    });
+    ui(cx, window, |window, cx| window.press("enter", cx));
+    assert_eq!(key(cx).expires.as_deref(), Some("2000-01-01 09:00"));
+    ui(cx, window, |window, _| {
+        assert!(window.find(("access-key-off", 0usize)).visible())
+    });
+    // 今からの長さで選ぶと、印は消える
+    ui(cx, window, |window, cx| {
+        window.click("access-key-expiry-menu", cx)
+    });
+    pick(cx, window, "7 日");
+    let expires = key(cx).expires.unwrap();
+    assert!(
+        expires.as_str() > malakt_core::view::now().as_str(),
+        "{expires}"
+    );
+    ui(cx, window, |window, _| {
+        assert!(window.try_find(("access-key-off", 0usize)).is_none())
+    });
+
+    // 時間帯を足すと、毎日 9:00〜18:00。曜日と時刻をその場で変える
+    ui(cx, window, |window, cx| {
+        window.click("access-key-window-add", cx)
+    });
+    assert_eq!(key(cx).windows, vec![Hours::standard()]);
+    // 土曜を外す（7 つずつ並ぶ。5 番目が土）
+    ui(cx, window, |window, cx| {
+        window.click(("access-key-day", 5usize), cx)
+    });
+    assert_eq!(key(cx).windows[0].days, vec![0, 1, 2, 3, 4, 6]);
+    ui(cx, window, |window, cx| {
+        window.click(("access-key-from", 0usize), cx)
+    });
+    ui(cx, window, |window, cx| {
+        window.input("22", cx);
+        window.press("enter", cx);
+    });
+    ui(cx, window, |window, cx| {
+        window.click(("access-key-to", 0usize), cx)
+    });
+    ui(cx, window, |window, cx| {
+        window.input("6:00", cx);
+        window.press("enter", cx);
+    });
+    let hours = key(cx).windows[0].clone();
+    assert_eq!((hours.from, hours.to), (22 * 60, 6 * 60));
+
+    // 読めない時刻は、何も変えずにエラーを出す。Esc は書きかけを捨てて、設定は開いたまま
+    ui(cx, window, |window, cx| {
+        window.click(("access-key-to", 0usize), cx)
+    });
+    ui(cx, window, |window, cx| {
+        window.input("あとで", cx);
+        window.press("enter", cx);
+    });
+    cx.update(|cx| {
+        let v = view.read(cx);
+        assert!(v
+            .error
+            .as_deref()
+            .unwrap_or("")
+            .contains("時刻として読めません"));
+        assert!(v.key_limit_editing.is_some());
+    });
+    ui(cx, window, |window, cx| window.press("escape", cx));
+    cx.update(|cx| {
+        let v = view.read(cx);
+        assert!(v.key_limit_editing.is_none());
+        assert_eq!(v.modal, Modal::Appearance);
+    });
+    assert_eq!(key(cx).windows[0], hours);
+
+    // 期限を空にすると、期限なし。時間帯の × で外すと、いつでも
+    ui(cx, window, |window, cx| {
+        window.click("access-key-expires", cx)
+    });
+    ui(cx, window, |window, cx| {
+        window.press("backspace", cx);
+        window.press("enter", cx);
+    });
+    assert_eq!(key(cx).expires, None);
+    ui(cx, window, |window, cx| {
+        window.click(("access-key-window-remove", 0usize), cx)
+    });
+    assert!(!key(cx).limited());
 }
 
 /// 歯車を押すと、メニューを挟まずに「設定」が開く。担当者・キー操作・新しいウィンドウ・今すぐロック・版も

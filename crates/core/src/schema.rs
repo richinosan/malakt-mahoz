@@ -327,6 +327,13 @@ pub(crate) const MIGRATIONS: &[&str] = &[
         used_at INTEGER
     ) STRICT;
     "#,
+    // 20: アクセスキーの使える期間と時間帯。starts / expires は `YYYY-MM-DD` か `YYYY-MM-DD HH:MM`
+    //     （その PC の時刻）、windows は時間帯の JSON（`access::Window` の配列）
+    r#"
+    ALTER TABLE access_keys ADD COLUMN starts TEXT;
+    ALTER TABLE access_keys ADD COLUMN expires TEXT;
+    ALTER TABLE access_keys ADD COLUMN windows TEXT NOT NULL DEFAULT '[]';
+    "#,
 ];
 
 pub(crate) fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {

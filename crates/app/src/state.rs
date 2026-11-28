@@ -93,6 +93,28 @@ pub const NEW_WORKSPACE_NAME: &str = "新規ワークスペース";
 /// 保存したばかりのテーマの名前。同じ名前があれば、後ろの番号を増やす。
 pub const NEW_PRESET_NAME: &str = "マイテーマ";
 
+/// アクセスキーの、その場で書き直す値。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LimitField {
+    Starts,
+    Expires,
+    /// 何番目かの時間帯の始まり
+    From(usize),
+    /// 何番目かの時間帯の終わり
+    To(usize),
+}
+
+impl LimitField {
+    pub fn label(self) -> &'static str {
+        match self {
+            LimitField::Starts => "開始",
+            LimitField::Expires => "期限",
+            LimitField::From(_) => "時間帯の始まり",
+            LimitField::To(_) => "時間帯の終わり",
+        }
+    }
+}
+
 /// 「設定」の左に並ぶカテゴリ。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CustomizeSection {
@@ -107,7 +129,7 @@ pub enum CustomizeSection {
     AiSchedules,
     AiGithub,
     Lock,
-    Mcp,
+    AccessKeys,
     Notices,
     Update,
     People,
@@ -129,7 +151,7 @@ impl CustomizeSection {
         CustomizeSection::AiSchedules,
         CustomizeSection::AiGithub,
         CustomizeSection::Lock,
-        CustomizeSection::Mcp,
+        CustomizeSection::AccessKeys,
         CustomizeSection::Notices,
         CustomizeSection::Update,
         CustomizeSection::People,
@@ -151,7 +173,7 @@ impl CustomizeSection {
             CustomizeSection::AiSchedules => crate::ai_settings::AiGroup::Schedules.label(),
             CustomizeSection::AiGithub => crate::ai_settings::AiGroup::Github.label(),
             CustomizeSection::Lock => "ロック",
-            CustomizeSection::Mcp => "MCP",
+            CustomizeSection::AccessKeys => "アクセスキー",
             CustomizeSection::Notices => "通知",
             CustomizeSection::Update => "アップデート",
             CustomizeSection::People => "担当者",
@@ -174,7 +196,7 @@ impl CustomizeSection {
             CustomizeSection::AiSchedules => "alarm-clock",
             CustomizeSection::AiGithub => "github",
             CustomizeSection::Lock => "lock",
-            CustomizeSection::Mcp => "plug",
+            CustomizeSection::AccessKeys => "key-round",
             CustomizeSection::Notices => "bell",
             CustomizeSection::Update => "refresh-cw",
             CustomizeSection::People => "users",
@@ -192,9 +214,8 @@ impl CustomizeSection {
             | CustomizeSection::AiRules
             | CustomizeSection::AiSchedules
             | CustomizeSection::AiGithub => "AI",
-            CustomizeSection::Lock
-            | CustomizeSection::Mcp
-            | CustomizeSection::Notices
+            CustomizeSection::Lock | CustomizeSection::AccessKeys => "セキュリティ",
+            CustomizeSection::Notices
             | CustomizeSection::Update
             | CustomizeSection::People
             | CustomizeSection::Keys
@@ -320,8 +341,10 @@ pub struct Inputs {
     pub font_search: Entity<InputState>,
     pub customize_search: Entity<InputState>,
     pub preset_name: Entity<InputState>,
-    /// 設定の「MCP」の、アクセスキーの名前
+    /// 設定の「アクセスキー」の、キーの名前
     pub key_name: Entity<InputState>,
+    /// 設定の「アクセスキー」の、開始・期限・時刻
+    pub key_limit: Entity<InputState>,
     pub name: Entity<InputState>,
     pub title: Entity<InputState>,
     /// タスクに足す URL。
@@ -360,12 +383,16 @@ pub struct MainView {
     pub naming_task: Option<Id>,
     /// 担当者の一覧で名前を書いている担当者。
     pub person_naming: Option<Id>,
-    /// 設定の「MCP」で名前を書いているアクセスキー。
+    /// 設定の「アクセスキー」で名前を書いているアクセスキー。
     pub key_naming: Option<Id>,
     /// 発行したばかりのアクセスキー。文字列は設定を閉じるまでだけ出す。
     pub issued_access_key: Option<malakt_core::access::IssuedKey>,
     /// パスキーの確認が済んだら「ロック中も使える」にするアクセスキー。
     pub pending_key_unlock: Option<Id>,
+    /// 期限と時間帯の欄を開いているアクセスキー。
+    pub key_limits_open: Option<Id>,
+    /// その場で書き直している、アクセスキーの開始・期限・時刻。
+    pub key_limit_editing: Option<(Id, LimitField)>,
     /// 左のメニューで名前を書いているワークスペース。
     pub workspace_naming: Option<WorkspaceNaming>,
     /// アイコンを選ぶ画面で選んでいるカテゴリ。
@@ -608,6 +635,7 @@ impl MainView {
             preset_name: input(window, cx, "テーマの名前"),
             name: input(window, cx, "名前"),
             key_name: input(window, cx, "名前"),
+            key_limit: input(window, cx, "12/31 18:00"),
             title: input(window, cx, "タイトル"),
             url: input(window, cx, "https://"),
             // 長い指示も全部見えるように、書いた分だけ伸ばす（8 行を超えたらスクロール）
@@ -710,6 +738,16 @@ impl MainView {
         on_enter!(quick_add, submit_quick_add);
         on_enter!(name, save_person_name);
         on_enter!(key_name, save_access_key_name);
+        on_enter!(key_limit, save_key_limit);
+        subs.push(cx.subscribe_in(
+            &inputs.key_limit,
+            window,
+            |this, _, event: &InputEvent, window, cx| {
+                if matches!(event, InputEvent::Blur) && this.key_limit_editing.is_some() {
+                    this.save_key_limit(window, cx);
+                }
+            },
+        ));
         subs.push(cx.subscribe_in(
             &inputs.key_name,
             window,
@@ -939,6 +977,8 @@ impl MainView {
             key_naming: None,
             issued_access_key: None,
             pending_key_unlock: None,
+            key_limits_open: None,
+            key_limit_editing: None,
             naming_task: None,
             workspaces: Vec::new(),
             tree: Vec::new(),
@@ -3035,6 +3075,8 @@ impl MainView {
         self.preset_naming = None;
         self.key_naming = None;
         self.issued_access_key = None;
+        self.key_limits_open = None;
+        self.key_limit_editing = None;
         self.appearance_section = CustomizeSection::Theme;
         self.appearance_pinned = false;
         self.preview_pick = None;
@@ -4972,6 +5014,7 @@ impl MainView {
         self.person_naming = None;
         self.preset_naming = None;
         self.key_naming = None;
+        self.key_limit_editing = None;
         self.modal = Modal::None;
         self.issued_ticket = None;
         self.issued_access_key = None;
@@ -5010,6 +5053,7 @@ impl MainView {
         } else if self.person_naming.take().is_some()
             || self.preset_naming.take().is_some()
             || self.key_naming.take().is_some()
+            || self.key_limit_editing.take().is_some()
         {
             // 書きかけの名前を捨てる。ダイアログは開いたまま
         } else if self.modal != Modal::None {
@@ -5038,6 +5082,7 @@ impl MainView {
             || self.person_naming.take().is_some()
             || self.preset_naming.take().is_some()
             || self.key_naming.take().is_some()
+            || self.key_limit_editing.take().is_some()
         {
         } else if self.modal != Modal::None {
             self.modal = Modal::None;
@@ -5596,6 +5641,31 @@ mod tests {
         assert_eq!(load(Some("no-such-icon")), folder);
         // UI 部品のアイコンも読める
         assert!(super::Assets.load("icons/check.svg").unwrap().is_some());
+    }
+
+    /// コードに書いたアイコンの名前は、どれも同梱のアイコンにある（ないと、黙ってフォルダの絵になる）。
+    #[test]
+    fn every_icon_named_in_the_code_exists() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut missing = Vec::new();
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_none_or(|ext| ext != "rs") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).unwrap();
+            for call in ["app_icon(\"", "icon_path(\""] {
+                for (at, _) in text.match_indices(call) {
+                    let rest = &text[at + call.len()..];
+                    let Some(end) = rest.find('"') else { continue };
+                    let name = &rest[..end];
+                    if super::icon_svg(name).is_none() && crate::icons::svg(name).is_none() {
+                        missing.push(format!("{}: {name}", path.display()));
+                    }
+                }
+            }
+        }
+        assert!(missing.is_empty(), "{missing:?}");
     }
 
     fn ws(id: &str, parent: Option<&str>, position: i64) -> Workspace {

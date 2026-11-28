@@ -896,7 +896,7 @@ fn screens() -> Vec<(&'static str, Size<Pixels>, Setup)> {
             |cx, w| {
                 with_view(cx, w, |v, window, cx| {
                     v.open_appearance(window, cx);
-                    v.show_appearance_section(CustomizeSection::Mcp, window, cx);
+                    v.show_appearance_section(CustomizeSection::AccessKeys, window, cx);
                     v.issue_access_key(window, cx);
                     v.save_access_key_name(window, cx);
                 })
