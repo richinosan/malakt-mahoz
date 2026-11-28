@@ -1,6 +1,7 @@
 //! malakt-mahoz のデータとロジック。UI には依存しない。
 //!
 //! - `Store`: SQLite への保存と読み出し
+//! - `access`: アクセスキー（外のエージェントに渡す合い言葉。キーごとに読み取りのみ・ロック中も使えるかを選ぶ）
 //! - `actor`: 誰が変えたか（自分・AI・外のエージェントなど）
 //! - `alert`: 期限の通知のタイミング（何分前・何日前に知らせるか）
 //! - `archive`: zip へのエクスポート / インポート
@@ -26,6 +27,7 @@
 
 #![cfg_attr(test, allow(clippy::cloned_ref_to_slice_refs))]
 
+pub mod access;
 pub mod actor;
 pub mod alert;
 pub mod archive;

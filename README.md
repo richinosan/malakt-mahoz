@@ -42,7 +42,7 @@
 - **完了チケット**: コマンドからタスクを完了にする（[docs/tickets.md](docs/tickets.md)）
 - **AI チャット**: `Ctrl/⌘ + J`（[docs/ai.md](docs/ai.md)）
 - **ターミナル**: アプリの中で WSL や zsh を開き、Claude Code などをそのまま動かす（[docs/terminal.md](docs/terminal.md)）
-- **MCP サーバー**: Claude Code などのエージェントからタスクを読み書き（[docs/mcp.md](docs/mcp.md)）
+- **MCP サーバー**: Claude Code などのエージェントからタスクを読み書き。アクセスキーで、エージェントごとに読み取りのみ・ロック中も使えるかを選べる（[docs/mcp.md](docs/mcp.md)）
 
 ## 起動とビルド
 

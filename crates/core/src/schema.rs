@@ -314,6 +314,19 @@ pub(crate) const MIGRATIONS: &[&str] = &[
         at TEXT NOT NULL
     ) STRICT;
     "#,
+    // 19: アクセスキー（`access`）。secret はハッシュだけ、hint は最後の 4 文字。元に戻す相手にしない
+    r#"
+    CREATE TABLE access_keys (
+        id TEXT PRIMARY KEY NOT NULL,
+        name TEXT NOT NULL,
+        secret_hash TEXT NOT NULL UNIQUE,
+        hint TEXT NOT NULL,
+        read_only INTEGER NOT NULL DEFAULT 0,
+        while_locked INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL,
+        used_at INTEGER
+    ) STRICT;
+    "#,
 ];
 
 pub(crate) fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {

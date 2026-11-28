@@ -14,6 +14,7 @@ mod feel;
 mod history_view;
 pub mod icons;
 pub mod mcp;
+mod mcp_keys;
 pub mod mcp_register;
 pub mod panes;
 pub mod passkey;
