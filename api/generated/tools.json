@@ -1,0 +1,3244 @@
+{
+  "tools": [
+    {
+      "name": "list_workspaces",
+      "group": "data",
+      "description": "ワークスペース（タスクをまとめる単位。入れ子にできる）の一覧を返す。",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "list_people",
+      "group": "data",
+      "description": "担当者の一覧を返す。workspace_ids が空の人はすべてのワークスペースで、そうでない人はそのワークスペース（とサブワークスペース）で選べる。",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "list_tasks",
+      "group": "data",
+      "description": "タスクの一覧を返す。workspace_id を省くと全部、\"unfiled\" でどのワークスペースにも入っていないもの。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "query": {
+            "type": "string",
+            "description": "タイトルと説明の部分一致"
+          },
+          "include_done": {
+            "type": "boolean",
+            "description": "完了・中止も含める（標準は含めない）"
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "get_task",
+      "group": "data",
+      "description": "タスク 1 件の内容と、コメント、サブタスク、添付、変更履歴を返す。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "get_workspace",
+      "group": "data",
+      "description": "ワークスペース 1 つの中身を返す。上からの道筋、サブワークスペース（入れ子の全部）とそれぞれのタスクの数、サブワークスペースも含めたタスクの一覧。多いときはタスクの一部だけを返す（tasks_total と tasks_shown を見る）。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "include_done": {
+            "type": "boolean",
+            "description": "完了・中止のタスクも一覧に含める（標準は含めない）"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "create_task",
+      "group": "data",
+      "description": "タスクを作る。workspace_id を省くと、どのワークスペースにも入れない。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "needs_action",
+              "in_process",
+              "completed",
+              "cancelled"
+            ],
+            "description": "未着手 / 進行中 / 完了 / 中止"
+          },
+          "priority": {
+            "type": "string",
+            "enum": [
+              "none",
+              "high",
+              "mid",
+              "low"
+            ]
+          },
+          "start": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "開始日 YYYY-MM-DD。時刻つきなら YYYY-MM-DD HH:MM。null でなくす"
+          },
+          "due": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "期限 YYYY-MM-DD。時刻つきなら YYYY-MM-DD HH:MM。null でなくす"
+          },
+          "percent": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100,
+            "description": "進捗"
+          },
+          "parent_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "親のタスクの ID（サブタスクにする）"
+          },
+          "assignee_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "担当者の ID。足した人の役は R。役も決めるときは assignees を使う"
+          },
+          "assignees": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "person": {
+                  "type": "string",
+                  "description": "担当者の ID か名前（敬称は付けない）"
+                },
+                "roles": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "enum": [
+                      "R",
+                      "A",
+                      "C",
+                      "I"
+                    ]
+                  },
+                  "description": "役。R=実行責任者、A=説明責任者（1 つのタスクに 1 人まで）、C=相談先、I=報告先。省くと、もう担当の人は今の役のまま、新しい人は R"
+                }
+              },
+              "required": [
+                "person"
+              ],
+              "additionalProperties": false
+            },
+            "description": "担当者と役（RACI）。渡すと担当者がこの並びになる（assignee_ids と一緒には渡さない）。person は担当者の ID か名前。登録されていない名前は、その場で担当者に登録する"
+          },
+          "categories": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "urls": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "タスクに付ける URL。渡すと URL がこの並びになる（足すだけなら add_urls）"
+          },
+          "add_urls": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "今の URL の後ろに足す URL。同じものは足さない"
+          },
+          "remove_urls": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "外す URL"
+          },
+          "estimate": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "予想工数。月・日・時間・分を組み合わせて書く（「1日3時間」「90分」「1.5h」「2週間」「1か月」「P1DT3H」）。単位のない数は時間。null か空でなくす"
+          },
+          "time_basis": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "start": {
+                "type": "string",
+                "enum": [
+                  "created",
+                  "assigned",
+                  "in_process",
+                  "start_date"
+                ],
+                "description": "作った時 / 担当が付いた時 / 進行中にした時 / 開始日"
+              },
+              "end": {
+                "type": "string",
+                "enum": [
+                  "completed",
+                  "self_done"
+                ],
+                "description": "完了にした時 / 自分の分を完了にした時"
+              }
+            },
+            "required": [
+              "start",
+              "end"
+            ],
+            "additionalProperties": false,
+            "description": "このタスクの所要時間の基準。null でワークスペースか全体の標準に合わせる"
+          },
+          "workspace_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "title"
+        ],
+        "additionalProperties": false
+      },
+      "writes": true
+    },
+    {
+      "name": "update_task",
+      "group": "data",
+      "description": "タスクを書き換える。渡した項目だけが変わる。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "needs_action",
+              "in_process",
+              "completed",
+              "cancelled"
+            ],
+            "description": "未着手 / 進行中 / 完了 / 中止"
+          },
+          "priority": {
+            "type": "string",
+            "enum": [
+              "none",
+              "high",
+              "mid",
+              "low"
+            ]
+          },
+          "start": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "開始日 YYYY-MM-DD。時刻つきなら YYYY-MM-DD HH:MM。null でなくす"
+          },
+          "due": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "期限 YYYY-MM-DD。時刻つきなら YYYY-MM-DD HH:MM。null でなくす"
+          },
+          "percent": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100,
+            "description": "進捗"
+          },
+          "parent_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "親のタスクの ID（サブタスクにする）"
+          },
+          "assignee_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "担当者の ID。足した人の役は R。役も決めるときは assignees を使う"
+          },
+          "assignees": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "person": {
+                  "type": "string",
+                  "description": "担当者の ID か名前（敬称は付けない）"
+                },
+                "roles": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "enum": [
+                      "R",
+                      "A",
+                      "C",
+                      "I"
+                    ]
+                  },
+                  "description": "役。R=実行責任者、A=説明責任者（1 つのタスクに 1 人まで）、C=相談先、I=報告先。省くと、もう担当の人は今の役のまま、新しい人は R"
+                }
+              },
+              "required": [
+                "person"
+              ],
+              "additionalProperties": false
+            },
+            "description": "担当者と役（RACI）。渡すと担当者がこの並びになる（assignee_ids と一緒には渡さない）。person は担当者の ID か名前。登録されていない名前は、その場で担当者に登録する"
+          },
+          "categories": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "urls": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "タスクに付ける URL。渡すと URL がこの並びになる（足すだけなら add_urls）"
+          },
+          "add_urls": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "今の URL の後ろに足す URL。同じものは足さない"
+          },
+          "remove_urls": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "外す URL"
+          },
+          "estimate": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "予想工数。月・日・時間・分を組み合わせて書く（「1日3時間」「90分」「1.5h」「2週間」「1か月」「P1DT3H」）。単位のない数は時間。null か空でなくす"
+          },
+          "time_basis": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "start": {
+                "type": "string",
+                "enum": [
+                  "created",
+                  "assigned",
+                  "in_process",
+                  "start_date"
+                ],
+                "description": "作った時 / 担当が付いた時 / 進行中にした時 / 開始日"
+              },
+              "end": {
+                "type": "string",
+                "enum": [
+                  "completed",
+                  "self_done"
+                ],
+                "description": "完了にした時 / 自分の分を完了にした時"
+              }
+            },
+            "required": [
+              "start",
+              "end"
+            ],
+            "additionalProperties": false,
+            "description": "このタスクの所要時間の基準。null でワークスペースか全体の標準に合わせる"
+          },
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "additionalProperties": false
+      },
+      "writes": true
+    },
+    {
+      "name": "set_assignee",
+      "group": "data",
+      "description": "タスクの担当者 1 人の役（RACI）を決める。担当でない人は担当に加える。person は担当者の ID か名前。登録されていない名前は、タスクのワークスペースの担当者としてその場で登録する。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "task_id": {
+            "type": "string"
+          },
+          "person": {
+            "type": "string",
+            "description": "担当者の ID か名前（敬称は付けない）"
+          },
+          "roles": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "R",
+                "A",
+                "C",
+                "I"
+              ]
+            },
+            "description": "役。R=実行責任者、A=説明責任者（1 つのタスクに 1 人まで）、C=相談先、I=報告先。A を付けると、ほかの人の A は外れる。空にすると担当から外す"
+          }
+        },
+        "required": [
+          "task_id",
+          "person",
+          "roles"
+        ],
+        "additionalProperties": false
+      },
+      "writes": true
+    },
+    {
+      "name": "set_assignee_done",
+      "group": "data",
+      "description": "担当者 1 人の「自分の分」の完了を付ける・外す。自分の分もほかの人の分も変えられる。全員の分がそろうとタスクが完了になる。完了したタスクで誰かの分を外すと、タスクは進行中に戻る。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "task_id": {
+            "type": "string"
+          },
+          "person": {
+            "type": "string",
+            "description": "タスクの担当者の ID か名前（敬称は付けない）"
+          },
+          "done": {
+            "type": "boolean",
+            "description": "true で完了にする、false で完了を外す"
+          }
+        },
+        "required": [
+          "task_id",
+          "person",
+          "done"
+        ],
+        "additionalProperties": false
+      },
+      "writes": true
+    },
+    {
+      "name": "move_task",
+      "group": "data",
+      "description": "タスクを別のワークスペースへ移す。workspace_id が null なら、どこにも入れない。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "workspace_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "workspace_id"
+        ],
+        "additionalProperties": false
+      },
+      "writes": true
+    },
+    {
+      "name": "delete_task",
+      "group": "data",
+      "description": "タスクを削除する。元に戻せないので、実行の前にユーザーに確認が出る。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "additionalProperties": false
+      },
+      "writes": true,
+      "confirm": true
+    },
+    {
+      "name": "add_comment",
+      "group": "data",
+      "description": "タスクにコメントを書く。書くのは、あとでタスクを読む人に要る事実だけ（決まったこと、分かったこと、変わった状態、次にすること）。「確認しました」「レビューしました」のように作業をしたことだけを伝える文と、「まだ〜していません」のようにしていないことは書かない。書く事実がなければ呼ばない。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "task_id": {
+            "type": "string"
+          },
+          "body": {
+            "type": "string"
+          },
+          "reply_to": {
+            "type": "string",
+            "description": "返信するレビューのスレッドのルートのコメントの ID"
+          },
+          "review": {
+            "type": "boolean",
+            "description": "レビューコメント（返信と解決ができるスレッド）にする"
+          }
+        },
+        "required": [
+          "task_id",
+          "body"
+        ],
+        "additionalProperties": false
+      },
+      "writes": true
+    },
+    {
+      "name": "create_workspace",
+      "group": "data",
+      "description": "ワークスペースを作る。parent_id を渡すと、その中に作る。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "parent_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "additionalProperties": false
+      },
+      "writes": true
+    },
+    {
+      "name": "create_person",
+      "group": "data",
+      "description": "担当者を登録する。workspace_id を渡すと、そのワークスペース（のいちばん上の親とサブワークスペース）で選べる担当者になり、省くとすべてのワークスペースで選べる担当者になる。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "workspace_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "additionalProperties": false
+      },
+      "writes": true
+    },
+    {
+      "name": "update_workspace",
+      "group": "data",
+      "description": "ワークスペースの名前を変える、別のワークスペースの中へ移す、並び順を変える。parent_id が null なら、いちばん上に出す。index は、同じ親の中で何番目に置くか（0 が先頭。自分を除いて数え、多すぎると末尾）。渡した項目だけが変わる。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "parent_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "index": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "additionalProperties": false
+      },
+      "writes": true
+    },
+    {
+      "name": "delete_workspace",
+      "group": "data",
+      "description": "ワークスペースを、サブワークスペースとタスクごと削除する。元に戻せないので、実行の前にユーザーに確認が出る。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "additionalProperties": false
+      },
+      "writes": true,
+      "confirm": true
+    },
+    {
+      "name": "update_person",
+      "group": "data",
+      "description": "担当者の名前とメモを変える。workspace_ids で使うワークスペースを決める（空の配列で、すべてのワークスペースで使う）。渡した項目だけが変わる。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "note": {
+            "type": "string"
+          },
+          "workspace_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "additionalProperties": false
+      },
+      "writes": true
+    },
+    {
+      "name": "delete_person",
+      "group": "data",
+      "description": "担当者を削除する（担当から外れるだけで、タスクは残る）。元に戻せないので、実行の前にユーザーに確認が出る。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "additionalProperties": false
+      },
+      "writes": true,
+      "confirm": true
+    },
+    {
+      "name": "update_comment",
+      "group": "data",
+      "description": "コメントを書き直す、ピン留めする・外す、レビューのスレッドを解決済みにする・戻す。渡した項目だけが変わる。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "body": {
+            "type": "string"
+          },
+          "pinned": {
+            "type": "boolean"
+          },
+          "resolved": {
+            "type": "boolean",
+            "description": "レビューのスレッドのルートのコメントだけ"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "additionalProperties": false
+      },
+      "writes": true
+    },
+    {
+      "name": "delete_comment",
+      "group": "data",
+      "description": "コメントを削除する。元に戻せないので、実行の前にユーザーに確認が出る。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "additionalProperties": false
+      },
+      "writes": true,
+      "confirm": true
+    },
+    {
+      "name": "link_task",
+      "group": "data",
+      "description": "タスクを、入っているワークスペースのほかのワークスペースにも出す（同期する）。linked が false なら、そのワークスペースから外す。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "workspace_id": {
+            "type": "string"
+          },
+          "linked": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "workspace_id",
+          "linked"
+        ],
+        "additionalProperties": false
+      },
+      "writes": true
+    },
+    {
+      "name": "reorder_tasks",
+      "group": "data",
+      "description": "タスクを手動の順（並び順「手動の順」）で、渡した ID の順に並べる。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "ids"
+        ],
+        "additionalProperties": false
+      },
+      "writes": true
+    },
+    {
+      "name": "add_attachment",
+      "group": "data",
+      "description": "ユーザーの PC のファイルをタスクに添付する。path はファイルの絶対パス（先頭の ~ はホーム）。1 ファイル 10 MiB まで。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "task_id": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "task_id",
+          "path"
+        ],
+        "additionalProperties": false
+      },
+      "writes": true
+    },
+    {
+      "name": "delete_attachment",
+      "group": "data",
+      "description": "添付を削除する。元に戻せないので、実行の前にユーザーに確認が出る。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "additionalProperties": false
+      },
+      "writes": true,
+      "confirm": true
+    },
+    {
+      "name": "issue_ticket",
+      "group": "data",
+      "description": "タスクの完了チケット（ほかの人が malakt-mahoz redeem で完了を報告するための文字列）を発行して返す。person_id はだれの分として報告するか（省くと自分）。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "task_id": {
+            "type": "string"
+          },
+          "person_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "task_id"
+        ],
+        "additionalProperties": false
+      },
+      "writes": true
+    },
+    {
+      "name": "revoke_tickets",
+      "group": "data",
+      "description": "タスクの、まだ使われていない完了チケットをすべて取り消す。元に戻せないので、実行の前にユーザーに確認が出る。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "task_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "task_id"
+        ],
+        "additionalProperties": false
+      },
+      "writes": true,
+      "confirm": true
+    },
+    {
+      "name": "list_categories",
+      "group": "data",
+      "description": "タスクに使われているカテゴリの一覧を返す。",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "list_notices",
+      "group": "data",
+      "description": "通知（ベルの一覧）を新しい順に返す。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "mark_notices_read",
+      "group": "data",
+      "description": "通知を既読にする。ids を省くと、すべて既読にする。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "writes": true
+    },
+    {
+      "name": "get_workspace_settings",
+      "group": "data",
+      "description": "ワークスペースの基準日と、タスクを追加したときに入る値（既定値）を返す。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "update_workspace_settings",
+      "group": "data",
+      "description": "ワークスペースの基準日と、タスクを追加したときに入る値を変える。渡した項目だけが変わる。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "date": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "基準日（開催日など）YYYY-MM-DD。null でなくす"
+          },
+          "assignee_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "due": {
+            "type": "string",
+            "enum": [
+              "none",
+              "relative",
+              "fixed"
+            ],
+            "description": "期限の決め方。なし / 基準日からの日数 / 決まった日"
+          },
+          "due_days": {
+            "type": "integer",
+            "description": "due が relative のとき、基準日からの日数（負は前）"
+          },
+          "due_date": {
+            "type": "string",
+            "description": "due が fixed のときの日付 YYYY-MM-DD"
+          },
+          "due_time": {
+            "type": "string",
+            "description": "期限の時刻 HH:MM。空で日付だけ"
+          },
+          "priority": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "none",
+              "high",
+              "mid",
+              "low",
+              null
+            ],
+            "description": "null で指定なし"
+          },
+          "categories": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "description": {
+            "type": "string",
+            "description": "説明の雛形"
+          },
+          "link_workspace_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "追加したタスクを一緒に表示するワークスペース"
+          },
+          "terminal_dir": {
+            "type": "string",
+            "description": "このワークスペースのタスクでターミナルを開くフォルダー。空で消す"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "additionalProperties": false
+      },
+      "writes": true
+    },
+    {
+      "name": "list_ai_rules",
+      "group": "data",
+      "description": "AI のルール（ユーザーが決めた、AI がいつも従う指示）の一覧を返す。workspace_id を省くと、すべてのワークスペースで使うグローバルのルールと、ワークスペースごとのルールをすべて返す。ワークスペースのルールは、そのワークスペースとサブワークスペースで使う。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "create_ai_rule",
+      "group": "data",
+      "description": "AI のルールを足す。workspace_id を省くとグローバル（すべてのワークスペース）、渡すとそのワークスペースとサブワークスペースで使う。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "名前（100 文字まで）"
+          },
+          "body": {
+            "type": "string",
+            "description": "AI への指示（4000 文字まで）"
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "false で使わない"
+          },
+          "apply": {
+            "type": "string",
+            "enum": [
+              "always",
+              "chat",
+              "auto"
+            ],
+            "description": "使う場面。いつも / ユーザーとのチャットだけ / 自動の処理（新しいタスクを整える、コメントから更新、GitHub の定期チェック）だけ"
+          },
+          "workspace_id": {
+            "type": "string"
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "writes": true
+    },
+    {
+      "name": "update_ai_rule",
+      "group": "data",
+      "description": "AI のルールを変える。渡した項目だけが変わる。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "名前（100 文字まで）"
+          },
+          "body": {
+            "type": "string",
+            "description": "AI への指示（4000 文字まで）"
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "false で使わない"
+          },
+          "apply": {
+            "type": "string",
+            "enum": [
+              "always",
+              "chat",
+              "auto"
+            ],
+            "description": "使う場面。いつも / ユーザーとのチャットだけ / 自動の処理（新しいタスクを整える、コメントから更新、GitHub の定期チェック）だけ"
+          },
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "additionalProperties": false
+      },
+      "writes": true
+    },
+    {
+      "name": "delete_ai_rule",
+      "group": "data",
+      "description": "AI のルールを削除する。使わないだけなら update_ai_rule で enabled を false にする。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "additionalProperties": false
+      },
+      "writes": true
+    },
+    {
+      "name": "get_pomodoro",
+      "group": "data",
+      "description": "ポモドーロタイマーの今の状態（段 phase: work / short_break / long_break、run: ready / running / paused、残り秒、作業しているタスク、済んだ作業の数）、設定、今日の作業の合計を返す。",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "pomodoro",
+      "group": "data",
+      "description": "ポモドーロタイマーを操作する。start（始める。一時停止していれば続きから。task_id を渡すと、そのタスクで測る）、pause（一時停止）、stop（止めて最初の作業に戻す）、skip（今の段を飛ばして次へ）、set_task（作業するタスクを変える。task_id を null か省くとタスクなし）、set_settings（渡した項目だけ変える）。作業の段が終わると、測った時間がタスクの作業の記録に残る。work_media / break_media は、作業 / 休憩を始めたときに OS で再生中の音楽をどうするか（none / play / pause）。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "start",
+              "pause",
+              "stop",
+              "skip",
+              "set_task",
+              "set_settings"
+            ]
+          },
+          "task_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "work_minutes": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 180
+          },
+          "short_break_minutes": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 180
+          },
+          "long_break_minutes": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 180
+          },
+          "rounds": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 12,
+            "description": "長い休憩までの作業の回数"
+          },
+          "auto_break": {
+            "type": "boolean",
+            "description": "作業が終わったら休憩をそのまま始める"
+          },
+          "work_media": {
+            "type": "string",
+            "enum": [
+              "none",
+              "play",
+              "pause"
+            ]
+          },
+          "break_media": {
+            "type": "string",
+            "enum": [
+              "none",
+              "play",
+              "pause"
+            ]
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "list_work_logs",
+      "group": "data",
+      "description": "ポモドーロで測った作業の記録を新しい順に返す。task_id でそのタスクだけ、since（YYYY-MM-DD）でその日以降だけ。合計の秒数も返す。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "task_id": {
+            "type": "string"
+          },
+          "since": {
+            "type": "string"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 500
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "get_due_alerts",
+      "group": "data",
+      "description": "期限をいつ知らせるか（OS の通知とリマインダー）を返す。task_id を渡すと、そのタスクで使うもの（own が null なら全体の標準のまま）。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "task_id": {
+            "type": "string"
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "set_due_alerts",
+      "group": "data",
+      "description": "期限をいつ知らせるかを変える。渡した項目だけが変わる。task_id を省くと全体の標準、渡すとそのタスクだけの上書き。timed_minutes は時刻つきの期限の何分前か（0 で期限ちょうど、例 [0, 5, 60, 1440]、[] で知らせない）。date_days は日付だけの期限の何日前か（0 で当日、1 で前日、[] で知らせない）。タスクで null を渡すと、その側は標準に合わせる。hour は日付だけの期限を知らせる時刻（0〜23 時、全体だけ）。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "task_id": {
+            "type": "string"
+          },
+          "timed_minutes": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 40320
+            }
+          },
+          "date_days": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 28
+            }
+          },
+          "hour": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 23
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "writes": true
+    },
+    {
+      "name": "get_time_stats",
+      "group": "data",
+      "description": "予想工数と所要時間の統計を返す。workspace_id を渡すとそのワークスペース（サブワークスペースを含む）、省くと全体。period で、その期間に終わったタスクだけを数える。完了数・所要時間の合計／平均／中央値・予想工数に収まった割合・予想工数に対する所要時間の割合・未完了の予想工数の合計を、全体と担当者ごとに返す。所要時間は、タスクごとの基準（タスク → ワークスペース → 全体の標準）で数えた時計の経過（ポモドーロの作業時間とは別）。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "period": {
+            "type": "string",
+            "enum": [
+              "week",
+              "month",
+              "quarter",
+              "year",
+              "all"
+            ],
+            "description": "7 日 / 30 日 / 90 日 / 1 年 / すべて（標準は month）"
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "set_time_basis",
+      "group": "data",
+      "description": "所要時間の基準（どこから数え、どこまで数えるか）を変える。workspace_id を省くと全体の標準、渡すとそのワークスペース（サブワークスペースも従う）。ワークスペースで basis に null を渡すと、親のワークスペースか全体の標準に合わせる。タスクごとの基準は update_task の time_basis で変える。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "basis": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "start": {
+                "type": "string",
+                "enum": [
+                  "created",
+                  "assigned",
+                  "in_process",
+                  "start_date"
+                ],
+                "description": "作った時 / 担当が付いた時 / 進行中にした時 / 開始日"
+              },
+              "end": {
+                "type": "string",
+                "enum": [
+                  "completed",
+                  "self_done"
+                ],
+                "description": "完了にした時 / 自分の分を完了にした時"
+              }
+            },
+            "required": [
+              "start",
+              "end"
+            ],
+            "additionalProperties": false,
+            "description": "基準。null はワークスペースだけ"
+          }
+        },
+        "required": [
+          "basis"
+        ],
+        "additionalProperties": false
+      },
+      "writes": true
+    },
+    {
+      "name": "set_repeat",
+      "group": "data",
+      "description": "タスクに繰り返しを付ける・変える・外す。繰り返しのあるタスクは、次の回の時刻になるとアプリがタスクを写して次の回を作り、繰り返しは新しい回へ移る（開始日と期限は回の日に合わせてずれる）。ai_instruction を付けると、回を作ったときにアプリの AI がその指示を実行して、結果をその回のタスクにコメントする（例: 週次の報告の下書き）。アプリが動いている間だけ動く。渡した項目だけが変わる。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "task_id": {
+            "type": "string"
+          },
+          "repeat": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "unit": {
+                "type": "string",
+                "enum": [
+                  "day",
+                  "week",
+                  "month",
+                  "year"
+                ]
+              },
+              "every": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 99,
+                "description": "何日・何週間・何か月・何年ごとか（標準は 1）"
+              },
+              "weekdays": {
+                "type": "array",
+                "items": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 6
+                },
+                "description": "unit が week のときの曜日。0 = 月 … 6 = 日。省くと起点の曜日"
+              },
+              "from": {
+                "type": "string",
+                "description": "数え始めの日 YYYY-MM-DD。毎月・毎年の日付になる。省くとタスクの開始日か期限（なければ今日）"
+              },
+              "time": {
+                "type": "string",
+                "description": "次の回を作る時刻 HH:MM。空で 0:00"
+              }
+            },
+            "required": [
+              "unit"
+            ],
+            "description": "null で繰り返しを外す"
+          },
+          "ai_instruction": {
+            "type": "string",
+            "description": "回を作ったときに AI に頼むこと。空で頼まない"
+          }
+        },
+        "required": [
+          "task_id"
+        ],
+        "additionalProperties": false
+      },
+      "writes": true
+    },
+    {
+      "name": "list_schedules",
+      "group": "data",
+      "description": "定時タスク（決まった時刻が来るたびに、雛形から新しいタスクを 1 件作る設定）の一覧を返す。workspace_id を省くと、ワークスペースの外に作るものと、ワークスペースごとのものをすべて返す。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "create_schedule",
+      "group": "data",
+      "description": "定時タスクを足す。時刻が来るたびに、そのワークスペース（workspace_id を省くとワークスペースの外）に新しいタスクを 1 件作る。雛形にはタスクと同じ項目（説明・状態・優先度・担当と役・開始日・期限・通知・進捗・カテゴリ・URL・親タスク・ほかのワークスペース・サブタスク）を決められ、決めていない項目にはワークスペースの既定値が入る。開始日と期限は作った日の何日後か（start_days・due_days）で決める。添付は add_schedule_attachment。ai_instruction を付けると、作ったタスクでアプリの AI がその指示を実行して、結果をそのタスクにコメントする（例: 週次定例の報告の下書き）。前のタスクは書き換えない。1 つのタスクを毎回写すなら set_repeat。アプリが動いている間だけ動く。schedule を省くと今日の曜日の毎週 9:00。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string",
+            "description": "作るタスクのタイトル（200 文字まで）"
+          },
+          "schedule": {
+            "type": "object",
+            "properties": {
+              "unit": {
+                "type": "string",
+                "enum": [
+                  "day",
+                  "week",
+                  "month",
+                  "year"
+                ]
+              },
+              "every": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 99,
+                "description": "何日・何週間・何か月・何年ごとか（標準は 1）"
+              },
+              "weekdays": {
+                "type": "array",
+                "items": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 6
+                },
+                "description": "unit が week のときの曜日。0 = 月 … 6 = 日。省くと起点の曜日"
+              },
+              "from": {
+                "type": "string",
+                "description": "数え始めの日 YYYY-MM-DD。毎月・毎年の日付になる。省くと今日（変えるときは今の起点）"
+              },
+              "time": {
+                "type": "string",
+                "description": "タスクを作る時刻 HH:MM。空で 0:00"
+              }
+            },
+            "required": [
+              "unit"
+            ],
+            "description": "いつタスクを作るか"
+          },
+          "ai_instruction": {
+            "type": "string",
+            "description": "作ったタスクで AI に頼むこと。空で頼まない"
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "false で止める"
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "作るタスクの説明。null でワークスペースの既定値"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "needs_action",
+              "in_process",
+              "completed",
+              "cancelled"
+            ],
+            "description": "作るタスクの状態。未着手 / 進行中 / 完了 / 中止"
+          },
+          "priority": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "none",
+              "high",
+              "mid",
+              "low",
+              null
+            ],
+            "description": "作るタスクの優先度。null でワークスペースの既定値"
+          },
+          "start_days": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0,
+            "maximum": 365,
+            "description": "開始日を作った日の何日後にするか（0 で当日）。null で開始日なし"
+          },
+          "start_time": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "開始日の時刻 HH:MM。null か空で日付だけ"
+          },
+          "due_days": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0,
+            "maximum": 365,
+            "description": "期限を作った日の何日後にするか（0 で当日）。null でワークスペースの既定値"
+          },
+          "due_time": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "期限の時刻 HH:MM。null か空で日付だけ"
+          },
+          "due_alerts": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "timed_minutes": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 40320
+                },
+                "description": "時刻つきの期限の何分前か。[] で知らせない、null で標準"
+              },
+              "date_days": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 28
+                },
+                "description": "日付だけの期限の何日前か。[] で知らせない、null で標準"
+              }
+            },
+            "description": "作るタスクの、期限をいつ知らせるか（set_due_alerts と同じ）。null で全体の標準"
+          },
+          "percent": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100,
+            "description": "作るタスクの進捗"
+          },
+          "parent_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "親のタスクの ID（作るタスクをそのサブタスクにする）。null で親なし"
+          },
+          "assignee_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "作るタスクの担当者の ID。[] でワークスペースの既定値。足した人の役は R。役も決めるときは assignees を使う"
+          },
+          "assignees": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "person": {
+                  "type": "string",
+                  "description": "担当者の ID か名前（敬称は付けない）"
+                },
+                "roles": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "enum": [
+                      "R",
+                      "A",
+                      "C",
+                      "I"
+                    ]
+                  },
+                  "description": "役。R=実行責任者、A=説明責任者（1 つのタスクに 1 人まで）、C=相談先、I=報告先。省くと、もう担当の人は今の役のまま、新しい人は R"
+                }
+              },
+              "required": [
+                "person"
+              ],
+              "additionalProperties": false
+            },
+            "description": "作るタスクの担当者と役（RACI）。渡すと担当者がこの並びになる（assignee_ids と一緒には渡さない）。person は担当者の ID か名前。登録されていない名前は、その場で担当者に登録する"
+          },
+          "categories": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "作るタスクのカテゴリ。null でワークスペースの既定値"
+          },
+          "urls": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "作るタスクに付ける URL。渡すと URL がこの並びになる（足すだけなら add_urls）"
+          },
+          "add_urls": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "今の URL の後ろに足す URL。同じものは足さない"
+          },
+          "remove_urls": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "外す URL"
+          },
+          "linked_workspace_ids": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "作るタスクを、入れるワークスペースのほかにも出すワークスペース（link_task と同じ）。null でワークスペースの既定値"
+          },
+          "subtasks": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "作るタスクのサブタスクのタイトル（100 件まで）。渡すとこの並びになる"
+          },
+          "estimate": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "作るタスクの予想工数。月・日・時間・分を組み合わせて書く（「1日3時間」「90分」「1.5h」「2週間」「1か月」「P1DT3H」）。単位のない数は時間。null か空でなくす"
+          },
+          "time_basis": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "start": {
+                "type": "string",
+                "enum": [
+                  "created",
+                  "assigned",
+                  "in_process",
+                  "start_date"
+                ],
+                "description": "作った時 / 担当が付いた時 / 進行中にした時 / 開始日"
+              },
+              "end": {
+                "type": "string",
+                "enum": [
+                  "completed",
+                  "self_done"
+                ],
+                "description": "完了にした時 / 自分の分を完了にした時"
+              }
+            },
+            "required": [
+              "start",
+              "end"
+            ],
+            "additionalProperties": false,
+            "description": "作るタスクの所要時間の基準。null でワークスペースか全体の標準に合わせる"
+          },
+          "workspace_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "title"
+        ],
+        "additionalProperties": false
+      },
+      "writes": true
+    },
+    {
+      "name": "update_schedule",
+      "group": "data",
+      "description": "定時タスクを変える。渡した項目だけが変わる（作るタスクの項目も同じ）。schedule を変えたときと、enabled を true にしたときは、次の時刻を今から決め直す。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string",
+            "description": "作るタスクのタイトル（200 文字まで）"
+          },
+          "schedule": {
+            "type": "object",
+            "properties": {
+              "unit": {
+                "type": "string",
+                "enum": [
+                  "day",
+                  "week",
+                  "month",
+                  "year"
+                ]
+              },
+              "every": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 99,
+                "description": "何日・何週間・何か月・何年ごとか（標準は 1）"
+              },
+              "weekdays": {
+                "type": "array",
+                "items": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 6
+                },
+                "description": "unit が week のときの曜日。0 = 月 … 6 = 日。省くと起点の曜日"
+              },
+              "from": {
+                "type": "string",
+                "description": "数え始めの日 YYYY-MM-DD。毎月・毎年の日付になる。省くと今日（変えるときは今の起点）"
+              },
+              "time": {
+                "type": "string",
+                "description": "タスクを作る時刻 HH:MM。空で 0:00"
+              }
+            },
+            "required": [
+              "unit"
+            ],
+            "description": "いつタスクを作るか"
+          },
+          "ai_instruction": {
+            "type": "string",
+            "description": "作ったタスクで AI に頼むこと。空で頼まない"
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "false で止める"
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "作るタスクの説明。null でワークスペースの既定値"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "needs_action",
+              "in_process",
+              "completed",
+              "cancelled"
+            ],
+            "description": "作るタスクの状態。未着手 / 進行中 / 完了 / 中止"
+          },
+          "priority": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "none",
+              "high",
+              "mid",
+              "low",
+              null
+            ],
+            "description": "作るタスクの優先度。null でワークスペースの既定値"
+          },
+          "start_days": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0,
+            "maximum": 365,
+            "description": "開始日を作った日の何日後にするか（0 で当日）。null で開始日なし"
+          },
+          "start_time": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "開始日の時刻 HH:MM。null か空で日付だけ"
+          },
+          "due_days": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0,
+            "maximum": 365,
+            "description": "期限を作った日の何日後にするか（0 で当日）。null でワークスペースの既定値"
+          },
+          "due_time": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "期限の時刻 HH:MM。null か空で日付だけ"
+          },
+          "due_alerts": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "timed_minutes": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 40320
+                },
+                "description": "時刻つきの期限の何分前か。[] で知らせない、null で標準"
+              },
+              "date_days": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 28
+                },
+                "description": "日付だけの期限の何日前か。[] で知らせない、null で標準"
+              }
+            },
+            "description": "作るタスクの、期限をいつ知らせるか（set_due_alerts と同じ）。null で全体の標準"
+          },
+          "percent": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100,
+            "description": "作るタスクの進捗"
+          },
+          "parent_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "親のタスクの ID（作るタスクをそのサブタスクにする）。null で親なし"
+          },
+          "assignee_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "作るタスクの担当者の ID。[] でワークスペースの既定値。足した人の役は R。役も決めるときは assignees を使う"
+          },
+          "assignees": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "person": {
+                  "type": "string",
+                  "description": "担当者の ID か名前（敬称は付けない）"
+                },
+                "roles": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "enum": [
+                      "R",
+                      "A",
+                      "C",
+                      "I"
+                    ]
+                  },
+                  "description": "役。R=実行責任者、A=説明責任者（1 つのタスクに 1 人まで）、C=相談先、I=報告先。省くと、もう担当の人は今の役のまま、新しい人は R"
+                }
+              },
+              "required": [
+                "person"
+              ],
+              "additionalProperties": false
+            },
+            "description": "作るタスクの担当者と役（RACI）。渡すと担当者がこの並びになる（assignee_ids と一緒には渡さない）。person は担当者の ID か名前。登録されていない名前は、その場で担当者に登録する"
+          },
+          "categories": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "作るタスクのカテゴリ。null でワークスペースの既定値"
+          },
+          "urls": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "作るタスクに付ける URL。渡すと URL がこの並びになる（足すだけなら add_urls）"
+          },
+          "add_urls": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "今の URL の後ろに足す URL。同じものは足さない"
+          },
+          "remove_urls": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "外す URL"
+          },
+          "linked_workspace_ids": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "作るタスクを、入れるワークスペースのほかにも出すワークスペース（link_task と同じ）。null でワークスペースの既定値"
+          },
+          "subtasks": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "作るタスクのサブタスクのタイトル（100 件まで）。渡すとこの並びになる"
+          },
+          "estimate": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "作るタスクの予想工数。月・日・時間・分を組み合わせて書く（「1日3時間」「90分」「1.5h」「2週間」「1か月」「P1DT3H」）。単位のない数は時間。null か空でなくす"
+          },
+          "time_basis": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "start": {
+                "type": "string",
+                "enum": [
+                  "created",
+                  "assigned",
+                  "in_process",
+                  "start_date"
+                ],
+                "description": "作った時 / 担当が付いた時 / 進行中にした時 / 開始日"
+              },
+              "end": {
+                "type": "string",
+                "enum": [
+                  "completed",
+                  "self_done"
+                ],
+                "description": "完了にした時 / 自分の分を完了にした時"
+              }
+            },
+            "required": [
+              "start",
+              "end"
+            ],
+            "additionalProperties": false,
+            "description": "作るタスクの所要時間の基準。null でワークスペースか全体の標準に合わせる"
+          },
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "additionalProperties": false
+      },
+      "writes": true
+    },
+    {
+      "name": "add_schedule_attachment",
+      "group": "data",
+      "description": "ユーザーの PC のファイルを定時タスクの雛形に添付する。作るタスクには毎回この添付が付く。path はファイルの絶対パス（先頭の ~ はホーム）。1 ファイル 10 MiB まで。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "schedule_id": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "schedule_id",
+          "path"
+        ],
+        "additionalProperties": false
+      },
+      "writes": true
+    },
+    {
+      "name": "delete_schedule_attachment",
+      "group": "data",
+      "description": "定時タスクの雛形から添付を外す。作ったタスクの添付は残る。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "additionalProperties": false
+      },
+      "writes": true
+    },
+    {
+      "name": "delete_schedule",
+      "group": "data",
+      "description": "定時タスクを削除する。作ったタスクは残る。止めるだけなら update_schedule で enabled を false にする。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "additionalProperties": false
+      },
+      "writes": true
+    },
+    {
+      "name": "get_done_notices",
+      "group": "data",
+      "description": "ほかの人が完了チケットで完了を報告したときに、通知を作るかの設定を返す。",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "set_done_notices",
+      "group": "data",
+      "description": "ほかの人が完了を報告したときに、通知を作るかを変える。渡した項目だけが変わる。enabled は全体のオン・オフ。when は each（1 人が自分の分を完了にするたび）か finished（タスクが完了したときだけ）。roles は、完了にした人がこのどれかの役なら知らせる（R・A・C・I、1 つ以上）。muted_people は知らせない担当者（ID か名前）、muted_workspaces は知らせないワークスペースの ID（サブワークスペースも知らせない）。どちらも渡すとその並びになり、[] で全員・全部を知らせる。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "when": {
+            "type": "string",
+            "enum": [
+              "each",
+              "finished"
+            ]
+          },
+          "roles": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "R",
+                "A",
+                "C",
+                "I"
+              ]
+            }
+          },
+          "muted_people": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "muted_workspaces": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "writes": true
+    },
+    {
+      "name": "github_fetch",
+      "group": "data",
+      "description": "GitHub のリンク（issue、プルリクエスト、リポジトリ、ファイル、コミット）の中身を gh コマンドで取ってくる。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "additionalProperties": false
+      },
+      "in_app_only": true
+    },
+    {
+      "name": "slack_fetch",
+      "group": "data",
+      "description": "Slack のメッセージへのリンク（https://〜.slack.com/archives/…）のメッセージと、そのスレッドの返信を Slack CLI で取ってくる。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "additionalProperties": false
+      },
+      "in_app_only": true
+    },
+    {
+      "name": "run_shell",
+      "group": "data",
+      "description": "ユーザーの PC でコマンドを 1 つ実行し、終了コードと出力を返す。動くシェル（PowerShell、bash、WSL など）は、ユーザーのメッセージの最後にアプリが書く。そのシェルの書き方で書く。実行の前にユーザーに確認が出る。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "command": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "command"
+        ],
+        "additionalProperties": false
+      },
+      "confirm": true,
+      "in_app_only": true
+    },
+    {
+      "name": "get_screen",
+      "group": "app",
+      "description": "今の画面の状態を返す。開いている場所、開いているタスク、一覧の絞り込みと並び順、表の列、左のメニューと詳細の幅、AI チャットとシェル、ペイン、ロック・リマインダー・自動アップデートの設定、開けるシェル。",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      },
+      "view": true
+    },
+    {
+      "name": "navigate",
+      "group": "app",
+      "description": "画面を開く。to は home（ホーム）、all（すべてのタスク）、unfiled（未所属のタスク）、またはワークスペースの ID。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "to": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "to"
+        ],
+        "additionalProperties": false
+      },
+      "view": true
+    },
+    {
+      "name": "open_task",
+      "group": "app",
+      "description": "タスクの詳細を開く。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "additionalProperties": false
+      },
+      "view": true
+    },
+    {
+      "name": "close_task",
+      "group": "app",
+      "description": "開いているタスクの詳細を閉じる。",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      },
+      "view": true
+    },
+    {
+      "name": "set_list_view",
+      "group": "app",
+      "description": "タスクの一覧の絞り込みと並び順を変える。渡した項目だけが変わる。clear_filters で絞り込みを外す（タブと並び順は残る）。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "tab": {
+            "type": "string",
+            "enum": [
+              "open",
+              "closed"
+            ],
+            "description": "未完了 / 完了"
+          },
+          "query": {
+            "type": "string",
+            "description": "キーワード。空で外す"
+          },
+          "status": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "needs_action",
+              "in_process",
+              "completed",
+              "cancelled",
+              null
+            ]
+          },
+          "assignee": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "me（自分）、unassigned（未割り当て）、担当者の ID。null ですべて"
+          },
+          "priority": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "none",
+              "high",
+              "mid",
+              "low",
+              null
+            ]
+          },
+          "category": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "time": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "estimated",
+              "not_estimated",
+              "over",
+              null
+            ],
+            "description": "予想工数あり / 予想工数なし / 所要時間が予想工数を超えた。null で外す"
+          },
+          "sort": {
+            "type": "string",
+            "enum": [
+              "due",
+              "priority",
+              "updated",
+              "created",
+              "title",
+              "status",
+              "assignee",
+              "estimate",
+              "elapsed",
+              "manual"
+            ],
+            "description": "期限が近い順 / 優先度が高い順 / 更新が新しい順 / 作成が新しい順 / タイトル順 / 状態順 / 担当順 / 予想工数が短い順 / 所要時間が短い順 / 手動の順"
+          },
+          "descending": {
+            "type": "boolean",
+            "description": "並び順を逆にする"
+          },
+          "clear_filters": {
+            "type": "boolean"
+          },
+          "home_mine_only": {
+            "type": "boolean",
+            "description": "ホームの「期限が近いタスク」を自分の担当だけにする"
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "view": true
+    },
+    {
+      "name": "set_columns",
+      "group": "app",
+      "description": "タスクの表の列を出す・隠す、幅を変える、並べ替える。order は列の並び（全部の列でなくてよい。書いた列がその順で先頭に来る）。width は 56〜480、null で最初の幅。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "columns": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "column": {
+                  "type": "string",
+                  "enum": [
+                    "status",
+                    "priority",
+                    "assignee",
+                    "due",
+                    "updated",
+                    "estimate",
+                    "elapsed"
+                  ]
+                },
+                "shown": {
+                  "type": "boolean"
+                },
+                "width": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "column"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "order": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "status",
+                "priority",
+                "assignee",
+                "due",
+                "updated",
+                "estimate",
+                "elapsed"
+              ]
+            }
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "view": true
+    },
+    {
+      "name": "set_panels",
+      "group": "app",
+      "description": "画面の部分を出す・隠す、幅を変える。sidebar は左のメニュー、chat は AI チャット、shell はシェルの場所（AI のタブ、ターミナル、ブラウザのタブ）。幅は null で最初の幅。expanded は左のメニューのワークスペースを開く・閉じる（ID と true / false）。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "sidebar": {
+            "type": "boolean"
+          },
+          "sidebar_width": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "description": "200〜480"
+          },
+          "detail_width": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "description": "タスクの詳細の幅 400〜1600"
+          },
+          "chat": {
+            "type": "boolean"
+          },
+          "shell": {
+            "type": "boolean"
+          },
+          "expanded": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "boolean"
+            }
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "view": true
+    },
+    {
+      "name": "pane",
+      "group": "app",
+      "description": "画面を分けたペインを操作する。split_right / split_down（分ける）、close（今のペインを閉じる）、zoom（今のペインだけを大きく出す・戻す）、focus_next / focus_prev、focus_left / focus_right / focus_up / focus_down、swap_left / swap_right / swap_up / swap_down、duplicate（複製）、pop_out（別ウィンドウに出す）、save_layout（今の配置を保存）、load_layout（name の配置にする。最初からある配置か、保存した配置）、delete_layout（保存した配置 name を削除）。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "split_right",
+              "split_down",
+              "close",
+              "zoom",
+              "focus_next",
+              "focus_prev",
+              "focus_left",
+              "focus_right",
+              "focus_up",
+              "focus_down",
+              "swap_left",
+              "swap_right",
+              "swap_up",
+              "swap_down",
+              "duplicate",
+              "pop_out",
+              "save_layout",
+              "load_layout",
+              "delete_layout"
+            ]
+          },
+          "name": {
+            "type": "string",
+            "description": "load_layout と delete_layout の配置の名前（get_screen の pane_layouts）"
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "additionalProperties": false
+      },
+      "view": true
+    },
+    {
+      "name": "open_dialog",
+      "group": "app",
+      "description": "ダイアログを開く。people（担当者）、customize（カスタマイズ）、lock（ロックの設定）、notices（通知）、keys（キー操作の一覧）、workspace_settings（ワークスペースの設定。workspace_id が要る）、workspace_icon（ワークスペースのアイコン。workspace_id が要る）、history（開いているタスクの変更履歴）、ticket（完了チケット。task_id が要る）。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "enum": [
+              "people",
+              "customize",
+              "notices",
+              "keys",
+              "workspace_settings",
+              "workspace_icon",
+              "history",
+              "ticket"
+            ]
+          },
+          "workspace_id": {
+            "type": "string"
+          },
+          "task_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "additionalProperties": false
+      },
+      "view": true
+    },
+    {
+      "name": "open_window",
+      "group": "app",
+      "description": "新しいウィンドウを開く。kind は main（タスクの画面をもう 1 枚。標準）か pomodoro（ポモドーロタイマー。開いていれば手前に出す。タイマーの操作は pomodoro ツール）。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "main",
+              "pomodoro"
+            ]
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "view": true
+    },
+    {
+      "name": "open_terminal",
+      "group": "app",
+      "description": "ターミナルを開く。task_id を渡すと、そのタスクのワークスペースのフォルダーで開く。shell は get_screen の terminal_shells の id（選んだシェルは次からも使う）。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "task_id": {
+            "type": "string"
+          },
+          "shell": {
+            "type": "string"
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "view": true
+    },
+    {
+      "name": "browser",
+      "group": "app",
+      "description": "アプリ内ブラウザ（シェルの場所のタブ）を操作する。open（url を新しいタブで開いて見せる。同じ場所のタブがあればそれを見せる）、list（開いているタブの一覧）、show（tab を見せる）、navigate（tab で url を開く）、back、forward、reload、close（tab を閉じる）、open_external（url か tab のページを OS のブラウザで開く）、zoom_in / zoom_out（ページの拡大率を 1 段変える）、zoom_reset（100% に戻す）。tab を省くと、見ているタブ。ページの文字は read_browser で読む。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "open",
+              "list",
+              "show",
+              "navigate",
+              "back",
+              "forward",
+              "reload",
+              "close",
+              "open_external",
+              "zoom_in",
+              "zoom_out",
+              "zoom_reset"
+            ]
+          },
+          "url": {
+            "type": "string"
+          },
+          "tab": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "additionalProperties": false
+      },
+      "view": true
+    },
+    {
+      "name": "read_browser",
+      "group": "app",
+      "description": "アプリ内ブラウザのページの文字（url、title、ユーザーが選んでいる文字 selection、本文 text）を読む。tab を省くと、ユーザーが見ているタブ。ログインが要るページも、ユーザーのログインのまま読める。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "tab": {
+            "type": "integer"
+          },
+          "max_chars": {
+            "type": "integer",
+            "description": "本文の最大の文字数（500〜20000、標準 20000）"
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "lock",
+      "group": "app",
+      "description": "ロック。lock_now（今すぐロック）、enable（ロックを有効にする）、disable（ロックを無効にする）、set_options（ロックの設定を変える。渡した項目だけが変わる）。有効と無効は、OS の認証（パスキー）が出て、ユーザーが通したときだけ変わる。auto_lock_minutes は、操作がないまま自動でロックするまでの分数（0 で自動でロックしない）。locked_notices は、ロック中の OS の通知に出すもの（title: 通知の 1 行を出す、hidden: 「新しい通知があります」だけ）。今の値は get_screen の lock にある。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "lock_now",
+              "enable",
+              "disable",
+              "set_options"
+            ]
+          },
+          "auto_lock_minutes": {
+            "type": "integer",
+            "enum": [
+              0,
+              1,
+              5,
+              10,
+              15,
+              30,
+              60,
+              120
+            ]
+          },
+          "locked_notices": {
+            "type": "string",
+            "enum": [
+              "title",
+              "hidden"
+            ]
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "additionalProperties": false
+      },
+      "view": true
+    },
+    {
+      "name": "set_app_options",
+      "group": "app",
+      "description": "アプリの設定を変える。渡した項目だけが変わる。reminders は OS のリマインダーとの連携、autostart は OS にログインしたときにアプリを起動するか（スタートアップ）、auto_update は自動アップデート、pane_keys はペインのキー操作（herdr / tmux）。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "reminders": {
+            "type": "boolean"
+          },
+          "autostart": {
+            "type": "boolean"
+          },
+          "auto_update": {
+            "type": "boolean"
+          },
+          "pane_keys": {
+            "type": "string",
+            "enum": [
+              "herdr",
+              "tmux"
+            ]
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "view": true
+    },
+    {
+      "name": "update_now",
+      "group": "app",
+      "description": "取ってきてある新しい版に入れ替えて、アプリを起動し直す。",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      },
+      "view": true
+    },
+    {
+      "name": "export_data",
+      "group": "app",
+      "description": "全部のデータ（タスク、ワークスペース、担当者、コメント、添付）を zip に書き出す。path は書き出すファイルの場所（先頭の ~ はホーム）。省くと書類のフォルダー。同じ名前のファイルがあると、上書きの前にユーザーに確認が出る。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "view": true
+    },
+    {
+      "name": "import_data",
+      "group": "app",
+      "description": "エクスポートした zip を取り込む。ID が同じものは上書きするので、実行の前にユーザーに確認が出る。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "additionalProperties": false
+      },
+      "confirm": true,
+      "view": true
+    },
+    {
+      "name": "undo",
+      "group": "app",
+      "description": "直前の変更を 1 つ元に戻す（Ctrl+Z と同じ）。AI の変更も、ツールの呼び出し 1 回が 1 つの段になる。",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      },
+      "view": true
+    },
+    {
+      "name": "redo",
+      "group": "app",
+      "description": "元に戻した変更をやり直す。",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      },
+      "view": true
+    },
+    {
+      "name": "find_icons",
+      "group": "app",
+      "description": "ワークスペースに付けられるアイコンを探す。query は英語か日本語の言葉。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "additionalProperties": false
+      },
+      "view": true
+    },
+    {
+      "name": "set_workspace_icon",
+      "group": "app",
+      "description": "ワークスペースのアイコンと色を変える。icon は find_icons で見つけた名前（null で最初のアイコン）、image_path は icon の代わりに使う画像ファイル（PNG・JPEG・SVG）の絶対パス（先頭の ~ はホーム）、color は red / orange / yellow / green / teal / blue / purple / pink（null で文字と同じ色）。渡した項目だけが変わる。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "icon": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "image_path": {
+            "type": "string"
+          },
+          "color": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "additionalProperties": false
+      },
+      "view": true
+    },
+    {
+      "name": "get_customization",
+      "group": "app",
+      "description": "カスタマイズ（見た目）の今の値と、選べるテーマ・レイアウト・値を返す。",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      },
+      "view": true
+    },
+    {
+      "name": "list_fonts",
+      "group": "app",
+      "description": "この PC で使える書体の名前を返す。query で絞り込む。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string"
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "view": true
+    },
+    {
+      "name": "apply_theme",
+      "group": "app",
+      "description": "テーマ（おすすめのテーマか、自分で保存したテーマ）を名前で選んで使う。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "additionalProperties": false
+      },
+      "view": true
+    },
+    {
+      "name": "save_theme",
+      "group": "app",
+      "description": "今の見た目を、自分のテーマとして名前を付けて保存する。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "additionalProperties": false
+      },
+      "view": true
+    },
+    {
+      "name": "rename_theme",
+      "group": "app",
+      "description": "自分で保存したテーマの名前を変える。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "new_name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "new_name"
+        ],
+        "additionalProperties": false
+      },
+      "view": true
+    },
+    {
+      "name": "delete_theme",
+      "group": "app",
+      "description": "自分で保存したテーマを削除する（今の見た目は変わらない）。元に戻せないので、実行の前にユーザーに確認が出る。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "additionalProperties": false
+      },
+      "confirm": true,
+      "view": true
+    },
+    {
+      "name": "apply_layout",
+      "group": "app",
+      "description": "レイアウト（重ねる詳細 / 一覧と詳細 / 3 カラム / カード / 浮いたパネル）を名前で選んで使う。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "additionalProperties": false
+      },
+      "view": true
+    },
+    {
+      "name": "set_appearance",
+      "group": "app",
+      "description": "見た目を 1 つずつ変える。渡した項目だけが変わる。mode はライト・ダーク、scene は背景の画像（none / sky / forest / dusk か、画像ファイルの絶対パス）、clear は面の透明度 0〜70、blur は背景のぼかし 0〜100、cards は一覧をカードで出す、floating はパネルを浮かせる、overlay は詳細を一覧の上に重ねる、density は行の詰め方、feel はホバーと押したときの描き方、due_format は一覧の期限の出し方（date は「11/24～11/27」、relative は「明日」「あと 3 日」「2 日前」）、fonts は画面の書体の優先順（名前の配列。文字ごとに上から順に、その文字を持つ書体で描く。null で標準の LINE Seed JP）、mono_fonts はターミナルとコードの等幅の書体の優先順（null で標準）、font は書体を 1 つだけにする、accent / light_background / dark_background は #rrggbb の色（null で標準の色）。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "mode": {
+            "type": "string",
+            "enum": [
+              "system",
+              "light",
+              "dark"
+            ]
+          },
+          "scene": {
+            "type": "string"
+          },
+          "clear": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 70
+          },
+          "blur": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100
+          },
+          "cards": {
+            "type": "boolean"
+          },
+          "floating": {
+            "type": "boolean"
+          },
+          "overlay": {
+            "type": "boolean"
+          },
+          "density": {
+            "type": "string",
+            "enum": [
+              "roomy",
+              "standard",
+              "compact"
+            ],
+            "description": "ゆったり / 標準 / 詰める"
+          },
+          "feel": {
+            "type": "string",
+            "enum": [
+              "standard",
+              "glass",
+              "crisp",
+              "tint"
+            ],
+            "description": "標準 / ガラス / くっきり / 色づく"
+          },
+          "due_format": {
+            "type": "string",
+            "enum": [
+              "date",
+              "relative"
+            ],
+            "description": "日付 / 相対"
+          },
+          "font": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "fonts": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
+          "mono_fonts": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
+          "accent": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "light_background": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "dark_background": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "view": true
+    },
+    {
+      "name": "get_ai_settings",
+      "group": "app",
+      "description": "AI チャットの設定（サービス、モデル、effort、振り分けのモデル、新しいタスクを整える、コメントから進捗を更新する、GitHub の定期チェック、オート実行）を返す。AI のルールは list_ai_rules で読む。",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      },
+      "session": true
+    },
+    {
+      "name": "set_ai_settings",
+      "group": "app",
+      "description": "AI チャットの設定を変える。渡した項目だけが変わり、次のメッセージから使う。provider は claude / chatgpt / opencode / opencode_go / cursor。effort はモデルごとに覚え、model を変えるとそのモデルで前に選んだ effort に戻る（model と effort を一緒に渡すと、新しいモデルの effort になる）。routing_model は空で今のモデルを使う。watch_minutes は 60 / 180 / 360 / 720 / 1440（分）。auto_run をオンにするときは、実行の前にユーザーに確認が出る。API キーはここでは変えられない（チャットの「設定」で入れる）。AI のルールは create_ai_rule / update_ai_rule で変える。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "provider": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          },
+          "effort": {
+            "type": "string"
+          },
+          "routing_model": {
+            "type": "string"
+          },
+          "arrange": {
+            "type": "boolean",
+            "description": "新しいタスクを AI が整える"
+          },
+          "track": {
+            "type": "boolean",
+            "description": "コメントから AI が進捗などを更新する"
+          },
+          "watch_enabled": {
+            "type": "boolean",
+            "description": "GitHub の定期チェック"
+          },
+          "watch_minutes": {
+            "type": "integer"
+          },
+          "watch_instruction": {
+            "type": "string"
+          },
+          "auto_run": {
+            "type": "boolean",
+            "description": "コマンドの実行と削除を確認なしで行う"
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "session": true
+    },
+    {
+      "name": "check_github",
+      "group": "app",
+      "description": "GitHub の定期チェックを今すぐ 1 回行う。",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      },
+      "session": true
+    },
+    {
+      "name": "get_autostart",
+      "group": "mcp",
+      "description": "OS にログインしたときに malakt-mahoz のアプリを起動するか（スタートアップ）を読む。available が false なら、この OS では登録できない。",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "set_autostart",
+      "group": "mcp",
+      "description": "OS にログインしたときに malakt-mahoz のアプリを起動するか（スタートアップ）を変える。enabled が true で登録、false で外す。undo では戻らないので、戻すときはもう一度呼ぶ。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "enabled"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "undo",
+      "group": "mcp",
+      "description": "このサーバーからの直前の変更を 1 つ元に戻す。続けて呼ぶと、さらに前の変更を戻す。",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "redo",
+      "group": "mcp",
+      "description": "undo で戻した変更をやり直す。",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      }
+    }
+  ]
+}

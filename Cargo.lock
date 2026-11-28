@@ -4935,12 +4935,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "malakt-caldav"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "jiff",
+ "roxmltree 0.21.2",
+ "serde",
+ "ureq",
+]
+
+[[package]]
 name = "malakt-core"
 version = "0.1.0"
 dependencies = [
  "chrono",
  "criterion 0.5.1",
  "flate2",
+ "jiff",
+ "malakt-caldav",
  "malakt-reminders",
  "markdown",
  "rand 0.8.8",
@@ -4968,8 +4981,10 @@ dependencies = [
  "gpui-kit",
  "gtk",
  "image",
+ "keyring",
  "malakt-ai",
  "malakt-autostart",
+ "malakt-caldav",
  "malakt-core",
  "malakt-media",
  "malakt-passkey",

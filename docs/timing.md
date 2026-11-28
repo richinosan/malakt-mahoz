@@ -57,5 +57,6 @@
 
 - 定時タスクと繰り返し: 雛形にも予想工数と基準を入れられ、作ったタスクにそのまま入ります
 - アプリ内 AI と MCP: `create_task` / `update_task` の `estimate`（「1日3時間」か ISO 8601 の `P1DT3H`）と `time_basis`、`get_task` の `time`、`get_time_stats`、`set_time_basis`（[docs/mcp.md](mcp.md)）
+- CalDAV: 予想工数は VTODO の ESTIMATED-DURATION で同期します（1 か月は 30 日で送ります）。所要時間の基準は送りません（[docs/caldav.md](caldav.md)）
 - 変更履歴: 予想工数と基準の変更が残ります
 - エクスポート: 予想工数は ISO 8601 の期間（`P1M2DT3H30M`）、基準は `in_process>completed` の形でタスクとワークスペースに入ります。全体の標準は端末の設定なので書き出しません

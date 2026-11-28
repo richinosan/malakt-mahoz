@@ -27,6 +27,8 @@ pub const USAGE: &str = "\
                                                  タスクの一覧（--all で完了・中止も含める）
   malakt-mahoz task <ID>                         タスク 1 件と、コメント、サブタスク
   malakt-mahoz call <ツール> [<引数の JSON>]        MCP と同じツールを 1 回呼ぶ
+  malakt-mahoz api                               ツールの一覧（JSON）を出す
+  malakt-mahoz api tsp <フォルダー>                API の定義（TypeSpec）を書き出す
   malakt-mahoz redeem <チケット> --message <本文>   完了チケットを引き換えて、完了報告を書く
   malakt-mahoz redeem <チケット> --message-file <ファイル>
   malakt-mahoz ticket <チケット>                   完了チケットのタスクを読む（引き換えない）
@@ -126,6 +128,15 @@ fn execute(
             }
             [other, ..] => Err(Failure::Usage(format!("知らない指定です: {other}"))),
         },
+        "api" => match rest {
+            [] => {
+                write!(out, "{}", malakt_ai::api::SOURCE)?;
+                Ok(())
+            }
+            [sub, dir] if sub == "tsp" => write_api_files(std::path::Path::new(dir), out),
+            [sub] if sub == "tsp" => Err(usage("書き出すフォルダーを指定してください")),
+            [other, ..] => Err(Failure::Usage(format!("知らない指定です: {other}"))),
+        },
         "workspaces" | "people" | "tasks" | "task" | "call" => {
             let (tool, tool_args) = tool_call(command, rest)?;
             let mut store = open()?;
@@ -191,6 +202,47 @@ fn execute(
         }
         other => Err(Failure::Usage(format!("知らないコマンドです: {other}"))),
     }
+}
+
+/// API の定義のファイルを `dir` に書く。同じ名前のファイルがあれば、どれも書かずに失敗する。
+fn write_api_files(dir: &std::path::Path, out: &mut dyn Write) -> Result<(), Failure> {
+    let files = malakt_ai::api::FILES;
+    let taken: Vec<_> = files
+        .iter()
+        .map(|(name, _)| dir.join(name))
+        .filter(|path| path.exists())
+        .map(|path| path.display().to_string())
+        .collect();
+    if !taken.is_empty() {
+        return Err(Failure::Failed(format!(
+            "書き出す先にもうファイルがあります: {}",
+            taken.join("、")
+        )));
+    }
+    std::fs::create_dir_all(dir)?;
+    for (i, (name, text)) in files.iter().enumerate() {
+        if let Err(error) = std::fs::write(dir.join(name), text) {
+            // 途中までのものを残さない。消せなかったものは、失敗の文に並べる
+            let left: Vec<_> = files[..i]
+                .iter()
+                .map(|(done, _)| dir.join(done))
+                .filter(|path| std::fs::remove_file(path).is_err())
+                .map(|path| path.display().to_string())
+                .collect();
+            let mut message = format!("{} を書けませんでした: {error}", dir.join(name).display());
+            if !left.is_empty() {
+                message.push_str(&format!("。消せなかったファイル: {}", left.join("、")));
+            }
+            return Err(Failure::Failed(message));
+        }
+    }
+    writeln!(
+        out,
+        "{} 個のファイルを {} に書きました",
+        files.len(),
+        dir.display()
+    )?;
+    Ok(())
 }
 
 fn unix_now() -> i64 {
@@ -337,6 +389,47 @@ mod tests {
         let (code, again, _) = call(&path, &["redeem", &secret, "-m", "別の文"]);
         assert_eq!((code, again), (0, out));
         assert_eq!(s.comments(&task.id).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn the_api_is_printed_and_written_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("data.sqlite3");
+        let (code, out, _) = call(&path, &["api"]);
+        assert_eq!(code, 0);
+        let list: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert!(list["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t["name"] == "create_task"));
+
+        let target = dir.path().join("api");
+        let where_ = target.to_str().unwrap();
+        let (code, _, err) = call(&path, &["api", "tsp", where_]);
+        assert_eq!(code, 0, "{err}");
+        for (name, text) in malakt_ai::api::FILES {
+            assert_eq!(&std::fs::read_to_string(target.join(name)).unwrap(), text);
+        }
+        // もうあるファイルは上書きしない
+        std::fs::write(target.join("main.tsp"), "mine").unwrap();
+        std::fs::remove_file(target.join("app.tsp")).unwrap();
+        let (code, _, err) = call(&path, &["api", "tsp", where_]);
+        assert_eq!(code, 1);
+        assert!(
+            err.contains("main.tsp") && err.contains("data.tsp"),
+            "{err}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(target.join("main.tsp")).unwrap(),
+            "mine"
+        );
+        assert!(!target.join("app.tsp").exists());
+
+        let (code, _, err) = call(&path, &["api", "tsp"]);
+        assert_eq!(code, 2, "{err}");
+        let (code, _, _) = call(&path, &["api", "other"]);
+        assert_eq!(code, 2);
     }
 
     #[test]

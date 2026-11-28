@@ -41,6 +41,7 @@
 - **エクスポート / インポート**: 全データを zip 1 つに書き出し、別の端末で取り込み
 - **リマインダーとの連携**（標準はオフ）: macOS の「リマインダー」、Windows の通知（[docs/reminders.md](docs/reminders.md)）
 - **スタートアップ**（標準はオフ）: PC にログインしたときに起動（[docs/startup.md](docs/startup.md)）
+- **CalDAV との同期**（標準はオフ）: Nextcloud などのサーバーのタスクを、ワークスペースと両方向に同期（[docs/caldav.md](docs/caldav.md)）
 - **自動アップデート**: GitHub Releases の新しい版に入れ替え（[docs/update.md](docs/update.md)）
 - **完了チケット**: コマンドからタスクを完了にする（[docs/tickets.md](docs/tickets.md)）
 - **AI チャット**: `Ctrl/⌘ + J`（[docs/ai.md](docs/ai.md)）
@@ -77,6 +78,7 @@ mise run verify     # 書式、clippy、テスト
 mise run hooks      # コミットの前に verify を走らせるフックを入れる
 mise run bench      # 1 万件のタスクでの一覧・検索・エクスポートの時間
 mise run mutants    # ミューテーションテスト（cargo-mutants が必要）
+mise run api        # API の定義（api/*.tsp）からツールの一覧を作り直す
 ```
 
 ## ドキュメント
@@ -87,8 +89,10 @@ mise run mutants    # ミューテーションテスト（cargo-mutants が必�
 - [AI チャット](docs/ai.md)
 - [ターミナル](docs/terminal.md)
 - [Claude Code などから使う（MCP）](docs/mcp.md)
+- [API の定義（TypeSpec）](docs/api.md)
 - [リマインダーとの連携](docs/reminders.md)
 - [スタートアップ](docs/startup.md)
+- [CalDAV との同期](docs/caldav.md)
 - [ポモドーロ](docs/pomodoro.md)
 - [自動アップデート](docs/update.md)
 - [エクスポートの形式](docs/export.md)
