@@ -326,7 +326,7 @@ pub(crate) fn window_menu(
 }
 
 /// タスクの画面の地。背景の画像の上では薄く塗って、文字を読めるようにする。
-fn page_fill(theme: &gpui_kit::component::Theme, cx: &App) -> Hsla {
+pub(crate) fn page_fill(theme: &gpui_kit::component::Theme, cx: &App) -> Hsla {
     match crate::theme::backdrop(cx) {
         Some(backdrop) => theme.background.opacity(backdrop.alpha * 0.45),
         None => theme.background,
@@ -442,11 +442,11 @@ impl Setting {
 }
 
 /// 浮かせたパネルのすき間。
-const FLOAT_GAP: Pixels = px(8.);
+pub(crate) const FLOAT_GAP: Pixels = px(8.);
 
 /// 浮かせたパネルの地（角丸のカード）。パネルの最初の子にして、中身の後ろに敷く。
 /// `edges` は上・右・下・左のすき間。隣のパネルと接する辺は半分にして、すき間をそろえる。
-fn floating_card(fill: Hsla, edges: [Pixels; 4], cx: &App) -> Div {
+pub(crate) fn floating_card(fill: Hsla, edges: [Pixels; 4], cx: &App) -> Div {
     let [top, right, bottom, left] = edges;
     div()
         .absolute()
@@ -10410,10 +10410,11 @@ impl MainView {
             .map(|d| self.with_drags(d, cx))
             .size_full()
             .relative()
-            // ペインの後ろには、ウィンドウが敷いた画像が見えている
-            .when(crate::theme::backdrop(cx).is_none(), |d| {
-                d.bg(theme.background)
-            })
+            // ペインの後ろには、ウィンドウが敷いた画像か、浮かせたカードが見えている
+            .when(
+                crate::theme::backdrop(cx).is_none() && !crate::theme::floating(cx),
+                |d| d.bg(theme.background),
+            )
             .text_color(theme.foreground)
             .child(
                 div()
@@ -10664,15 +10665,19 @@ impl Render for MainView {
                                     .h_full()
                                     .relative()
                                     // 浮かせたカードはタスクの画面だけを包み、右に並べた AI チャットの
-                                    // 手前で角丸の端として閉じる
-                                    .when(crate::theme::floating(cx), |d| {
-                                        let half = FLOAT_GAP / 2.;
-                                        d.child(floating_card(
-                                            page_fill,
-                                            [half, FLOAT_GAP, FLOAT_GAP, half],
-                                            cx,
-                                        ))
-                                    })
+                                    // 手前で角丸の端として閉じる。分けているときは、ペインごとにカードを置く
+                                    .when(
+                                        crate::theme::floating(cx)
+                                            && self.layout.panes().len() == 1,
+                                        |d| {
+                                            let half = FLOAT_GAP / 2.;
+                                            d.child(floating_card(
+                                                page_fill,
+                                                [half, FLOAT_GAP, FLOAT_GAP, half],
+                                                cx,
+                                            ))
+                                        },
+                                    )
                                     .child({
                                         let own = div()
                                             .size_full()

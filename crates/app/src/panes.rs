@@ -386,17 +386,37 @@ impl MainView {
         }
         let focus = self.layout.focus();
         let zoomed = self.layout.zoomed();
+        // パネルを浮かせているときは、ペインごとに角丸のカードを置き、すき間を空ける。
+        // そうでないときは、ペインの間に細い線だけを引く
+        let floating = crate::theme::floating(cx);
+        let gap = crate::render::FLOAT_GAP;
+        let half = gap / 2.;
+        let bar_height = px(BAR) * crate::UI_SCALE;
         let mut own = Some(own);
-        let mut root = div().id("panes").absolute().inset_0().bg(theme.border);
+        let mut root = div()
+            .id("panes")
+            .absolute()
+            .inset_0()
+            .when(!floating, |d| d.bg(theme.border));
         for (id, rect) in visible {
+            // 右端と下端のペインは、ウィンドウの縁との間を、ほかのパネルと同じすき間にする
+            let right = if rect.x + rect.w >= 0.999 { gap } else { half };
+            let bottom = if rect.y + rect.h >= 0.999 { gap } else { half };
+            // 中身を置く場所。浮かせているときは、1 つだけのときと同じ並びになるように、
+            // カードのまわりのすき間の分だけ外に広げる（詳細はカードの縁に合わせて止まる）
+            let (inset_right, inset_bottom, top) = if floating {
+                (right - gap, bottom - gap, bar_height + px(1.))
+            } else {
+                (px(0.), px(0.), bar_height)
+            };
             let bounds = Bounds::new(
                 point(
                     area.origin.x + area.size.width * rect.x,
-                    area.origin.y + area.size.height * rect.y + px(BAR) * crate::UI_SCALE,
+                    area.origin.y + area.size.height * rect.y + top,
                 ),
                 size(
-                    area.size.width * rect.w,
-                    (area.size.height * rect.h - px(BAR) * crate::UI_SCALE).max(px(0.)),
+                    area.size.width * rect.w - inset_right,
+                    (area.size.height * rect.h - top - inset_bottom).max(px(0.)),
                 ),
             );
             let content = match self.children.get(&id) {
@@ -414,22 +434,31 @@ impl MainView {
                     .xsmall()
                     .tooltip(label)
             };
+            // 今のペインは、バーの地をうっすら色づけ、名前を濃くする
             let bar = div()
                 .id(("pane-bar", id as usize))
                 .flex()
                 .flex_row()
                 .items_center()
                 .flex_none()
-                .h(px(BAR) * crate::UI_SCALE)
+                .h(bar_height)
                 .px_2()
                 .gap_1()
                 .text_xs()
                 .border_b_1()
-                .border_color(theme.border)
-                .when(on, |d| d.bg(theme.primary.opacity(0.18)))
+                .border_color(theme.border.opacity(if floating { 0.6 } else { 1. }))
+                .when(on, |d| d.bg(theme.primary.opacity(0.15)))
                 .when(!on, |d| {
-                    d.bg(theme.muted.opacity(0.5))
+                    d.when(!floating, |d| d.bg(theme.muted.opacity(0.5)))
                         .text_color(theme.muted_foreground)
+                })
+                .when(floating, |d| {
+                    // カードの角丸と枠の内側に収める
+                    d.absolute()
+                        .top(half + px(1.))
+                        .left(half + px(1.))
+                        .right(right + px(1.))
+                        .rounded_t(px(15.))
                 })
                 .child(
                     div()
@@ -475,6 +504,35 @@ impl MainView {
                     ),
                 ))
                 .test_support();
+            let body = if floating {
+                div()
+                    .size_full()
+                    .relative()
+                    .child(crate::render::floating_card(
+                        crate::render::page_fill(&theme, cx),
+                        [half, right, bottom, half],
+                        cx,
+                    ))
+                    .child(bar)
+                    .child(
+                        div()
+                            .absolute()
+                            .top(top)
+                            .left_0()
+                            .right(inset_right)
+                            .bottom(inset_bottom)
+                            .child(content),
+                    )
+            } else {
+                div()
+                    .size_full()
+                    .flex()
+                    .flex_col()
+                    .bg(theme.background)
+                    .overflow_hidden()
+                    .child(bar)
+                    .child(div().flex_1().min_h_0().relative().child(content))
+            };
             root = root.child(
                 div()
                     .id(("pane", id as usize))
@@ -483,7 +541,9 @@ impl MainView {
                     .top(relative(rect.y))
                     .w(relative(rect.w))
                     .h(relative(rect.h))
-                    .p(px(1.))
+                    // ペインの間にだけ線を引く
+                    .when(!floating && rect.x > 0.001, |d| d.pl(px(1.)))
+                    .when(!floating && rect.y > 0.001, |d| d.pt(px(1.)))
                     // どこを押しても、そのペインが今のペインになる
                     .capture_any_mouse_down(cx.listener(
                         move |this, event: &MouseDownEvent, _, cx| {
@@ -504,18 +564,7 @@ impl MainView {
                             }
                         },
                     ))
-                    .child(
-                        div()
-                            .size_full()
-                            .flex()
-                            .flex_col()
-                            .bg(theme.background)
-                            .overflow_hidden()
-                            .border_1()
-                            .border_color(if on { theme.primary } else { theme.border })
-                            .child(bar)
-                            .child(div().flex_1().min_h_0().relative().child(content)),
-                    )
+                    .child(body)
                     .test_support(),
             );
         }
