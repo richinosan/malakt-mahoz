@@ -291,6 +291,8 @@ pub enum SubModal {
     DoneWorkspaces,
     /// プラグインを有効にする前の承認
     EnablePlugin,
+    /// 同期するアカウントを足す（プロバイダを選び、アカウントを書く）
+    AddAccount,
 }
 
 /// 詳細で日付と時刻を入れる 2 つの項目。
@@ -726,6 +728,25 @@ impl MainView {
         let mut subs = vec![
             cx.observe(&ai_settings, |_, _, cx| cx.notify()),
             cx.observe(&caldav_settings, |_, _, cx| cx.notify()),
+            // 「同期」の「アカウントを追加」は、設定の上に重ねて出す
+            cx.subscribe_in(
+                &caldav_settings,
+                window,
+                |this, _, event: &crate::caldav_settings::AddDialog, window, cx| {
+                    match event {
+                        crate::caldav_settings::AddDialog::Open => {
+                            this.sub_modal = Some(SubModal::AddAccount);
+                        }
+                        crate::caldav_settings::AddDialog::Close => {
+                            if this.sub_modal == Some(SubModal::AddAccount) {
+                                this.sub_modal = None;
+                                this.focus.focus(window, cx);
+                            }
+                        }
+                    }
+                    cx.notify();
+                },
+            ),
             cx.observe(&db, |this, _, cx| {
                 this.reload(cx);
                 // ロックを解除したら、待っていた AI のおすすめを出す
@@ -5717,6 +5738,7 @@ bundled_icons! {
         "calendar-sync",
         "server",
         "cloud-alert",
+        "cloud",
         "timer",
         "chart-column",
         "minus",

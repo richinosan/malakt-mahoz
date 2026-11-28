@@ -5346,6 +5346,43 @@ fn reminders(
     os
 }
 
+/// 「設定」の「同期」の「アカウントを追加」でリマインダーを選び、設定を閉じる。
+fn start_reminders_sync(cx: &mut TestAppContext, window: AnyWindowHandle, view: &Entity<MainView>) {
+    pick_sync_provider(cx, window, view, "caldav-pick-reminders");
+    ui(cx, window, |window, _| {
+        // 選ぶとダイアログが閉じ、「同期」の一覧にリマインダーが出る
+        assert!(window.try_find("caldav-pick-other").is_none());
+        assert!(window.find("reminders-account").visible());
+    });
+    wait_sub_closed(cx, window);
+    ui(cx, window, |window, cx| window.click("dialog-close", cx));
+}
+
+/// 「設定」の「同期」で、リマインダーのごみ箱の「同期をやめる」を選ぶ。
+fn stop_reminders_sync(cx: &mut TestAppContext, window: AnyWindowHandle, view: &Entity<MainView>) {
+    ui(cx, window, |window, cx| window.click("open-settings", cx));
+    ui(cx, window, |window, cx| {
+        view.update(cx, |v, cx| {
+            v.show_appearance_section(malakt_mahoz::state::CustomizeSection::Sync, window, cx)
+        })
+    });
+    ui(cx, window, |window, cx| {
+        window.click("reminders-remove", cx)
+    });
+    pick(cx, window, "同期をやめる");
+    ui(cx, window, |window, _| {
+        assert!(window.try_find("reminders-account").is_none())
+    });
+    // 同期をやめたら、また選べる
+    ui(cx, window, |window, cx| window.click("caldav-add", cx));
+    ui(cx, window, |window, _| {
+        assert!(window.find("caldav-pick-reminders").visible());
+    });
+    ui(cx, window, |window, cx| window.press("escape", cx));
+    wait_sub_closed(cx, window);
+    ui(cx, window, |window, cx| window.click("dialog-close", cx));
+}
+
 /// 歯車で「設定」を開いてそのカテゴリまでスクロールし、スイッチを押して閉じる。
 fn press_in_settings(
     cx: &mut TestAppContext,
@@ -5393,13 +5430,7 @@ fn reminders_follow_tasks_once_chosen(cx: &mut TestAppContext) {
     // 標準では何も作らない
     assert!(os.lock().unwrap().items.is_empty());
 
-    press_in_settings(
-        cx,
-        window,
-        &view,
-        malakt_mahoz::state::CustomizeSection::Notices,
-        "reminders-switch",
-    );
+    start_reminders_sync(cx, window, &view);
     cx.run_until_parked();
     {
         let os = os.lock().unwrap();
@@ -5438,13 +5469,7 @@ fn reminders_follow_tasks_once_chosen(cx: &mut TestAppContext) {
     assert_eq!(os.lock().unwrap().writes, writes);
 
     // 解除すると、作ったリマインダーとリストが消える。タスクは残る
-    press_in_settings(
-        cx,
-        window,
-        &view,
-        malakt_mahoz::state::CustomizeSection::Notices,
-        "reminders-switch",
-    );
+    stop_reminders_sync(cx, window, &view);
     cx.run_until_parked();
     {
         let os = os.lock().unwrap();
@@ -5475,13 +5500,7 @@ fn reminders_refused_by_the_os_turn_back_off(cx: &mut TestAppContext) {
     });
     let (window, view) = open(cx, wide());
     cx.run_until_parked();
-    press_in_settings(
-        cx,
-        window,
-        &view,
-        malakt_mahoz::state::CustomizeSection::Notices,
-        "reminders-switch",
-    );
+    pick_sync_provider(cx, window, &view, "caldav-pick-reminders");
     cx.run_until_parked();
     assert!(!store(cx, |s| s.reminders_enabled().unwrap()));
     cx.update(|cx| {
@@ -8007,8 +8026,13 @@ fn caldav(
     (server, secrets)
 }
 
-/// 「設定」の「同期」を開き、アカウントの欄に入れて Enter で足す。
-fn add_caldav_account(cx: &mut TestAppContext, window: AnyWindowHandle, view: &Entity<MainView>) {
+/// 「設定」の「同期」を開き、「アカウントを追加」でプロバイダを選ぶ。
+fn pick_sync_provider(
+    cx: &mut TestAppContext,
+    window: AnyWindowHandle,
+    view: &Entity<MainView>,
+    provider: &'static str,
+) {
     ui(cx, window, |window, cx| window.click("open-settings", cx));
     ui(cx, window, |window, cx| {
         view.update(cx, |v, cx| {
@@ -8016,17 +8040,34 @@ fn add_caldav_account(cx: &mut TestAppContext, window: AnyWindowHandle, view: &E
         })
     });
     ui(cx, window, |window, cx| window.click("caldav-add", cx));
+    ui(cx, window, |window, cx| window.click(provider, cx));
+}
+
+/// 「その他の CalDAV アカウント」を選び、サーバー（`https://` は省く）・ユーザー名・
+/// パスワード・説明を入れて Enter で足す。
+fn add_caldav_account(cx: &mut TestAppContext, window: AnyWindowHandle, view: &Entity<MainView>) {
+    pick_sync_provider(cx, window, view, "caldav-pick-other");
+    // サーバーの欄から書き始める
     ui(cx, window, |window, cx| {
-        window.input("https://dav.example.com/", cx)
+        window.input("dav.example.com/", cx)
     });
     ui(cx, window, |window, cx| window.click("caldav-user", cx));
     ui(cx, window, |window, cx| window.input("me", cx));
     ui(cx, window, |window, cx| window.click("caldav-password", cx));
+    ui(cx, window, |window, cx| window.input("pw", cx));
+    ui(cx, window, |window, cx| window.click("caldav-name", cx));
     ui(cx, window, |window, cx| {
-        window.input("pw", cx);
+        window.input("チーム", cx);
         window.press("enter", cx);
     });
     cx.run_until_parked();
+    wait_sub_closed(cx, window);
+}
+
+/// 閉じた重ねたダイアログが消えるのを待つ。消えるまでは、下のダイアログを押せない。
+fn wait_sub_closed(cx: &mut TestAppContext, window: AnyWindowHandle) {
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    ui(cx, window, |_, _| {});
 }
 
 /// アカウントを足し、カレンダーを新しいワークスペースにつなぐと、サーバーのタスクが入り、
@@ -8049,7 +8090,12 @@ fn caldav_calendar_syncs_with_a_workspace(cx: &mut TestAppContext) {
     add_caldav_account(cx, window, &view);
     let accounts = store(cx, |s| s.caldav_accounts().unwrap());
     assert_eq!(accounts.len(), 1);
-    assert_eq!(accounts[0].label(), "me@dav.example.com");
+    assert_eq!(accounts[0].label(), "チーム");
+    ui(cx, window, |window, _| {
+        // 足したら重ねたダイアログは閉じ、「同期」の一覧にアカウントが出る
+        assert!(window.try_find("caldav-name").is_none());
+        assert!(window.find(("caldav-account", 0usize)).visible());
+    });
     use malakt_mahoz::caldav::Secrets;
     assert_eq!(secrets.get(&accounts[0].id).unwrap().as_deref(), Some("pw"));
     // つなぐまでは同期しない
@@ -8112,7 +8158,7 @@ fn caldav_calendar_syncs_with_a_workspace(cx: &mut TestAppContext) {
     assert_eq!(server.lock().objects.len(), 2);
 }
 
-/// サーバーに接続できなければ、アカウントは足さず、理由を欄の下に出す。
+/// サーバーに接続できなければ、アカウントは足さず、理由をダイアログの中に出す。
 #[gpui_kit::test]
 fn caldav_account_that_fails_is_not_added(cx: &mut TestAppContext) {
     start(cx);
@@ -8122,10 +8168,109 @@ fn caldav_account_that_fails_is_not_added(cx: &mut TestAppContext) {
     add_caldav_account(cx, window, &view);
     assert!(store(cx, |s| s.caldav_accounts().unwrap()).is_empty());
     ui(cx, window, |window, _| {
-        assert!(window.find("caldav-form-error").visible());
+        assert!(window.find("caldav-add-error").visible());
         // 欄は開いたまま、直してもう一度送れる
         assert!(window.find("caldav-url").visible());
     });
+    // キャンセルで閉じ、もう一度開くとプロバイダを選ぶところから始まる
+    ui(cx, window, |window, cx| window.click("caldav-cancel", cx));
+    ui(cx, window, |window, _| {
+        assert!(window.try_find("caldav-url").is_none())
+    });
+    wait_sub_closed(cx, window);
+    ui(cx, window, |window, cx| window.click("caldav-add", cx));
+    ui(cx, window, |window, _| {
+        assert!(window.find("caldav-pick-other").visible());
+        assert!(window.try_find("caldav-add-error").is_none());
+    });
+}
+
+/// 調べている間に Esc でダイアログを閉じたら、あとで答えが来てもアカウントは足さない。
+#[gpui_kit::test]
+fn caldav_account_closed_while_connecting_is_not_added(cx: &mut TestAppContext) {
+    start(cx);
+    caldav(cx, None);
+    let (window, view) = open(cx, wide());
+    cx.run_until_parked();
+    pick_sync_provider(cx, window, &view, "caldav-pick-other");
+    ui(cx, window, |window, cx| {
+        window.input("dav.example.com/", cx)
+    });
+    ui(cx, window, |window, cx| window.click("caldav-user", cx));
+    ui(cx, window, |window, cx| window.input("me", cx));
+    ui(cx, window, |window, cx| window.click("caldav-password", cx));
+    ui(cx, window, |window, cx| {
+        window.input("pw", cx);
+        window.press("enter", cx);
+        window.press("escape", cx);
+    });
+    cx.run_until_parked();
+    assert!(store(cx, |s| s.caldav_accounts().unwrap()).is_empty());
+    ui(cx, window, |window, _| {
+        // 閉じたのは重ねたダイアログだけで、設定は開いたまま
+        assert!(window.try_find("caldav-url").is_none());
+        assert!(window.find("caldav-add").visible());
+    });
+}
+
+/// サーバーが決まっているプロバイダ（Fastmail）は、サーバーの欄を出さずにそのサーバーへ
+/// つなぐ。リマインダーのない OS では、リマインダーを選べない。
+#[gpui_kit::test]
+fn caldav_provider_with_a_known_server_skips_the_server_field(cx: &mut TestAppContext) {
+    start(cx);
+    let tried = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let seen = tried.clone();
+    cx.update(|cx| {
+        cx.set_global(malakt_mahoz::caldav::CalDav {
+            secrets: std::sync::Arc::new(malakt_mahoz::caldav::MemorySecrets::default()),
+            discover: std::sync::Arc::new(move |url, _, _| {
+                seen.lock().unwrap().push(url.to_owned());
+                Err("ユーザー名かパスワードが違います".into())
+            }),
+            connect: std::sync::Arc::new(|_, _, _| {
+                Box::new(malakt_caldav::memory::Shared::new(
+                    malakt_caldav::memory::Memory::new(),
+                ))
+            }),
+        })
+    });
+    let (window, view) = open(cx, wide());
+    cx.run_until_parked();
+    ui(cx, window, |window, cx| window.click("open-settings", cx));
+    ui(cx, window, |window, cx| {
+        view.update(cx, |v, cx| {
+            v.show_appearance_section(malakt_mahoz::state::CustomizeSection::Sync, window, cx)
+        })
+    });
+    ui(cx, window, |window, cx| window.click("caldav-add", cx));
+    ui(cx, window, |window, _| {
+        assert!(window.try_find("caldav-pick-reminders").is_none());
+        assert!(window.find("caldav-pick-nextcloud").visible());
+    });
+    ui(cx, window, |window, cx| {
+        window.click("caldav-pick-fastmail", cx)
+    });
+    ui(cx, window, |window, _| {
+        assert!(window.try_find("caldav-url").is_none());
+        assert!(window.find("caldav-user").visible());
+    });
+    // 欄が空のまま押すと、足りないものを挙げる
+    ui(cx, window, |window, cx| window.click("caldav-connect", cx));
+    ui(cx, window, |window, _| {
+        assert!(window.find("caldav-add-error").visible());
+    });
+    assert!(tried.lock().unwrap().is_empty());
+    ui(cx, window, |window, cx| window.input("me@example.com", cx));
+    ui(cx, window, |window, cx| window.click("caldav-password", cx));
+    ui(cx, window, |window, cx| {
+        window.input("app-pw", cx);
+        window.press("enter", cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        *tried.lock().unwrap(),
+        ["https://caldav.fastmail.com/".to_owned()]
+    );
 }
 
 /// プラグインを待つ。コマンドは別のスレッドで動くので、終わるまで画面のタスクを回す。

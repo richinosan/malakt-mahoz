@@ -7099,6 +7099,12 @@ impl MainView {
             Some(SubModal::Font) => ("フォント", px(440.), self.font_picker(false, cx)),
             Some(SubModal::MonoFont) => ("等幅フォント", px(440.), self.font_picker(true, cx)),
             Some(SubModal::Scene) => ("背景の画像", px(680.), self.scene_picker(cx)),
+            Some(SubModal::AddAccount) => {
+                let (title, over) = self
+                    .caldav_settings
+                    .update(cx, |s, cx| (s.add_title(), s.add_dialog(cx)));
+                (title, px(440.), over)
+            }
             Some(SubModal::DonePeople) => ("知らせる担当者", px(400.), self.done_picker(true, cx)),
             Some(SubModal::DoneWorkspaces) => (
                 "知らせるワークスペース",
@@ -7626,7 +7632,10 @@ impl MainView {
                 ),
             ]);
         }
-        if let Some(name) = crate::reminders::setting_label(cx) {
+        // macOS のリマインダーは「同期」のアカウントに並べる。ここは Windows の通知の予約
+        if let Some(name) =
+            crate::reminders::setting_label(cx).filter(|_| !crate::reminders::is_app(cx))
+        {
             all.push(Setting::new(
                 Section::Notices,
                 SettingKey::Reminders,
@@ -7683,12 +7692,18 @@ impl MainView {
             Setting::new(
                 Section::Sync,
                 SettingKey::CalDav,
-                "CalDAV",
+                if crate::reminders::is_app(cx) {
+                    "CalDAV・リマインダー同期"
+                } else {
+                    "CalDAV 同期"
+                },
                 None,
                 list(&[
                     "同期",
+                    "CalDAV",
                     "サーバー",
                     "カレンダー",
+                    "Fastmail",
                     "Nextcloud",
                     "リマインダー",
                     "アカウント",
@@ -7810,9 +7825,14 @@ impl MainView {
                     .into_any_element();
             }
             SettingKey::CalDav => {
-                return edge(div().py_3())
-                    .child(self.caldav_settings.clone())
-                    .into_any_element();
+                return setting_line(
+                    item.name,
+                    item.note,
+                    self.caldav_settings.clone().into_any_element(),
+                    true,
+                    first,
+                    &theme,
+                );
             }
             SettingKey::Keys => {
                 return edge(div().py_3())
@@ -10624,6 +10644,13 @@ impl MainView {
 
 impl Render for MainView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // 「アカウントを追加」を Esc や外側で閉じたら、調べている途中の結果を捨てる。
+        // 前に描いたときに出していたかで見る（開いた直後は、まだ `sub_modal` に入っていない）
+        if self.sub_seen == Some(SubModal::AddAccount)
+            && self.sub_modal != Some(SubModal::AddAccount)
+        {
+            self.caldav_settings.update(cx, |s, cx| s.end_adding(cx));
+        }
         self.tick_dialog_motion(window);
         if self.embedded {
             return self.render_embedded(window, cx);

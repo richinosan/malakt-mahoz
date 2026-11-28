@@ -479,6 +479,10 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     CREATE INDEX notices_created ON notices(created_at);
     CREATE INDEX notices_task ON notices(task_id);
     "#,
+    // 27: CalDAV のアカウントに付ける名前（「説明」）。空なら `ユーザー名@ホスト名` で出す
+    r#"
+    ALTER TABLE caldav_accounts ADD COLUMN name TEXT NOT NULL DEFAULT '';
+    "#,
 ];
 
 pub(crate) fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
