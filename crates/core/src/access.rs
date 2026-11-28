@@ -6,9 +6,14 @@
 //! キーを付けずにつないできたものをどう扱うかは [`keyless`] で選ぶ。標準は「読み書き」で、
 //! アクセスキーを入れる前と同じ（ロックを解除している間だけ、すべてのツールが使える）。
 //!
+//! キーごとに、使える期間（開始と期限）と、使える時間帯（曜日と時刻、[`Window`]）も決められる。
+//! 期間と時間帯は、その PC の時刻で見る。
+//!
 //! キーの文字列（secret）は 256 ビットの乱数で、データベースにはそのハッシュと最後の 4 文字だけを置く。
 
+use chrono::{Datelike, NaiveDate, NaiveDateTime, Timelike};
 use rusqlite::{params, OptionalExtension};
+use serde::{Deserialize, Serialize};
 
 use crate::attachment::hash_of;
 use crate::model::{new_id, now_ms, Id};
@@ -78,6 +83,162 @@ pub fn set_keyless(store: &mut Store, keyless: Keyless) -> Result<()> {
     }
 }
 
+/// 1 つのキーに付けられる時間帯の数。
+pub const MAX_WINDOWS: usize = 20;
+/// 曜日の名前。0 が月曜。
+pub const WEEKDAYS: [&str; 7] = ["月", "火", "水", "木", "金", "土", "日"];
+
+/// キーを使える時間帯。`days` の曜日の `from` 分から `to` 分まで（0 時からの分）。
+/// `to` が `from` より前なら、日をまたぐ（22:00〜6:00 は、その曜日の 22 時から翌朝 6 時まで）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Window {
+    /// 0 が月曜、6 が日曜
+    pub days: Vec<u8>,
+    pub from: u32,
+    pub to: u32,
+}
+
+impl Window {
+    /// 毎日 9:00〜18:00。時間帯を足したときに最初に入るもの。
+    pub fn standard() -> Self {
+        Window {
+            days: (0..7).collect(),
+            from: 9 * 60,
+            to: 18 * 60,
+        }
+    }
+
+    fn check(&self) -> Result<()> {
+        let bad = |why: &str| {
+            Err(Error::Invalid(format!(
+                "アクセスキーの時間帯が正しくありません: {why}"
+            )))
+        };
+        if self.days.is_empty() {
+            return bad("曜日がありません");
+        }
+        if self.days.iter().any(|d| *d > 6) {
+            return bad("曜日は 0（月）から 6（日）です");
+        }
+        if self.from >= 24 * 60 || self.to > 24 * 60 {
+            return bad("時刻は 0:00 から 24:00 です");
+        }
+        if self.from == self.to || (self.to == 24 * 60 && self.from == 0) && self.days.len() == 7 {
+            return bad("始まりと終わりが同じです");
+        }
+        Ok(())
+    }
+
+    /// その時刻（その PC の時刻）が、この時間帯に入るか。
+    pub fn contains(&self, at: NaiveDateTime) -> bool {
+        let day = at.weekday().num_days_from_monday() as u8;
+        let minute = at.hour() * 60 + at.minute();
+        let on = |d: u8| self.days.contains(&d);
+        if self.from < self.to {
+            on(day) && (self.from..self.to).contains(&minute)
+        } else {
+            // 日をまたぐ。前の日に始まった分は、前の日の曜日で見る
+            (on(day) && minute >= self.from) || (on((day + 6) % 7) && minute < self.to)
+        }
+    }
+
+    /// 曜日の表示（「毎日」「平日」「月・水・金」「土日」）。
+    pub fn days_label(&self) -> String {
+        let mut days = self.days.clone();
+        days.sort_unstable();
+        days.dedup();
+        match days.as_slice() {
+            [0, 1, 2, 3, 4, 5, 6] => "毎日".into(),
+            [0, 1, 2, 3, 4] => "平日".into(),
+            [5, 6] => "土日".into(),
+            _ => days
+                .iter()
+                .map(|d| WEEKDAYS[*d as usize])
+                .collect::<Vec<_>>()
+                .join("・"),
+        }
+    }
+
+    /// 「平日 9:00〜18:00」の形。
+    pub fn label(&self) -> String {
+        format!(
+            "{} {}〜{}",
+            self.days_label(),
+            clock(self.from),
+            clock(self.to)
+        )
+    }
+}
+
+/// 0 時からの分を「9:05」の形にする。
+pub fn clock(minutes: u32) -> String {
+    format!("{}:{:02}", minutes / 60, minutes % 60)
+}
+
+/// 時刻の入力（`9`、`9:30`、`21時`、`24:00` など）を 0 時からの分にする。読めなければ `None`。
+pub fn parse_clock(input: &str) -> Option<u32> {
+    // 全角の数字とコロンは半角にする
+    let text: String = input
+        .trim()
+        .chars()
+        .map(|c| match c {
+            '０'..='９' => char::from(b'0' + (c as u32 - '０' as u32) as u8),
+            '：' => ':',
+            c => c,
+        })
+        .collect();
+    if matches!(text.as_str(), "24:00" | "24" | "24時") {
+        return Some(24 * 60);
+    }
+    // 数字だけなら、2 けたまでは時、4 けたは時と分（0930）
+    if !text.is_empty() && text.len() <= 4 && text.bytes().all(|b| b.is_ascii_digit()) {
+        let n: u32 = text.parse().ok()?;
+        let (h, m) = if text.len() <= 2 {
+            (n, 0)
+        } else {
+            (n / 100, n % 100)
+        };
+        return (h < 24 && m < 60).then_some(h * 60 + m);
+    }
+    crate::when::parse_time(&text)
+        .filter(|(h, m)| *h < 24 && *m < 60)
+        .map(|(h, m)| h * 60 + m)
+}
+
+/// 開始・期限の保存する形（`YYYY-MM-DD` か `YYYY-MM-DD HH:MM`）を読む。
+enum Moment {
+    Day(NaiveDate),
+    At(NaiveDateTime),
+}
+
+fn moment(text: &str) -> Option<Moment> {
+    if let Ok(at) = NaiveDateTime::parse_from_str(text, "%Y-%m-%d %H:%M") {
+        return Some(Moment::At(at));
+    }
+    NaiveDate::parse_from_str(text, "%Y-%m-%d")
+        .ok()
+        .map(Moment::Day)
+}
+
+fn clean_moment(text: Option<&str>, what: &str) -> Result<Option<String>> {
+    match text.map(str::trim).filter(|t| !t.is_empty()) {
+        None => Ok(None),
+        Some(t) if moment(t).is_some() => Ok(Some(t.to_owned())),
+        Some(t) => Err(Error::Invalid(format!(
+            "アクセスキーの{what}が正しくありません: {t}"
+        ))),
+    }
+}
+
+/// 「2026/12/31 18:00」の形にする。日付だけならその日のまま。
+pub fn moment_label(text: &str) -> String {
+    match moment(text) {
+        Some(Moment::At(at)) => at.format("%Y/%m/%d %H:%M").to_string(),
+        Some(Moment::Day(day)) => day.format("%Y/%m/%d").to_string(),
+        None => text.to_owned(),
+    }
+}
+
 /// 発行したキー。secret は持たない。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccessKey {
@@ -92,12 +253,66 @@ pub struct AccessKey {
     pub created_at: i64,
     /// 最後に使った時刻（ミリ秒。1 分ごとにだけ書き直す）
     pub used_at: Option<i64>,
+    /// 使えるようになる日時（`YYYY-MM-DD` ならその日の始まりから）。`None` は発行したときから
+    pub starts: Option<String>,
+    /// 期限（`YYYY-MM-DD` ならその日の終わりまで）。`None` は期限なし
+    pub expires: Option<String>,
+    /// 使える時間帯。どれかに入っていれば使える。空なら、いつでも
+    pub windows: Vec<Window>,
 }
 
 impl AccessKey {
     /// 画面に出す、伏せたキー。
     pub fn masked(&self) -> String {
         format!("{SECRET_PREFIX}••••{}", self.hint)
+    }
+
+    /// 期間か時間帯で絞っているか。
+    pub fn limited(&self) -> bool {
+        self.starts.is_some() || self.expires.is_some() || !self.windows.is_empty()
+    }
+
+    /// その時刻（その PC の時刻）に、期間と時間帯の上で使えるか。
+    pub fn usable_at(&self, at: NaiveDateTime) -> std::result::Result<(), Denied> {
+        if let Some(expires) = self.expires.as_deref() {
+            let over = match moment(expires) {
+                Some(Moment::Day(day)) => at.date() > day,
+                Some(Moment::At(end)) => at >= end,
+                // 読めない期限（手で書き換えたなど）は、切れているものとして扱う
+                None => true,
+            };
+            if over {
+                return Err(Denied::Expired {
+                    name: self.name.clone(),
+                    until: moment_label(expires),
+                });
+            }
+        }
+        if let Some(starts) = self.starts.as_deref() {
+            let early = match moment(starts) {
+                Some(Moment::Day(day)) => at.date() < day,
+                Some(Moment::At(start)) => at < start,
+                None => true,
+            };
+            if early {
+                return Err(Denied::NotYet {
+                    name: self.name.clone(),
+                    from: moment_label(starts),
+                });
+            }
+        }
+        if !self.windows.is_empty() && !self.windows.iter().any(|w| w.contains(at)) {
+            return Err(Denied::OutsideHours {
+                name: self.name.clone(),
+                hours: self
+                    .windows
+                    .iter()
+                    .map(Window::label)
+                    .collect::<Vec<_>>()
+                    .join("、"),
+            });
+        }
+        Ok(())
     }
 }
 
@@ -114,6 +329,11 @@ pub struct KeyPatch {
     pub name: Option<String>,
     pub read_only: Option<bool>,
     pub while_locked: Option<bool>,
+    /// 開始。`Some(None)` で外す
+    pub starts: Option<Option<String>>,
+    /// 期限。`Some(None)` で外す
+    pub expires: Option<Option<String>>,
+    pub windows: Option<Vec<Window>>,
 }
 
 /// 使ってよいと分かったときの、できること。
@@ -126,7 +346,7 @@ pub struct Grant {
 }
 
 /// 使えない理由。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Denied {
     /// アプリがロックしている（または動いていない）
     Locked,
@@ -134,6 +354,37 @@ pub enum Denied {
     NeedsKey,
     /// キーが違う、または失効している
     BadKey,
+    /// キーの期限が切れている
+    Expired { name: String, until: String },
+    /// キーを使えるようになる前
+    NotYet { name: String, from: String },
+    /// キーを使える時間帯の外
+    OutsideHours { name: String, hours: String },
+}
+
+impl std::fmt::Display for Denied {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Denied::Locked => f.write_str(
+                "malakt-mahoz はロックされています。アプリを開いて、ロックを解除してください。",
+            ),
+            Denied::NeedsKey => f.write_str(
+                "malakt-mahoz にはアクセスキーが必要です。アプリの設定の「アクセスキー」でキーを発行して、環境変数 MALAKT_MAHOZ_KEY に入れてください。",
+            ),
+            Denied::BadKey => f.write_str(
+                "アクセスキーが違うか、失効しています。アプリの設定の「アクセスキー」でキーを発行し直してください。",
+            ),
+            Denied::Expired { name, until } => {
+                write!(f, "アクセスキー「{name}」の期限が切れています（{until} まで）。")
+            }
+            Denied::NotYet { name, from } => {
+                write!(f, "アクセスキー「{name}」は {from} から使えます。")
+            }
+            Denied::OutsideHours { name, hours } => {
+                write!(f, "アクセスキー「{name}」を使える時間帯は {hours} です。")
+            }
+        }
+    }
 }
 
 fn clean_name(name: &str) -> Result<String> {
@@ -149,9 +400,11 @@ fn clean_name(name: &str) -> Result<String> {
     Ok(name)
 }
 
-const COLUMNS: &str = "id, name, hint, read_only, while_locked, created_at, used_at";
+const COLUMNS: &str =
+    "id, name, hint, read_only, while_locked, created_at, used_at, starts, expires, windows";
 
 fn key_row(r: &rusqlite::Row) -> rusqlite::Result<AccessKey> {
+    let windows: String = r.get(9)?;
     Ok(AccessKey {
         id: r.get(0)?,
         name: r.get(1)?,
@@ -160,6 +413,16 @@ fn key_row(r: &rusqlite::Row) -> rusqlite::Result<AccessKey> {
         while_locked: r.get(4)?,
         created_at: r.get(5)?,
         used_at: r.get(6)?,
+        starts: r.get(7)?,
+        expires: r.get(8)?,
+        // 読めない時間帯（手で書き換えたなど）は、どの時刻にも入らないものにする
+        windows: serde_json::from_str(&windows).unwrap_or_else(|_| {
+            vec![Window {
+                days: Vec::new(),
+                from: 0,
+                to: 0,
+            }]
+        }),
     })
 }
 
@@ -190,6 +453,9 @@ impl Store {
             while_locked,
             created_at: now_ms(),
             used_at: None,
+            starts: None,
+            expires: None,
+            windows: Vec::new(),
         };
         self.conn.execute(
             "INSERT INTO access_keys(id, name, secret_hash, hint, read_only, while_locked, \
@@ -238,9 +504,43 @@ impl Store {
         if let Some(while_locked) = patch.while_locked {
             key.while_locked = while_locked;
         }
+        if let Some(starts) = &patch.starts {
+            key.starts = clean_moment(starts.as_deref(), "開始")?;
+        }
+        if let Some(expires) = &patch.expires {
+            key.expires = clean_moment(expires.as_deref(), "期限")?;
+        }
+        if let Some(windows) = &patch.windows {
+            if windows.len() > MAX_WINDOWS {
+                return Err(Error::Invalid(format!(
+                    "アクセスキーの時間帯は {MAX_WINDOWS} 個までです"
+                )));
+            }
+            for window in windows {
+                window.check()?;
+            }
+            key.windows = windows
+                .iter()
+                .map(|w| {
+                    let mut w = w.clone();
+                    w.days.sort_unstable();
+                    w.days.dedup();
+                    w
+                })
+                .collect();
+        }
         self.conn.execute(
-            "UPDATE access_keys SET name = ?2, read_only = ?3, while_locked = ?4 WHERE id = ?1",
-            params![key.id, key.name, key.read_only, key.while_locked],
+            "UPDATE access_keys SET name = ?2, read_only = ?3, while_locked = ?4, starts = ?5, \
+             expires = ?6, windows = ?7 WHERE id = ?1",
+            params![
+                key.id,
+                key.name,
+                key.read_only,
+                key.while_locked,
+                key.starts,
+                key.expires,
+                serde_json::to_string(&key.windows)?
+            ],
         )?;
         Ok(key)
     }
@@ -303,6 +603,9 @@ pub fn check(
     let Some(mut key) = store.access_key_by_secret(secret)? else {
         return Ok(Err(Denied::BadKey));
     };
+    if let Err(denied) = key.usable_at(local(now)) {
+        return Ok(Err(denied));
+    }
     if !key.while_locked && !lock::allows_outside(store, now)? {
         return Ok(Err(Denied::Locked));
     }
@@ -318,6 +621,64 @@ pub fn check(
         read_only: key.read_only,
         key: Some(key),
     }))
+}
+
+/// 期限を、今からの長さで選ぶときの選択肢。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Expiry {
+    Hour,
+    Today,
+    Week,
+    Month,
+    Quarter,
+}
+
+impl Expiry {
+    pub const ALL: [Expiry; 5] = [
+        Expiry::Hour,
+        Expiry::Today,
+        Expiry::Week,
+        Expiry::Month,
+        Expiry::Quarter,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Expiry::Hour => "1 時間",
+            Expiry::Today => "今日の終わりまで",
+            Expiry::Week => "7 日",
+            Expiry::Month => "30 日",
+            Expiry::Quarter => "90 日",
+        }
+    }
+
+    /// `now`（その PC の時刻）から見た期限。保存する形（`YYYY-MM-DD` か `YYYY-MM-DD HH:MM`）。
+    pub fn until(self, now: NaiveDateTime) -> String {
+        let at = |t: NaiveDateTime| t.format("%Y-%m-%d %H:%M").to_string();
+        let days = |n: i64| at(now + chrono::Duration::days(n));
+        match self {
+            Expiry::Hour => at(now + chrono::Duration::hours(1)),
+            Expiry::Today => now.date().format("%Y-%m-%d").to_string(),
+            Expiry::Week => days(7),
+            Expiry::Month => days(30),
+            Expiry::Quarter => days(90),
+        }
+    }
+}
+
+/// 今の、その PC の時刻。
+pub fn now_local() -> NaiveDateTime {
+    chrono::Local::now().naive_local()
+}
+
+/// UNIX 秒を、その PC の時刻にする。
+fn local(now: i64) -> NaiveDateTime {
+    use chrono::TimeZone;
+    chrono::Local
+        .timestamp_opt(now, 0)
+        .earliest()
+        .map(|t| t.naive_local())
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -520,6 +881,198 @@ mod tests {
         assert_eq!(grant.key.unwrap().used_at, Some(1_060_000));
     }
 
+    fn at(text: &str) -> NaiveDateTime {
+        NaiveDateTime::parse_from_str(text, "%Y-%m-%d %H:%M").unwrap()
+    }
+
+    #[test]
+    fn windows_by_weekday_and_time() {
+        // 2026-11-30 は月曜
+        let weekdays = Window {
+            days: vec![0, 1, 2, 3, 4],
+            from: 9 * 60,
+            to: 18 * 60,
+        };
+        assert!(weekdays.contains(at("2026-11-30 09:00")));
+        assert!(weekdays.contains(at("2026-11-30 17:59")));
+        assert!(!weekdays.contains(at("2026-11-30 18:00")));
+        assert!(!weekdays.contains(at("2026-11-30 08:59")));
+        // 土曜
+        assert!(!weekdays.contains(at("2026-12-05 10:00")));
+        assert_eq!(weekdays.label(), "平日 9:00〜18:00");
+
+        // 日をまたぐ: 金曜の 22 時から土曜の 6 時まで
+        let night = Window {
+            days: vec![4],
+            from: 22 * 60,
+            to: 6 * 60,
+        };
+        assert!(night.contains(at("2026-12-04 22:00")));
+        assert!(night.contains(at("2026-12-05 05:59")));
+        assert!(!night.contains(at("2026-12-05 06:00")));
+        assert!(!night.contains(at("2026-12-05 22:30")));
+        assert!(!night.contains(at("2026-12-04 05:00")));
+        assert_eq!(night.label(), "金 22:00〜6:00");
+
+        let all = Window {
+            days: (0..7).collect(),
+            from: 0,
+            to: 24 * 60,
+        };
+        assert!(all.contains(at("2026-12-06 23:59")));
+        assert_eq!(all.label(), "毎日 0:00〜24:00");
+        assert_eq!(Window::standard().label(), "毎日 9:00〜18:00");
+        assert_eq!(
+            Window {
+                days: vec![6, 5],
+                from: 600,
+                to: 630
+            }
+            .days_label(),
+            "土日"
+        );
+        assert_eq!(
+            Window {
+                days: vec![0, 2, 4],
+                from: 0,
+                to: 1
+            }
+            .days_label(),
+            "月・水・金"
+        );
+        assert_eq!(parse_clock("9"), Some(540));
+        assert_eq!(parse_clock("21時半"), Some(21 * 60 + 30));
+        assert_eq!(parse_clock("24:00"), Some(1440));
+        assert_eq!(parse_clock("０９３０"), Some(570));
+        assert_eq!(parse_clock("25"), None);
+        assert_eq!(parse_clock("あとで"), None);
+    }
+
+    #[test]
+    fn period_and_hours_of_a_key() {
+        let mut s = Store::open_in_memory().unwrap();
+        let issued = s.issue_access_key("夜間", false, false).unwrap();
+        let id = issued.key.id.clone();
+        let key = |s: &Store| s.access_key(&id).unwrap();
+        assert!(!key(&s).limited());
+        assert!(key(&s).usable_at(at("1999-01-01 00:00")).is_ok());
+
+        let patch = KeyPatch {
+            starts: Some(Some("2026-12-01".into())),
+            expires: Some(Some("2026-12-31 18:00".into())),
+            windows: Some(vec![Window {
+                days: vec![4, 0, 0],
+                from: 9 * 60,
+                to: 18 * 60,
+            }]),
+            ..Default::default()
+        };
+        s.update_access_key(&id, &patch).unwrap();
+        let k = key(&s);
+        assert!(k.limited());
+        // 曜日はそろえて、重なりを除く
+        assert_eq!(k.windows[0].days, vec![0, 4]);
+        assert_eq!(
+            k.usable_at(at("2026-11-30 10:00")),
+            Err(Denied::NotYet {
+                name: "夜間".into(),
+                from: "2026/12/01".into()
+            })
+        );
+        // 12/7 は月曜
+        assert!(k.usable_at(at("2026-12-07 10:00")).is_ok());
+        let outside = k.usable_at(at("2026-12-08 10:00")).unwrap_err();
+        assert_eq!(
+            outside.to_string(),
+            "アクセスキー「夜間」を使える時間帯は 月・金 9:00〜18:00 です。"
+        );
+        assert!(k.usable_at(at("2026-12-07 08:00")).is_err());
+        assert_eq!(
+            k.usable_at(at("2026-12-31 18:00")).unwrap_err().to_string(),
+            "アクセスキー「夜間」の期限が切れています（2026/12/31 18:00 まで）。"
+        );
+        // 日付だけの期限は、その日の終わりまで
+        let patch = KeyPatch {
+            starts: Some(None),
+            expires: Some(Some("2026-12-31".into())),
+            windows: Some(Vec::new()),
+            ..Default::default()
+        };
+        s.update_access_key(&id, &patch).unwrap();
+        let k = key(&s);
+        assert_eq!(k.starts, None);
+        assert!(k.usable_at(at("2026-12-31 23:59")).is_ok());
+        assert!(k.usable_at(at("2027-01-01 00:00")).is_err());
+
+        // 読めない日時と時間帯は、何も変えずにエラーにする
+        for patch in [
+            KeyPatch {
+                expires: Some(Some("来年".into())),
+                ..Default::default()
+            },
+            KeyPatch {
+                starts: Some(Some("2026-13-01".into())),
+                ..Default::default()
+            },
+            KeyPatch {
+                windows: Some(vec![Window {
+                    days: vec![],
+                    from: 0,
+                    to: 60,
+                }]),
+                ..Default::default()
+            },
+            KeyPatch {
+                windows: Some(vec![Window {
+                    days: vec![7],
+                    from: 0,
+                    to: 60,
+                }]),
+                ..Default::default()
+            },
+            KeyPatch {
+                windows: Some(vec![Window {
+                    days: vec![1],
+                    from: 600,
+                    to: 600,
+                }]),
+                ..Default::default()
+            },
+            KeyPatch {
+                windows: Some(vec![Window::standard(); MAX_WINDOWS + 1]),
+                ..Default::default()
+            },
+        ] {
+            assert!(s.update_access_key(&id, &patch).is_err(), "{patch:?}");
+        }
+        assert_eq!(key(&s), k);
+        // 空の文字は、外すのと同じ
+        let patch = KeyPatch {
+            expires: Some(Some(" ".into())),
+            ..Default::default()
+        };
+        assert_eq!(s.update_access_key(&id, &patch).unwrap().expires, None);
+
+        // 期限の切れたキーは、ロックより先に断る
+        let patch = KeyPatch {
+            expires: Some(Some("2000-01-01".into())),
+            ..Default::default()
+        };
+        s.update_access_key(&id, &patch).unwrap();
+        assert!(matches!(
+            check(&mut s, Some(&issued.secret), 1_000_000_000).unwrap(),
+            Err(Denied::Expired { .. })
+        ));
+        // 読めない時間帯（手で書き換えたなど）は、いつも時間帯の外
+        s.conn
+            .execute("UPDATE access_keys SET expires = NULL, windows = 'x'", [])
+            .unwrap();
+        assert!(matches!(
+            check(&mut s, Some(&issued.secret), 1_000_000_000).unwrap(),
+            Err(Denied::OutsideHours { .. })
+        ));
+    }
+
     #[test]
     fn read_only_blocks_every_write() {
         let mut s = Store::open_in_memory().unwrap();
@@ -531,5 +1084,14 @@ mod tests {
         assert!(read.is_empty());
         // 終わったら、また書ける
         s.create_workspace(None, "冬のイベント").unwrap();
+    }
+    #[test]
+    fn expiry_from_now() {
+        let now = NaiveDateTime::parse_from_str("2026-11-28 21:40", "%Y-%m-%d %H:%M").unwrap();
+        assert_eq!(Expiry::Hour.until(now), "2026-11-28 22:40");
+        assert_eq!(Expiry::Today.until(now), "2026-11-28");
+        assert_eq!(Expiry::Week.until(now), "2026-12-05 21:40");
+        assert_eq!(Expiry::Month.until(now), "2026-12-28 21:40");
+        assert_eq!(Expiry::Quarter.until(now), "2027-02-26 21:40");
     }
 }

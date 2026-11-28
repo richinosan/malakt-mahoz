@@ -6249,7 +6249,8 @@ impl MainView {
             .capture_any_mouse_down(cx.listener(|this, _, _, _| {
                 this.outside_busy = this.person_naming.is_some()
                     || this.preset_naming.is_some()
-                    || this.key_naming.is_some();
+                    || this.key_naming.is_some()
+                    || this.key_limit_editing.is_some();
             }))
             .on_click(cx.listener(|this, _, window, cx| this.dismiss_outside(window, cx)))
             .child(
@@ -7015,14 +7016,7 @@ impl MainView {
         }
         all.extend([
             Setting::new(
-                Section::Mcp,
-                SettingKey::McpKeyless,
-                "キーなしの接続",
-                None,
-                list(&["MCP", "アクセスキー", "エージェント", "Claude Code"]),
-            ),
-            Setting::new(
-                Section::Mcp,
+                Section::AccessKeys,
                 SettingKey::McpKeys,
                 "アクセスキー",
                 None,
@@ -7034,7 +7028,17 @@ impl MainView {
                     "Claude Code",
                     "Cursor",
                     "Codex",
+                    "期限",
+                    "時間帯",
+                    "セキュリティ",
                 ]),
+            ),
+            Setting::new(
+                Section::AccessKeys,
+                SettingKey::McpKeyless,
+                "キーなしの接続",
+                None,
+                list(&["MCP", "アクセスキー", "エージェント", "Claude Code"]),
             ),
         ]);
         all.extend([
@@ -7233,12 +7237,7 @@ impl MainView {
             }
             SettingKey::McpKeys => {
                 return edge(div().py_3())
-                    .child(
-                        col()
-                            .gap_2()
-                            .child(div().text_sm().child(item.name))
-                            .child(self.access_keys_editor(cx)),
-                    )
+                    .child(self.access_keys_editor(cx))
                     .into_any_element();
             }
             _ => {}

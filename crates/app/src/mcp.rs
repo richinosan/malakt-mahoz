@@ -34,16 +34,29 @@ const PROTOCOLS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
 
 pub const LOCKED: &str =
     "malakt-mahoz はロックされています。アプリを開いて、ロックを解除してください。";
-pub const NEEDS_KEY: &str = "malakt-mahoz にはアクセスキーが必要です。アプリの設定の「MCP」でキーを発行して、環境変数 MALAKT_MAHOZ_KEY に入れてください。";
+pub const NEEDS_KEY: &str = "malakt-mahoz にはアクセスキーが必要です。アプリの設定の「アクセスキー」でキーを発行して、環境変数 MALAKT_MAHOZ_KEY に入れてください。";
 pub const BAD_KEY: &str =
-    "アクセスキーが違うか、失効しています。アプリの設定の「MCP」でキーを発行し直してください。";
+    "アクセスキーが違うか、失効しています。アプリの設定の「アクセスキー」でキーを発行し直してください。";
 
 /// 使えない理由の文。
-pub fn denied_text(denied: Denied) -> &'static str {
-    match denied {
-        Denied::Locked => LOCKED,
-        Denied::NeedsKey => NEEDS_KEY,
-        Denied::BadKey => BAD_KEY,
+pub fn denied_text(denied: &Denied) -> String {
+    denied.to_string()
+}
+
+/// ツールを実行できなかった理由。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Refused {
+    /// ロック・アクセスキー（期限・時間帯・読み取りのみ）で使えない。コマンドの終了コードは 3
+    Denied(String),
+    /// ツールが失敗した。コマンドの終了コードは 1
+    Failed(String),
+}
+
+impl Refused {
+    pub fn text(self) -> String {
+        match self {
+            Refused::Denied(text) | Refused::Failed(text) => text,
+        }
     }
 }
 
@@ -118,25 +131,37 @@ pub fn call_tool(
     name: &str,
     args: &Value,
 ) -> Result<String, String> {
-    let core = |e: malakt_core::Error| e.to_string();
+    call_tool_checked(store, now, key, name, args).map_err(Refused::text)
+}
+
+/// [`call_tool`] と同じ。使えなかったのか、ツールが失敗したのかを分けて返す。
+pub fn call_tool_checked(
+    store: &mut Store,
+    now: i64,
+    key: Option<&str>,
+    name: &str,
+    args: &Value,
+) -> Result<String, Refused> {
+    let core = |e: malakt_core::Error| Refused::Failed(e.to_string());
     let grant = access::check(store, key, now)
         .map_err(core)?
-        .map_err(|denied| denied_text(denied).to_owned())?;
+        .map_err(|denied| Refused::Denied(denied_text(&denied)))?;
     if grant.read_only {
         if !reads(name) {
-            return Err(match &grant.key {
+            return Err(Refused::Denied(match &grant.key {
                 Some(key) => format!(
                     "アクセスキー「{}」は読み取りのみです。{name} は使えません。",
                     key.name
                 ),
                 None => format!("アクセスキーなしの接続は読み取りのみです。{name} は使えません。"),
-            });
+            }));
         }
         return store
             .read_only(|store| run_tool(store, name, args))
-            .map_err(core)?;
+            .map_err(core)?
+            .map_err(Refused::Failed);
     }
-    run_tool(store, name, args)
+    run_tool(store, name, args).map_err(Refused::Failed)
 }
 
 fn run_tool(store: &mut Store, name: &str, args: &Value) -> Result<String, String> {
@@ -831,6 +856,13 @@ mod tests {
         // 失効させると、すぐ使えなくなる
         app.revoke_access_key(&key.key.id).unwrap();
         assert_eq!(failure(&mut s, "list_tasks", json!({})), BAD_KEY);
+    }
+
+    #[test]
+    fn denials_read_the_same_everywhere() {
+        assert_eq!(denied_text(&Denied::Locked), LOCKED);
+        assert_eq!(denied_text(&Denied::NeedsKey), NEEDS_KEY);
+        assert_eq!(denied_text(&Denied::BadKey), BAD_KEY);
     }
 
     #[test]
