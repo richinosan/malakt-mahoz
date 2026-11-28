@@ -2047,6 +2047,31 @@ fn the_print_dialog_previews_the_pages(cx: &mut TestAppContext) {
     assert!(setup.landscape);
 }
 
+/// 設定を変えてすぐ元に戻したら、プレビューは作り直さない。
+#[gpui_kit::test]
+fn a_setting_changed_back_keeps_the_preview(cx: &mut TestAppContext) {
+    let (world, window, tab, fake, _dir) = pdf_page(cx);
+    press_in_page(cx, &world, window, tab, key("ctrl-p", "cmd-p"));
+    cx.executor().advance_clock(browser::PREVIEW_WAIT);
+    cx.run_until_parked();
+    let path = std::path::PathBuf::from(last_pdf(&fake).trim_start_matches("pdf "));
+    write_pdf(&path, 1, true);
+    fake.pdf.borrow_mut().take().unwrap()(Ok(()));
+    cx.run_until_parked();
+    let made = fake.pdf_setup.borrow().len();
+    ui(cx, window, |window, cx| {
+        window.click("browser-print-layout", cx)
+    });
+    pick(cx, window, "横");
+    ui(cx, window, |window, cx| {
+        window.click("browser-print-layout", cx)
+    });
+    pick(cx, window, "縦");
+    cx.executor().advance_clock(browser::PREVIEW_WAIT);
+    cx.run_until_parked();
+    assert_eq!(fake.pdf_setup.borrow().len(), made, "縦のプレビューのまま");
+}
+
 /// フォントを埋め込めないページは、保存する前にプレビューで分かる。
 #[gpui_kit::test]
 fn the_preview_shows_why_it_cannot_be_saved(cx: &mut TestAppContext) {

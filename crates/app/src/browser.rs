@@ -908,7 +908,7 @@ impl Terms {
             PdfJob {
                 id,
                 target: PdfFor::Preview(gen),
-                path: crate::print_preview::temp_path(gen),
+                path: crate::print_preview::temp_path(),
                 setup: setup.clone(),
                 counting: !setup.every_page() && setup.per_sheet() > 1,
                 pages: None,
@@ -2348,6 +2348,8 @@ impl PrintDialog {
         let mut setup = self.setup.clone();
         setup.more = false;
         if self.previewed.as_ref() == Some(&setup) {
+            // 変えてすぐ元に戻したときは、待っている作り直しをやめる
+            self.preview_wait = None;
             return;
         }
         self.preview_wait = Some(cx.spawn(async move |this, cx| {
