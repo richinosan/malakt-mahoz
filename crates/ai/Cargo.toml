@@ -1,6 +1,6 @@
 [package]
 name = "malakt-ai"
-description = "malakt-mahoz の AI チャット（UI 非依存）。API の呼び出し、タスクを操作するツール、シェル"
+description = "malakt-mahoz の AI bot（UI 非依存）。API の呼び出し、タスクを操作するツール、シェル"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

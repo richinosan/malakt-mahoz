@@ -266,7 +266,7 @@ const QUIET: &[(&str, &str)] = &[
     ("comment-review", "コメントが空"),
 ];
 
-/// AI チャットの中は tests/ai.rs で、ターミナルの中は tests/term.rs で確かめる。
+/// AI bot の中は tests/ai.rs で、ターミナルの中は tests/term.rs で確かめる。
 /// ここでは開け閉めだけを見る。
 fn ai_inside(name: &str) -> bool {
     name.starts_with("ai-") && name != "ai-toggle" || name.starts_with("term-")

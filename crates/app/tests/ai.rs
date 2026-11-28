@@ -1,4 +1,4 @@
-//! AI チャットの、画面を通したシナリオテスト。
+//! AI bot の、画面を通したシナリオテスト。
 //! API とキーチェーンと gh は差し替え、通信はしない。シェルのコマンドは実際に動かす。
 
 use std::collections::VecDeque;
@@ -267,7 +267,7 @@ fn wait(cx: &mut TestAppContext, what: &str, f: impl Fn(&Session) -> bool) {
     panic!("待っても起きませんでした: {what}");
 }
 
-/// AI チャットを開き、右のパネルを返す。
+/// AI bot を開き、右のパネルを返す。
 fn open_chat(
     cx: &mut TestAppContext,
     window: AnyWindowHandle,
@@ -4106,7 +4106,7 @@ fn a_workspace_is_attached_from_the_menu_or_a_pasted_link(cx: &mut TestAppContex
     let home = new_workspace(cx, None, "家");
     let (window, view) = open(cx, wide());
 
-    // 「AI チャットに添える」は、チャットを開いて添える
+    // 「AI bot に添える」は、チャットを開いて添える
     ui(cx, window, |window, cx| {
         view.update(cx, |v, cx| v.attach_workspace_to_chat(&home, window, cx));
     });
@@ -4580,7 +4580,7 @@ fn offer_ai(cx: &mut TestAppContext, view: &Entity<MainView>) {
     cx.run_until_parked();
 }
 
-/// API キーがないまま起動すると、AI のおすすめが出る。「AI チャットを開く」で右にチャットが開き、
+/// API キーがないまま起動すると、AI のおすすめが出る。「AI bot を開く」で右にチャットが開き、
 /// そこから API キーの設定に進める。
 #[gpui_kit::test]
 fn the_ai_promo_opens_the_chat_without_a_key(cx: &mut TestAppContext) {

@@ -13,7 +13,7 @@
 | | |
 | --- | --- |
 | ![ホーム](docs/images/home.png)<br><sub>ホーム</sub> | ![タスクの詳細](docs/images/detail.png)<br><sub>タスクの詳細</sub> |
-| ![ペイン](docs/images/panes.png)<br><sub>ペイン</sub> | ![AI チャット](docs/images/ai.png)<br><sub>AI チャット</sub> |
+| ![ペイン](docs/images/panes.png)<br><sub>ペイン</sub> | ![AI bot](docs/images/ai.png)<br><sub>AI bot</sub> |
 | ![ターミナル](docs/images/terminal.png)<br><sub>ターミナル</sub> | ![すべてのタスク](docs/images/all.png)<br><sub>すべてのタスク</sub> |
 
 ![カスタマイズ](docs/images/themes.png)
@@ -45,7 +45,7 @@
 - **CalDAV との同期**（標準はオフ）: Nextcloud などのサーバーのタスクを、ワークスペースと両方向に同期（[docs/caldav.md](docs/caldav.md)）
 - **自動アップデート**: GitHub Releases の新しい版に入れ替え（[docs/update.md](docs/update.md)）
 - **完了チケット**: コマンドからタスクを完了にする（[docs/tickets.md](docs/tickets.md)）
-- **AI チャット**: `Ctrl/⌘ + J`（[docs/ai.md](docs/ai.md)）
+- **AI bot**: `Ctrl/⌘ + J`（[docs/ai.md](docs/ai.md)）
 - **ターミナル**: アプリの中で WSL や zsh を開き、Claude Code などをそのまま動かす（[docs/terminal.md](docs/terminal.md)）
 - **MCP サーバー**: Claude Code などのエージェントからタスクを読み書き。アクセスキーで、エージェントごとに読み取りのみ・ロック中も使えるかを選べる（[docs/mcp.md](docs/mcp.md)）
 - **プラグイン**: WASM のプラグインで、タスクやワークスペースの右クリックにコマンドを足す。有効にするのは、許すことを確かめて承認したものだけ（[docs/plugins.md](docs/plugins.md)）
@@ -88,7 +88,7 @@ mise run api        # API の定義（api/*.tsp）からツールの一覧を作
 - [繰り返しのタスク](docs/repeat.md)
 - [定時タスク](docs/schedule.md)
 - [完了チケット](docs/tickets.md)
-- [AI チャット](docs/ai.md)
+- [AI bot](docs/ai.md)
 - [ターミナル](docs/terminal.md)
 - [Claude Code などから使う（MCP）](docs/mcp.md)
 - [API の定義（TypeSpec）](docs/api.md)

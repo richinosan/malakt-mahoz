@@ -1,4 +1,4 @@
-//! AI チャットとシェルの画面。メインのウィンドウの右にも、別のウィンドウにも出せる。
+//! AI bot とシェルの画面。メインのウィンドウの右にも、別のウィンドウにも出せる。
 
 use std::ops::Range;
 use std::time::Duration;
@@ -2077,14 +2077,7 @@ impl AiPane {
         } else {
             bar()
                 .child(app_icon("sparkles").size_4())
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .pl_1()
-                        .text_sm()
-                        .child("AI チャット"),
-                )
+                .child(div().flex_1().min_w_0().pl_1().text_sm().child("AI bot"))
                 .children(badge)
                 .child(feel::gloss(
                     icon_button("ai-chats", "history", "会話の一覧").on_click(cx.listener(
@@ -2601,7 +2594,7 @@ impl AiPane {
         let title: SharedString = match self.mode {
             // タブの場所だけのウィンドウは、見ているタブの名前
             PaneMode::ShellWindow => term::shared(cx).read(cx).active_label(),
-            PaneMode::ChatWindow => "AI チャット".into(),
+            PaneMode::ChatWindow => "AI bot".into(),
             PaneMode::Docked => return None,
         };
         // OS がタイトルバーを描いているときは、そちらに任せる

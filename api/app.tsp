@@ -79,7 +79,7 @@ model ColumnSetting {
 
 /**
  * 今の画面の状態を返す。
- * 開いている場所、開いているタスク、一覧の絞り込みと並び順、表の列、左のメニューと詳細の幅、AI チャットとシェル、ペイン、ロック・リマインダー・自動アップデートの設定、開けるシェル、最前面に表示しているウィンドウ（on_top）。
+ * 開いている場所、開いているタスク、一覧の絞り込みと並び順、表の列、左のメニューと詳細の幅、AI bot とシェル、ペイン、ロック・リマインダー・自動アップデートの設定、開けるシェル、最前面に表示しているウィンドウ（on_top）。
  */
 @view
 op get_screen(): void;
@@ -139,7 +139,7 @@ op set_columns(columns?: ColumnSetting[], order?: Column[]): void;
 
 /**
  * 画面の部分を出す・隠す、幅を変える。
- * sidebar は左のメニュー、chat は AI チャット、shell はシェルの場所（AI のタブ、ターミナル、ブラウザのタブ）。
+ * sidebar は左のメニュー、chat は AI bot、shell はシェルの場所（AI のタブ、ターミナル、ブラウザのタブ）。
  * 幅は null で最初の幅。
  * expanded は左のメニューのワークスペースを開く・閉じる（ID と true / false）。
  */
@@ -221,7 +221,7 @@ op open_window(kind?: "main" | "pomodoro" | "timer"): void;
 
 /**
  * ウィンドウを常に最前面に表示する（on が true）、または元に戻す（false）。
- * window は task（操作しているタスクのウィンドウ。標準）、pomodoro（ポモドーロ）、timer（タイマー）、chat（AI チャットだけのウィンドウ）、shell（シェルだけのウィンドウ）。
+ * window は task（操作しているタスクのウィンドウ。標準）、pomodoro（ポモドーロ）、timer（タイマー）、chat（AI bot だけのウィンドウ）、shell（シェルだけのウィンドウ）。
  * 開いていないウィンドウは、次に開いたときに最前面に出す。
  * 今の状態は get_screen の on_top にある。
  */
@@ -410,14 +410,14 @@ op set_appearance(
 ): void;
 
 /**
- * AI チャットの設定（サービス、モデル、effort、振り分けのモデル、新しいタスクを整える、コメントから進捗を更新する、GitHub の定期チェック、オート実行）を返す。
+ * AI bot の設定（サービス、モデル、effort、振り分けのモデル、新しいタスクを整える、コメントから進捗を更新する、GitHub の定期チェック、オート実行）を返す。
  * AI のルールは list_ai_rules で読む。
  */
 @session
 op get_ai_settings(): void;
 
 /**
- * AI チャットの設定を変える。
+ * AI bot の設定を変える。
  * 渡した項目だけが変わり、次のメッセージから使う。
  * provider は claude / chatgpt / opencode / opencode_go / cursor。
  * effort はモデルごとに覚え、model を変えるとそのモデルで前に選んだ effort に戻る（model と effort を一緒に渡すと、新しいモデルの effort になる）。

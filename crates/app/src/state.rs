@@ -522,7 +522,7 @@ pub struct MainView {
     /// 時間で閉じる知らせの時計。失敗（`error`）は閉じるまで出したままにする
     pub notice_clock: NoticeClock,
     pub sidebar_open: bool,
-    /// このウィンドウの右に AI チャットを出しているか。
+    /// このウィンドウの右に AI bot を出しているか。
     pub ai_open: bool,
     /// タスクの詳細で、AI の記録を開いている。
     pub ai_log_open: bool,
@@ -1199,7 +1199,7 @@ impl MainView {
             crate::theme::system_changed(window, cx)
         });
         cx.defer_in(window, |this, window, cx| this.deliver_notices(window, cx));
-        // 前に閉じたときの AI チャットとシェルを、最初のウィンドウで戻す
+        // 前に閉じたときの AI bot とシェルを、最初のウィンドウで戻す
         if let Some((chat_window, shell_window)) =
             this.ai_session.update(cx, |s, _| s.restore.take())
         {
@@ -3179,7 +3179,7 @@ impl MainView {
         cx.notify();
     }
 
-    /// レイアウトを使う。AI チャットを並べるレイアウトでは、チャットも開く。
+    /// レイアウトを使う。AI bot を並べるレイアウトでは、チャットも開く。
     pub fn apply_layout(
         &mut self,
         layout: &crate::theme::Layout,
@@ -3633,7 +3633,7 @@ impl MainView {
         cx.notify();
     }
 
-    /// ワークスペースへのリンクをクリップボードに入れる。AI チャットの入力欄に貼ると、そのワークスペースが付く。
+    /// ワークスペースへのリンクをクリップボードに入れる。AI bot の入力欄に貼ると、そのワークスペースが付く。
     pub fn copy_workspace_link(&mut self, id: &str, cx: &mut Context<Self>) {
         cx.write_to_clipboard(ClipboardItem::new_string(malakt_core::wslink::url(id)));
         self.show_notice("リンクをコピーしました。".into());
@@ -4772,9 +4772,9 @@ impl MainView {
         }
     }
 
-    // ---- AI チャット ----
+    // ---- AI bot ----
 
-    /// AI チャットを開く・閉じる。別ウィンドウに出しているときは、そのウィンドウを手前に出す。
+    /// AI bot を開く・閉じる。別ウィンドウに出しているときは、そのウィンドウを手前に出す。
     /// あるタスクについての会話を、チャットに開く。
     pub fn chat_about_task(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         let title = match self.db.read(cx).store.task(id) {
@@ -4790,7 +4790,7 @@ impl MainView {
         self.show_chat_input(window, cx);
     }
 
-    /// ワークスペースを AI チャットの入力欄に添えて、チャットを開く。
+    /// ワークスペースを AI bot の入力欄に添えて、チャットを開く。
     pub fn attach_workspace_to_chat(
         &mut self,
         id: &str,
@@ -5016,7 +5016,7 @@ impl MainView {
         cx.notify();
     }
 
-    /// AI のおすすめから、右に AI チャットを開く。キーがなければ、そこから設定に進める。
+    /// AI のおすすめから、右に AI bot を開く。キーがなければ、そこから設定に進める。
     pub fn open_ai_from_promo(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.modal = Modal::None;
         if !self.ai_docked(cx) {
@@ -5445,7 +5445,7 @@ pub enum DropTarget {
     Row(usize),
     /// このワークスペースへ移す。`None` は未所属。
     Workspace(Option<Id>),
-    /// AI チャットの入力欄に添える。
+    /// AI bot の入力欄に添える。
     Chat,
 }
 

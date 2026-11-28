@@ -29,7 +29,7 @@ struct Zone {
     others_only: bool,
 }
 
-/// 1 つの画面（ウィンドウのタスクの画面、ペイン、AI チャットのウィンドウ）が描いた、落とせる場所。
+/// 1 つの画面（ウィンドウのタスクの画面、ペイン、AI bot のウィンドウ）が描いた、落とせる場所。
 #[derive(Default)]
 pub struct Surface {
     zones: RefCell<Vec<Zone>>,

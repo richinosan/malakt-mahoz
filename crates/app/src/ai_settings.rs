@@ -1,4 +1,4 @@
-//! AI の設定。「設定」のウィンドウ（モデル・動作・GitHub のカテゴリ）と、AI チャットのペインの
+//! AI の設定。「設定」のウィンドウ（モデル・動作・GitHub のカテゴリ）と、AI bot のペインの
 //! 設定の両方に、同じ行を出す。どちらも自分の入力欄を持つので、1 つずつ作る。
 
 use crate::press::button;
@@ -1013,7 +1013,7 @@ impl AiSettings {
             )
     }
 
-    /// AI チャットのペインに出す設定。まとまりごとに見出しとカードを並べる。
+    /// AI bot のペインに出す設定。まとまりごとに見出しとカードを並べる。
     pub fn render_all(&self, cx: &mut Context<Self>) -> Div {
         let theme = cx.theme().clone();
         let mut all = col().gap_4();

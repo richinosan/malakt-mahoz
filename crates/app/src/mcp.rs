@@ -5,7 +5,7 @@
 //! ```
 //!
 //! 標準入出力で JSON-RPC を 1 行ずつやり取りする（MCP の stdio）。ネットワークは使わない。
-//! ツールは AI チャットと同じもの（[`malakt_ai::tools`]）に、`undo` と `redo` を足したもの。
+//! ツールは AI bot と同じもの（[`malakt_ai::tools`]）に、`undo` と `redo` を足したもの。
 //! ロックが有効なときは、アプリがロックを解除している間だけ動く（[`malakt_core::lock::allows_outside`]）。
 //! 環境変数 [`ENV_KEY`] でアクセスキーを渡すと、キーごとに読み取りのみ・ロック中も使えるかが決まる
 //! （[`malakt_core::access`]）。キーなしの接続をどう扱うかは、アプリの設定で選ぶ。
@@ -177,7 +177,7 @@ fn run_tool(store: &mut Store, name: &str, args: &Value) -> Result<String, Strin
         GET_AUTOSTART | SET_AUTOSTART => autostart(&crate::autostart::process(), name, args),
         GET_ON_TOP | SET_ON_TOP => on_top(store, name, args),
         _ => {
-            // 自分が登録されていれば、コメントの書き手にする（AI チャットと同じ）
+            // 自分が登録されていれば、コメントの書き手にする（AI bot と同じ）
             let author = store
                 .people()
                 .map_err(core)?
