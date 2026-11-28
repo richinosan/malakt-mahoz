@@ -927,29 +927,38 @@ impl AiSettings {
                     )
                     .into_any_element()
             }
-            AiRow::AutoRun => Switch::new("ai-auto")
-                .checked(session.auto_run)
-                .on_click(cx.listener(|this, on: &bool, _, cx| {
-                    let on = *on;
-                    this.session.update(cx, |s, cx| s.set_auto_run(on, cx));
-                }))
-                .into_any_element(),
+            AiRow::AutoRun => crate::render::on_off(
+                session.auto_run,
+                Switch::new("ai-auto")
+                    .checked(session.auto_run)
+                    .on_click(cx.listener(|this, on: &bool, _, cx| {
+                        let on = *on;
+                        this.session.update(cx, |s, cx| s.set_auto_run(on, cx));
+                    })),
+                cx,
+            ),
             AiRow::Rules => self.rules_editor(true, cx),
             AiRow::Schedules => self.schedules_editor(true, cx),
-            AiRow::Arrange => Switch::new("ai-arrange")
-                .checked(session.arrange)
-                .on_click(cx.listener(|this, on: &bool, _, cx| {
-                    let on = *on;
-                    this.session.update(cx, |s, cx| s.set_arrange(on, cx));
-                }))
-                .into_any_element(),
-            AiRow::Track => Switch::new("ai-track")
-                .checked(session.track)
-                .on_click(cx.listener(|this, on: &bool, _, cx| {
-                    let on = *on;
-                    this.session.update(cx, |s, cx| s.set_track(on, cx));
-                }))
-                .into_any_element(),
+            AiRow::Arrange => crate::render::on_off(
+                session.arrange,
+                Switch::new("ai-arrange")
+                    .checked(session.arrange)
+                    .on_click(cx.listener(|this, on: &bool, _, cx| {
+                        let on = *on;
+                        this.session.update(cx, |s, cx| s.set_arrange(on, cx));
+                    })),
+                cx,
+            ),
+            AiRow::Track => crate::render::on_off(
+                session.track,
+                Switch::new("ai-track")
+                    .checked(session.track)
+                    .on_click(cx.listener(|this, on: &bool, _, cx| {
+                        let on = *on;
+                        this.session.update(cx, |s, cx| s.set_track(on, cx));
+                    })),
+                cx,
+            ),
             AiRow::Shell => self.shell_choice(cx).into_any_element(),
             AiRow::Account => {
                 let (account, signed_in): (SharedString, bool) = match session.github() {
@@ -1002,11 +1011,15 @@ impl AiSettings {
                                         });
                                     })),
                             ))
-                            .child(Switch::new("ai-watch").checked(watch.enabled).on_click(
-                                cx.listener(|this, on: &bool, _, cx| {
-                                    let on = *on;
-                                    this.set_watch(|w| w.enabled = on, cx);
-                                }),
+                            .child(crate::render::on_off(
+                                watch.enabled,
+                                Switch::new("ai-watch").checked(watch.enabled).on_click(
+                                    cx.listener(|this, on: &bool, _, cx| {
+                                        let on = *on;
+                                        this.set_watch(|w| w.enabled = on, cx);
+                                    }),
+                                ),
+                                cx,
                             )),
                     )
                     .when_some(status, |d, status| {

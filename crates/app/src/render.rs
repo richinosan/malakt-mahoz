@@ -441,6 +441,26 @@ enum SettingKey {
     PluginFolders,
 }
 
+impl SettingKey {
+    /// ほかの設定（スイッチや選んだもの）しだいで出る設定。上の設定の下に字下げして並べる。
+    fn nested(self) -> bool {
+        matches!(
+            self,
+            SettingKey::Clear
+                | SettingKey::Blur
+                | SettingKey::AutoLock
+                | SettingKey::LockNow
+                | SettingKey::LockedNotices
+                | SettingKey::DoneWhen
+                | SettingKey::DoneRoles
+                | SettingKey::DonePeople
+                | SettingKey::DoneWorkspaces
+                | SettingKey::McpHttpPort
+                | SettingKey::McpHttpUrl
+        )
+    }
+}
+
 impl Setting {
     fn new(
         section: crate::state::CustomizeSection,
@@ -626,12 +646,12 @@ pub(crate) fn setting_line(
             )
         });
     let line = if wide {
-        col().py_3().gap_2().child(label).child(control)
+        col().py_4().gap_3().child(label).child(control)
     } else {
         row()
             .flex_wrap()
             .justify_end()
-            .py_3()
+            .py_4()
             .gap_x_4()
             .gap_y_2()
             .child(label)
@@ -641,6 +661,27 @@ pub(crate) fn setting_line(
         d.border_t_1().border_color(theme.border.opacity(0.6))
     })
     .into_any_element()
+}
+
+/// スイッチの左に、今の状態を「オン」「オフ」の文字で出す。スイッチの色だけでは状態が読み取りにくいので、
+/// 「設定」のスイッチはすべてこれで包む。
+pub(crate) fn on_off(on: bool, switch: impl IntoElement, cx: &App) -> AnyElement {
+    let theme = cx.theme();
+    row()
+        .gap_2()
+        .flex_none()
+        .child(
+            div()
+                .text_sm()
+                .text_color(if on {
+                    theme.foreground
+                } else {
+                    theme.muted_foreground
+                })
+                .child(if on { "オン" } else { "オフ" }),
+        )
+        .child(switch)
+        .into_any_element()
 }
 
 /// 押すと、選べる値のメニューが開くボタン。
@@ -6546,7 +6587,7 @@ impl MainView {
                 button("person-add")
                     .icon(app_icon("plus"))
                     .framed(cx)
-                    .tooltip("担当者を追加")
+                    .label("担当者を追加")
                     .on_click(cx.listener(|this, _, window, cx| this.add_person(window, cx))),
             )),
         );
@@ -6609,7 +6650,8 @@ impl MainView {
             APPEARANCE_WIDTH
         };
         let compact = width < SETTINGS_COMPACT_WIDTH;
-        let with_preview = !searching && page == Page::Appearance && width >= SETTINGS_PREVIEW_WIDTH;
+        let with_preview =
+            !searching && page == Page::Appearance && width >= SETTINGS_PREVIEW_WIDTH;
 
         let search = || {
             Input::new(&self.inputs.customize_search)
@@ -6696,11 +6738,9 @@ impl MainView {
                                     active == section,
                                     cx,
                                 )
-                                .on_click(cx.listener(
-                                    move |this, _: &ClickEvent, window, cx| {
-                                        this.show_appearance_section(section, window, cx)
-                                    },
-                                ))
+                                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                                    this.show_appearance_section(section, window, cx)
+                                }))
                                 .test_support(),
                             ),
                         );
@@ -6775,7 +6815,13 @@ impl MainView {
             let mut card = setting_card(cx);
             let mut first = true;
             for item in items.iter().filter(|item| item.section == *section) {
-                card = card.child(self.setting_row(item, first, cx));
+                let line = self.setting_row(item, first, cx);
+                // ほかの設定がオンのときだけ出る設定は、その下に字下げして並べる
+                card = card.child(if item.key.nested() {
+                    div().pl_6().child(line).into_any_element()
+                } else {
+                    line
+                });
                 first = false;
             }
             // 見出しが 1 つだけのページで、ページと同じ名前なら、見出しは出さない
@@ -7129,6 +7175,7 @@ impl MainView {
                     .child("プレビュー"),
             )
             .child(frame)
+            .test_support()
     }
 
     /// 「設定」に出す見出し。今出せる設定があるものだけ、並ぶ順に。
@@ -7393,9 +7440,9 @@ impl MainView {
                 list(&["期限", "通知", "時刻"]),
             ),
             Setting::new(
-                Section::Notices,
+                Section::DoneNotices,
                 SettingKey::DoneOn,
-                "ほかの人の完了",
+                "完了を知らせる",
                 None,
                 list(&["完了", "通知", "担当者", "完了チケット"]),
             ),
@@ -7403,28 +7450,28 @@ impl MainView {
         if self.done_notices(cx).enabled {
             all.extend([
                 Setting::new(
-                    Section::Notices,
+                    Section::DoneNotices,
                     SettingKey::DoneWhen,
                     "知らせるとき",
                     None,
                     list(&["完了", "通知", "1 人ずつ"]),
                 ),
                 Setting::new(
-                    Section::Notices,
+                    Section::DoneNotices,
                     SettingKey::DoneRoles,
                     "完了にした人の役",
                     None,
                     list(&["完了", "通知", "役", "RACI", "R", "A", "C", "I"]),
                 ),
                 Setting::new(
-                    Section::Notices,
+                    Section::DoneNotices,
                     SettingKey::DonePeople,
                     "知らせる担当者",
                     None,
                     list(&["完了", "通知", "担当者", "人"]),
                 ),
                 Setting::new(
-                    Section::Notices,
+                    Section::DoneNotices,
                     SettingKey::DoneWorkspaces,
                     "知らせるワークスペース",
                     None,
@@ -7446,11 +7493,11 @@ impl MainView {
         }
         if locked {
             all.push(Setting::new(
-                Section::Notices,
+                Section::Lock,
                 SettingKey::LockedNotices,
                 "ロック中の通知",
                 None,
-                list(&["ロック"]),
+                list(&["ロック", "通知"]),
             ));
         }
         if crate::autostart::available(cx) {
@@ -7808,7 +7855,6 @@ impl MainView {
                     row()
                         .gap_1()
                         .flex_wrap()
-                        .justify_end()
                         .children(
                             malakt_core::alert::HOUR_CHOICES
                                 .into_iter()
@@ -7991,8 +8037,12 @@ impl MainView {
                             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
                                 this.preview_hover(Pick::Cards(!on), *hovered, cx)
                             }))
-                            .child(Switch::new("cards-switch").checked(on).on_click(
-                                cx.listener(|this, on: &bool, _, cx| this.set_cards(*on, cx)),
+                            .child(on_off(
+                                on,
+                                Switch::new("cards-switch").checked(on).on_click(
+                                    cx.listener(|this, on: &bool, _, cx| this.set_cards(*on, cx)),
+                                ),
+                                cx,
                             ))
                     })
                     .child(reset("cards-reset", false).placeholder())
@@ -8006,20 +8056,32 @@ impl MainView {
                             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
                                 this.preview_hover(Pick::Float(!on), *hovered, cx)
                             }))
-                            .child(Switch::new("float-switch").checked(on).on_click(
-                                cx.listener(|this, on: &bool, _, cx| this.set_floating(*on, cx)),
+                            .child(on_off(
+                                on,
+                                Switch::new("float-switch").checked(on).on_click(
+                                    cx.listener(|this, on: &bool, _, cx| {
+                                        this.set_floating(*on, cx)
+                                    }),
+                                ),
+                                cx,
                             ))
                     })
                     .child(reset("float-reset", false).placeholder())
                     .into_any_element(),
-                SettingKey::DoneOn => Switch::new("done-switch")
-                    .checked(self.done_notices(cx).enabled)
-                    .on_click(cx.listener(|this, on: &bool, _, cx| {
-                        let mut notices = this.done_notices(cx);
-                        notices.enabled = *on;
-                        this.set_done_notices(&notices, cx);
-                    }))
-                    .into_any_element(),
+                SettingKey::DoneOn => {
+                    let on = self.done_notices(cx).enabled;
+                    on_off(
+                        on,
+                        Switch::new("done-switch").checked(on).on_click(cx.listener(
+                            |this, on: &bool, _, cx| {
+                                let mut notices = this.done_notices(cx);
+                                notices.enabled = *on;
+                                this.set_done_notices(&notices, cx);
+                            },
+                        )),
+                        cx,
+                    )
+                }
                 SettingKey::DoneWhen => {
                     use malakt_core::done_notice::When;
                     let view = cx.entity().downgrade();
@@ -8117,17 +8179,23 @@ impl MainView {
                         )))
                         .into_any_element()
                 }
-                SettingKey::LockOn => Switch::new("lock-switch")
-                    .checked(self.lock_enabled(cx))
-                    .disabled(self.verifying(cx))
-                    .on_click(cx.listener(|this, on: &bool, window, cx| {
-                        if *on {
-                            this.enable_lock(window, cx)
-                        } else {
-                            this.disable_lock(window, cx)
-                        }
-                    }))
-                    .into_any_element(),
+                SettingKey::LockOn => {
+                    let on = self.lock_enabled(cx);
+                    on_off(
+                        on,
+                        Switch::new("lock-switch")
+                            .checked(on)
+                            .disabled(self.verifying(cx))
+                            .on_click(cx.listener(|this, on: &bool, window, cx| {
+                                if *on {
+                                    this.enable_lock(window, cx)
+                                } else {
+                                    this.disable_lock(window, cx)
+                                }
+                            })),
+                        cx,
+                    )
+                }
                 SettingKey::AutoLock => {
                     let view = cx.entity().downgrade();
                     let auto = self.auto_lock(cx);
@@ -8152,10 +8220,16 @@ impl MainView {
                         })
                         .into_any_element()
                 }
-                SettingKey::McpHttp => Switch::new("mcp-http-switch")
-                    .checked(self.mcp_http(cx).0)
-                    .on_click(cx.listener(|this, on: &bool, _, cx| this.set_mcp_http(*on, cx)))
-                    .into_any_element(),
+                SettingKey::McpHttp => {
+                    let on = self.mcp_http(cx).0;
+                    on_off(
+                        on,
+                        Switch::new("mcp-http-switch").checked(on).on_click(
+                            cx.listener(|this, on: &bool, _, cx| this.set_mcp_http(*on, cx)),
+                        ),
+                        cx,
+                    )
+                }
                 SettingKey::McpHttpPort => self.mcp_port_control(cx),
                 SettingKey::McpHttpUrl => self.mcp_url_control(cx),
                 SettingKey::LockedNotices => {
@@ -8180,18 +8254,36 @@ impl MainView {
                         })
                         .into_any_element()
                 }
-                SettingKey::Reminders => Switch::new("reminders-switch")
-                    .checked(crate::reminders::enabled(cx))
-                    .on_click(cx.listener(|this, _: &bool, _, cx| this.toggle_reminders(cx)))
-                    .into_any_element(),
-                SettingKey::Autostart => Switch::new("autostart-switch")
-                    .checked(crate::autostart::enabled(cx))
-                    .on_click(cx.listener(|this, _: &bool, _, cx| this.toggle_autostart(cx)))
-                    .into_any_element(),
-                SettingKey::AutoUpdate => Switch::new("auto-update-switch")
-                    .checked(crate::update::enabled(cx))
-                    .on_click(cx.listener(|this, _: &bool, _, cx| this.toggle_auto_update(cx)))
-                    .into_any_element(),
+                SettingKey::Reminders => {
+                    let on = crate::reminders::enabled(cx);
+                    on_off(
+                        on,
+                        Switch::new("reminders-switch").checked(on).on_click(
+                            cx.listener(|this, _: &bool, _, cx| this.toggle_reminders(cx)),
+                        ),
+                        cx,
+                    )
+                }
+                SettingKey::Autostart => {
+                    let on = crate::autostart::enabled(cx);
+                    on_off(
+                        on,
+                        Switch::new("autostart-switch").checked(on).on_click(
+                            cx.listener(|this, _: &bool, _, cx| this.toggle_autostart(cx)),
+                        ),
+                        cx,
+                    )
+                }
+                SettingKey::AutoUpdate => {
+                    let on = crate::update::enabled(cx);
+                    on_off(
+                        on,
+                        Switch::new("auto-update-switch").checked(on).on_click(
+                            cx.listener(|this, _: &bool, _, cx| this.toggle_auto_update(cx)),
+                        ),
+                        cx,
+                    )
+                }
                 SettingKey::Export => feel::gloss(
                     button("export-all")
                         .label("エクスポート")
@@ -8236,7 +8328,9 @@ impl MainView {
                         .into_any_element()
                 }
             };
-        setting_line(item.name, item.note, control, false, first, &theme)
+        // 時刻の選択肢は、期限の通知の 2 行と同じく名前の下に並べる
+        let wide = item.key == SettingKey::AlertHour;
+        setting_line(item.name, item.note, control, wide, first, &theme)
     }
 
     /// 期限をいつ知らせるかの行。上に名前、下に選べるものを並べ、押すたびに入れる・外す。
@@ -8275,7 +8369,7 @@ impl MainView {
                     .test_support()
             }));
         col()
-            .py_3()
+            .py_4()
             .gap_2()
             .child(
                 row()

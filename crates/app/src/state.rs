@@ -123,8 +123,8 @@ impl LimitField {
 /// 「設定」の左に並ぶページ。1 つのページに、見出し（[`CustomizeSection`]）を 1 つ以上並べる。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsPage {
-    General,
     Appearance,
+    General,
     Ai,
     Notices,
     People,
@@ -136,8 +136,8 @@ pub enum SettingsPage {
 
 impl SettingsPage {
     pub const ALL: [SettingsPage; 9] = [
-        SettingsPage::General,
         SettingsPage::Appearance,
+        SettingsPage::General,
         SettingsPage::Ai,
         SettingsPage::Notices,
         SettingsPage::People,
@@ -186,22 +186,23 @@ impl SettingsPage {
 /// 「設定」の見出し。どれも、どこかのページ（[`SettingsPage`]）に入る。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CustomizeSection {
-    Startup,
-    Update,
-    Window,
-    Browser,
-    Data,
     Theme,
     Layout,
     Backdrop,
     Look,
     Display,
+    Startup,
+    Update,
+    Window,
+    Browser,
+    Data,
     AiModel,
     AiBehavior,
     AiRules,
     AiSchedules,
     AiGithub,
     Notices,
+    DoneNotices,
     People,
     Sync,
     Lock,
@@ -213,23 +214,24 @@ pub enum CustomizeSection {
 
 impl CustomizeSection {
     /// ページの順に並べた、すべての見出し。
-    pub const ALL: [CustomizeSection; 23] = [
-        CustomizeSection::Startup,
-        CustomizeSection::Update,
-        CustomizeSection::Window,
-        CustomizeSection::Browser,
-        CustomizeSection::Data,
+    pub const ALL: [CustomizeSection; 24] = [
         CustomizeSection::Theme,
         CustomizeSection::Layout,
         CustomizeSection::Backdrop,
         CustomizeSection::Look,
         CustomizeSection::Display,
+        CustomizeSection::Startup,
+        CustomizeSection::Update,
+        CustomizeSection::Window,
+        CustomizeSection::Browser,
+        CustomizeSection::Data,
         CustomizeSection::AiModel,
         CustomizeSection::AiBehavior,
         CustomizeSection::AiRules,
         CustomizeSection::AiSchedules,
         CustomizeSection::AiGithub,
         CustomizeSection::Notices,
+        CustomizeSection::DoneNotices,
         CustomizeSection::People,
         CustomizeSection::Sync,
         CustomizeSection::Lock,
@@ -254,7 +256,8 @@ impl CustomizeSection {
             CustomizeSection::Lock => "ロック",
             CustomizeSection::AccessKeys => "アクセスキー",
             CustomizeSection::McpConnection => "MCP の接続",
-            CustomizeSection::Notices => "通知",
+            CustomizeSection::Notices => "期限",
+            CustomizeSection::DoneNotices => "ほかの人の完了",
             CustomizeSection::Startup => "スタートアップ",
             CustomizeSection::Update => "アップデート",
             CustomizeSection::People => "担当者",
@@ -283,6 +286,7 @@ impl CustomizeSection {
             CustomizeSection::AccessKeys => "key-round",
             CustomizeSection::McpConnection => "plug",
             CustomizeSection::Notices => "bell",
+            CustomizeSection::DoneNotices => "check-check",
             CustomizeSection::Startup => "power",
             CustomizeSection::Update => "refresh-cw",
             CustomizeSection::People => "users",
@@ -313,7 +317,7 @@ impl CustomizeSection {
             | CustomizeSection::AiRules
             | CustomizeSection::AiSchedules
             | CustomizeSection::AiGithub => SettingsPage::Ai,
-            CustomizeSection::Notices => SettingsPage::Notices,
+            CustomizeSection::Notices | CustomizeSection::DoneNotices => SettingsPage::Notices,
             CustomizeSection::People => SettingsPage::People,
             CustomizeSection::Sync => SettingsPage::Sync,
             CustomizeSection::Lock
@@ -3167,8 +3171,8 @@ impl MainView {
         self.plugin_approving = None;
         // プラグインのフォルダーは、開くたびに読み直す
         crate::plugins::refresh(cx);
-        // 前に開いていたページを、いちばん上から出す
-        self.appearance_section = self.appearance_section.page().sections().next().unwrap();
+        // 開くたびに、最初のページ（見た目）のいちばん上から出す
+        self.appearance_section = CustomizeSection::ALL[0];
         self.appearance_pinned = false;
         self.preview_pick = None;
         self.ai_settings.update(cx, |s, cx| s.show_rules(None, cx));

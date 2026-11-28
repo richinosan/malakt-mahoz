@@ -1943,8 +1943,6 @@ fn locked_notices_hide_what_was_chosen(cx: &mut TestAppContext) {
     assert_eq!(shown[1].body.as_ref(), "");
 }
 
-/// 「設定」のロックと通知で、自動でロックするまでの時間と、ロック中の通知をメニューから選ぶ。
-/// 操作がないまま選んだ時間が過ぎるとロックし、操作すると数え直す。
 /// 「設定」の左のページ。
 fn page_nav(page: malakt_mahoz::state::SettingsPage) -> (&'static str, usize) {
     (
@@ -1967,6 +1965,8 @@ fn section_nav(section: malakt_mahoz::state::CustomizeSection) -> (&'static str,
     )
 }
 
+/// 「設定」のロックで、自動でロックするまでの時間と、ロック中の通知をメニューから選ぶ。
+/// 操作がないまま選んだ時間が過ぎるとロックし、操作すると数え直す。
 #[gpui_kit::test]
 fn auto_lock_after_the_chosen_minutes(cx: &mut TestAppContext) {
     use malakt_mahoz::state::CustomizeSection;
@@ -2004,10 +2004,7 @@ fn auto_lock_after_the_chosen_minutes(cx: &mut TestAppContext) {
     ui(cx, window, |window, cx| window.click("auto-lock", cx));
     pick(cx, window, "15 分");
     cx.update(|cx| assert_eq!(view.read(cx).auto_lock(cx), Some(15)));
-    // ロック中の通知は「通知」のカテゴリにある
-    ui(cx, window, |window, cx| {
-        window.click(page_nav(malakt_mahoz::state::SettingsPage::Notices), cx)
-    });
+    // ロック中の通知は、ロックの下に並ぶ
     ui(cx, window, |window, cx| window.click("locked-notices", cx));
     pick(cx, window, "タイトルを出さない");
     cx.update(|cx| {
@@ -2450,12 +2447,12 @@ fn the_gear_opens_settings_with_everything_inside(cx: &mut TestAppContext) {
     let (window, view) = open(cx, wide());
     ui(cx, window, |window, cx| window.click("open-settings", cx));
     cx.update(|cx| assert_eq!(view.read(cx).modal, Modal::Appearance));
-    // 最初は「一般」。ほかのページの設定は出ない
+    // 最初は「見た目」。ほかのページの設定は出ない
     ui(cx, window, |window, _| {
-        assert!(window.find(page_nav(Page::General)).visible());
-        assert!(window.find("new-window").visible());
+        assert!(window.find(page_nav(Page::Appearance)).visible());
+        assert!(window.find(("preset", 0usize)).visible());
         assert!(window.try_find("person-add").is_none());
-        assert!(window.try_find(("preset", 0usize)).is_none());
+        assert!(window.try_find("new-window").is_none());
     });
 
     // 担当者
@@ -2718,11 +2715,7 @@ fn sub_dialogs_fade_out(cx: &mut TestAppContext) {
     });
     ui(cx, window, |window, cx| {
         view.update(cx, |v, cx| {
-            v.show_appearance_section(
-                malakt_mahoz::state::CustomizeSection::Look,
-                window,
-                cx,
-            )
+            v.show_appearance_section(malakt_mahoz::state::CustomizeSection::Look, window, cx)
         })
     });
     ui(cx, window, |window, cx| window.click("font-open", cx));
@@ -3348,11 +3341,7 @@ fn font_and_colors_are_chosen_in_settings(cx: &mut TestAppContext) {
     });
     ui(cx, window, |window, cx| {
         view.update(cx, |v, cx| {
-            v.show_appearance_section(
-                malakt_mahoz::state::CustomizeSection::Look,
-                window,
-                cx,
-            )
+            v.show_appearance_section(malakt_mahoz::state::CustomizeSection::Look, window, cx)
         })
     });
     ui(cx, window, |window, cx| window.click("font-open", cx));
@@ -3462,11 +3451,7 @@ fn font_and_colors_are_chosen_in_settings(cx: &mut TestAppContext) {
     });
     ui(cx, window, |window, cx| {
         view.update(cx, |v, cx| {
-            v.show_appearance_section(
-                malakt_mahoz::state::CustomizeSection::Look,
-                window,
-                cx,
-            )
+            v.show_appearance_section(malakt_mahoz::state::CustomizeSection::Look, window, cx)
         })
     });
     let pick = |cx: &mut TestAppContext, slot: usize, hex: &str| {
@@ -3578,11 +3563,7 @@ fn mono_fonts_are_chosen_in_settings(cx: &mut TestAppContext) {
     });
     ui(cx, window, |window, cx| {
         view.update(cx, |v, cx| {
-            v.show_appearance_section(
-                malakt_mahoz::state::CustomizeSection::Look,
-                window,
-                cx,
-            )
+            v.show_appearance_section(malakt_mahoz::state::CustomizeSection::Look, window, cx)
         })
     });
     ui(cx, window, |window, cx| window.click("mono-font-open", cx));
@@ -3684,11 +3665,7 @@ fn backdrop_and_cards_are_chosen_in_settings(cx: &mut TestAppContext) {
     });
     ui(cx, window, |window, cx| {
         view.update(cx, |v, cx| {
-            v.show_appearance_section(
-                malakt_mahoz::state::CustomizeSection::Backdrop,
-                window,
-                cx,
-            )
+            v.show_appearance_section(malakt_mahoz::state::CustomizeSection::Backdrop, window, cx)
         })
     });
     ui(cx, window, |window, cx| {
@@ -3736,11 +3713,7 @@ fn backdrop_and_cards_are_chosen_in_settings(cx: &mut TestAppContext) {
     assert_eq!(primary(cx), "#b3344f");
     ui(cx, window, |window, cx| {
         view.update(cx, |v, cx| {
-            v.show_appearance_section(
-                malakt_mahoz::state::CustomizeSection::Look,
-                window,
-                cx,
-            )
+            v.show_appearance_section(malakt_mahoz::state::CustomizeSection::Look, window, cx)
         })
     });
     ui(cx, window, |window, cx| window.click("accent-reset", cx));
@@ -3749,11 +3722,7 @@ fn backdrop_and_cards_are_chosen_in_settings(cx: &mut TestAppContext) {
     // カードとパネルの行は「表示」にある
     ui(cx, window, |window, cx| {
         view.update(cx, |v, cx| {
-            v.show_appearance_section(
-                malakt_mahoz::state::CustomizeSection::Display,
-                window,
-                cx,
-            )
+            v.show_appearance_section(malakt_mahoz::state::CustomizeSection::Display, window, cx)
         })
     });
     // カードで表示にすると、広い画面でも表の見出しがなくなる
@@ -3847,11 +3816,7 @@ fn backdrop_and_cards_are_chosen_in_settings(cx: &mut TestAppContext) {
     // 標準に戻すと、画像も、画像に合わせた色もなくなる
     ui(cx, window, |window, cx| {
         view.update(cx, |v, cx| {
-            v.show_appearance_section(
-                malakt_mahoz::state::CustomizeSection::Backdrop,
-                window,
-                cx,
-            )
+            v.show_appearance_section(malakt_mahoz::state::CustomizeSection::Backdrop, window, cx)
         })
     });
     ui(cx, window, |window, cx| window.click("scene-reset", cx));
@@ -3887,22 +3852,14 @@ fn themes_are_chosen_and_saved_in_settings(cx: &mut TestAppContext) {
         assert!(window.find(("preset", 0usize)).visible());
         assert!(!window.find("font-open").visible());
         view.update(cx, |v, cx| {
-            v.show_appearance_section(
-                malakt_mahoz::state::CustomizeSection::Look,
-                window,
-                cx,
-            )
+            v.show_appearance_section(malakt_mahoz::state::CustomizeSection::Look, window, cx)
         })
     });
     ui(cx, window, |window, cx| {
         assert!(window.find("font-open").visible());
         assert!(!window.find(("preset", 0usize)).visible());
         view.update(cx, |v, cx| {
-            v.show_appearance_section(
-                malakt_mahoz::state::CustomizeSection::Theme,
-                window,
-                cx,
-            )
+            v.show_appearance_section(malakt_mahoz::state::CustomizeSection::Theme, window, cx)
         })
     });
 
@@ -4182,7 +4139,9 @@ fn customize_settings_are_searched(cx: &mut TestAppContext) {
                 .update(cx, |s, cx| s.set_value("シェル", window, cx))
         })
     });
-    ui(cx, window, |window, cx| window.click(page_nav(Page::Ai), cx));
+    ui(cx, window, |window, cx| {
+        window.click(page_nav(Page::Ai), cx)
+    });
     assert!(cx.update(|cx| {
         let v = view.read(cx);
         v.appearance_section.page() == Page::Ai
@@ -4272,11 +4231,7 @@ fn density_and_editor_themes(cx: &mut TestAppContext) {
     });
     ui(cx, window, |window, cx| {
         view.update(cx, |v, cx| {
-            v.show_appearance_section(
-                malakt_mahoz::state::CustomizeSection::Display,
-                window,
-                cx,
-            )
+            v.show_appearance_section(malakt_mahoz::state::CustomizeSection::Display, window, cx)
         })
     });
     ui(cx, window, |window, cx| {
@@ -4376,11 +4331,7 @@ fn hover_feel_follows_the_theme(cx: &mut TestAppContext) {
     // 「表示」の「ホバー」でも選べる
     ui(cx, window, |window, cx| {
         view.update(cx, |v, cx| {
-            v.show_appearance_section(
-                malakt_mahoz::state::CustomizeSection::Display,
-                window,
-                cx,
-            )
+            v.show_appearance_section(malakt_mahoz::state::CustomizeSection::Display, window, cx)
         })
     });
     for (ix, key) in [(1usize, "glass"), (2, "crisp"), (3, "tint")] {
@@ -7330,11 +7281,7 @@ fn clicking_outside_closes_the_top_dialog(cx: &mut TestAppContext) {
     });
     ui(cx, window, |window, cx| {
         view.update(cx, |v, cx| {
-            v.show_appearance_section(
-                malakt_mahoz::state::CustomizeSection::Look,
-                window,
-                cx,
-            )
+            v.show_appearance_section(malakt_mahoz::state::CustomizeSection::Look, window, cx)
         })
     });
     ui(cx, window, |window, cx| window.click("font-open", cx));
@@ -7923,11 +7870,7 @@ fn due_format_is_picked_from_the_due_column_and_settings(cx: &mut TestAppContext
     });
     ui(cx, window, |window, cx| {
         view.update(cx, |v, cx| {
-            v.show_appearance_section(
-                malakt_mahoz::state::CustomizeSection::Display,
-                window,
-                cx,
-            )
+            v.show_appearance_section(malakt_mahoz::state::CustomizeSection::Display, window, cx)
         })
     });
     ui(cx, window, |window, cx| {

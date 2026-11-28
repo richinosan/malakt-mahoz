@@ -201,13 +201,16 @@ impl DownloadSettings {
                     .children(error_line("download-folder-error"))
                     .into_any_element()
             }
-            DownloadRow::Ask => Switch::new("download-ask")
-                .checked(rules.ask)
-                .on_click(cx.listener(|this, on: &bool, _, cx| {
-                    let rules = crate::downloads::shared(cx).read(cx).rules.clone();
-                    this.apply(DownloadRow::Ask, Rules { ask: *on, ..rules }, cx);
-                }))
-                .into_any_element(),
+            DownloadRow::Ask => crate::render::on_off(
+                rules.ask,
+                Switch::new("download-ask")
+                    .checked(rules.ask)
+                    .on_click(cx.listener(|this, on: &bool, _, cx| {
+                        let rules = crate::downloads::shared(cx).read(cx).rules.clone();
+                        this.apply(DownloadRow::Ask, Rules { ask: *on, ..rules }, cx);
+                    })),
+                cx,
+            ),
             DownloadRow::Subfolder => {
                 let on = rules.subfolder.is_some();
                 let preview = rules.subfolder.as_deref().map(|pattern| {
@@ -224,23 +227,29 @@ impl DownloadSettings {
                     .child(
                         row()
                             .gap_3()
-                            .child(Switch::new("download-subfolder").checked(on).on_click(
-                                cx.listener(|this, on: &bool, _, cx| {
-                                    let rules = crate::downloads::shared(cx).read(cx).rules.clone();
-                                    let subfolder = on.then(|| {
-                                        let text = this.pattern.read(cx).value().trim().to_string();
-                                        if text.is_empty() {
-                                            DEFAULT_PATTERN.to_owned()
-                                        } else {
-                                            text
-                                        }
-                                    });
-                                    this.apply(
-                                        DownloadRow::Subfolder,
-                                        Rules { subfolder, ..rules },
-                                        cx,
-                                    );
-                                }),
+                            .child(crate::render::on_off(
+                                on,
+                                Switch::new("download-subfolder").checked(on).on_click(
+                                    cx.listener(|this, on: &bool, _, cx| {
+                                        let rules =
+                                            crate::downloads::shared(cx).read(cx).rules.clone();
+                                        let subfolder = on.then(|| {
+                                            let text =
+                                                this.pattern.read(cx).value().trim().to_string();
+                                            if text.is_empty() {
+                                                DEFAULT_PATTERN.to_owned()
+                                            } else {
+                                                text
+                                            }
+                                        });
+                                        this.apply(
+                                            DownloadRow::Subfolder,
+                                            Rules { subfolder, ..rules },
+                                            cx,
+                                        );
+                                    }),
+                                ),
+                                cx,
                             ))
                             .child(
                                 div()
