@@ -19,7 +19,7 @@ op set_autostart(enabled: boolean): void;
 
 /**
  * アプリのウィンドウを常に最前面に表示しているかを読む。
- * task はメインのウィンドウ（最初に開いた 1 枚）、pomodoro はポモドーロ、chat は AI チャットだけのウィンドウ、shell はシェルだけのウィンドウ。
+ * task はメインのウィンドウ（最初に開いた 1 枚）、pomodoro はポモドーロ、timer はタイマー、chat は AI チャットだけのウィンドウ、shell はシェルだけのウィンドウ。
  * 開いていないウィンドウは、次に開いたときの状態。
  */
 op get_on_top(): void;

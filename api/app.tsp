@@ -64,6 +64,7 @@ union DueFormat {
 union OnTopWindow {
   "task",
   "pomodoro",
+  "timer",
   "chat",
   "shell",
 }
@@ -213,14 +214,14 @@ op open_dialog(
 
 /**
  * 新しいウィンドウを開く。
- * kind は main（タスクの画面をもう 1 枚。標準）か pomodoro（ポモドーロタイマー。開いていれば手前に出す。タイマーの操作は pomodoro ツール）。
+ * kind は main（タスクの画面をもう 1 枚。標準）、pomodoro（ポモドーロタイマー。開いていれば手前に出す。タイマーの操作は pomodoro ツール）、timer（カウントダウンとストップウォッチのタイマー。開いていれば手前に出す。タイマーの操作は timer ツール）。
  */
 @view
-op open_window(kind?: "main" | "pomodoro"): void;
+op open_window(kind?: "main" | "pomodoro" | "timer"): void;
 
 /**
  * ウィンドウを常に最前面に表示する（on が true）、または元に戻す（false）。
- * window は task（操作しているタスクのウィンドウ。標準）、pomodoro（ポモドーロ）、chat（AI チャットだけのウィンドウ）、shell（シェルだけのウィンドウ）。
+ * window は task（操作しているタスクのウィンドウ。標準）、pomodoro（ポモドーロ）、timer（タイマー）、chat（AI チャットだけのウィンドウ）、shell（シェルだけのウィンドウ）。
  * 開いていないウィンドウは、次に開いたときに最前面に出す。
  * 今の状態は get_screen の on_top にある。
  */

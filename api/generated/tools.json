@@ -1235,6 +1235,58 @@
       }
     },
     {
+      "name": "get_timer",
+      "group": "data",
+      "description": "タイマーの今の状態を返す。mode（countdown: 決めた時間から 0 まで / stopwatch: 0 から数える）、run（ready / running / paused / done。done はカウントダウンが 0 になって止まった）、カウントダウンの長さ length_seconds、画面に出している時間 shown_seconds（カウントダウンは残り、ストップウォッチは進んだ時間）と、その文字 shown_text。",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "timer",
+      "group": "data",
+      "description": "タイマーを操作する。start（始める。一時停止していれば続きから、終わっていれば最初から）、pause（一時停止）、reset（止めて最初に戻す）、set（seconds か text でカウントダウンの長さを決めて最初に戻す。mode も渡せる）、add（カウントダウンに seconds 秒足す。動いていればそのまま続く）。mode だけを渡して set にすると、カウントダウンとストップウォッチを切り替える（最初に戻る）。start に seconds や text を渡すと、その長さのカウントダウンを始める。カウントダウンが 0 になると、通知（アプリの通知と OS の通知）が出る。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "start",
+              "pause",
+              "reset",
+              "set",
+              "add"
+            ]
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "countdown",
+              "stopwatch"
+            ]
+          },
+          "seconds": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 359999,
+            "description": "秒。1〜359999（99 時間 59 分 59 秒）"
+          },
+          "text": {
+            "type": "string",
+            "description": "長さを文字で（「5」は 5 分、「1:30」「1:00:00」「1時間30分」「90秒」）"
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
       "name": "list_work_logs",
       "group": "data",
       "description": "ポモドーロで測った作業の記録を新しい順に返す。task_id でそのタスクだけ、since（YYYY-MM-DD）でその日以降だけ。合計の秒数も返す。",
@@ -2608,7 +2660,7 @@
     {
       "name": "open_window",
       "group": "app",
-      "description": "新しいウィンドウを開く。kind は main（タスクの画面をもう 1 枚。標準）か pomodoro（ポモドーロタイマー。開いていれば手前に出す。タイマーの操作は pomodoro ツール）。",
+      "description": "新しいウィンドウを開く。kind は main（タスクの画面をもう 1 枚。標準）、pomodoro（ポモドーロタイマー。開いていれば手前に出す。タイマーの操作は pomodoro ツール）、timer（カウントダウンとストップウォッチのタイマー。開いていれば手前に出す。タイマーの操作は timer ツール）。",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -2616,7 +2668,8 @@
             "type": "string",
             "enum": [
               "main",
-              "pomodoro"
+              "pomodoro",
+              "timer"
             ]
           }
         },
@@ -2628,7 +2681,7 @@
     {
       "name": "set_on_top",
       "group": "app",
-      "description": "ウィンドウを常に最前面に表示する（on が true）、または元に戻す（false）。window は task（操作しているタスクのウィンドウ。標準）、pomodoro（ポモドーロ）、chat（AI チャットだけのウィンドウ）、shell（シェルだけのウィンドウ）。開いていないウィンドウは、次に開いたときに最前面に出す。今の状態は get_screen の on_top にある。",
+      "description": "ウィンドウを常に最前面に表示する（on が true）、または元に戻す（false）。window は task（操作しているタスクのウィンドウ。標準）、pomodoro（ポモドーロ）、timer（タイマー）、chat（AI チャットだけのウィンドウ）、shell（シェルだけのウィンドウ）。開いていないウィンドウは、次に開いたときに最前面に出す。今の状態は get_screen の on_top にある。",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -2640,6 +2693,7 @@
             "enum": [
               "task",
               "pomodoro",
+              "timer",
               "chat",
               "shell"
             ]
@@ -3370,7 +3424,7 @@
     {
       "name": "get_on_top",
       "group": "mcp",
-      "description": "アプリのウィンドウを常に最前面に表示しているかを読む。task はメインのウィンドウ（最初に開いた 1 枚）、pomodoro はポモドーロ、chat は AI チャットだけのウィンドウ、shell はシェルだけのウィンドウ。開いていないウィンドウは、次に開いたときの状態。",
+      "description": "アプリのウィンドウを常に最前面に表示しているかを読む。task はメインのウィンドウ（最初に開いた 1 枚）、pomodoro はポモドーロ、timer はタイマー、chat は AI チャットだけのウィンドウ、shell はシェルだけのウィンドウ。開いていないウィンドウは、次に開いたときの状態。",
       "input_schema": {
         "type": "object",
         "properties": {},
@@ -3393,6 +3447,7 @@
             "enum": [
               "task",
               "pomodoro",
+              "timer",
               "chat",
               "shell"
             ]

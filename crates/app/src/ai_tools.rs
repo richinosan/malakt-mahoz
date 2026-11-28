@@ -177,6 +177,7 @@ pub fn summary(name: &str, args: &Value) -> Option<String> {
         "open_dialog" => "ダイアログを開く".into(),
         "open_window" => match arg("kind") {
             "pomodoro" => "ポモドーロのウィンドウを開く".into(),
+            "timer" => "タイマーのウィンドウを開く".into(),
             _ => "新しいウィンドウを開く".into(),
         },
         "set_on_top" => match args.get("on").and_then(Value::as_bool) {
@@ -425,7 +426,22 @@ impl MainView {
                     });
                     json!({"opened": "pomodoro"})
                 }
-                other => return Err(format!("kind は main / pomodoro のどちらかです: {other}")),
+                "timer" => {
+                    // ウィンドウの更新中なので、終わってから開く
+                    cx.defer(|cx| {
+                        if let Err(e) = crate::timer::open(cx) {
+                            crate::timer::shared(cx).update(cx, |t, cx| {
+                                t.fail(format!("タイマーのウィンドウを開けませんでした: {e}"), cx)
+                            });
+                        }
+                    });
+                    json!({"opened": "timer"})
+                }
+                other => {
+                    return Err(format!(
+                        "kind は main / pomodoro / timer のどれかです: {other}"
+                    ))
+                }
             },
             "set_on_top" => {
                 let on = bool_arg(args, "on")?.ok_or("on（true か false）が必要です")?;

@@ -209,6 +209,13 @@ fn measures_work_on_the_chosen_task(cx: &mut TestAppContext) {
     });
     // 音楽は選んでいないので、何も送らない
     assert!(sent.lock().unwrap().is_empty());
+    // 期限の通知と同じく、アプリの通知（ベル）と OS の通知に 1 回だけ出る
+    let shown = cx.shown_system_notifications();
+    assert_eq!(shown.len(), 1);
+    assert_eq!(shown[0].title.as_ref(), "作業が終わりました");
+    cx.update(|cx| assert_eq!(view.read(cx).unread_notices, 1));
+    rewind(cx, 0);
+    assert_eq!(cx.shown_system_notifications().len(), 1);
 
     // タスクの詳細に作業時間が出る
     cx.update_window(main, |_, window, cx| {

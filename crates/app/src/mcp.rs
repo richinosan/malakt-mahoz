@@ -836,7 +836,7 @@ mod tests {
         };
         assert_eq!(
             call(&mut store, GET_ON_TOP, json!({})),
-            json!({"task": false, "pomodoro": false, "chat": false, "shell": false})
+            json!({"task": false, "pomodoro": false, "timer": false, "chat": false, "shell": false})
         );
         let reply = call(&mut store, SET_ON_TOP, json!({"on": true}));
         assert_eq!(reply["window"], "task");
