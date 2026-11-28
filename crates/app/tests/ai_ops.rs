@@ -83,6 +83,7 @@ fn start(cx: &mut TestAppContext, store: Store) -> World {
         slack: Arc::new(|_| Vec::new()),
         whoami: Arc::new(|_| vec![Spec::shell("exit 1")]),
         gh_progress: Arc::new(|_| vec![Spec::shell("exit 1")]),
+        files: std::env::temp_dir().join(format!("malakt-ai-files-{}", std::process::id())),
     };
     cx.update(|cx| malakt_mahoz::init_with(store, config, cx));
     world

@@ -713,8 +713,8 @@ pub(crate) fn remove_x(
         })
 }
 
-/// ダウンロードの一覧に出す、ファイルの種類のアイコン。
-fn file_icon(name: &str) -> &'static str {
+/// ファイルの種類のアイコン（ダウンロードの一覧、チャットに添えたファイル）。
+pub(crate) fn file_icon(name: &str) -> &'static str {
     let ext = name
         .rsplit_once('.')
         .map(|(_, ext)| ext.to_ascii_lowercase())
