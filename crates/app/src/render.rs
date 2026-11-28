@@ -421,6 +421,8 @@ enum SettingKey {
     Keys,
     NewWindow,
     Pomodoro,
+    Plugins,
+    PluginFolders,
 }
 
 impl Setting {
@@ -1550,6 +1552,7 @@ impl MainView {
         cx: &mut Context<Self>,
     ) -> impl Fn(PopupMenu) -> PopupMenu + Clone + 'static {
         let view = cx.entity().downgrade();
+        let plugin_commands = crate::plugins::get(cx).commands(malakt_plugins::Place::Workspace);
         move |menu: PopupMenu| {
             let item =
                 |label: &'static str,
@@ -1594,6 +1597,14 @@ impl MainView {
             .item(item("コピー", |this, id, _, cx| {
                 this.copy_workspace_link(&id, cx)
             }))
+            .map(|menu| {
+                crate::plugins::menu_items(
+                    menu,
+                    &plugin_commands,
+                    &view,
+                    &crate::plugins::Target::Workspace(id.clone()),
+                )
+            })
             .separator()
             .item(item("削除", |this, id, _, cx| {
                 this.modal = Modal::DeleteWorkspace(id);
@@ -4606,6 +4617,14 @@ impl MainView {
                 .separator()
                 .item(item("コピー", |this, id, _, cx| this.copy_task(&id, cx)))
                 .item(paste_item(&view, cx))
+                .map(|menu| {
+                    crate::plugins::menu_items(
+                        menu,
+                        &crate::plugins::get(cx).commands(malakt_plugins::Place::Task),
+                        &view,
+                        &crate::plugins::Target::Task(menu_id.clone()),
+                    )
+                })
                 .separator()
                 .item(item("削除", |this, id, _, cx| {
                     this.modal = Modal::DeleteTasks(vec![id]);
@@ -6991,6 +7010,16 @@ impl MainView {
                 px(400.),
                 self.done_picker(false, cx),
             ),
+            Some(SubModal::EnablePlugin) => {
+                let (title, approval) = self.plugin_approval(cx);
+                let over = self.dialog_as("dialog", px(440.), title, approval, cx);
+                let over = self.sub_motion(over);
+                return div()
+                    .absolute()
+                    .inset_0()
+                    .child(sized("dialog-under", body, cx))
+                    .child(over);
+            }
             Some(SubModal::ClearBrowser) => {
                 let body = col()
                     .gap_3()
@@ -7586,6 +7615,20 @@ impl MainView {
                 list(&["ウィンドウ", "タイマー", "作業時間", "休憩", "音楽"]),
             ),
             Setting::new(
+                Section::Plugins,
+                SettingKey::Plugins,
+                "プラグイン",
+                None,
+                list(&["拡張", "拡張機能", "プラグイン", "WASM", "有効", "無効"]),
+            ),
+            Setting::new(
+                Section::Plugins,
+                SettingKey::PluginFolders,
+                "フォルダー",
+                None,
+                list(&["プラグイン", "フォルダー", "場所", malakt_plugins::ENV_DIRS]),
+            ),
+            Setting::new(
                 Section::Data,
                 SettingKey::Export,
                 "エクスポート",
@@ -7674,6 +7717,21 @@ impl MainView {
                     .child(self.access_keys_editor(cx))
                     .into_any_element();
             }
+            SettingKey::Plugins => {
+                return edge(div().py_3())
+                    .child(self.plugins_editor(cx))
+                    .into_any_element();
+            }
+            SettingKey::PluginFolders => {
+                return setting_line(
+                    item.name,
+                    item.note,
+                    self.plugin_folders_editor(cx).into_any_element(),
+                    true,
+                    first,
+                    &theme,
+                );
+            }
             _ => {}
         }
         use crate::state::PreviewPick as Pick;
@@ -7726,6 +7784,8 @@ impl MainView {
                 | SettingKey::People
                 | SettingKey::CalDav
                 | SettingKey::McpKeys
+                | SettingKey::Plugins
+                | SettingKey::PluginFolders
                 | SettingKey::Keys => unreachable!(),
                 SettingKey::LockNow => feel::gloss(
                     button("lock-now")

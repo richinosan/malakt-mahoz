@@ -303,15 +303,15 @@ impl Pomodoro {
             .background_executor()
             .spawn(async move { (sender.0)(command) });
         cx.spawn(async move |this, cx| {
-            if let Err(e) = task.await {
-                // ウィンドウを閉じたあとでも、次に開いたときに出す
-                let _ = this.update(cx, |this, cx| {
-                    this.fail(
-                        format!("音楽を「{}」にできませんでした: {e}", command.label()),
-                        cx,
-                    )
-                });
-            }
+            let result = task.await;
+            // ウィンドウを閉じたあとでも、次に開いたときに出す
+            let _ = this.update(cx, |this, cx| match result {
+                Ok(()) => crate::now_playing::shared(cx).update(cx, |m, cx| m.read_soon(cx)),
+                Err(e) => this.fail(
+                    format!("音楽を「{}」にできませんでした: {e}", command.label()),
+                    cx,
+                ),
+            });
         })
         .detach();
     }
@@ -423,8 +423,23 @@ impl PomodoroView {
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("タスクを検索"));
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
+        // 開いている間だけ、再生中の曲を読み続ける
+        let music = crate::now_playing::shared(cx);
+        cx.spawn(async move |this, cx| loop {
+            let alive = this.update(cx, |_, cx| {
+                crate::now_playing::shared(cx).update(cx, |m, cx| m.read(cx))
+            });
+            if alive.is_err() {
+                break;
+            }
+            cx.background_executor()
+                .timer(crate::now_playing::EVERY)
+                .await;
+        })
+        .detach();
         let subscriptions = vec![
             cx.observe(&pomodoro, |_, _, cx| cx.notify()),
+            cx.observe(&music, |_, _, cx| cx.notify()),
             cx.observe(&db::shared(cx), |this, _, cx| {
                 if this.page == Page::Tasks {
                     this.find_tasks(cx);
@@ -774,7 +789,6 @@ impl PomodoroView {
         reduce_motion: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let theme = cx.theme().clone();
         let (running, fresh, task_id) = {
             let timer = &self.pomodoro.read(cx).timer;
             // 最初の作業を始める前は、止めるものがない
@@ -830,32 +844,7 @@ impl PomodoroView {
                         |this, _, _, cx| this.pomodoro.update(cx, |p, cx| p.act(Op::Skip, cx)),
                     )),
                 ));
-        let media = malakt_media::supported().then(|| {
-            let send = |command: Command| {
-                cx.listener(move |this: &mut Self, _, _, cx| {
-                    this.pomodoro.update(cx, |p, cx| p.send_media(command, cx))
-                })
-            };
-            row()
-                .gap_1()
-                .items_center()
-                .text_color(theme.muted_foreground)
-                .child(
-                    tool("media-previous", "skip-back", "前の曲")
-                        .xsmall()
-                        .on_click(send(Command::Previous)),
-                )
-                .child(
-                    tool("media-toggle", "music", "再生中の音楽を再生 / 一時停止")
-                        .xsmall()
-                        .on_click(send(Command::Toggle)),
-                )
-                .child(
-                    tool("media-next", "skip-forward", "次の曲")
-                        .xsmall()
-                        .on_click(send(Command::Next)),
-                )
-        });
+        let media = malakt_media::supported().then(|| self.render_music(cx));
         col()
             .key_context("PomodoroTimer")
             .track_focus(&self.focus)
@@ -869,6 +858,120 @@ impl PomodoroView {
             .child(div().max_w_full().child(task))
             .child(controls)
             .children(media)
+            .into_any_element()
+    }
+
+    /// 再生中の曲（ジャケット・曲名・アーティスト）と、前・再生 / 一時停止・次のボタン。
+    fn render_music(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let music = crate::now_playing::shared(cx);
+        let (track, error) = {
+            let m = music.read(cx);
+            (m.track.clone(), m.error.clone())
+        };
+        let send = |command: Command| {
+            cx.listener(move |this: &mut Self, _, _, cx| {
+                this.pomodoro.update(cx, |p, cx| p.send_media(command, cx))
+            })
+        };
+        let tool = |id: &'static str, icon: &str, tip: &'static str| {
+            button(id)
+                .icon(app_icon(icon))
+                .tooltip(tip)
+                .ghost()
+                .xsmall()
+        };
+        let toggle = match &track {
+            Some(t) if t.playing => ("pause", "再生中の音楽を一時停止"),
+            Some(_) => ("play", "再生中の音楽を再生"),
+            None => ("music", "再生中の音楽を再生 / 一時停止"),
+        };
+        let buttons = row()
+            .flex_none()
+            .gap_1()
+            .text_color(theme.muted_foreground)
+            .child(tool("media-previous", "skip-back", "前の曲").on_click(send(Command::Previous)))
+            .child(
+                tool("media-toggle", toggle.0, toggle.1)
+                    .accessibility_label(toggle.1)
+                    .on_click(send(Command::Toggle)),
+            )
+            .child(tool("media-next", "skip-forward", "次の曲").on_click(send(Command::Next)));
+        let Some(track) = track else {
+            return col()
+                .items_center()
+                .gap_1()
+                .child(buttons)
+                .children(error.map(|text| {
+                    div()
+                        .id("now-playing-error")
+                        .test_support()
+                        .aria_label(text.clone())
+                        .max_w_full()
+                        .text_xs()
+                        .text_color(theme.danger)
+                        .child(text)
+                }))
+                .into_any_element();
+        };
+        let art = px(40.);
+        let artwork = match track.artwork.clone() {
+            Some(image) => img(image)
+                .size(art)
+                .rounded(px(4.))
+                .object_fit(ObjectFit::Cover)
+                .into_any_element(),
+            None => div()
+                .size(art)
+                .flex_none()
+                .rounded(px(4.))
+                .bg(theme.muted)
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_color(theme.muted_foreground)
+                .child(app_icon("music"))
+                .into_any_element(),
+        };
+        let sub = [track.artist.as_ref(), track.album.as_ref()]
+            .into_iter()
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join(" · ");
+        row()
+            .id("now-playing")
+            .test_support()
+            .w_full()
+            .max_w(px(320.))
+            .gap_2()
+            .child(div().flex_none().child(artwork))
+            .child(
+                col()
+                    .flex_1()
+                    .min_w_0()
+                    .child(
+                        div()
+                            .id("now-playing-title")
+                            .test_support()
+                            .aria_label(track.title.clone())
+                            .text_sm()
+                            .truncate()
+                            .child(track.title.clone()),
+                    )
+                    .when(!sub.is_empty(), |this| {
+                        this.child(
+                            div()
+                                .id("now-playing-artist")
+                                .test_support()
+                                .aria_label(sub.clone())
+                                .text_xs()
+                                .truncate()
+                                .text_color(theme.muted_foreground)
+                                .child(sub),
+                        )
+                    }),
+            )
+            .child(buttons)
             .into_any_element()
     }
 

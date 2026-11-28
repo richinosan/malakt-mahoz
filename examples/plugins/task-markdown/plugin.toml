@@ -1,0 +1,16 @@
+id = "task-markdown"
+name = "Markdown でコピー"
+version = "1.0.0"
+api = 1
+description = "タスクとサブタスクを Markdown のチェックリストにしてコピーする"
+permissions = ["read"]
+
+[[commands]]
+id = "copy"
+title = "Markdown でコピー"
+on = "task"
+
+[[commands]]
+id = "copy-workspace"
+title = "未完了のタスクを Markdown でコピー"
+on = "workspace"

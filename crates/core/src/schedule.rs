@@ -889,6 +889,7 @@ impl Store {
             time_basis,
             started_at: (status == Status::InProcess).then_some(now),
             assigned_at: (!assignee_ids_empty).then_some(now),
+            pr: None,
         };
         // サブタスクは、画面で足したときと同じく、タイトルだけで作る
         let subtasks: Vec<Task> = t
@@ -922,6 +923,7 @@ impl Store {
                 time_basis: None,
                 started_at: None,
                 assigned_at: None,
+                pr: None,
             })
             .collect();
         let alerts = alert::TaskAlerts {

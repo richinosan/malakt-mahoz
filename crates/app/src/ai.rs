@@ -4359,6 +4359,18 @@ impl Session {
                 Err(e) => failed(e),
             };
         }
+        if name == crate::plugins::RUN_TOOL {
+            // コマンドは別のスレッドで動き、終わってから結果が届く
+            let started = cx.update(|cx| crate::plugins::run_from_ai(&call.args, cx));
+            return match started {
+                Ok(answer) => match answer.recv().await {
+                    Ok(Ok(outcome)) => Ok(Ok(crate::plugins::outcome_json(&outcome))),
+                    Ok(Err(error)) => failed(error),
+                    Err(_) => failed("コマンドが終わる前に、ウィンドウが閉じられました".into()),
+                },
+                Err(e) => failed(e),
+            };
+        }
         if crate::ai_tools::is_view_tool(name) {
             let result = cx.update(|cx| crate::ai_tools::run_view_tool(name, &call.args, cx));
             return Ok(result.map_err(ToolError::Failed));

@@ -31,7 +31,10 @@ pub fn is_session_tool(name: &str) -> bool {
 }
 
 pub fn is_app_tool(name: &str) -> bool {
-    is_view_tool(name) || is_session_tool(name) || name == crate::browser::READ_TOOL
+    is_view_tool(name)
+        || is_session_tool(name)
+        || name == crate::browser::READ_TOOL
+        || name == crate::plugins::RUN_TOOL
 }
 
 const SORTS: [(&str, Sort); 10] = [
@@ -209,6 +212,14 @@ pub fn summary(name: &str, args: &Value) -> Option<String> {
         "get_ai_settings" => "AI の設定を取得".into(),
         "set_ai_settings" => "AI の設定を変更".into(),
         "check_github" => "GitHub を確認".into(),
+        "list_plugins" => "プラグインの一覧を取得".into(),
+        "run_plugin_command" => format!("プラグインのコマンドを実行: {}", arg("command_id")),
+        "set_plugin_enabled" => match args.get("enabled").and_then(Value::as_bool) {
+            Some(true) => format!("プラグインを有効にする: {}", arg("plugin_id")),
+            _ => format!("プラグインを無効にする: {}", arg("plugin_id")),
+        },
+        "plugin_folder" => format!("プラグインのフォルダーを変更: {}", arg("path")),
+        "set_plugin_default_folder" => "プラグインの標準のフォルダーを変更".into(),
         _ => return None,
     })
 }
@@ -291,7 +302,7 @@ pub fn register(window: AnyWindowHandle, view: WeakEntity<MainView>, cx: &mut Ap
 
 /// 操作を届けるウィンドウ。手前にあるメインのウィンドウか、いちばん最近使ったもの。
 /// ほかのウィンドウの中に置かれたペインは、そのウィンドウのメインのビューが受け持つ。
-fn target(cx: &mut App) -> Option<(AnyWindowHandle, Entity<MainView>)> {
+pub(crate) fn target(cx: &mut App) -> Option<(AnyWindowHandle, Entity<MainView>)> {
     let active = cx.active_window();
     let list: Vec<(AnyWindowHandle, Entity<MainView>)> = {
         let views = cx.default_global::<Views>();
@@ -393,6 +404,10 @@ impl MainView {
             "set_panels" => self.ai_set_panels(args, window, cx)?,
             "pane" => self.ai_pane(args, window, cx)?,
             "open_dialog" => self.ai_open_dialog(args, window, cx)?,
+            "list_plugins"
+            | "set_plugin_enabled"
+            | "plugin_folder"
+            | "set_plugin_default_folder" => self.ai_plugin_tool(name, args, window, cx)?,
             "open_window" => match str_arg(args, "kind").unwrap_or("main") {
                 "main" => {
                     crate::open_main_window(cx)

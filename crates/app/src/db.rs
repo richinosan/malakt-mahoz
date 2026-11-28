@@ -21,6 +21,8 @@ pub struct Db {
     pub next_alert: Option<i64>,
     /// 繰り返しの次の回を作れなかった理由。画面がエラーとして出す。
     pub repeat_error: Option<String>,
+    /// GitHub の PR の時刻を読めなかった理由と、その番号（出すたびに増える）。画面がエラーとして出す。
+    pub pr_error: Option<(u64, String)>,
 }
 
 /// 解除の印を書き直す間隔（秒）。[`lock::OPEN_FOR`] より十分短くする。
@@ -64,6 +66,7 @@ impl Db {
             last_input: unix_now(),
             next_alert: None,
             repeat_error: None,
+            pr_error: None,
         }
     }
 
@@ -283,10 +286,12 @@ pub fn watch(cx: &mut App) {
                     }
                     outside
                 });
-                // MCP のサーバーが頼んだ、最前面の表示の切り替え
                 if outside {
+                    crate::pr_times::nudge(cx);
+                    // MCP のサーバーが頼んだ、最前面の表示の切り替え
                     crate::on_top::answer_asks(cx);
                 }
+                crate::pr_times::tick(cx);
             });
         }
     })

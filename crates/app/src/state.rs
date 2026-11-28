@@ -141,11 +141,12 @@ pub enum CustomizeSection {
     Sync,
     Keys,
     Window,
+    Plugins,
     Data,
 }
 
 impl CustomizeSection {
-    pub const ALL: [CustomizeSection; 20] = [
+    pub const ALL: [CustomizeSection; 21] = [
         CustomizeSection::Theme,
         CustomizeSection::Layout,
         CustomizeSection::Backdrop,
@@ -165,6 +166,7 @@ impl CustomizeSection {
         CustomizeSection::Sync,
         CustomizeSection::Keys,
         CustomizeSection::Window,
+        CustomizeSection::Plugins,
         CustomizeSection::Data,
     ];
 
@@ -189,6 +191,7 @@ impl CustomizeSection {
             CustomizeSection::Sync => "同期",
             CustomizeSection::Keys => "キー操作",
             CustomizeSection::Window => "ウィンドウ",
+            CustomizeSection::Plugins => "プラグイン",
             CustomizeSection::Data => "データ",
         }
     }
@@ -214,6 +217,7 @@ impl CustomizeSection {
             CustomizeSection::Sync => "calendar-sync",
             CustomizeSection::Keys => "keyboard",
             CustomizeSection::Window => "app-window",
+            CustomizeSection::Plugins => "puzzle",
             CustomizeSection::Data => "database",
         }
     }
@@ -234,6 +238,7 @@ impl CustomizeSection {
             | CustomizeSection::Sync
             | CustomizeSection::Keys
             | CustomizeSection::Window
+            | CustomizeSection::Plugins
             | CustomizeSection::Data => "アプリ",
             _ => "見た目",
         }
@@ -284,6 +289,8 @@ pub enum SubModal {
     DonePeople,
     /// ほかの人の完了を知らせるワークスペースを選ぶ
     DoneWorkspaces,
+    /// プラグインを有効にする前の承認
+    EnablePlugin,
 }
 
 /// 詳細で日付と時刻を入れる 2 つの項目。
@@ -409,6 +416,8 @@ pub struct MainView {
     pub pending_key_unlock: Option<Id>,
     /// 期限と時間帯の欄を開いているアクセスキー。
     pub key_limits_open: Option<Id>,
+    /// 承認の画面を出しているプラグインの ID と、出したときのファイルのハッシュ。
+    pub plugin_approving: Option<(String, String)>,
     /// その場で書き直している、アクセスキーの開始・期限・時刻。
     pub key_limit_editing: Option<(Id, LimitField)>,
     /// 左のメニューで名前を書いているワークスペース。
@@ -479,6 +488,8 @@ pub struct MainView {
     pub date_opens: usize,
     /// 統計の期間。
     pub stats_period: malakt_core::timing::Period,
+    /// 出した、PR の時刻を読めなかった失敗の番号（[`crate::db::Db::pr_error`]）。
+    pr_error_seen: u64,
     /// 統計のダイアログに出す数字。
     pub stats_view: Option<crate::timing_view::StatsView>,
     /// 開いている予想工数のパネル。
@@ -1018,6 +1029,7 @@ impl MainView {
             issued_access_key: None,
             pending_key_unlock: None,
             key_limits_open: None,
+            plugin_approving: None,
             key_limit_editing: None,
             naming_task: None,
             workspaces: Vec::new(),
@@ -1065,6 +1077,7 @@ impl MainView {
             estimate_pick: None,
             estimate_opens: 0,
             stats_period: Default::default(),
+            pr_error_seen: 0,
             stats_view: None,
             date_grid: cx.focus_handle(),
             month_scroll: ScrollHandle::new(),
@@ -1238,6 +1251,12 @@ impl MainView {
         if let Some(error) = self.db.read(cx).repeat_error.clone() {
             self.error = Some(error.into());
         }
+        if let Some((n, error)) = self.db.read(cx).pr_error.clone() {
+            if n > self.pr_error_seen {
+                self.pr_error_seen = n;
+                self.error = Some(error.into());
+            }
+        }
         let description = self
             .detail
             .as_ref()
@@ -1407,6 +1426,8 @@ impl MainView {
             cx.notify();
             result.and_then(|value| marked.map(|()| value))
         });
+        // PR の時刻を読むタスクが増えたかもしれない
+        crate::pr_times::nudge(cx);
         match result {
             Ok(value) => {
                 self.error = None;
@@ -3041,6 +3062,9 @@ impl MainView {
         self.issued_access_key = None;
         self.key_limits_open = None;
         self.key_limit_editing = None;
+        self.plugin_approving = None;
+        // プラグインのフォルダーは、開くたびに読み直す
+        crate::plugins::refresh(cx);
         self.appearance_section = CustomizeSection::Theme;
         self.appearance_pinned = false;
         self.preview_pick = None;
@@ -5655,6 +5679,7 @@ bundled_icons! {
         "maximize-2",
         "minimize-2",
         "plug",
+        "puzzle",
         "rotate-ccw-clock",
         "rotate-ccw",
         "image",

@@ -809,6 +809,7 @@ fn copy_task(
         time_basis: from.time_basis,
         started_at: None,
         assigned_at: (!from.assignee_ids.is_empty()).then_some(now),
+        pr: None,
     };
     insert_task(conn, &task)?;
     record_created(conn, &task, &Actor::Repeat)?;

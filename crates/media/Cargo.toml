@@ -7,8 +7,11 @@ license.workspace = true
 repository.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.62", features = ["Foundation", "Media_Control"] }
+windows = { version = "0.62", features = ["Foundation", "Media_Control", "Storage_Streams"] }
 windows-future = "0.3"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 zbus = { version = "5", default-features = false, features = ["blocking-api", "async-io"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6"
