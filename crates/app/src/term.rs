@@ -1380,6 +1380,8 @@ struct Frame {
     cell: Size<Pixels>,
     origin: Point<Pixels>,
     font: Font,
+    /// 等幅の書体の優先順。文字ごとに、上からその文字を持つ書体で描く。
+    chain: crate::fonts::Chain,
     font_size: Pixels,
     focused: bool,
     ime: Option<String>,
@@ -1395,7 +1397,9 @@ impl TermPane {
         cx: &mut Context<Self>,
     ) -> Frame {
         let theme = cx.theme();
-        let font = font(theme.mono_font_family.clone());
+        let chain = crate::fonts::mono(cx);
+        let mut font = font(chain.primary.clone());
+        font.fallbacks = chain.fallbacks.clone();
         let font_size = theme.font_size * (13. / 16.);
         let text = window.text_system();
         let width = text
@@ -1430,6 +1434,7 @@ impl TermPane {
             cell,
             origin,
             font,
+            chain,
             font_size,
             focused: self.focus.is_focused(window),
             ime: self.ime.clone(),
@@ -1520,6 +1525,35 @@ fn paint_lines(c: char, cell: Bounds<Pixels>, color: Hsla, window: &mut Window) 
     true
 }
 
+/// 区切りの文字を、描く書体ごとに分ける（桁のずれ、文字、書体）。区切りは ASCII が続くか、
+/// 1 マスの 1 文字（と、それに付く結合文字）なので、桁のずれは文字の数。結合文字は前の文字の書体で描く。
+fn pieces<F: PartialEq + Clone>(
+    text: &str,
+    mut pick: impl FnMut(char) -> F,
+) -> Vec<(usize, String, F)> {
+    let mut out: Vec<(usize, String, F)> = Vec::new();
+    let mut chars = text.chars();
+    let Some(first) = chars.next() else {
+        return out;
+    };
+    out.push((0, first.to_string(), pick(first)));
+    let ascii = first.is_ascii();
+    for (ix, c) in chars.enumerate() {
+        let last = out.last_mut().expect("最初の文字を入れた");
+        if !ascii {
+            last.1.push(c);
+            continue;
+        }
+        let family = pick(c);
+        if family == last.2 {
+            last.1.push(c);
+        } else {
+            out.push((ix + 1, c.to_string(), family));
+        }
+    }
+    out
+}
+
 fn paint(frame: &Frame, window: &mut Window, cx: &mut App) {
     let Frame {
         snapshot,
@@ -1533,47 +1567,50 @@ fn paint(frame: &Frame, window: &mut Window, cx: &mut App) {
             origin.y + cell.height * row as f32,
         )
     };
-    let draw =
-        |text: &str, fg: u32, look: u8, to: Point<Pixels>, window: &mut Window, cx: &mut App| {
-            // Nerd Font のアイコンは、同梱のアイコンの書体で描く。ターミナルの書体が
-            // Nerd Font でなくても、Windows Terminal と同じようにプロンプトの記号が出る
-            let symbol = text.chars().next().is_some_and(malakt_term::nerd_symbol);
-            let mut font = if symbol {
-                font(crate::theme::SYMBOL_FONT)
-            } else {
-                frame.font.clone()
-            };
-            if look & style::BOLD != 0 && !symbol {
-                font = font.bold();
-            }
-            if look & style::ITALIC != 0 && !symbol {
-                font = font.italic();
-            }
-            let color = hsla(fg);
-            let run = TextRun {
-                len: text.len(),
-                font,
-                color,
-                background_color: None,
-                underline: (look & style::UNDERLINE != 0).then_some(UnderlineStyle {
-                    thickness: gpui_kit::px(1.),
-                    color: Some(color),
-                    wavy: false,
-                }),
-                strikethrough: (look & style::STRIKE != 0).then_some(StrikethroughStyle {
-                    thickness: gpui_kit::px(1.),
-                    color: Some(color),
-                }),
-            };
-            let line = window.text_system().shape_line(
-                text.to_owned().into(),
-                frame.font_size,
-                &[run],
-                None,
-            );
-            // 描けなかった文字は、その場所が空くだけ
-            let _ = line.paint(to, cell.height, TextAlign::Left, None, window, cx);
+    let draw = |text: &str,
+                family: &SharedString,
+                fg: u32,
+                look: u8,
+                to: Point<Pixels>,
+                window: &mut Window,
+                cx: &mut App| {
+        // 主の書体は、どの書体も持たない文字を OS に探させるため、代わりの書体付きのものを使う
+        let mut font = if *family == frame.chain.primary {
+            frame.font.clone()
+        } else {
+            font(family.clone())
         };
+        // 同梱の Nerd Font は標準の太さしかないので、太字・斜体にしない
+        let plain = family.as_ref() == crate::theme::SYMBOL_FONT;
+        if look & style::BOLD != 0 && !plain {
+            font = font.bold();
+        }
+        if look & style::ITALIC != 0 && !plain {
+            font = font.italic();
+        }
+        let color = hsla(fg);
+        let run = TextRun {
+            len: text.len(),
+            font,
+            color,
+            background_color: None,
+            underline: (look & style::UNDERLINE != 0).then_some(UnderlineStyle {
+                thickness: gpui_kit::px(1.),
+                color: Some(color),
+                wavy: false,
+            }),
+            strikethrough: (look & style::STRIKE != 0).then_some(StrikethroughStyle {
+                thickness: gpui_kit::px(1.),
+                color: Some(color),
+            }),
+        };
+        let line =
+            window
+                .text_system()
+                .shape_line(text.to_owned().into(), frame.font_size, &[run], None);
+        // 描けなかった文字は、その場所が空くだけ
+        let _ = line.paint(to, cell.height, TextAlign::Left, None, window, cx);
+    };
     for row in 0..snapshot.rows {
         for (range, color) in backgrounds(snapshot, row) {
             window.paint_quad(fill(
@@ -1594,14 +1631,20 @@ fn paint(frame: &Frame, window: &mut Window, cx: &mut App) {
                     continue;
                 }
             }
-            draw(
-                &segment.text,
-                segment.fg,
-                segment.style,
-                at(segment.col, row),
-                window,
-                cx,
-            );
+            // 文字ごとに書体を選び、同じ書体の続きはまとめて、その文字の桁から描く
+            for (offset, text, family) in pieces(&segment.text, |c| {
+                crate::fonts::pick(&frame.chain, c, window, cx)
+            }) {
+                draw(
+                    &text,
+                    &family,
+                    segment.fg,
+                    segment.style,
+                    at(segment.col + offset, row),
+                    window,
+                    cx,
+                );
+            }
         }
     }
     if let (Some(ime), Some((col, row))) = (&frame.ime, snapshot.input_at) {
@@ -1652,8 +1695,10 @@ fn paint(frame: &Frame, window: &mut Window, cx: &mut App) {
                     if here.c != ' ' {
                         let look = here.style & TEXT_STYLE;
                         let text = String::from(here.c);
+                        let family = crate::fonts::pick(&frame.chain, here.c, window, cx);
                         draw(
                             &text,
+                            &family,
                             malakt_term::BACKGROUND,
                             look,
                             block.origin,
@@ -1801,7 +1846,25 @@ impl Render for TermPane {
 
 #[cfg(test)]
 mod tests {
-    use super::{backgrounds, expand_dir, segments};
+    use super::{backgrounds, expand_dir, pieces, segments};
+
+    #[test]
+    fn each_char_gets_the_first_font_that_has_it() {
+        // 英字は 1 つ目、私用領域のアイコンは 2 つ目の書体が持つ
+        let pick = |c: char| if c.is_ascii() { "mono" } else { "nerd" };
+        assert_eq!(pieces("ls -la", pick), [(0, "ls -la".to_owned(), "mono")]);
+        let mixed: String = ['a', '\u{e0b0}', 'b'].iter().collect();
+        assert_eq!(
+            pieces(&mixed, |c: char| if c == 'a' { "x" } else { "y" }),
+            [(0, "a".to_owned(), "x"), (1, "\u{e0b0}b".to_owned(), "y")]
+        );
+        // ASCII でない 1 文字は、結合文字ごと 1 つの書体で描く
+        assert_eq!(
+            pieces("か\u{3099}", pick),
+            [(0, "か\u{3099}".to_owned(), "nerd")]
+        );
+        assert!(pieces("", pick).is_empty());
+    }
     use malakt_term::{style, Cell, Snapshot, BACKGROUND, FOREGROUND, SELECTION};
 
     fn snapshot(cells: &[(char, u32, u32, u8)]) -> Snapshot {

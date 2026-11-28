@@ -57,6 +57,7 @@ const NOT_BUTTONS: &[&str] = &[
     "dialog-under",
     "font-list",
     "font-search",
+    "font-chain",
     "customize-search",
     "history-list",
     "notices-scroll",
@@ -110,6 +111,9 @@ const MUST: &[&str] = &[
     "font-open",
     "font",
     "font-reset",
+    "font-remove",
+    "mono-font-open",
+    "mono-font-reset",
     "accent-reset",
     "light-reset",
     "dark-reset",
@@ -653,6 +657,8 @@ fn fingerprint(cx: &mut TestAppContext, world: &World) -> String {
             "table.columns",
             "sidebar.width",
             "font.family",
+            "font.families",
+            "font.mono",
             "color.accent",
             "color.background.light",
             "color.background.dark",
@@ -936,7 +942,7 @@ fn screens() -> Vec<(&'static str, Size<Pixels>, Setup)> {
         ("カスタマイズを変えたところ", wide, |cx, w| {
             use malakt_mahoz::theme::{Color, Slot};
             with_view(cx, w, |v, window, cx| {
-                v.set_font(Some("Noto Sans"), cx);
+                v.set_font_list(false, vec!["Noto Sans".into(), "LINE Seed JP".into()], cx);
                 for (slot, hex) in [
                     (Slot::Accent, "#1d4ed8"),
                     (Slot::Light, "#fdf6e3"),
@@ -969,7 +975,7 @@ fn screens() -> Vec<(&'static str, Size<Pixels>, Setup)> {
         ("フォントの一覧", wide, |cx, w| {
             with_view(cx, w, |v, window, cx| {
                 v.open_appearance(window, cx);
-                v.open_font_picker(window, cx);
+                v.open_font_picker(false, window, cx);
                 // この PC に入っている書体の代わり
                 v.fonts = ["LINE Seed JP", "Noto Sans", "Noto Serif"]
                     .map(String::from)

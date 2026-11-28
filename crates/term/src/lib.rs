@@ -784,12 +784,6 @@ const BOX: [u8; 128] = [
     0x14, 0x00, 0x00, 0x00, 0x01, 0x10, 0x04, 0x40, 0x02, 0x20, 0x08, 0x80, 0x09, 0x90, 0x06, 0x60,
 ];
 
-/// Nerd Font のアイコンの文字か。私用領域（U+E000〜U+F8FF、U+F0000〜）と、
-/// Nerd Font が私用領域の外に置いた電源の記号（U+23FB〜U+23FE、U+2B58）。
-pub fn nerd_symbol(c: char) -> bool {
-    matches!(c as u32, 0xe000..=0xf8ff | 0xf0000..=0x10fffd | 0x23fb..=0x23fe | 0x2b58)
-}
-
 /// Powerline の三角の文字（U+E0B0〜U+E0B3、U+E0B8〜U+E0BF の塗った三角）なら、
 /// マスを 1 とした頂点と、塗るか（`true`）線を引くか（`false`）。
 /// 書体の字形はマスの高さとずれて上下にすき間が出るので、マスいっぱいに描く。
@@ -869,24 +863,6 @@ pub fn block_rects(c: char) -> Option<(Vec<[f32; 4]>, f32)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn nerd_font_icons_are_told_apart() {
-        // Powerline の矢印、フォルダー、Material のアイコン、電源
-        for c in [
-            '\u{e0b0}',
-            '\u{e0b6}',
-            '\u{f07c}',
-            '\u{f0001}',
-            '\u{23fb}',
-            '\u{2b58}',
-        ] {
-            assert!(nerd_symbol(c), "{:x}", c as u32);
-        }
-        for c in ['a', '~', 'あ', '─', '\u{2b57}', '\u{d7ff}', '\u{f900}'] {
-            assert!(!nerd_symbol(c), "{:x}", c as u32);
-        }
-    }
 
     #[test]
     fn powerline_triangles_fill_the_cell() {

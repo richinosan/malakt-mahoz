@@ -11,6 +11,7 @@ pub mod cli;
 pub mod db;
 pub mod drops;
 mod feel;
+pub mod fonts;
 mod history_view;
 pub mod icons;
 pub mod mcp;

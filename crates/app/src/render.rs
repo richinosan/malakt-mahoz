@@ -3,6 +3,7 @@
 use std::ops::Range;
 use std::sync::Arc;
 
+use crate::fonts::MonoFont;
 use crate::press::{button, Unpressed};
 use gpui_kit::base::{Disableable, TestSupportExt};
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants};
@@ -359,6 +360,7 @@ enum SettingKey {
     Clear,
     Blur,
     Font,
+    MonoFont,
     Color(crate::theme::Slot),
     Density,
     DueFormat,
@@ -6597,7 +6599,8 @@ impl MainView {
         };
         let (title, width, over) = match self.sub_shown().map(|(sub, _)| sub) {
             None | Some(SubModal::Rules | SubModal::Schedules) => return sized("dialog", body, cx),
-            Some(SubModal::Font) => ("フォント", px(400.), self.font_picker(cx)),
+            Some(SubModal::Font) => ("フォント", px(440.), self.font_picker(false, cx)),
+            Some(SubModal::MonoFont) => ("等幅フォント", px(440.), self.font_picker(true, cx)),
             Some(SubModal::Scene) => ("背景の画像", px(680.), self.scene_picker(cx)),
             Some(SubModal::DonePeople) => ("知らせる担当者", px(400.), self.done_picker(true, cx)),
             Some(SubModal::DoneWorkspaces) => (
@@ -6921,7 +6924,21 @@ impl MainView {
             SettingKey::Font,
             "フォント",
             None,
-            list(&["書体", "文字"]),
+            list(&["書体", "文字", "優先順", "フォールバック"]),
+        ));
+        all.push(Setting::new(
+            Section::Look,
+            SettingKey::MonoFont,
+            "等幅フォント",
+            Some("ターミナルとコード"),
+            list(&[
+                "書体",
+                "ターミナル",
+                "コード",
+                "Nerd Font",
+                "優先順",
+                "フォールバック",
+            ]),
         ));
         for slot in crate::theme::Slot::ALL {
             all.push(Setting::new(
@@ -7377,20 +7394,32 @@ impl MainView {
                     .child(slider("blur-slider", &self.blur_slider, "ぼかし"))
                     .child(reset("blur-reset", false).placeholder())
                     .into_any_element(),
-                SettingKey::Font => row()
-                    .gap_1()
-                    .child(
-                        opener("font-open", self.current_font(cx), cx)
-                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                                this.open_font_picker(window, cx)
-                            }))
-                            .test_support(),
-                    )
-                    .child(
-                        reset("font-reset", look.font.is_some())
-                            .on_click(cx.listener(|this, _, _, cx| this.set_font(None, cx))),
-                    )
-                    .into_any_element(),
+                SettingKey::Font | SettingKey::MonoFont => {
+                    let mono = item.key == SettingKey::MonoFont;
+                    let (open, clear) = if mono {
+                        ("mono-font-open", "mono-font-reset")
+                    } else {
+                        ("font-open", "font-reset")
+                    };
+                    let chosen = if mono {
+                        crate::theme::mono_fonts(cx).is_some()
+                    } else {
+                        !look.fonts.is_empty()
+                    };
+                    row()
+                        .gap_1()
+                        .child(
+                            opener(open, self.font_list(mono, cx).join(", "), cx)
+                                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                                    this.open_font_picker(mono, window, cx)
+                                }))
+                                .test_support(),
+                        )
+                        .child(reset(clear, chosen).on_click(
+                            cx.listener(move |this, _, _, cx| this.reset_fonts(mono, cx)),
+                        ))
+                        .into_any_element()
+                }
                 SettingKey::Color(slot) => {
                     let ix = crate::theme::Slot::ALL
                         .iter()
@@ -8128,10 +8157,150 @@ impl MainView {
         tiles
     }
 
-    /// この PC に入っている書体の一覧。
-    fn font_picker(&self, cx: &mut Context<Self>) -> Div {
+    /// 書体の優先順と、この PC に入っている書体の一覧。上の行はドラッグで並べ替え、× で外す。
+    /// 下の一覧を押すと末尾に足し、入っているものを押すと外す。
+    fn font_picker(&self, mono: bool, cx: &mut Context<Self>) -> Div {
         let theme = cx.theme().clone();
-        let current = self.current_font(cx);
+        let chosen = self.font_list(mono, cx);
+        let only = chosen.len() == 1;
+        let drag = self.font_drag.clone().filter(|d| d.mono == mono);
+        let mut chain = col().id("font-chain").gap_1();
+        for (ix, name) in chosen.iter().enumerate() {
+            let missing = !crate::fonts::is_installed(name, cx);
+            let dragged = drag.as_ref().is_some_and(|d| d.moved && d.from == ix);
+            // 落とす場所の印。上から下へ動かすときは行の下、下から上へは行の上
+            let mark = drag
+                .as_ref()
+                .filter(|d| d.moved && d.over == Some(ix) && d.from != ix)
+                .map(|d| d.from < ix);
+            let row_name = name.clone();
+            let line = |below: bool| {
+                div()
+                    .absolute()
+                    .left_2()
+                    .right_2()
+                    .h(px(2.))
+                    .rounded_full()
+                    .bg(theme.ring)
+                    .when(below, |d| d.bottom(px(-3.)))
+                    .when(!below, |d| d.top(px(-3.)))
+            };
+            let item = row()
+                .id(("font-chain-row", ix))
+                .relative()
+                .w_full()
+                .h(px(40.))
+                .pl_2()
+                .pr_1()
+                .gap_2()
+                .rounded(feel::md())
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.background)
+                .cursor_grab()
+                .when(dragged, |d| d.opacity(0.4))
+                .lit(theme.accent.opacity(0.6), cx)
+                .child(
+                    app_icon("grip-vertical")
+                        .small()
+                        .text_color(theme.muted_foreground),
+                )
+                .child(
+                    div()
+                        .w(px(16.))
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child((ix + 1).to_string()),
+                )
+                // 名前は、その書体で出す
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .font_family(name.clone())
+                        .when(missing, |d| {
+                            d.text_color(theme.muted_foreground).line_through()
+                        })
+                        .child(name.clone()),
+                )
+                .when(missing, |d| {
+                    d.child(
+                        div()
+                            .id(("font-missing", ix))
+                            .child(
+                                app_icon("triangle-exclamation-point")
+                                    .small()
+                                    .text_color(theme.warning),
+                            )
+                            .tooltip(|window, cx| {
+                                gpui_kit::component::tooltip::Tooltip::new("この PC にありません")
+                                    .build(window, cx)
+                            }),
+                    )
+                })
+                .when(!only, |d| {
+                    d.child(
+                        remove_x(
+                            ("font-remove", ix),
+                            "外す",
+                            cx.listener(move |this, _, _, cx| this.remove_font(mono, ix, cx)),
+                            cx,
+                        )
+                        .test_support(),
+                    )
+                })
+                .when_some(mark, |d, below| d.child(line(below)))
+                // 押したまま上下へ動かすと、並べ替える
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                        this.font_drag = Some(crate::state::FontDrag {
+                            mono,
+                            from: ix,
+                            start_y: f32::from(event.position.y),
+                            moved: false,
+                            over: None,
+                        });
+                        cx.notify();
+                    }),
+                )
+                .on_mouse_move(cx.listener(move |this, _: &MouseMoveEvent, _, cx| {
+                    if let Some(drag) = &mut this.font_drag {
+                        if drag.moved && drag.over != Some(ix) {
+                            drag.over = Some(ix);
+                            cx.notify();
+                        }
+                    }
+                }))
+                .test_support();
+            // 足した行は、すっと出てくる
+            chain = chain.child(item.with_animation(
+                SharedString::from(format!("font-in-{row_name}")),
+                appear(200),
+                |d, t| d.opacity(t).top(px(-6. * (1. - t))),
+            ));
+        }
+        let chain = chain.when(drag.is_some(), |d| {
+            d.on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
+                if event.pressed_button != Some(MouseButton::Left) {
+                    this.finish_font_drag(cx);
+                } else if let Some(drag) = &mut this.font_drag {
+                    if !drag.moved && (f32::from(event.position.y) - drag.start_y).abs() > 6. {
+                        drag.moved = true;
+                        cx.notify();
+                    }
+                }
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| this.finish_font_drag(cx)),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| this.finish_font_drag(cx)),
+            )
+        });
         let found = self.found_fonts(cx);
         let none_found = found.is_empty();
         let count = found.len();
@@ -8143,16 +8312,16 @@ impl MainView {
                 range
                     .map(|ix| {
                         let name = found[ix].clone();
-                        let selected = name == current;
+                        let selected = chosen.contains(&name);
                         row()
                             .id(("font", ix))
+                            .group("font-row")
                             .w_full()
                             .h(px(40.))
                             .px_3()
                             .gap_2()
                             .rounded(feel::md())
                             .cursor_pointer()
-                            .when(selected, |d| d.bg(theme.accent))
                             .lit(theme.accent.opacity(0.6), cx)
                             .sunk(theme.primary.opacity(0.4), cx)
                             // 名前は、その書体で出す
@@ -8163,11 +8332,13 @@ impl MainView {
                                     .font_family(name.clone())
                                     .child(name.clone()),
                             )
-                            .when(selected, |d| {
-                                d.child(app_icon("check").small().text_color(theme.primary))
+                            .child(if selected {
+                                app_icon("check").small().text_color(theme.primary)
+                            } else {
+                                app_icon("plus").small().text_color(theme.muted_foreground)
                             })
                             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                this.set_font(Some(&name), cx)
+                                this.toggle_font(mono, &name, cx)
                             }))
                             .test_support()
                     })
@@ -8180,6 +8351,8 @@ impl MainView {
         .size_full();
         col()
             .gap_3()
+            .child(chain)
+            .child(div().h(px(1.)).bg(theme.border))
             .child(
                 Input::new(&self.inputs.font_search)
                     .id("font-search")
@@ -8190,7 +8363,7 @@ impl MainView {
             .child(
                 div()
                     .relative()
-                    .h(px(360.))
+                    .h(px(300.))
                     .child(list)
                     .vertical_scrollbar(&self.font_scroll)
                     .when(none_found, |d| {
@@ -8968,7 +9141,7 @@ impl MainView {
                                     div()
                                         .id("ticket-secret")
                                         .text_sm()
-                                        .font_family(theme.mono_font_family.clone())
+                                        .mono_font(cx)
                                         .child(ticket.secret.clone()),
                                 )
                                 .child(muted(format!(

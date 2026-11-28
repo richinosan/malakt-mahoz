@@ -233,8 +233,10 @@ pub enum PreviewPick {
 /// ダイアログの上に、もう 1 枚重ねて出すダイアログ。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SubModal {
-    /// 書体を選ぶ
+    /// 画面の書体の優先順
     Font,
+    /// 等幅の書体の優先順（ターミナル・コード）
+    MonoFont,
     /// 背景の画像を選ぶ
     Scene,
     /// ワークスペースの AI のルール（ワークスペースの設定の上に重ねる）
@@ -554,6 +556,8 @@ pub struct MainView {
     /// 書体を選ぶ一覧に出す名前（この PC に入っている書体）。
     pub fonts: Vec<String>,
     pub font_scroll: UniformListScrollHandle,
+    /// 書体の優先順の行をドラッグして並べ替えている。
+    pub font_drag: Option<FontDrag>,
     /// アクセント、背景（ライト）、背景（ダーク）の色を選ぶところ。
     pub color_pickers: [Entity<ColorPickerState>; 3],
     /// 面の透明度と、背景の画像のぼかし。
@@ -1048,6 +1052,7 @@ impl MainView {
             preset_naming: None,
             fonts: Vec::new(),
             font_scroll: UniformListScrollHandle::new(),
+            font_drag: None,
             color_pickers,
             clear_slider,
             blur_slider,
@@ -3340,26 +3345,115 @@ impl MainView {
         cx.notify();
     }
 
-    pub fn open_font_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// 書体の優先順を開く。`mono` は等幅（ターミナル・コード）のほう。
+    pub fn open_font_picker(&mut self, mono: bool, window: &mut Window, cx: &mut Context<Self>) {
+        crate::fonts::forget_installed(cx);
         self.fonts = crate::theme::fonts(cx);
+        self.font_drag = None;
         self.inputs.font_search.update(cx, |s, cx| {
             s.set_value("", window, cx);
             s.focus(window, cx);
         });
-        // 今の書体が見えるところから始める
-        let current = self.current_font(cx);
-        let at = self.fonts.iter().position(|name| *name == current);
-        self.font_scroll
-            .scroll_to_item(at.unwrap_or(0), ScrollStrategy::Center);
-        self.sub_modal = Some(SubModal::Font);
+        self.font_scroll.scroll_to_item(0, ScrollStrategy::Top);
+        self.sub_modal = Some(if mono {
+            SubModal::MonoFont
+        } else {
+            SubModal::Font
+        });
         cx.notify();
     }
 
-    /// 今使っている書体の名前。
-    pub fn current_font(&self, cx: &App) -> String {
-        crate::theme::look(cx)
-            .font
-            .unwrap_or_else(|| crate::theme::DEFAULT_FONT.to_owned())
+    /// 今の書体の優先順。
+    pub fn font_list(&self, mono: bool, cx: &App) -> Vec<String> {
+        if mono {
+            crate::fonts::mono_list(cx)
+        } else {
+            crate::fonts::ui_list(cx)
+        }
+    }
+
+    /// 書体の優先順を変えて保存する。空にはしない（最後の 1 つは外せない）。
+    pub fn set_font_list(&mut self, mono: bool, list: Vec<String>, cx: &mut Context<Self>) {
+        let list = crate::theme::tidy_fonts(&list);
+        if list.is_empty() {
+            return;
+        }
+        let saved = if mono {
+            // 標準と同じ並びなら、何も選んでいない形で残す（配色の等幅の書体が変わっても追う）
+            let standard = list == crate::fonts::default_mono(cx);
+            crate::theme::set_mono_fonts((!standard).then_some(list.as_slice()), cx)
+        } else {
+            crate::theme::set_fonts(&list, cx)
+        };
+        match saved {
+            Ok(()) => self.error = None,
+            Err(error) => {
+                self.error = Some(format!("フォントを保存できませんでした。{error}").into())
+            }
+        }
+        cx.notify();
+    }
+
+    /// 一覧の書体を、優先順の末尾に足す。もう入っていれば外す。
+    pub fn toggle_font(&mut self, mono: bool, name: &str, cx: &mut Context<Self>) {
+        let mut list = self.font_list(mono, cx);
+        match list.iter().position(|have| have == name) {
+            Some(ix) => {
+                if list.len() == 1 {
+                    return;
+                }
+                list.remove(ix);
+            }
+            None => list.push(name.to_owned()),
+        }
+        self.set_font_list(mono, list, cx);
+    }
+
+    /// 優先順の `ix` 番目を外す。
+    pub fn remove_font(&mut self, mono: bool, ix: usize, cx: &mut Context<Self>) {
+        let mut list = self.font_list(mono, cx);
+        if ix < list.len() && list.len() > 1 {
+            list.remove(ix);
+            self.set_font_list(mono, list, cx);
+        }
+    }
+
+    /// 優先順の `from` 番目を `to` 番目へ動かす。
+    pub fn move_font(&mut self, mono: bool, from: usize, to: usize, cx: &mut Context<Self>) {
+        let mut list = self.font_list(mono, cx);
+        if from >= list.len() || to >= list.len() || from == to {
+            return;
+        }
+        let moved = list.remove(from);
+        list.insert(to, moved);
+        self.set_font_list(mono, list, cx);
+    }
+
+    /// 書体の優先順を標準に戻す。
+    pub fn reset_fonts(&mut self, mono: bool, cx: &mut Context<Self>) {
+        let saved = if mono {
+            crate::theme::set_mono_fonts(None, cx)
+        } else {
+            crate::theme::set_fonts(&[], cx)
+        };
+        match saved {
+            Ok(()) => self.error = None,
+            Err(error) => {
+                self.error = Some(format!("フォントを保存できませんでした。{error}").into())
+            }
+        }
+        cx.notify();
+    }
+
+    /// 優先順の行のドラッグを終える。ほかの行の上で離したら、そこへ動かす。
+    pub fn finish_font_drag(&mut self, cx: &mut Context<Self>) {
+        let Some(drag) = self.font_drag.take() else {
+            return;
+        };
+        if let Some(to) = drag.over.filter(|_| drag.moved) {
+            self.move_font(drag.mono, drag.from, to, cx);
+        }
+        cx.notify();
     }
 
     /// 検索に合う書体。
@@ -3370,17 +3464,6 @@ impl MainView {
             .filter(|name| name.to_lowercase().contains(query.trim()))
             .cloned()
             .collect()
-    }
-
-    /// 書体を変える。`None` は同梱の書体。
-    pub fn set_font(&mut self, font: Option<&str>, cx: &mut Context<Self>) {
-        match crate::theme::set_font(font, cx) {
-            Ok(()) => self.error = None,
-            Err(error) => {
-                self.error = Some(format!("フォントを保存できませんでした。{error}").into())
-            }
-        }
-        cx.notify();
     }
 
     /// 色を変える。`None` は同梱の配色の色。
@@ -5265,6 +5348,17 @@ pub enum DropTarget {
     Workspace(Option<Id>),
     /// AI チャットの入力欄に添える。
     Chat,
+}
+
+/// 書体の優先順の行のドラッグ。押し始めた位置から少し動くまでは、ただのクリックとして扱う。
+#[derive(Debug, Clone, PartialEq)]
+pub struct FontDrag {
+    pub mono: bool,
+    pub from: usize,
+    pub start_y: f32,
+    pub moved: bool,
+    /// 今マウスが上にある行。
+    pub over: Option<usize>,
 }
 
 /// 見出しのドラッグ。押し始めた位置から少し動くまでは、ただのクリックとして扱う。
