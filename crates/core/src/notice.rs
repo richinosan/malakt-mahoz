@@ -29,6 +29,8 @@ pub enum NoticeKind {
     Timer,
     /// ポモドーロ（[`crate::pomodoro`]）の段が終わった。タスクには付かない
     Pomodoro,
+    /// AI bot が毎日の声かけ（[`crate::bots::AiBot::check_in`]）をした。タスクには付かず、会話（`chat_id`）を開く
+    BotCheckIn,
 }
 
 impl NoticeKind {
@@ -42,6 +44,7 @@ impl NoticeKind {
             NoticeKind::Mentioned => "mentioned",
             NoticeKind::Timer => "timer",
             NoticeKind::Pomodoro => "pomodoro",
+            NoticeKind::BotCheckIn => "bot_check_in",
         }
     }
 
@@ -55,6 +58,7 @@ impl NoticeKind {
             "mentioned" => NoticeKind::Mentioned,
             "timer" => NoticeKind::Timer,
             "pomodoro" => NoticeKind::Pomodoro,
+            "bot_check_in" => NoticeKind::BotCheckIn,
             _ => return None,
         })
     }
@@ -83,8 +87,10 @@ pub struct Notice {
     pub read_at: Option<i64>,
     /// 期限の通知のときの、その時点の期限。
     pub due: Option<String>,
-    /// タスクに付かない通知の 1 行（タイマーとポモドーロ）。
+    /// タスクに付かない通知の 1 行（タイマー、ポモドーロ、bot の声かけ）。
     pub text: String,
+    /// bot の声かけの通知から開く、AI bot の会話の ID。
+    pub chat_id: Option<String>,
 }
 
 impl Notice {
@@ -101,7 +107,7 @@ impl Notice {
             format!("{} さん", self.actor)
         };
         match self.kind {
-            NoticeKind::Timer | NoticeKind::Pomodoro => self.text.clone(),
+            NoticeKind::Timer | NoticeKind::Pomodoro | NoticeKind::BotCheckIn => self.text.clone(),
             NoticeKind::DueToday => format!("「{title}」の期限は今日です"),
             NoticeKind::Due => match self.due.as_deref() {
                 Some(due) => crate::alert::headline(title, due, self.created_at),
@@ -161,7 +167,7 @@ pub const MAX_NOTICES: usize = 500;
 pub const EXCERPT_CHARS: usize = 200;
 
 const COLUMNS: &str = "id, kind, task_id, task_title, actor, comment_id, excerpt, status, \
-                       done_count, total_count, created_at, read_at, due, text";
+                       done_count, total_count, created_at, read_at, due, text, chat_id";
 
 fn from_row(r: &Row<'_>) -> rusqlite::Result<Notice> {
     let kind: String = r.get(1)?;
@@ -182,6 +188,7 @@ fn from_row(r: &Row<'_>) -> rusqlite::Result<Notice> {
         read_at: r.get(11)?,
         due: r.get(12)?,
         text: r.get(13)?,
+        chat_id: r.get(14)?,
     })
 }
 
@@ -236,6 +243,27 @@ pub(crate) fn insert_plain(
 }
 
 impl Store {
+    /// bot の声かけの通知を作る。`text` は 1 行目（bot の名前など）、`excerpt` は bot が書いたことの先頭、
+    /// `chat_id` は押したときに開く会話。同じ `dedupe` の通知がすでにあれば作らない。作ったら `true`。
+    pub fn add_bot_check_in_notice(
+        &mut self,
+        text: &str,
+        excerpt: &str,
+        chat_id: &str,
+        dedupe: &str,
+    ) -> Result<bool> {
+        let tx = self.conn.transaction()?;
+        let made = insert_plain(&tx, NoticeKind::BotCheckIn, text, excerpt, dedupe, now_ms())?;
+        if made {
+            tx.execute(
+                "UPDATE notices SET chat_id = ?2 WHERE dedupe = ?1",
+                params![dedupe, chat_id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(made)
+    }
+
     /// 新しい順。
     pub fn notices(&self, limit: usize) -> Result<Vec<Notice>> {
         let sql =
@@ -599,6 +627,7 @@ mod tests {
             read_at: None,
             due: None,
             text: String::new(),
+            chat_id: None,
         };
         let with = |f: &dyn Fn(&mut Notice)| {
             let mut n = base.clone();

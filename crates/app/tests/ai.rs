@@ -5545,3 +5545,156 @@ fn each_bot_talks_with_its_own_instructions_and_chats(cx: &mut TestAppContext) {
         assert!(window.find("ai-bot-name").visible());
     });
 }
+
+/// 声かけの時刻を決めた bot は、毎日その時刻に今日のタスクを読み、伝えたいことを通知に出す。
+/// 声かけでは読むだけのツールしか使えない。通知を押すと、その会話が開く。
+#[gpui_kit::test]
+fn bots_check_in_every_day_and_the_notice_opens_the_chat(cx: &mut TestAppContext) {
+    let mut store = Store::open_in_memory().unwrap();
+    let helper = store.create_ai_bot("秘書", "短く答える").unwrap();
+    store
+        .update_ai_bot(
+            &helper.id,
+            &malakt_core::bots::BotPatch {
+                check_in: Some(Some("09:00".into())),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let world = start_with(cx, store);
+    world.keys.set(Provider::Claude, "sk-ant-1").unwrap();
+    let (window, view) = open(cx, wide());
+    let notices = |cx: &mut TestAppContext| {
+        cx.update(|cx| db::shared(cx).read(cx).store.notices(10).unwrap())
+    };
+
+    // 時刻の前は何もしない
+    let started = session(cx).update(cx, |s, cx| s.check_in_at("2099-01-05", "08:59", cx));
+    assert_eq!(started, 0);
+
+    world.reply(tool_reply("c1", "list_tasks", json!({})));
+    world.reply(tool_reply(
+        "c2",
+        "create_task",
+        json!({"title": "勝手に作らない"}),
+    ));
+    world.reply(text_reply(
+        "今日は期限のタスクがありません。\n来週の準備を始めましょうか。",
+    ));
+    let started = session(cx).update(cx, |s, cx| s.check_in_at("2099-01-05", "09:00", cx));
+    assert_eq!(started, 1);
+    wait(cx, "声かけが終わる", |s| {
+        s.parallel.len() == 1 && s.parallel[0].done
+    });
+    // 声かけは秘書として話し、読むだけのツールしか使えない
+    let sent = world.sent();
+    assert_eq!(sent.len(), 3);
+    assert!(sent[0].2["system"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("「秘書」という名前"));
+    let first = sent[0].2["messages"][0]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        first.starts_with(malakt_mahoz::ai::CHECK_IN_PROMPT),
+        "{first}"
+    );
+    let result = &sent[2].2["messages"].as_array().unwrap().last().unwrap()["content"][0];
+    assert_eq!(result["is_error"], true, "{result}");
+    assert!(all_tasks(cx).is_empty());
+
+    let made = notices(cx);
+    assert_eq!(made.len(), 1);
+    assert_eq!(made[0].kind, malakt_core::notice::NoticeKind::BotCheckIn);
+    assert_eq!(made[0].headline(), "秘書 から");
+    assert_eq!(
+        made[0].excerpt,
+        "今日は期限のタスクがありません。 来週の準備を始めましょうか。"
+    );
+    let chat = made[0].chat_id.clone().unwrap();
+
+    // 同じ日には 2 回声をかけない。次の日はまた声をかける
+    let again = session(cx).update(cx, |s, cx| s.check_in_at("2099-01-05", "18:00", cx));
+    assert_eq!(again, 0);
+
+    // 通知を押すと、AI bot に声かけの会話が開き、秘書と話せる
+    let id = made[0].id.clone();
+    cx.update_window(window, |_, window, cx| {
+        view.update(cx, |v, cx| {
+            v.reload(cx);
+            v.open_notice(&id, window, cx)
+        })
+    })
+    .unwrap();
+    cx.run_until_parked();
+    assert_eq!(read(cx, |s| s.chat_id().to_owned()), chat);
+    assert_eq!(read(cx, |s| s.bot.clone()), Some(helper.id.clone()));
+    assert!(read(cx, |s| s.parallel.is_empty()));
+    assert!(read(cx, |s| s.items.iter().any(
+        |i| matches!(i, Item::Assistant(t) if t.contains("来週の準備"))
+    )));
+    assert!(notices(cx)[0].read_at.is_some());
+    // 送った指示は会話に出さず、「毎日の声かけ」と出す
+    assert_eq!(
+        read(cx, |s| s.items.first().cloned()),
+        Some(Item::Notice(malakt_mahoz::ai::CHECK_IN_TITLE.into()))
+    );
+    let title = read(cx, |s| {
+        s.chats
+            .iter()
+            .find(|c| c.id == chat)
+            .map(|c| c.title.clone())
+    });
+    assert_eq!(title.as_deref(), Some("秘書: 毎日の声かけ"));
+
+    world.reply(text_reply("おはようございます。"));
+    let started = session(cx).update(cx, |s, cx| s.check_in_at("2099-01-06", "09:30", cx));
+    assert_eq!(started, 1);
+    wait(cx, "次の日の声かけが終わる", |s| {
+        s.parallel.len() == 1 && s.parallel[0].done
+    });
+    assert_eq!(notices(cx).len(), 2);
+}
+
+/// 声かけの時刻を今日決めて、もう過ぎていれば、次の日から声をかける。
+#[gpui_kit::test]
+fn a_check_in_set_after_its_time_starts_the_next_day(cx: &mut TestAppContext) {
+    let mut store = Store::open_in_memory().unwrap();
+    let helper = store.create_ai_bot("秘書", "").unwrap();
+    store
+        .update_ai_bot(
+            &helper.id,
+            &malakt_core::bots::BotPatch {
+                check_in: Some(Some("00:00".into())),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let world = start_with(cx, store);
+    world.keys.set(Provider::Claude, "sk-ant-1").unwrap();
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let started = session(cx).update(cx, |s, cx| s.check_in_at(&today, "23:59", cx));
+    assert_eq!(started, 0);
+    assert!(world.sent().is_empty());
+
+    // 声かけの時刻は、開いた bot の「毎日の声かけ」のメニューで選ぶ
+    let (window, view) = open(cx, wide());
+    let _pane = open_chat(cx, window, &view);
+    ui(cx, window, |window, cx| window.click("ai-bot-pick", cx));
+    ui(cx, window, |window, cx| {
+        window.press("up", cx);
+        window.press("enter", cx);
+    });
+    cx.run_until_parked();
+    ui(cx, window, |window, cx| window.click("ai-bot-check-in", cx));
+    ui(cx, window, |window, cx| {
+        window.press("up", cx);
+        window.press("enter", cx);
+    });
+    cx.run_until_parked();
+    let first = cx.update(|cx| db::shared(cx).read(cx).store.ai_bots().unwrap().remove(0));
+    let time = first.check_in.expect("時刻を選んだ");
+    assert!(time.ends_with(":00"), "{time}");
+}

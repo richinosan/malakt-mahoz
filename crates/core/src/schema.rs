@@ -524,6 +524,11 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     ) STRICT, WITHOUT ROWID;
     CREATE INDEX import_keys_task ON import_keys(task_id);
     "#,
+    // 31: bot から毎日声をかける時刻（HH:MM）と、声かけの通知から開く会話
+    r#"
+    ALTER TABLE ai_bots ADD COLUMN check_in TEXT;
+    ALTER TABLE notices ADD COLUMN chat_id TEXT;
+    "#,
 ];
 
 pub(crate) fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {

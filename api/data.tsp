@@ -608,6 +608,9 @@ op update_ai_bot(
 
   /** アイコンの動き。なし / ふわふわ / ぴょんぴょん / ゆらゆら / くるくる / どきどき */
   motion?: "still" | "float" | "bounce" | "sway" | "spin" | "pulse",
+
+  /** 毎日この時刻（HH:MM、例: 09:00）に、bot から声をかける（今日のタスクを見て、通知で知らせる）。空文字でやめる */
+  check_in?: string,
 ): void;
 
 /** AI bot を削除する。最後の 1 つは消せない。 */
