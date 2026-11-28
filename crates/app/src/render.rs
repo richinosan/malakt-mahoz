@@ -302,6 +302,12 @@ pub(crate) fn window_menu(
                 .on_click(move |_, _, cx| crate::open_settings_in(main.as_ref(), None, cx)),
         )
     })
+    .item(
+        PopupMenuItem::new("キー操作")
+            .icon(app_icon("keyboard"))
+            .action(Box::new(crate::shortcuts::ShowKeys))
+            .on_click(|_, window, cx| crate::keys_help::open_from_menu(window, cx)),
+    )
     .separator()
     .when(supported.minimize, |menu| {
         menu.item(
@@ -361,6 +367,12 @@ const APPEARANCE_WIDTH: Pixels = px(1280.);
 const APPEARANCE_HEIGHT: Pixels = px(700.);
 /// 「設定」の右に出すプレビューの幅。
 const PREVIEW_WIDTH: Pixels = px(300.);
+/// 「設定」のダイアログがこれより狭いときは、プレビューを出さない。
+const SETTINGS_PREVIEW_WIDTH: Pixels = px(1080.);
+/// 「設定」のダイアログがこれより狭いときは、左をアイコンだけの列にする。
+const SETTINGS_COMPACT_WIDTH: Pixels = px(760.);
+/// 「設定」のカードの幅の上限。広いダイアログでも、名前と変えるものを離しすぎない。
+const SETTINGS_CONTENT_WIDTH: Pixels = px(860.);
 /// 「カスタマイズ」の行の右に置く、一覧を開くボタンやスライダーの幅。
 const CONTROL_WIDTH: Pixels = px(220.);
 const PRESET_WIDTH: Pixels = px(124.);
@@ -428,11 +440,32 @@ enum SettingKey {
     People,
     CalDav,
     Keys,
+    PaneKeys,
     NewWindow,
     Pomodoro,
     Timer,
     Plugins,
     PluginFolders,
+}
+
+impl SettingKey {
+    /// ほかの設定（スイッチや選んだもの）しだいで出る設定。上の設定の下に字下げして並べる。
+    fn nested(self) -> bool {
+        matches!(
+            self,
+            SettingKey::Clear
+                | SettingKey::Blur
+                | SettingKey::AutoLock
+                | SettingKey::LockNow
+                | SettingKey::LockedNotices
+                | SettingKey::DoneWhen
+                | SettingKey::DoneRoles
+                | SettingKey::DonePeople
+                | SettingKey::DoneWorkspaces
+                | SettingKey::McpHttpPort
+                | SettingKey::McpHttpUrl
+        )
+    }
 }
 
 impl Setting {
@@ -620,12 +653,12 @@ pub(crate) fn setting_line(
             )
         });
     let line = if wide {
-        col().py_3().gap_2().child(label).child(control)
+        col().py_4().gap_3().child(label).child(control)
     } else {
         row()
             .flex_wrap()
             .justify_end()
-            .py_3()
+            .py_4()
             .gap_x_4()
             .gap_y_2()
             .child(label)
@@ -635,6 +668,27 @@ pub(crate) fn setting_line(
         d.border_t_1().border_color(theme.border.opacity(0.6))
     })
     .into_any_element()
+}
+
+/// スイッチの左に、今の状態を「オン」「オフ」の文字で出す。スイッチの色だけでは状態が読み取りにくいので、
+/// 「設定」のスイッチはすべてこれで包む。
+pub(crate) fn on_off(on: bool, switch: impl IntoElement, cx: &App) -> AnyElement {
+    let theme = cx.theme();
+    row()
+        .gap_2()
+        .flex_none()
+        .child(
+            div()
+                .text_sm()
+                .text_color(if on {
+                    theme.foreground
+                } else {
+                    theme.muted_foreground
+                })
+                .child(if on { "オン" } else { "オフ" }),
+        )
+        .child(switch)
+        .into_any_element()
 }
 
 /// 押すと、選べる値のメニューが開くボタン。
@@ -1376,6 +1430,35 @@ impl MainView {
             .active(|s| s.bg(theme.accent).opacity(0.8))
             .child(icon)
             .child(div().flex_1().truncate().child(label.into()))
+    }
+
+    /// 「設定」の左で、開いているページの下に並べる見出し。ページより小さく、アイコンなしで出す。
+    fn sub_nav_link(
+        &self,
+        id: impl Into<ElementId>,
+        label: &'static str,
+        active: bool,
+        cx: &App,
+    ) -> Stateful<Div> {
+        let theme = cx.theme();
+        row()
+            .id(id)
+            .flex_1()
+            .min_w_0()
+            .px_3()
+            .py_1()
+            .rounded(feel::md())
+            .text_sm()
+            .cursor_pointer()
+            .text_color(if active {
+                theme.foreground
+            } else {
+                theme.muted_foreground
+            })
+            .when(active, |d| d.bg(theme.accent.opacity(0.5)))
+            .when(!active, |d| d.lit(theme.accent.opacity(0.6), cx))
+            .active(|s| s.bg(theme.accent).opacity(0.8))
+            .child(div().flex_1().truncate().child(label))
     }
 
     fn nav_item(
@@ -6511,19 +6594,22 @@ impl MainView {
                 button("person-add")
                     .icon(app_icon("plus"))
                     .framed(cx)
-                    .tooltip("担当者を追加")
+                    .label("担当者を追加")
                     .on_click(cx.listener(|this, _, window, cx| this.add_person(window, cx))),
             )),
         );
         body
     }
 
-    /// 「設定」。左に検索と目次、まん中にすべての設定を見出しごとに 1 本の縦スクロールで並べ、
-    /// 右に見た目のプレビューを出す。左を押すとその見出しへスクロールし、
-    /// スクロールすると、いちばん上に見えている見出しを左で光らせる。
+    /// 「設定」。左に検索とページ、まん中に今のページの設定を見出しごとに 1 本の縦スクロールで並べ、
+    /// 「見た目」のページでは右に見た目のプレビューを出す。左のページを押すとそのページを出し、
+    /// 今のページの下に並ぶ見出しを押すと、その見出しまでスクロールする。スクロールすると、
+    /// いちばん上に見えている見出しを左で光らせる。検索している間は、当たった設定をページをまたいで並べる。
+    /// 狭いウィンドウでは、プレビューを出さず、左はアイコンだけの列にする。
     /// 書体と背景の画像の一覧は、この上にもう 1 枚重ねて出す。
     fn render_appearance(&self, cx: &mut Context<Self>) -> Div {
         use crate::state::CustomizeSection as Section;
+        use crate::state::SettingsPage as Page;
         let theme = cx.theme().clone();
         let query = self
             .inputs
@@ -6533,104 +6619,184 @@ impl MainView {
             .trim()
             .to_lowercase();
         let searching = !query.is_empty();
-        let items: Vec<Setting> = self
-            .customize_settings(cx)
+        let every = self.customize_settings(cx);
+        // 今出せる設定があるページ（この OS にない連携だけのページは出さない）
+        let pages: Vec<Page> = Page::ALL
             .into_iter()
-            .filter(|item| !searching || item.matches(&query))
+            .filter(|page| every.iter().any(|item| item.section.page() == *page))
+            .collect();
+        let page = self.appearance_section.page();
+        let items: Vec<Setting> = every
+            .into_iter()
+            .filter(|item| {
+                if searching {
+                    item.matches(&query)
+                } else {
+                    item.section.page() == page
+                }
+            })
             .collect();
         let shown: Vec<Section> = Section::ALL
             .into_iter()
             .filter(|section| items.iter().any(|item| item.section == *section))
             .collect();
         // 左を押した直後はその見出し、スクロールしたら、いちばん上に見えている見出し
-        let active = if self.appearance_pinned {
+        let active = if self.appearance_pinned && shown.contains(&self.appearance_section) {
             self.appearance_section
         } else {
             shown
                 .get(self.appearance_scroll.top_item())
+                .or(shown.first())
                 .copied()
-                .unwrap_or(Section::Theme)
+                .unwrap_or(self.appearance_section)
+        };
+        // ダイアログの幅。狭いウィンドウでは、ウィンドウに合わせて縮む
+        let width = if self.viewport_width * 0.94 < APPEARANCE_WIDTH {
+            self.viewport_width * 0.94
+        } else {
+            APPEARANCE_WIDTH
+        };
+        let compact = width < SETTINGS_COMPACT_WIDTH;
+        let with_preview =
+            !searching && page == Page::Appearance && width >= SETTINGS_PREVIEW_WIDTH;
+
+        let search = || {
+            Input::new(&self.inputs.customize_search)
+                .id("customize-search")
+                .aria_label("設定を検索")
+                .prefix(app_icon("search").small())
+                .cleanable(true)
         };
 
-        // 左: 検索と、見出しでまとめた目次
-        let mut nav = col().gap_0p5().child(
-            div().pb_2().child(
-                Input::new(&self.inputs.customize_search)
-                    .id("customize-search")
-                    .aria_label("設定を検索")
-                    .prefix(app_icon("search").small()),
-            ),
-        );
-        let mut group = "";
-        for (ix, section) in Section::ALL.into_iter().enumerate() {
-            // 今出せる設定がないカテゴリ（この OS にない連携など）は出さない
-            if !shown.contains(&section) {
-                continue;
+        // 左: 検索とページ。今のページの下に、そのページの見出しを並べる
+        let nav = if compact {
+            let mut rail = col().items_center().gap_1();
+            for (ix, each) in Page::ALL.into_iter().enumerate() {
+                if !pages.contains(&each) {
+                    continue;
+                }
+                let found = !searching || shown.iter().any(|s| s.page() == each);
+                rail = rail.child(
+                    self.rail_link(
+                        ("settings-page", ix),
+                        app_icon(each.icon()).small().into_any_element(),
+                        each.label(),
+                        !searching && page == each,
+                        cx,
+                    )
+                    .when(!found, |d| d.opacity(0.4))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        this.show_settings_page(each, window, cx)
+                    }))
+                    .test_support(),
+                );
             }
-            if section.group() != group {
-                group = section.group();
-                nav = nav.child(
+            col()
+                .w(px(RAIL_BUTTON + 16.))
+                .flex_none()
+                .min_h_0()
+                .border_r_1()
+                .border_color(theme.border)
+                .child(
+                    div()
+                        .id("customize-nav-list")
+                        .flex_1()
+                        .min_h_0()
+                        .pr_2()
+                        .child(rail)
+                        .overflow_y_scrollbar(),
+                )
+        } else {
+            let mut list = col().gap_0p5().child(div().pb_3().child(search()));
+            for (ix, each) in Page::ALL.into_iter().enumerate() {
+                if !pages.contains(&each) {
+                    continue;
+                }
+                let here = !searching && page == each;
+                // 検索している間は、当たったもののないページを薄く出す
+                let found = !searching || shown.iter().any(|s| s.page() == each);
+                list = list.child(
+                    row().child(
+                        self.nav_link(
+                            ("settings-page", ix),
+                            app_icon(each.icon()).small(),
+                            each.label(),
+                            here,
+                            cx,
+                        )
+                        .when(!found, |d| d.opacity(0.4))
+                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                            this.show_settings_page(each, window, cx)
+                        }))
+                        .test_support(),
+                    ),
+                );
+                // 見出しが 2 つ以上あるページは、開いている間だけ見出しを下に並べる
+                if here && shown.len() > 1 {
+                    let mut sub = col().gap_0p5().pl_5().pb_1();
+                    for section in &shown {
+                        let section = *section;
+                        let ix = Section::ALL.iter().position(|s| *s == section).unwrap();
+                        sub = sub.child(
+                            row().child(
+                                self.sub_nav_link(
+                                    ("customize-nav", ix),
+                                    section.label(),
+                                    active == section,
+                                    cx,
+                                )
+                                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                                    this.show_appearance_section(section, window, cx)
+                                }))
+                                .test_support(),
+                            ),
+                        );
+                    }
+                    list = list.child(if self.motion {
+                        sub.with_animation(("settings-sub-in", ix), appear(180), |d, t| {
+                            d.opacity(t)
+                        })
+                        .into_any_element()
+                    } else {
+                        sub.into_any_element()
+                    });
+                }
+            }
+            // 低いウィンドウで入りきらないときは、左の列だけスクロールする。版はいちばん下
+            col()
+                .w(px(216.))
+                .flex_none()
+                .min_h_0()
+                .border_r_1()
+                .border_color(theme.border)
+                .child(
+                    div()
+                        .id("customize-nav-list")
+                        .flex_1()
+                        .min_h_0()
+                        // 右の端はスクロールバーの場所
+                        .pr_3()
+                        .child(list)
+                        .overflow_y_scrollbar(),
+                )
+                .child(
                     div()
                         .px_3()
                         .pt_2()
-                        .pb_0p5()
                         .text_xs()
                         .text_color(theme.muted_foreground)
-                        .child(group),
-                );
-            }
-            nav = nav.child(
-                row().child(
-                    self.nav_link(
-                        ("customize-nav", ix),
-                        app_icon(section.icon()).small(),
-                        section.label(),
-                        active == section,
-                        cx,
-                    )
-                    // 見出しが多いので、左のメニューより詰めて並べる
-                    .py_1()
-                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                        this.show_appearance_section(section, window, cx)
-                    }))
-                    .test_support(),
-                ),
-            );
-        }
-        // 低いウィンドウで入りきらないときは、目次の列だけスクロールする。版はいちばん下
-        let nav = col()
-            .w(px(208.))
-            .flex_none()
-            .min_h_0()
-            .border_r_1()
-            .border_color(theme.border)
-            .child(
-                div()
-                    .id("customize-nav-list")
-                    .flex_1()
-                    .min_h_0()
-                    // 右の端はスクロールバーの場所
-                    .pr_3()
-                    .child(nav)
-                    .overflow_y_scrollbar(),
-            )
-            .child(
-                div()
-                    .px_3()
-                    .pt_2()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .child(concat!("v", env!("CARGO_PKG_VERSION"))),
-            );
+                        .child(concat!("v", env!("CARGO_PKG_VERSION"))),
+                )
+        };
 
         // まん中: 見出しとカード。1 つの見出しが、スクロールする所の子 1 つ
         let mut list = div()
             .id("appearance-scroll")
             .size_full()
-            .pl_5()
+            .pl_6()
             // 右の端はスクロールバーの場所
-            .pr_4()
-            .pb_2()
+            .pr_5()
+            .pb_4()
             .track_scroll(&self.appearance_scroll)
             .overflow_y_scroll()
             .on_scroll(cx.listener(|this, _, _, cx| {
@@ -6639,27 +6805,46 @@ impl MainView {
                     cx.notify();
                 }
             }));
-        let mut group = "";
-        for section in &shown {
-            let mut block = col().gap_2().pb_6();
-            if section.group() != group {
-                group = section.group();
-                block = block.child(div().px_1().text_xl().child(group));
+        let single = shown.len() == 1 && !searching;
+        let mut heading = None;
+        for (ix, section) in shown.iter().enumerate() {
+            let mut block = col().max_w(SETTINGS_CONTENT_WIDTH).gap_3().pb_8();
+            // ページの名前。検索している間は、当たったページごとに出す
+            let title = if searching {
+                (heading != Some(section.page())).then(|| section.page().label())
+            } else {
+                (ix == 0).then(|| page.label())
+            };
+            heading = Some(section.page());
+            if let Some(title) = title {
+                block = block.child(div().px_1().pb_1().text_xl().child(title));
             }
             let mut card = setting_card(cx);
             let mut first = true;
             for item in items.iter().filter(|item| item.section == *section) {
-                card = card.child(self.setting_row(item, first, cx));
+                let line = self.setting_row(item, first, cx);
+                // ほかの設定がオンのときだけ出る設定は、その下に字下げして並べる
+                card = card.child(if item.key.nested() {
+                    div().pl_6().child(line).into_any_element()
+                } else {
+                    line
+                });
                 first = false;
             }
+            // 見出しが 1 つだけのページで、ページと同じ名前なら、見出しは出さない
+            let label = !(single && section.label() == page.label());
             list = list.child(
                 block
-                    .child(
-                        div()
-                            .px_1()
-                            .text_color(theme.muted_foreground)
-                            .child(section.label()),
-                    )
+                    .when(label, |d| {
+                        d.child(
+                            row()
+                                .px_1()
+                                .gap_2()
+                                .text_color(theme.muted_foreground)
+                                .child(app_icon(section.icon()).small())
+                                .child(section.label()),
+                        )
+                    })
                     .child(card),
             );
         }
@@ -6672,22 +6857,36 @@ impl MainView {
                     .child("見つかりません。"),
             );
         }
+        let scroller = col()
+            .relative()
+            .flex_1()
+            .min_h_0()
+            .child(list.test_support())
+            .vertical_scrollbar(&self.appearance_scroll);
+        // ページを切り替えたら、中身を少し下からふわっと出す
+        let scroller = if self.motion {
+            let key = if searching { 99 } else { page as usize };
+            scroller
+                .with_animation(("settings-page-in", key), appear(200), |d, t| {
+                    d.opacity(0.2 + 0.8 * t).top(px(8.) * (1. - t))
+                })
+                .into_any_element()
+        } else {
+            scroller.into_any_element()
+        };
         let content = col()
             .flex_1()
             .min_w_0()
             .min_h_0()
             .gap_2()
-            .child(
-                col()
-                    .relative()
-                    .flex_1()
-                    .min_h_0()
-                    .child(list.test_support())
-                    .vertical_scrollbar(&self.appearance_scroll),
-            )
+            // 狭いときは、検索をまん中の上に出す
+            .when(compact, |d| {
+                d.child(div().pl_6().pr_5().pb_2().child(search()))
+            })
+            .child(scroller)
             // 失敗の理由は、どこまでスクロールしていても見える所に出す
             .when_some(self.error.clone(), |d, error| {
-                d.child(div().pl_5().text_sm().text_color(theme.danger).child(error))
+                d.child(div().pl_6().text_sm().text_color(theme.danger).child(error))
             });
         let body = row()
             .flex_1()
@@ -6695,7 +6894,7 @@ impl MainView {
             .items_stretch()
             .child(nav)
             .child(content)
-            .child(self.appearance_preview(cx));
+            .when(with_preview, |d| d.child(self.appearance_preview(cx)));
         let sized = |id: &'static str, body: Div, cx: &mut Context<Self>| {
             self.dialog_sized(
                 id,
@@ -6969,6 +7168,7 @@ impl MainView {
             .child(detail)
             .children(chat_panel);
         col()
+            .id("appearance-preview")
             .w(PREVIEW_WIDTH)
             .flex_none()
             .pl_4()
@@ -6982,6 +7182,7 @@ impl MainView {
                     .child("プレビュー"),
             )
             .child(frame)
+            .test_support()
     }
 
     /// 「設定」に出す見出し。今出せる設定があるものだけ、並ぶ順に。
@@ -7247,9 +7448,9 @@ impl MainView {
                 list(&["期限", "通知", "時刻"]),
             ),
             Setting::new(
-                Section::Notices,
+                Section::DoneNotices,
                 SettingKey::DoneOn,
-                "ほかの人の完了",
+                "完了を知らせる",
                 None,
                 list(&["完了", "通知", "担当者", "完了チケット"]),
             ),
@@ -7257,28 +7458,28 @@ impl MainView {
         if self.done_notices(cx).enabled {
             all.extend([
                 Setting::new(
-                    Section::Notices,
+                    Section::DoneNotices,
                     SettingKey::DoneWhen,
                     "知らせるとき",
                     None,
                     list(&["完了", "通知", "1 人ずつ"]),
                 ),
                 Setting::new(
-                    Section::Notices,
+                    Section::DoneNotices,
                     SettingKey::DoneRoles,
                     "完了にした人の役",
                     None,
                     list(&["完了", "通知", "役", "RACI", "R", "A", "C", "I"]),
                 ),
                 Setting::new(
-                    Section::Notices,
+                    Section::DoneNotices,
                     SettingKey::DonePeople,
                     "知らせる担当者",
                     None,
                     list(&["完了", "通知", "担当者", "人"]),
                 ),
                 Setting::new(
-                    Section::Notices,
+                    Section::DoneNotices,
                     SettingKey::DoneWorkspaces,
                     "知らせるワークスペース",
                     None,
@@ -7300,11 +7501,11 @@ impl MainView {
         }
         if locked {
             all.push(Setting::new(
-                Section::Notices,
+                Section::Lock,
                 SettingKey::LockedNotices,
                 "ロック中の通知",
                 None,
-                list(&["ロック"]),
+                list(&["ロック", "通知"]),
             ));
         }
         if crate::autostart::available(cx) {
@@ -7330,23 +7531,16 @@ impl MainView {
             people.push(' ');
             people.push_str(&person.name);
         }
-        let mut keys = String::from("キー ショートカット ペイン ブラウザ ターミナル");
-        for (key, about) in crate::shortcuts::help()
-            .into_iter()
-            .chain(crate::shell_keys::browser_help())
-            .chain(crate::shell_keys::terminal_help())
-        {
-            keys.push(' ');
-            keys.push_str(key);
-            keys.push(' ');
-            keys.push_str(about);
-        }
+        let keys = format!(
+            "キー ショートカット 一覧{}",
+            crate::keys_help::search_words()
+        );
         all.extend([
             Setting::new(Section::People, SettingKey::People, "担当者", None, people),
             Setting::new(
                 Section::Sync,
                 SettingKey::CalDav,
-                "連携と同期",
+                "連携",
                 None,
                 list(&[
                     "同期",
@@ -7368,7 +7562,20 @@ impl MainView {
                     "アカウント",
                 ]),
             ),
-            Setting::new(Section::Keys, SettingKey::Keys, "キー操作", None, keys),
+            Setting::new(
+                Section::Keys,
+                SettingKey::Keys,
+                "キー操作の一覧",
+                Some(crate::shortcuts::KEYS_KEY),
+                keys,
+            ),
+            Setting::new(
+                Section::Keys,
+                SettingKey::PaneKeys,
+                "ペインのキー",
+                Some("Ctrl+B のあとに押すキー"),
+                list(&["ペイン", "herdr", "tmux", "Ctrl+B"]),
+            ),
             Setting::new(
                 Section::Window,
                 SettingKey::NewWindow,
@@ -7424,28 +7631,28 @@ impl MainView {
                 list(&["読み込み", "復元"]),
             ),
             Setting::new(
-                Section::Data,
+                Section::Browser,
                 SettingKey::Download(crate::download_settings::DownloadRow::Folder),
                 "ダウンロードの保存先",
                 Some("アプリ内ブラウザのダウンロードと PDF の保存先"),
                 list(&["ダウンロード", "保存先", "フォルダー", "PDF"]),
             ),
             Setting::new(
-                Section::Data,
+                Section::Browser,
                 SettingKey::Download(crate::download_settings::DownloadRow::Ask),
                 "保存先を毎回確認する",
                 None,
                 list(&["ダウンロード", "保存先", "確認", "名前を付けて保存", "PDF"]),
             ),
             Setting::new(
-                Section::Data,
+                Section::Browser,
                 SettingKey::Download(crate::download_settings::DownloadRow::Subfolder),
                 "日付のフォルダ",
                 Some("保存先の中に日付のフォルダを作る（yyyy・yy・mm・dd が日付、/ で区切ると入れ子）"),
                 list(&["ダウンロード", "日付", "フォルダー", "形式", "yyyy-mm-dd", "PDF"]),
             ),
             Setting::new(
-                Section::Data,
+                Section::Browser,
                 SettingKey::BrowserData,
                 "ブラウザのデータ",
                 Some("アプリ内ブラウザのログインの情報とキャッシュ"),
@@ -7528,9 +7735,39 @@ impl MainView {
                 );
             }
             SettingKey::Keys => {
-                return edge(div().py_3())
-                    .child(self.keys_help(cx))
-                    .into_any_element();
+                let open = feel::gloss(
+                    button("keys-open")
+                        .icon(app_icon("keyboard"))
+                        .label("開く")
+                        .outline()
+                        .small()
+                        .on_click(cx.listener(|this, _, window, cx| this.open_keys(window, cx))),
+                )
+                .into_any_element();
+                return setting_line(item.name, item.note, open, false, first, &theme);
+            }
+            SettingKey::PaneKeys => {
+                use malakt_core::panes::Keys;
+                let mut schemes = row().gap_1();
+                for scheme in Keys::ALL {
+                    schemes = schemes.child(feel::gloss(
+                        button(("pane-keys", scheme as usize))
+                            .label(scheme.label())
+                            .xsmall()
+                            .when(self.pane_keys == scheme, |b| b.primary())
+                            .on_click(
+                                cx.listener(move |this, _, _, cx| this.set_pane_keys(scheme, cx)),
+                            ),
+                    ));
+                }
+                return setting_line(
+                    item.name,
+                    item.note,
+                    schemes.into_any_element(),
+                    false,
+                    first,
+                    &theme,
+                );
             }
             SettingKey::McpKeys => {
                 return edge(div().py_3())
@@ -7618,7 +7855,8 @@ impl MainView {
                 | SettingKey::McpKeyless
                 | SettingKey::Plugins
                 | SettingKey::PluginFolders
-                | SettingKey::Keys => unreachable!(),
+                | SettingKey::Keys
+                | SettingKey::PaneKeys => unreachable!(),
                 SettingKey::LockNow => feel::gloss(
                     button("lock-now")
                         .icon(app_icon("lock"))
@@ -7667,7 +7905,6 @@ impl MainView {
                     row()
                         .gap_1()
                         .flex_wrap()
-                        .justify_end()
                         .children(
                             malakt_core::alert::HOUR_CHOICES
                                 .into_iter()
@@ -7850,8 +8087,12 @@ impl MainView {
                             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
                                 this.preview_hover(Pick::Cards(!on), *hovered, cx)
                             }))
-                            .child(Switch::new("cards-switch").checked(on).on_click(
-                                cx.listener(|this, on: &bool, _, cx| this.set_cards(*on, cx)),
+                            .child(on_off(
+                                on,
+                                Switch::new("cards-switch").checked(on).on_click(
+                                    cx.listener(|this, on: &bool, _, cx| this.set_cards(*on, cx)),
+                                ),
+                                cx,
                             ))
                     })
                     .child(reset("cards-reset", false).placeholder())
@@ -7865,20 +8106,32 @@ impl MainView {
                             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
                                 this.preview_hover(Pick::Float(!on), *hovered, cx)
                             }))
-                            .child(Switch::new("float-switch").checked(on).on_click(
-                                cx.listener(|this, on: &bool, _, cx| this.set_floating(*on, cx)),
+                            .child(on_off(
+                                on,
+                                Switch::new("float-switch").checked(on).on_click(
+                                    cx.listener(|this, on: &bool, _, cx| {
+                                        this.set_floating(*on, cx)
+                                    }),
+                                ),
+                                cx,
                             ))
                     })
                     .child(reset("float-reset", false).placeholder())
                     .into_any_element(),
-                SettingKey::DoneOn => Switch::new("done-switch")
-                    .checked(self.done_notices(cx).enabled)
-                    .on_click(cx.listener(|this, on: &bool, _, cx| {
-                        let mut notices = this.done_notices(cx);
-                        notices.enabled = *on;
-                        this.set_done_notices(&notices, cx);
-                    }))
-                    .into_any_element(),
+                SettingKey::DoneOn => {
+                    let on = self.done_notices(cx).enabled;
+                    on_off(
+                        on,
+                        Switch::new("done-switch").checked(on).on_click(cx.listener(
+                            |this, on: &bool, _, cx| {
+                                let mut notices = this.done_notices(cx);
+                                notices.enabled = *on;
+                                this.set_done_notices(&notices, cx);
+                            },
+                        )),
+                        cx,
+                    )
+                }
                 SettingKey::DoneWhen => {
                     use malakt_core::done_notice::When;
                     let view = cx.entity().downgrade();
@@ -7976,17 +8229,23 @@ impl MainView {
                         )))
                         .into_any_element()
                 }
-                SettingKey::LockOn => Switch::new("lock-switch")
-                    .checked(self.lock_enabled(cx))
-                    .disabled(self.verifying(cx))
-                    .on_click(cx.listener(|this, on: &bool, window, cx| {
-                        if *on {
-                            this.enable_lock(window, cx)
-                        } else {
-                            this.disable_lock(window, cx)
-                        }
-                    }))
-                    .into_any_element(),
+                SettingKey::LockOn => {
+                    let on = self.lock_enabled(cx);
+                    on_off(
+                        on,
+                        Switch::new("lock-switch")
+                            .checked(on)
+                            .disabled(self.verifying(cx))
+                            .on_click(cx.listener(|this, on: &bool, window, cx| {
+                                if *on {
+                                    this.enable_lock(window, cx)
+                                } else {
+                                    this.disable_lock(window, cx)
+                                }
+                            })),
+                        cx,
+                    )
+                }
                 SettingKey::AutoLock => {
                     let view = cx.entity().downgrade();
                     let auto = self.auto_lock(cx);
@@ -8011,10 +8270,16 @@ impl MainView {
                         })
                         .into_any_element()
                 }
-                SettingKey::McpHttp => Switch::new("mcp-http-switch")
-                    .checked(self.mcp_http(cx).0)
-                    .on_click(cx.listener(|this, on: &bool, _, cx| this.set_mcp_http(*on, cx)))
-                    .into_any_element(),
+                SettingKey::McpHttp => {
+                    let on = self.mcp_http(cx).0;
+                    on_off(
+                        on,
+                        Switch::new("mcp-http-switch").checked(on).on_click(
+                            cx.listener(|this, on: &bool, _, cx| this.set_mcp_http(*on, cx)),
+                        ),
+                        cx,
+                    )
+                }
                 SettingKey::McpHttpPort => self.mcp_port_control(cx),
                 SettingKey::McpHttpUrl => self.mcp_url_control(cx),
                 SettingKey::LockedNotices => {
@@ -8039,18 +8304,36 @@ impl MainView {
                         })
                         .into_any_element()
                 }
-                SettingKey::Reminders => Switch::new("reminders-switch")
-                    .checked(crate::reminders::enabled(cx))
-                    .on_click(cx.listener(|this, _: &bool, _, cx| this.toggle_reminders(cx)))
-                    .into_any_element(),
-                SettingKey::Autostart => Switch::new("autostart-switch")
-                    .checked(crate::autostart::enabled(cx))
-                    .on_click(cx.listener(|this, _: &bool, _, cx| this.toggle_autostart(cx)))
-                    .into_any_element(),
-                SettingKey::AutoUpdate => Switch::new("auto-update-switch")
-                    .checked(crate::update::enabled(cx))
-                    .on_click(cx.listener(|this, _: &bool, _, cx| this.toggle_auto_update(cx)))
-                    .into_any_element(),
+                SettingKey::Reminders => {
+                    let on = crate::reminders::enabled(cx);
+                    on_off(
+                        on,
+                        Switch::new("reminders-switch").checked(on).on_click(
+                            cx.listener(|this, _: &bool, _, cx| this.toggle_reminders(cx)),
+                        ),
+                        cx,
+                    )
+                }
+                SettingKey::Autostart => {
+                    let on = crate::autostart::enabled(cx);
+                    on_off(
+                        on,
+                        Switch::new("autostart-switch").checked(on).on_click(
+                            cx.listener(|this, _: &bool, _, cx| this.toggle_autostart(cx)),
+                        ),
+                        cx,
+                    )
+                }
+                SettingKey::AutoUpdate => {
+                    let on = crate::update::enabled(cx);
+                    on_off(
+                        on,
+                        Switch::new("auto-update-switch").checked(on).on_click(
+                            cx.listener(|this, _: &bool, _, cx| this.toggle_auto_update(cx)),
+                        ),
+                        cx,
+                    )
+                }
                 SettingKey::Export => feel::gloss(
                     button("export-all")
                         .label("エクスポート")
@@ -8095,7 +8378,9 @@ impl MainView {
                         .into_any_element()
                 }
             };
-        setting_line(item.name, item.note, control, false, first, &theme)
+        // 時刻の選択肢は、期限の通知の 2 行と同じく名前の下に並べる
+        let wide = item.key == SettingKey::AlertHour;
+        setting_line(item.name, item.note, control, wide, first, &theme)
     }
 
     /// 期限をいつ知らせるかの行。上に名前、下に選べるものを並べ、押すたびに入れる・外す。
@@ -8134,7 +8419,7 @@ impl MainView {
                     .test_support()
             }));
         col()
-            .py_3()
+            .py_4()
             .gap_2()
             .child(
                 row()
@@ -10350,10 +10635,12 @@ impl Render for MainView {
             self.caldav_settings.update(cx, |s, cx| s.end_adding(cx));
         }
         self.tick_dialog_motion(window);
+        self.viewport_width = window.viewport_size().width;
         if self.embedded {
             return self.render_embedded(window, cx);
         }
         self.arm_notice(cx);
+        self.return_from_keys(window, cx);
         // 起動してすぐ出した AI のおすすめを、Esc で閉じられるようにする
         if std::mem::take(&mut self.ai_promo_focus) {
             self.focus.focus(window, cx);
@@ -10573,8 +10860,9 @@ impl Render for MainView {
             .children(self.ws_drag_listener(cx))
             .children(self.ws_drag_ghost(cx))
             .children(self.panel_drag_layer(cx))
-            .children(self.render_pane_overlay(cx))
             .children(self.render_modal(cx))
+            // キーの一覧は、設定などのダイアログの上にも開く
+            .children(self.render_pane_overlay(cx))
             .children(self.render_closing_dialog(cx))
             .when_some(
                 self.error

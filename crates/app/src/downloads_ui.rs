@@ -467,7 +467,7 @@ impl Render for DownloadsBubble {
                                 this.hide(cx);
                                 crate::open_settings_in(
                                     None,
-                                    Some(crate::state::CustomizeSection::Data),
+                                    Some(crate::state::CustomizeSection::Browser),
                                     cx,
                                 );
                             })),

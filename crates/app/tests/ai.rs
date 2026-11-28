@@ -3525,6 +3525,19 @@ fn updates_from_comments_are_turned_off_in_settings(cx: &mut TestAppContext) {
     open_chat(cx, window, &view);
     menu(cx, window, 0);
     assert!(read(cx, |s| s.track));
+    // スイッチはチャットの設定の下のほうにあるので、スクロールして出す
+    let at = cx
+        .update_window(window, |_, window, _| {
+            window.find("ai-track").bounds().origin
+        })
+        .unwrap();
+    let mut visual = gpui_kit::VisualTestContext::from_window(window, cx);
+    visual.simulate_event(gpui_kit::ScrollEvent {
+        position: point(at.x, at.y - px(300.)),
+        delta: ScrollDelta::Pixels(point(px(0.), px(-400.))),
+        ..Default::default()
+    });
+    visual.run_until_parked();
     ui(cx, window, |window, cx| window.click("ai-track", cx));
     assert!(!read(cx, |s| s.track));
     assert_eq!(setting(cx, "ai.track").as_deref(), Some("0"));
