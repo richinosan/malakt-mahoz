@@ -64,6 +64,11 @@ fn main() {
             malakt_mahoz::caldav::connect_system(cx);
             malakt_mahoz::update::connect_system(cx);
             let autostart = malakt_mahoz::autostart::connect_system(cx);
+            // 設定で選んでいれば、MCP を HTTP のポートでも開く
+            let http = malakt_mahoz::mcp_http::start_saved(
+                &malakt_mahoz::db::shared(cx).read(cx).store,
+                &malakt_mahoz::database_path(),
+            );
             malakt_mahoz::db::watch(cx);
             malakt_mahoz::pomodoro::run(cx);
             malakt_mahoz::timer::run(cx);
@@ -76,6 +81,9 @@ fn main() {
                     view.update(cx, |view, cx| {
                         view.request_unlock(window, cx);
                         if let Err(error) = &autostart {
+                            view.error = Some(error.clone().into());
+                        }
+                        if let Err(error) = &http {
                             view.error = Some(error.clone().into());
                         }
                         // AI を使っていなければ、AI のおすすめを出す

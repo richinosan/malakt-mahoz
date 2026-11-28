@@ -1,4 +1,7 @@
-//! 設定の「アクセスキー」。キーなしの接続の扱いと、アクセスキーの発行・名前・できること・失効。
+//! 設定の「アクセスキー」と「MCP の接続」。アクセスキーの発行・名前・できること・失効と、
+//! キーなしの接続の決まり、MCP を HTTP で開くかどうか。
+//!
+//! キーなしの接続の決まりは、キーと同じボタン（読み取りのみ・ロック中も・期限と時間帯）で決める。
 //!
 //! キーは「＋」で「新規アクセスキー」の名前のまま発行し、その行でそのまま名前を書ける。
 //! 発行したキーの文字列は、設定を閉じるまでその行の下に出す（あとからは出せない）。
@@ -13,15 +16,38 @@ use gpui_kit::component::{ActiveTheme, Selectable, Sizable};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use malakt_core::access::{
-    self, AccessKey, Expiry, KeyPatch, Keyless, Window as Hours, NEW_KEY_NAME, WEEKDAYS,
+    self, AccessKey, Expiry, KeyPatch, Window as Hours, NEW_KEY_NAME, WEEKDAYS,
 };
 use malakt_core::{view, Id};
 
 use crate::feel::{self, Lit};
 use crate::fonts::MonoFont;
+use crate::mcp_http;
 use crate::press::button;
 use crate::render::{app_icon, col, px, row, Framed};
 use crate::state::{LimitField, MainView};
+
+/// キーと決まりの行のボタンの id。
+struct EntryIds {
+    off: &'static str,
+    write: &'static str,
+    lock: &'static str,
+    limits: &'static str,
+}
+
+const KEY_IDS: EntryIds = EntryIds {
+    off: "access-key-off",
+    write: "access-key-write",
+    lock: "access-key-lock",
+    limits: "access-key-limits",
+};
+
+const RULE_IDS: EntryIds = EntryIds {
+    off: "keyless-off",
+    write: "keyless-write",
+    lock: "keyless-lock",
+    limits: "keyless-limits",
+};
 
 /// キーの行の高さ。担当者の一覧とそろえる。
 const KEY_ROW_HEIGHT: Pixels = px(32.);
@@ -39,12 +65,91 @@ impl MainView {
         }
     }
 
-    pub fn keyless(&self, cx: &App) -> Keyless {
-        access::keyless(&self.db.read(cx).store).unwrap_or(Keyless::Off)
+    /// キーなしの接続の決まり。
+    pub fn keyless_rules(&self, cx: &App) -> Vec<AccessKey> {
+        match self.db.read(cx).store.keyless_rules() {
+            Ok(rules) => rules,
+            Err(error) => {
+                // 描くたびに呼ぶので、ここでは画面のエラーに書かない。書き換えのときに、同じエラーが出る
+                eprintln!("キーなしの接続の決まりを読めませんでした: {error}");
+                Vec::new()
+            }
+        }
     }
 
-    pub fn set_keyless(&mut self, keyless: Keyless, cx: &mut Context<Self>) {
-        self.write(cx, |s| access::set_keyless(s, keyless));
+    /// キーなしの接続の決まりを足す（読み書き・いつでも）。足したら、期限と時間帯の欄を開く。
+    pub fn add_keyless_rule(&mut self, cx: &mut Context<Self>) {
+        if let Some(rule) = self.write(cx, |s| s.add_keyless_rule(false)) {
+            self.key_limits_open = Some(rule.id);
+            self.key_limit_editing = None;
+        }
+        cx.notify();
+    }
+
+    pub fn remove_keyless_rule(&mut self, id: &str, cx: &mut Context<Self>) {
+        if self.write(cx, |s| s.remove_keyless_rule(id)).is_some()
+            && self.key_limits_open.as_deref() == Some(id)
+        {
+            self.key_limits_open = None;
+            self.key_limit_editing = None;
+        }
+        cx.notify();
+    }
+
+    /// キーか、キーなしの接続の決まり。
+    fn access_entry(&self, id: &str, cx: &App) -> Option<AccessKey> {
+        self.db.read(cx).store.access_key(id).ok()
+    }
+
+    fn is_keyless_rule(&self, id: &str, cx: &App) -> bool {
+        self.keyless_rules(cx).iter().any(|r| r.id == id)
+    }
+
+    /// MCP を HTTP で開くかと、そのポート。
+    pub fn mcp_http(&self, cx: &App) -> (bool, u16) {
+        let store = &self.db.read(cx).store;
+        (
+            mcp_http::enabled(store).unwrap_or(false),
+            mcp_http::port(store).unwrap_or(mcp_http::DEFAULT_PORT),
+        )
+    }
+
+    pub fn set_mcp_http(&mut self, on: bool, cx: &mut Context<Self>) {
+        let (_, port) = self.mcp_http(cx);
+        self.open_mcp_http(on, port, cx);
+    }
+
+    /// HTTP を開く・閉じるか、ポートを変える。開けなければエラーを出し、設定も前のまま。
+    fn open_mcp_http(&mut self, on: bool, port: u16, cx: &mut Context<Self>) -> bool {
+        let Some(db) = self.db.read(cx).store.file_path() else {
+            self.error =
+                Some("データベースの場所が分からないので、MCP を HTTP で開けません。".into());
+            cx.notify();
+            return false;
+        };
+        let (was_on, was_port) = self.mcp_http(cx);
+        if let Err(error) = mcp_http::apply(&db, on, port) {
+            self.error = Some(error.into());
+            cx.notify();
+            return false;
+        }
+        if self.write(cx, |s| mcp_http::save(s, on, port)).is_none() {
+            // 保存できなければ、開く前に戻す。戻せなければ、その理由も出す
+            if let Err(error) = mcp_http::apply(&db, was_on, was_port) {
+                self.error = Some(error.into());
+            }
+            cx.notify();
+            return false;
+        }
+        cx.notify();
+        true
+    }
+
+    /// MCP の URL をコピーする。
+    pub fn copy_mcp_url(&mut self, cx: &mut Context<Self>) {
+        let (_, port) = self.mcp_http(cx);
+        cx.write_to_clipboard(ClipboardItem::new_string(mcp_http::url(port)));
+        self.show_notice("MCP の URL をコピーしました。".into());
         cx.notify();
     }
 
@@ -99,7 +204,7 @@ impl MainView {
     }
 
     pub fn toggle_key_read_only(&mut self, id: &str, cx: &mut Context<Self>) {
-        let Some(key) = self.access_keys(cx).into_iter().find(|k| k.id == id) else {
+        let Some(key) = self.access_entry(id, cx) else {
             return;
         };
         let patch = KeyPatch {
@@ -112,24 +217,24 @@ impl MainView {
 
     /// 「ロック中も使える」を切り替える。オンにするときは、ロックが有効ならパスキーで確かめる。
     pub fn toggle_key_while_locked(&mut self, id: Id, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(key) = self.access_keys(cx).into_iter().find(|k| k.id == id) else {
+        let Some(key) = self.access_entry(&id, cx) else {
             return;
+        };
+        let what = if self.is_keyless_rule(&id, cx) {
+            "ロック中もキーなしで使えるようにする"
+        } else {
+            "ロック中も使えるアクセスキーにする"
         };
         if key.while_locked || !self.lock_enabled(cx) {
             self.set_key_while_locked(&id, !key.while_locked, cx);
             return;
         }
         self.pending_key_unlock = Some(id);
-        self.with_passkey(
-            "ロック中も使えるアクセスキーにする",
-            window,
-            cx,
-            |this, cx| {
-                if let Some(id) = this.pending_key_unlock.take() {
-                    this.set_key_while_locked(&id, true, cx);
-                }
-            },
-        );
+        self.with_passkey(what, window, cx, |this, cx| {
+            if let Some(id) = this.pending_key_unlock.take() {
+                this.set_key_while_locked(&id, true, cx);
+            }
+        });
     }
 
     fn set_key_while_locked(&mut self, id: &str, on: bool, cx: &mut Context<Self>) {
@@ -220,9 +325,7 @@ impl MainView {
     }
 
     fn key_windows(&self, id: &str, cx: &App) -> Vec<Hours> {
-        self.access_keys(cx)
-            .into_iter()
-            .find(|k| k.id == id)
+        self.access_entry(id, cx)
             .map(|k| k.windows)
             .unwrap_or_default()
     }
@@ -267,31 +370,36 @@ impl MainView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(key) = self.access_keys(cx).into_iter().find(|k| k.id == id) else {
-            return;
-        };
-        let text = match field {
-            // 見えている書き方のまま直せるようにする
-            LimitField::Starts => key
-                .starts
-                .as_deref()
-                .map(access::moment_label)
-                .unwrap_or_default(),
-            LimitField::Expires => key
-                .expires
-                .as_deref()
-                .map(access::moment_label)
-                .unwrap_or_default(),
-            LimitField::From(ix) => key
-                .windows
-                .get(ix)
-                .map(|w| access::clock(w.from))
-                .unwrap_or_default(),
-            LimitField::To(ix) => key
-                .windows
-                .get(ix)
-                .map(|w| access::clock(w.to))
-                .unwrap_or_default(),
+        let text = if field == LimitField::Port {
+            self.mcp_http(cx).1.to_string()
+        } else {
+            let Some(key) = self.access_entry(&id, cx) else {
+                return;
+            };
+            match field {
+                // 見えている書き方のまま直せるようにする
+                LimitField::Starts => key
+                    .starts
+                    .as_deref()
+                    .map(access::moment_label)
+                    .unwrap_or_default(),
+                LimitField::Expires => key
+                    .expires
+                    .as_deref()
+                    .map(access::moment_label)
+                    .unwrap_or_default(),
+                LimitField::From(ix) => key
+                    .windows
+                    .get(ix)
+                    .map(|w| access::clock(w.from))
+                    .unwrap_or_default(),
+                LimitField::To(ix) => key
+                    .windows
+                    .get(ix)
+                    .map(|w| access::clock(w.to))
+                    .unwrap_or_default(),
+                LimitField::Port => unreachable!("ポートは上で読んだ"),
+            }
         };
         self.inputs.key_limit.update(cx, |s, cx| {
             s.set_value(text, window, cx);
@@ -309,6 +417,24 @@ impl MainView {
             return;
         };
         let text = self.inputs.key_limit.read(cx).value().trim().to_owned();
+        if field == LimitField::Port {
+            let port = match text.parse::<u16>() {
+                Ok(port) if port > 0 => port,
+                _ => {
+                    self.error = Some(format!("ポート番号として読めません: {text}").into());
+                    cx.notify();
+                    return;
+                }
+            };
+            let (on, _) = self.mcp_http(cx);
+            if !self.open_mcp_http(on, port, cx) {
+                return;
+            }
+            self.key_limit_editing = None;
+            self.leave_input(&self.inputs.key_limit.clone(), window, cx);
+            cx.notify();
+            return;
+        }
         let patch = match field {
             LimitField::Starts | LimitField::Expires => {
                 let value = if text.is_empty() {
@@ -357,6 +483,7 @@ impl MainView {
                     ..Default::default()
                 }
             }
+            LimitField::Port => unreachable!("ポートは上で保存した"),
         };
         if !self.update_key(&id, patch, cx) {
             return;
@@ -374,6 +501,7 @@ impl MainView {
         let secret = issued.secret.clone();
         let text = match what {
             Copy::Key => secret,
+            Copy::ClaudeHttp => mcp_http::claude_add_command(self.mcp_http(cx).1, &secret),
             Copy::Claude | Copy::Config => {
                 let exe = match std::env::current_exe() {
                     Ok(exe) => exe,
@@ -483,65 +611,16 @@ impl MainView {
                     gpui_kit::component::tooltip::Tooltip::new(used.clone()).build(window, cx)
                 })
                 .test_support();
-            let (write_id, lock_id, limits_id) = (id.clone(), id.clone(), id.clone());
-            // 今は期限・時間帯の外なら、名前の横に印を出す（ホバーで理由）
-            let now = access::now_local();
-            let denied = key
-                .usable_at(now)
-                .err()
-                .map(|d| SharedString::from(d.to_string()));
+            let (denied, toggles) = self.entry_toggles(&key, &KEY_IDS, ix, cx);
             let revoke_id = id.clone();
             let view_handle = cx.entity().downgrade();
             list = list.child(
                 row()
                     .gap_2()
                     .child(name)
-                    .children(denied.map(|why| {
-                        div()
-                            .id(("access-key-off", ix))
-                            .child(app_icon("calendar-x").size_4().text_color(theme.danger))
-                            .tooltip(move |window, cx| {
-                                gpui_kit::component::tooltip::Tooltip::new(why.clone())
-                                    .build(window, cx)
-                            })
-                            .test_support()
-                    }))
+                    .children(denied)
                     .child(masked)
-                    .child(feel::gloss(
-                        button(("access-key-write", ix))
-                            // 押すたびに切り替える。オンのときは押したままの見た目
-                            .icon(app_icon("eye"))
-                            .ghost()
-                            .xsmall()
-                            .selected(key.read_only)
-                            .tooltip("読み取りのみ")
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.toggle_key_read_only(&write_id, cx)
-                            })),
-                    ))
-                    .child(feel::gloss(
-                        button(("access-key-lock", ix))
-                            .icon(app_icon("lock-open"))
-                            .ghost()
-                            .xsmall()
-                            .selected(key.while_locked)
-                            .disabled(self.verifying(cx))
-                            .tooltip("ロック中も使える")
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.toggle_key_while_locked(lock_id.clone(), window, cx)
-                            })),
-                    ))
-                    .child(feel::gloss(
-                        button(("access-key-limits", ix))
-                            .icon(app_icon("calendar-clock"))
-                            .ghost()
-                            .xsmall()
-                            .selected(key.limited())
-                            .tooltip(limits_tip(&key))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.toggle_key_limits(&limits_id, cx)
-                            })),
-                    ))
+                    .child(toggles)
                     .child(
                         button(("access-key-revoke", ix))
                             .icon(app_icon("trash"))
@@ -568,7 +647,7 @@ impl MainView {
                 list = list.child(self.issued_key_box(&issued.secret, cx));
             }
             if self.key_limits_open.as_ref() == Some(&key.id) {
-                list = list.child(self.key_limits(&key, cx));
+                list = list.child(self.key_limits(&key, false, cx));
             }
         }
         col().gap_3().child(list).child(
@@ -582,10 +661,181 @@ impl MainView {
         )
     }
 
+    /// キーと決まりの行の右側。今使えないときの印と、読み取りのみ・ロック中も・期限と時間帯のボタン。
+    fn entry_toggles(
+        &self,
+        key: &AccessKey,
+        ids: &EntryIds,
+        ix: usize,
+        cx: &mut Context<Self>,
+    ) -> (Option<AnyElement>, Div) {
+        let theme = cx.theme().clone();
+        let (write_id, lock_id, limits_id) = (key.id.clone(), key.id.clone(), key.id.clone());
+        // 今は期限・時間帯の外なら、印を出す（ホバーで理由）
+        let denied = key.usable_at(access::now_local()).err().map(|d| {
+            let why = SharedString::from(d.to_string());
+            div()
+                .id((ids.off, ix))
+                .child(app_icon("calendar-x").size_4().text_color(theme.danger))
+                .tooltip(move |window, cx| {
+                    gpui_kit::component::tooltip::Tooltip::new(why.clone()).build(window, cx)
+                })
+                .test_support()
+                .into_any_element()
+        });
+        let toggles = row()
+            .gap_2()
+            .child(feel::gloss(
+                button((ids.write, ix))
+                    // 押すたびに切り替える。オンのときは押したままの見た目
+                    .icon(app_icon("eye"))
+                    .ghost()
+                    .xsmall()
+                    .selected(key.read_only)
+                    .tooltip("読み取りのみ")
+                    .on_click(
+                        cx.listener(move |this, _, _, cx| this.toggle_key_read_only(&write_id, cx)),
+                    ),
+            ))
+            .child(feel::gloss(
+                button((ids.lock, ix))
+                    .icon(app_icon("lock-open"))
+                    .ghost()
+                    .xsmall()
+                    .selected(key.while_locked)
+                    .disabled(self.verifying(cx))
+                    .tooltip("ロック中も使える")
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.toggle_key_while_locked(lock_id.clone(), window, cx)
+                    })),
+            ))
+            .child(feel::gloss(
+                button((ids.limits, ix))
+                    .icon(app_icon("calendar-clock"))
+                    .ghost()
+                    .xsmall()
+                    .selected(key.limited())
+                    .tooltip(limits_tip(key))
+                    .on_click(
+                        cx.listener(move |this, _, _, cx| this.toggle_key_limits(&limits_id, cx)),
+                    ),
+            ));
+        (denied, toggles)
+    }
+
+    /// 設定の「キーなしの接続」。決まりの一覧と、足すボタン。
+    pub(crate) fn keyless_editor(&self, cx: &mut Context<Self>) -> Div {
+        let theme = cx.theme().clone();
+        let mut list = col().gap_1();
+        let rules = self.keyless_rules(cx);
+        if rules.is_empty() {
+            list = list.child(
+                div()
+                    .id("keyless-none")
+                    .h(KEY_ROW_HEIGHT)
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .text_sm()
+                    .text_color(theme.muted_foreground)
+                    .child("アクセスキーが必要")
+                    .test_support(),
+            );
+        }
+        for (ix, rule) in rules.into_iter().enumerate() {
+            let (open_id, remove_id) = (rule.id.clone(), rule.id.clone());
+            let (denied, toggles) = self.entry_toggles(&rule, &RULE_IDS, ix, cx);
+            let label = div()
+                .id(("keyless", ix))
+                .flex_1()
+                .min_w_0()
+                .h(KEY_ROW_HEIGHT)
+                .flex()
+                .items_center()
+                .px_2()
+                .rounded(feel::md())
+                .cursor_pointer()
+                .lit(theme.muted, cx)
+                .child(div().truncate().child(rule.when_label()))
+                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                    this.toggle_key_limits(&open_id, cx)
+                }))
+                .test_support();
+            list = list.child(
+                row()
+                    .gap_2()
+                    .child(label)
+                    .children(denied)
+                    .child(toggles)
+                    .child(feel::gloss(
+                        button(("keyless-remove", ix))
+                            .icon(app_icon("trash"))
+                            .ghost()
+                            .xsmall()
+                            .tooltip("外す")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.remove_keyless_rule(&remove_id, cx)
+                            })),
+                    )),
+            );
+            if self.key_limits_open.as_ref() == Some(&rule.id) {
+                list = list.child(self.key_limits(&rule, true, cx));
+            }
+        }
+        col().gap_3().child(list).child(
+            row().child(feel::gloss(
+                button("keyless-add")
+                    .icon(app_icon("plus"))
+                    .framed(cx)
+                    .tooltip("キーなしの接続を追加")
+                    .on_click(cx.listener(|this, _, _, cx| this.add_keyless_rule(cx))),
+            )),
+        )
+    }
+
+    /// 「MCP の接続」の HTTP のポート。押すと、その場で書き直す。
+    pub(crate) fn mcp_port_control(&self, cx: &mut Context<Self>) -> AnyElement {
+        let (_, port) = self.mcp_http(cx);
+        self.limit_value(
+            "",
+            LimitField::Port,
+            "mcp-http-port",
+            port.to_string(),
+            false,
+            cx,
+        )
+    }
+
+    /// 「MCP の接続」の URL と、コピーのボタン。
+    pub(crate) fn mcp_url_control(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let (_, port) = self.mcp_http(cx);
+        row()
+            .gap_1()
+            .child(
+                div()
+                    .id("mcp-http-url")
+                    .text_sm()
+                    .text_color(theme.muted_foreground)
+                    .mono_font(cx)
+                    .child(mcp_http::url(port))
+                    .test_support(),
+            )
+            .child(feel::gloss(
+                button("mcp-http-copy")
+                    .icon(app_icon("copy"))
+                    .ghost()
+                    .xsmall()
+                    .tooltip("URL をコピー")
+                    .on_click(cx.listener(|this, _, _, cx| this.copy_mcp_url(cx))),
+            ))
+            .into_any_element()
+    }
+
     /// その場で書き直す値。書いている最中なら入力欄、そうでなければ押せる文字。
     fn limit_value(
         &self,
-        key: &AccessKey,
+        owner: &str,
         field: LimitField,
         id: impl Into<ElementId>,
         text: String,
@@ -596,7 +846,7 @@ impl MainView {
         let editing = self
             .key_limit_editing
             .as_ref()
-            .is_some_and(|(k, f)| *k == key.id && *f == field);
+            .is_some_and(|(k, f)| k == owner && *f == field);
         if editing {
             return div()
                 .w(px(150.))
@@ -613,7 +863,7 @@ impl MainView {
                 )
                 .into_any_element();
         }
-        let key_id = key.id.clone();
+        let key_id: Id = owner.to_owned();
         div()
             .id(id)
             .px_2()
@@ -634,7 +884,7 @@ impl MainView {
     }
 
     /// キーの開始・期限・時間帯。キーの行の下に出す。
-    fn key_limits(&self, key: &AccessKey, cx: &mut Context<Self>) -> Div {
+    fn key_limits(&self, key: &AccessKey, rule: bool, cx: &mut Context<Self>) -> Div {
         let theme = cx.theme().clone();
         let label = |text: &'static str| {
             div()
@@ -649,13 +899,20 @@ impl MainView {
             None => (none.to_owned(), true),
         };
         // 開始
-        let (starts, empty) = shown(&key.starts, "発行したときから");
+        let (starts, empty) = shown(
+            &key.starts,
+            if rule {
+                "足したときから"
+            } else {
+                "発行したときから"
+            },
+        );
         let start_id = key.id.clone();
         let start_row = row()
             .gap_2()
             .child(label("開始"))
             .child(self.limit_value(
-                key,
+                &key.id,
                 LimitField::Starts,
                 "access-key-starts",
                 starts,
@@ -682,7 +939,7 @@ impl MainView {
             .gap_2()
             .child(label("期限"))
             .child(self.limit_value(
-                key,
+                &key.id,
                 LimitField::Expires,
                 "access-key-expires",
                 expires,
@@ -731,7 +988,7 @@ impl MainView {
                     row()
                         .gap_1()
                         .child(self.limit_value(
-                            key,
+                            &key.id,
                             LimitField::From(wx),
                             ("access-key-from", wx),
                             access::clock(w.from),
@@ -740,7 +997,7 @@ impl MainView {
                         ))
                         .child(div().text_sm().child("〜"))
                         .child(self.limit_value(
-                            key,
+                            &key.id,
                             LimitField::To(wx),
                             ("access-key-to", wx),
                             access::clock(w.to),
@@ -841,6 +1098,9 @@ impl MainView {
                     )
                     .child(copy("access-key-copy", "copy", Copy::Key, cx))
                     .child(copy("access-key-copy-claude", "terminal", Copy::Claude, cx))
+                    .when(self.mcp_http(cx).0, |d| {
+                        d.child(copy("access-key-copy-http", "globe", Copy::ClaudeHttp, cx))
+                    })
                     .child(copy("access-key-copy-config", "braces", Copy::Config, cx))
                     .child(feel::gloss(
                         button("access-key-hide")
@@ -868,6 +1128,7 @@ impl MainView {
 enum Copy {
     Key,
     Claude,
+    ClaudeHttp,
     Config,
 }
 
@@ -876,6 +1137,7 @@ impl Copy {
         match self {
             Copy::Key => "キーをコピー",
             Copy::Claude => "Claude Code に登録するコマンドをコピー",
+            Copy::ClaudeHttp => "Claude Code に HTTP で登録するコマンドをコピー",
             Copy::Config => "MCP の設定（JSON）をコピー",
         }
     }
@@ -884,6 +1146,7 @@ impl Copy {
         match self {
             Copy::Key => "アクセスキーをコピーしました。",
             Copy::Claude => "Claude Code に登録するコマンドをコピーしました。",
+            Copy::ClaudeHttp => "Claude Code に HTTP で登録するコマンドをコピーしました。",
             Copy::Config => "MCP の設定をコピーしました。",
         }
     }
@@ -894,15 +1157,5 @@ fn limits_tip(key: &AccessKey) -> SharedString {
     if !key.limited() {
         return "期限と時間帯".into();
     }
-    let mut parts = Vec::new();
-    if let Some(starts) = &key.starts {
-        parts.push(format!("{} から", access::moment_label(starts)));
-    }
-    if let Some(expires) = &key.expires {
-        parts.push(format!("{} まで", access::moment_label(expires)));
-    }
-    for w in &key.windows {
-        parts.push(w.label());
-    }
-    parts.join("・").into()
+    key.when_label().into()
 }

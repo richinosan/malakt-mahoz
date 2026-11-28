@@ -8,7 +8,8 @@
 //! ツールは AI チャットと同じもの（[`malakt_ai::tools`]）に、`undo` と `redo` を足したもの。
 //! ロックが有効なときは、アプリがロックを解除している間だけ動く（[`malakt_core::lock::allows_outside`]）。
 //! 環境変数 [`ENV_KEY`] でアクセスキーを渡すと、キーごとに読み取りのみ・ロック中も使えるかが決まる
-//! （[`malakt_core::access`]）。キーなしの接続をどう扱うかは、アプリの設定で選ぶ。
+//! （[`malakt_core::access`]）。キーなしの接続をどう扱うかは、アプリの設定の決まりで選ぶ。
+//! アプリが動いている間は、同じものを HTTP のポートでも開ける（[`crate::mcp_http`]）。
 
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
@@ -44,7 +45,7 @@ const PROTOCOLS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
 
 pub const LOCKED: &str =
     "malakt-mahoz はロックされています。アプリを開いて、ロックを解除してください。";
-pub const NEEDS_KEY: &str = "malakt-mahoz にはアクセスキーが必要です。アプリの設定の「アクセスキー」でキーを発行して、環境変数 MALAKT_MAHOZ_KEY に入れてください。";
+pub const NEEDS_KEY: &str = "malakt-mahoz にはアクセスキーが必要です。アプリの設定の「アクセスキー」でキーを発行して、環境変数 MALAKT_MAHOZ_KEY（HTTP では Authorization: Bearer）で渡してください。";
 pub const BAD_KEY: &str =
     "アクセスキーが違うか、失効しています。アプリの設定の「アクセスキー」でキーを発行し直してください。";
 
@@ -426,6 +427,11 @@ impl<F: FnOnce() -> malakt_core::Result<Store>> Server<F> {
     pub fn with_key(mut self, key: Option<String>) -> Self {
         self.key = key;
         self
+    }
+
+    /// 次の呼び出しから使うアクセスキー。HTTP では、リクエストごとに渡される。
+    pub fn set_key(&mut self, key: Option<String>) {
+        self.key = key;
     }
 
     /// 時計を差し替える（テスト用）。
@@ -1010,12 +1016,13 @@ mod tests {
         // キーなしの接続を使えなくすると、解除していてもキーが要る
         lock::mark_open(&mut app, 1_000).unwrap();
         tool(&mut s, "list_tasks", json!({}));
-        access::set_keyless(&mut app, access::Keyless::Off).unwrap();
+        let rule = app.keyless_rules().unwrap().remove(0);
+        app.remove_keyless_rule(&rule.id).unwrap();
         assert_eq!(failure(&mut s, "list_tasks", json!({})), NEEDS_KEY);
         let mut s = keyed(&path, &plain.secret);
         tool(&mut s, "list_tasks", json!({}));
         // キーなしを読み取りのみにすると、読むだけできる
-        access::set_keyless(&mut app, access::Keyless::ReadOnly).unwrap();
+        app.add_keyless_rule(true).unwrap();
         let mut s = server(&path);
         tool(&mut s, "list_tasks", json!({}));
         let text = failure(&mut s, "create_task", json!({"title": "x"}));

@@ -132,7 +132,8 @@ const MUST: &[&str] = &[
     "lock-switch",
     "auto-lock",
     "locked-notices",
-    "mcp-keyless",
+    "keyless-add",
+    "mcp-http-switch",
     "access-key-add",
     "access-key-copy",
     "access-key-hide",
@@ -895,7 +896,7 @@ fn screens() -> Vec<(&'static str, Size<Pixels>, Setup)> {
             })
         }),
         (
-            "設定の MCP（発行したばかりのキーあり）",
+            "設定のアクセスキー（発行したばかりのキーあり）",
             wide,
             |cx, w| {
                 with_view(cx, w, |v, window, cx| {
