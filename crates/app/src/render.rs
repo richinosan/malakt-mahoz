@@ -421,6 +421,9 @@ enum SettingKey {
     LockNow,
     McpKeyless,
     McpKeys,
+    McpHttp,
+    McpHttpPort,
+    McpHttpUrl,
     People,
     CalDav,
     Keys,
@@ -7543,33 +7546,74 @@ impl MainView {
                 list(&["ロック"]),
             ));
         }
+        all.extend([Setting::new(
+            Section::AccessKeys,
+            SettingKey::McpKeys,
+            "アクセスキー",
+            None,
+            list(&[
+                "MCP",
+                "キー",
+                "トークン",
+                "エージェント",
+                "Claude Code",
+                "Cursor",
+                "Codex",
+                "期限",
+                "時間帯",
+                "セキュリティ",
+            ]),
+        )]);
         all.extend([
             Setting::new(
-                Section::AccessKeys,
-                SettingKey::McpKeys,
-                "アクセスキー",
+                Section::McpConnection,
+                SettingKey::McpKeyless,
+                "キーなしの接続",
                 None,
                 list(&[
                     "MCP",
-                    "キー",
-                    "トークン",
+                    "アクセスキー",
                     "エージェント",
                     "Claude Code",
-                    "Cursor",
-                    "Codex",
-                    "期限",
+                    "ロック",
                     "時間帯",
                     "セキュリティ",
                 ]),
             ),
             Setting::new(
-                Section::AccessKeys,
-                SettingKey::McpKeyless,
-                "キーなしの接続",
-                None,
-                list(&["MCP", "アクセスキー", "エージェント", "Claude Code"]),
+                Section::McpConnection,
+                SettingKey::McpHttp,
+                "HTTP で開く",
+                Some("この PC からだけ"),
+                list(&[
+                    "MCP",
+                    "HTTP",
+                    "ポート",
+                    "URL",
+                    "Streamable HTTP",
+                    "Claude Code",
+                ]),
             ),
         ]);
+        // ポートと URL は、HTTP で開いているときだけ
+        if self.mcp_http(cx).0 {
+            all.extend([
+                Setting::new(
+                    Section::McpConnection,
+                    SettingKey::McpHttpPort,
+                    "ポート",
+                    None,
+                    list(&["MCP", "HTTP", "ポート"]),
+                ),
+                Setting::new(
+                    Section::McpConnection,
+                    SettingKey::McpHttpUrl,
+                    "URL",
+                    None,
+                    list(&["MCP", "HTTP", "URL", "アドレス"]),
+                ),
+            ]);
+        }
         all.extend([
             Setting::new(
                 Section::Notices,
@@ -7844,6 +7888,16 @@ impl MainView {
                     .child(self.access_keys_editor(cx))
                     .into_any_element();
             }
+            SettingKey::McpKeyless => {
+                return setting_line(
+                    item.name,
+                    item.note,
+                    self.keyless_editor(cx).into_any_element(),
+                    true,
+                    first,
+                    &theme,
+                );
+            }
             SettingKey::Plugins => {
                 return edge(div().py_3())
                     .child(self.plugins_editor(cx))
@@ -7911,6 +7965,7 @@ impl MainView {
                 | SettingKey::People
                 | SettingKey::CalDav
                 | SettingKey::McpKeys
+                | SettingKey::McpKeyless
                 | SettingKey::Plugins
                 | SettingKey::PluginFolders
                 | SettingKey::Keys => unreachable!(),
@@ -8306,28 +8361,12 @@ impl MainView {
                         })
                         .into_any_element()
                 }
-                SettingKey::McpKeyless => {
-                    let view = cx.entity().downgrade();
-                    let keyless = self.keyless(cx);
-                    menu_choice("mcp-keyless", keyless.label().into(), &theme)
-                        .pop_menu(move |mut menu, _, _| {
-                            for option in malakt_core::access::Keyless::ALL {
-                                let view = view.clone();
-                                menu = menu.item(
-                                    PopupMenuItem::new(option.label())
-                                        .checked(keyless == option)
-                                        .on_click(move |_, _, cx| {
-                                            // ウィンドウを閉じたあとなら、反映する先がない
-                                            let _ = view.update(cx, |this, cx| {
-                                                this.set_keyless(option, cx);
-                                            });
-                                        }),
-                                );
-                            }
-                            menu
-                        })
-                        .into_any_element()
-                }
+                SettingKey::McpHttp => Switch::new("mcp-http-switch")
+                    .checked(self.mcp_http(cx).0)
+                    .on_click(cx.listener(|this, on: &bool, _, cx| this.set_mcp_http(*on, cx)))
+                    .into_any_element(),
+                SettingKey::McpHttpPort => self.mcp_port_control(cx),
+                SettingKey::McpHttpUrl => self.mcp_url_control(cx),
                 SettingKey::LockedNotices => {
                     let view = cx.entity().downgrade();
                     let notices = self.locked_notices(cx);

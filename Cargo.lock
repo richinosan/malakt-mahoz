@@ -5360,6 +5360,7 @@ dependencies = [
  "flate2",
  "gpui-kit",
  "gtk",
+ "httparse",
  "image",
  "keyring",
  "malakt-ai",

@@ -324,6 +324,20 @@ fn the_stopwatch_and_the_ai_tools(cx: &mut TestAppContext) {
     );
     assert_eq!(got["mode"], "stopwatch");
     assert_eq!(got["shown_text"], "00:00");
+    // ストップウォッチのときに長さを渡して始めると、その長さのカウントダウンになる
+    let got = run(
+        cx,
+        "timer",
+        serde_json::json!({"action": "start", "seconds": 90}),
+    );
+    assert_eq!(
+        (
+            got["mode"].as_str(),
+            got["run"].as_str(),
+            got["length_seconds"].as_i64()
+        ),
+        (Some("countdown"), Some("running"), Some(90))
+    );
     cx.update(|cx| {
         db::shared(cx).update(cx, |db, cx| {
             db.store.timer(Op::Reset, malakt_core::now_ms()).unwrap();

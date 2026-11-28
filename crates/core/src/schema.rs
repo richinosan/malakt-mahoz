@@ -479,7 +479,19 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     CREATE INDEX notices_created ON notices(created_at);
     CREATE INDEX notices_task ON notices(task_id);
     "#,
-    // 27: CalDAV のアカウントに付ける名前（「説明」）。空なら `ユーザー名@ホスト名` で出す
+    // 27: キーなしの接続を、キーと同じ表の決まり（keyless = 1）にする。secret_hash は 'keyless:' と id。
+    //     前の設定 mcp.keyless（標準・full は読み書き、read は読み取りのみ、off はなし）を決まりに移す
+    r#"
+    ALTER TABLE access_keys ADD COLUMN keyless INTEGER NOT NULL DEFAULT 0;
+    INSERT INTO access_keys(id, name, secret_hash, hint, read_only, while_locked, created_at, keyless)
+    SELECT id, 'キーなし', 'keyless:' || id, '', v IS 'read', 0,
+           CAST(strftime('%s', 'now') AS INTEGER) * 1000, 1
+    FROM (SELECT upper(hex(randomblob(13))) AS id,
+                 (SELECT value FROM settings WHERE key = 'mcp.keyless') AS v)
+    WHERE v IS NULL OR v IN ('full', 'read');
+    DELETE FROM settings WHERE key = 'mcp.keyless';
+    "#,
+    // 28: CalDAV のアカウントに付ける名前（「説明」）。空なら `ユーザー名@ホスト名` で出す
     r#"
     ALTER TABLE caldav_accounts ADD COLUMN name TEXT NOT NULL DEFAULT '';
     "#,
@@ -534,6 +546,70 @@ mod tests {
         assert_eq!((roles.as_str(), done), ("R", None));
         // もう一度開いても何もしない
         super::migrate(&mut conn).unwrap();
+    }
+
+    /// 前の設定「キーなしの接続」は、キーなしの接続の決まりになって設定から消える。
+    #[test]
+    fn moves_the_keyless_setting_into_rules() {
+        for (value, rules) in [
+            (None, Some(false)),
+            (Some("full"), Some(false)),
+            (Some("read"), Some(true)),
+            (Some("off"), None),
+            (Some("maybe"), None),
+        ] {
+            let mut conn = Connection::open_in_memory().unwrap();
+            for sql in &super::MIGRATIONS[..26] {
+                conn.execute_batch(sql).unwrap();
+            }
+            conn.pragma_update(None, "user_version", 26).unwrap();
+            if let Some(value) = value {
+                conn.execute(
+                    "INSERT INTO settings(key, value) VALUES ('mcp.keyless', ?1)",
+                    [value],
+                )
+                .unwrap();
+            }
+            conn.execute_batch(
+                "INSERT INTO access_keys(id, name, secret_hash, hint, created_at) \
+                 VALUES ('k', '鍵', 'h', 'abcd', 0);",
+            )
+            .unwrap();
+            super::migrate(&mut conn).unwrap();
+            let found: Vec<(String, bool, bool, String)> = conn
+                .prepare(
+                    "SELECT name, read_only, while_locked, secret_hash FROM access_keys \
+                     WHERE keyless = 1",
+                )
+                .unwrap()
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap();
+            assert_eq!(found.len(), usize::from(rules.is_some()), "{value:?}");
+            if let (Some(read_only), Some(rule)) = (rules, found.first()) {
+                assert_eq!(
+                    (rule.0.as_str(), rule.1, rule.2),
+                    ("キーなし", read_only, false)
+                );
+                assert!(rule.3.starts_with("keyless:"));
+            }
+            let left: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM settings WHERE key = 'mcp.keyless'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(left, 0);
+            // 前からあるキーは、キーのまま
+            let keyless: bool = conn
+                .query_row("SELECT keyless FROM access_keys WHERE id = 'k'", [], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            assert!(!keyless);
+        }
     }
 
     /// 設定に書いていた「AI に伝えること」は、ルールになって設定から消える。

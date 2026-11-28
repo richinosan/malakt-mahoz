@@ -2058,10 +2058,10 @@ fn auto_lock_after_the_chosen_minutes(cx: &mut TestAppContext) {
 }
 
 /// 設定の「アクセスキー」で、アクセスキーを発行し、名前を付け、できることを変え、失効させる。
-/// キーの文字列は発行した行の下にだけ出て、キーなしの接続の扱いもその場のメニューで選ぶ。
+/// キーの文字列は発行した行の下にだけ出る。
 #[gpui_kit::test]
 fn access_keys_are_issued_named_limited_and_revoked(cx: &mut TestAppContext) {
-    use malakt_core::access::{self, Keyless, NEW_KEY_NAME};
+    use malakt_core::access::{self, NEW_KEY_NAME};
     use malakt_mahoz::state::CustomizeSection;
     start(cx);
     let (window, view) = open(cx, wide());
@@ -2072,12 +2072,6 @@ fn access_keys_are_issued_named_limited_and_revoked(cx: &mut TestAppContext) {
         })
     });
     let keys = |cx: &mut TestAppContext| store(cx, |s| s.access_keys().unwrap());
-
-    // キーなしの接続は、最初は今までどおり読み書きできる
-    cx.update(|cx| assert_eq!(view.read(cx).keyless(cx), Keyless::Full));
-    ui(cx, window, |window, cx| window.click("mcp-keyless", cx));
-    pick(cx, window, "読み取りのみ");
-    cx.update(|cx| assert_eq!(view.read(cx).keyless(cx), Keyless::ReadOnly));
 
     // ＋ で「新規アクセスキー」が増え、その行で名前を書ける。キーの文字列はその下に出る
     ui(cx, window, |window, cx| window.click("access-key-add", cx));
@@ -2183,6 +2177,138 @@ fn access_keys_are_issued_named_limited_and_revoked(cx: &mut TestAppContext) {
         assert_eq!(v.modal, Modal::None);
         assert!(v.issued_access_key.is_none());
     });
+}
+
+/// 設定の「MCP の接続」で、キーなしの接続の決まりを足し・変え・外す。
+#[gpui_kit::test]
+fn keyless_rules_are_added_changed_and_removed(cx: &mut TestAppContext) {
+    use malakt_mahoz::state::CustomizeSection;
+    start(cx);
+    let (window, view) = open(cx, wide());
+    ui(cx, window, |window, cx| {
+        view.update(cx, |v, cx| {
+            v.open_appearance(window, cx);
+            v.show_appearance_section(CustomizeSection::McpConnection, window, cx);
+        })
+    });
+    let rules = |cx: &mut TestAppContext| store(cx, |s| s.keyless_rules().unwrap());
+    // 最初は「読み書き・いつでも」の 1 つ（アクセスキーを入れる前と同じ）
+    assert_eq!(rules(cx).len(), 1);
+    ui(cx, window, |window, _| {
+        assert!(window.find(("keyless", 0usize)).visible());
+        assert!(window.try_find("keyless-none").is_none());
+    });
+    // 読み取りのみにする
+    ui(cx, window, |window, cx| {
+        window.click(("keyless-write", 0usize), cx)
+    });
+    assert!(rules(cx)[0].read_only);
+    // ＋ で足すと、期限と時間帯の欄が開く。時間帯を足すと、その時間だけ
+    ui(cx, window, |window, cx| window.click("keyless-add", cx));
+    assert_eq!(rules(cx).len(), 2);
+    assert!(!rules(cx)[1].read_only);
+    ui(cx, window, |window, cx| {
+        window.click("access-key-window-add", cx)
+    });
+    assert_eq!(rules(cx)[1].windows.len(), 1);
+    assert_eq!(rules(cx)[1].when_label(), "毎日 9:00〜18:00");
+    // 行を押すと、欄を閉じる・開く
+    ui(cx, window, |window, cx| {
+        window.click(("keyless", 1usize), cx)
+    });
+    ui(cx, window, |window, _| {
+        assert!(window.try_find("access-key-window-add").is_none())
+    });
+    // ロック中も使える（ロックしていなければ、そのまま切り替わる）
+    ui(cx, window, |window, cx| {
+        window.click(("keyless-lock", 1usize), cx)
+    });
+    assert!(rules(cx)[1].while_locked);
+    // 全部外すと、キーが必要
+    ui(cx, window, |window, cx| {
+        window.click(("keyless-remove", 1usize), cx)
+    });
+    ui(cx, window, |window, cx| {
+        window.click(("keyless-remove", 0usize), cx)
+    });
+    assert!(rules(cx).is_empty());
+    ui(cx, window, |window, _| {
+        assert!(window.find("keyless-none").visible())
+    });
+    cx.update(|cx| assert_eq!(view.read(cx).modal, Modal::Appearance));
+}
+
+/// 設定の「MCP の接続」で、HTTP を開き、ポートを変え、閉じる。
+#[gpui_kit::test]
+fn mcp_opens_over_http_from_the_settings(cx: &mut TestAppContext) {
+    use malakt_mahoz::mcp_http;
+    use malakt_mahoz::state::CustomizeSection;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("data.sqlite3");
+    let free = || {
+        std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port()
+    };
+    let (first, second) = (free(), free());
+    let mut opened = Store::open(&path).unwrap();
+    mcp_http::save(&mut opened, false, first).unwrap();
+    cx.update(|cx| malakt_mahoz::init(opened, cx));
+    let (window, view) = open(cx, wide());
+    ui(cx, window, |window, cx| {
+        view.update(cx, |v, cx| {
+            v.open_appearance(window, cx);
+            v.show_appearance_section(CustomizeSection::McpConnection, window, cx);
+        })
+    });
+    ui(cx, window, |window, _| {
+        assert!(window.try_find("mcp-http-url").is_none())
+    });
+    ui(cx, window, |window, cx| window.click("mcp-http-switch", cx));
+    assert_eq!(mcp_http::running_port(), Some(first));
+    ui(cx, window, |window, _| {
+        assert!(window.find("mcp-http-url").visible())
+    });
+    // ポートをその場で書き直すと、そのポートで開き直す
+    ui(cx, window, |window, cx| window.click("mcp-http-port", cx));
+    ui(cx, window, |window, cx| {
+        window.input(&second.to_string(), cx);
+        window.press("enter", cx);
+    });
+    assert_eq!(mcp_http::running_port(), Some(second));
+    assert_eq!(store_port(cx), second);
+    // 読めないポートは、何も変えずにエラー
+    ui(cx, window, |window, cx| window.click("mcp-http-port", cx));
+    ui(cx, window, |window, cx| {
+        window.input("http", cx);
+        window.press("enter", cx);
+    });
+    cx.update(|cx| {
+        let error = view.read(cx).error.clone().unwrap_or_default();
+        assert!(error.contains("ポート番号として読めません"), "{error}");
+    });
+    ui(cx, window, |window, cx| window.press("escape", cx));
+    assert_eq!(mcp_http::running_port(), Some(second));
+    // 発行したばかりのキーの欄に、HTTP で登録するコマンドのコピーが出る
+    ui(cx, window, |window, cx| {
+        view.update(cx, |v, cx| {
+            v.show_appearance_section(CustomizeSection::AccessKeys, window, cx);
+            v.issue_access_key(window, cx);
+            v.save_access_key_name(window, cx);
+        })
+    });
+    ui(cx, window, |window, _| {
+        assert!(window.find("access-key-copy-http").visible())
+    });
+    ui(cx, window, |window, cx| window.click("mcp-http-switch", cx));
+    assert_eq!(mcp_http::running_port(), None);
+    assert!(!store(cx, |s| mcp_http::enabled(s).unwrap()));
+}
+
+fn store_port(cx: &mut TestAppContext) -> u16 {
+    store(cx, |s| malakt_mahoz::mcp_http::port(s).unwrap())
 }
 
 /// アクセスキーの時計のボタンで、開始・期限・時間帯をその場で決める。

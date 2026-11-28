@@ -7,17 +7,16 @@
 
 オフラインで使うタスク管理ツールです。Rust と [gpui](https://www.gpui.rs/) で作っていて、macOS・Windows・Linux で動きます。
 
-![タスクの一覧](docs/images/list.png)
+<picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/list-dark.webp"><img alt="タスクの一覧" src="docs/images/list-light.webp"></picture>
 <sub>タスクの一覧</sub>
 
-| | |
-| --- | --- |
-| ![ホーム](docs/images/home.png)<br><sub>ホーム</sub> | ![タスクの詳細](docs/images/detail.png)<br><sub>タスクの詳細</sub> |
-| ![ペイン](docs/images/panes.png)<br><sub>ペイン</sub> | ![AI チャット](docs/images/ai.png)<br><sub>AI チャット</sub> |
-| ![ターミナル](docs/images/terminal.png)<br><sub>ターミナル</sub> | ![すべてのタスク](docs/images/all.png)<br><sub>すべてのタスク</sub> |
-
-![カスタマイズ](docs/images/themes.png)
-<sub>カスタマイズ</sub>
+<table>
+<tr><td><picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/home-dark.webp"><img alt="ホーム" src="docs/images/home-light.webp"></picture><br><sub>ホーム</sub></td><td><picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/detail-dark.webp"><img alt="タスクの詳細" src="docs/images/detail-light.webp"></picture><br><sub>タスクの詳細</sub></td></tr>
+<tr><td><picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/date-dark.webp"><img alt="開始と期限の入力" src="docs/images/date-light.webp"></picture><br><sub>開始と期限の入力</sub></td><td><picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/panes-dark.webp"><img alt="ペイン" src="docs/images/panes-light.webp"></picture><br><sub>ペイン</sub></td></tr>
+<tr><td><picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/stats-dark.webp"><img alt="統計" src="docs/images/stats-light.webp"></picture><br><sub>統計</sub></td><td><picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/ai-dark.webp"><img alt="AI チャットとターミナル" src="docs/images/ai-light.webp"></picture><br><sub>AI チャットとターミナル</sub></td></tr>
+<tr><td><picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/browser-dark.webp"><img alt="アプリ内ブラウザのダウンロード" src="docs/images/browser-light.webp"></picture><br><sub>アプリ内ブラウザのダウンロード</sub></td><td><picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/settings-dark.webp"><img alt="設定" src="docs/images/settings-light.webp"></picture><br><sub>設定</sub></td></tr>
+<tr><td colspan="2" align="center"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/pomodoro-dark.webp"><img alt="ポモドーロ（別ウィンドウ）" src="docs/images/pomodoro-light.webp" width="320"></picture><br><sub>ポモドーロ（別ウィンドウ）</sub></td></tr>
+</table>
 
 ## 機能
 
@@ -47,7 +46,7 @@
 - **完了チケット**: コマンドからタスクを完了にする（[docs/tickets.md](docs/tickets.md)）
 - **AI チャット**: `Ctrl/⌘ + J`（[docs/ai.md](docs/ai.md)）
 - **ターミナル**: アプリの中で WSL や zsh を開き、Claude Code などをそのまま動かす（[docs/terminal.md](docs/terminal.md)）
-- **MCP サーバー**: Claude Code などのエージェントからタスクを読み書き。アクセスキーで、エージェントごとに読み取りのみ・ロック中も使えるかを選べる（[docs/mcp.md](docs/mcp.md)）
+- **MCP サーバー**: Claude Code などのエージェントからタスクを読み書き。アクセスキーで、エージェントごとに読み取りのみ・ロック中も使えるかを選べる。キーなしで使える条件（時間帯・ロック中）も決められ、HTTP のポートでも開ける（[docs/mcp.md](docs/mcp.md)）
 - **プラグイン**: WASM のプラグインで、タスクやワークスペースの右クリックにコマンドを足す。有効にするのは、許すことを確かめて承認したものだけ（[docs/plugins.md](docs/plugins.md)）
 
 ## 起動とビルド

@@ -38,6 +38,8 @@ resvg = { version = "0.45", default-features = false }
 # アプリ内ブラウザ。OS のブラウザの部品（Windows は WebView2、macOS は WKWebView、Linux は WebKitGTK）を使う
 wry = "0.58"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# MCP の HTTP（127.0.0.1 だけ）で、リクエストの頭を読む
+httparse = "1"
 
 [dev-dependencies]
 gpui-kit = { version = "0.11.0", features = ["test-support"] }
