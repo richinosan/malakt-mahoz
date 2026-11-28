@@ -3040,11 +3040,11 @@ fn a_comment_updates_the_progress(cx: &mut TestAppContext) {
     assert_eq!((now.percent, now.status), (60, Status::InProcess));
     let label = read(cx, |s| s.tracked[&task].label.clone());
     assert_eq!(label.as_ref(), "0% → 60%・進行中・期限 2026-12-01");
-    // 開いている詳細の期限の欄にも出る
+    // 開いている詳細の期限にも出る
     cx.update(|cx| {
         assert_eq!(
-            view.read(cx).inputs.due.read(cx).value().as_ref(),
-            "2026-12-01"
+            view.read(cx).detail.as_ref().unwrap().task.due.as_deref(),
+            Some("2026-12-01")
         );
     });
     ui(cx, window, |window, _| {
@@ -3063,7 +3063,7 @@ fn a_comment_updates_the_progress(cx: &mut TestAppContext) {
         (0, Status::NeedsAction, None)
     );
     cx.update(|cx| {
-        assert_eq!(view.read(cx).inputs.due.read(cx).value().as_ref(), "");
+        assert_eq!(view.read(cx).detail.as_ref().unwrap().task.due, None);
     });
     ui(cx, window, |window, _| {
         assert!(window.try_find("ai-tracked-undo").is_none());
@@ -4636,4 +4636,154 @@ fn the_ai_promo_waits_for_the_unlock(cx: &mut TestAppContext) {
     });
     cx.run_until_parked();
     cx.update(|cx| assert_eq!(view.read(cx).modal, malakt_mahoz::Modal::AiPromo));
+}
+
+/// 開いているメニューの中の、`label` の項目を押す。
+fn pick_item(cx: &mut TestAppContext, window: AnyWindowHandle, label: &str) {
+    use gpui_kit::test::TestEventExt;
+    use gpui_kit::MouseButton;
+    ui(cx, window, |window, cx| {
+        let center = window.find_by_label(label).bounds().center();
+        window.pointer_move(center, None, cx);
+        window.pointer_down(center, MouseButton::Left, cx);
+        window.pointer_up(center, MouseButton::Left, cx);
+    });
+}
+
+/// 定時タスクの雛形には、タスクの詳細と同じ項目を画面から入れられ、作るタスクに入る。
+#[gpui_kit::test]
+fn a_schedule_template_takes_every_task_field_from_the_screen(cx: &mut TestAppContext) {
+    start(cx);
+    let workspace = cx.update(|cx| {
+        db::shared(cx).update(cx, |db, cx| {
+            let w = db.store.create_workspace(None, "経理").unwrap();
+            cx.notify();
+            w.id
+        })
+    });
+    let (window, view) = open(cx, wide());
+    ui(cx, window, |window, cx| {
+        view.update(cx, |v, cx| {
+            v.open_workspace_settings(&workspace, window, cx)
+        });
+    });
+    ui(cx, window, |window, cx| window.click("ws-schedules", cx));
+    ui(cx, window, |window, cx| window.click("schedule-add", cx));
+    cx.run_until_parked();
+    ui(cx, window, |window, _| window.activate_window());
+    ui(cx, window, |window, cx| window.input("請求書の作成", cx));
+    ui(cx, window, |window, cx| window.press("enter", cx));
+
+    // URL は空白で区切っていくつも貼れる
+    ui(cx, window, |window, cx| {
+        window.click("schedule-url-input", cx)
+    });
+    ui(cx, window, |window, cx| {
+        window.input("https://epilysi.stargate65535.workers.dev/ b.example/x", cx)
+    });
+    ui(cx, window, |window, cx| window.press("enter", cx));
+    // 状態・優先度・開始日・進捗はメニューで選ぶ
+    ui(cx, window, |window, cx| window.click("schedule-status", cx));
+    pick_item(cx, window, "進行中");
+    ui(cx, window, |window, cx| {
+        window.click("schedule-priority", cx)
+    });
+    pick_item(cx, window, "高");
+    ui(cx, window, |window, cx| window.click("schedule-start", cx));
+    pick_item(cx, window, "翌日");
+    ui(cx, window, |window, cx| {
+        window.click("schedule-percent", cx)
+    });
+    pick_item(cx, window, "50%");
+    // 説明・カテゴリ・サブタスクはその場で書く
+    ui(cx, window, |window, cx| {
+        window.click("schedule-description", cx)
+    });
+    ui(cx, window, |window, cx| {
+        window.input("先月分をまとめる", cx)
+    });
+    ui(cx, window, |window, cx| window.press("enter", cx));
+    ui(cx, window, |window, cx| {
+        window.click("schedule-category-input", cx)
+    });
+    ui(cx, window, |window, cx| window.input("月次", cx));
+    ui(cx, window, |window, cx| window.press("enter", cx));
+    ui(cx, window, |window, cx| {
+        window.click("schedule-subtask-input", cx)
+    });
+    ui(cx, window, |window, cx| window.input("金額を確かめる", cx));
+    ui(cx, window, |window, cx| window.press("enter", cx));
+
+    let made = schedules_in(cx, Some(&workspace)).remove(0);
+    assert_eq!(made.title, "請求書の作成");
+    let t = &made.task;
+    assert_eq!(
+        t.urls,
+        [
+            "https://epilysi.stargate65535.workers.dev/",
+            "https://b.example/x"
+        ]
+    );
+    assert_eq!(t.status, Status::InProcess);
+    assert_eq!(t.priority, Some(1));
+    assert_eq!(t.start_days, Some(1));
+    assert_eq!(t.percent, 50);
+    assert_eq!(t.description.as_deref(), Some("先月分をまとめる"));
+    assert_eq!(t.categories, Some(vec!["月次".to_owned()]));
+    assert_eq!(t.subtasks, ["金額を確かめる"]);
+
+    // URL の ✕ で外せる
+    ui(cx, window, |window, cx| {
+        window.click(("schedule-url-remove", 1usize), cx)
+    });
+    assert_eq!(
+        schedules_in(cx, Some(&workspace))[0].task.urls,
+        ["https://epilysi.stargate65535.workers.dev/"]
+    );
+
+    // 添付は、選んだファイルを雛形に付ける
+    let dir = std::env::temp_dir().join(format!("malakt-schedule-ui-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("見積.txt");
+    std::fs::write(&path, b"abc").unwrap();
+    ui(cx, window, |_, cx| {
+        let settings = view.read(cx).ai_settings.clone();
+        settings.update(cx, |s, cx| {
+            s.attach_schedule_paths(&made.id, std::slice::from_ref(&path), cx)
+        });
+    });
+    std::fs::remove_dir_all(&dir).unwrap();
+
+    // 時刻が来ると、雛形のとおりのタスクを作る
+    let task = cx.update(|cx| {
+        db::shared(cx).update(cx, |db, _| {
+            assert!(db.sweep_repeats(&made.next_at));
+            let made = db.store.schedule(&made.id).unwrap();
+            let list = db
+                .store
+                .tasks(
+                    Scope::Workspace(&workspace),
+                    &TaskFilter {
+                        include_descendants: false,
+                        open_only: true,
+                        assignee_id: None,
+                        query: Some("請求書".into()),
+                    },
+                )
+                .unwrap();
+            assert_ne!(made.next_at, "");
+            list[0].clone()
+        })
+    });
+    assert_eq!(task.urls, ["https://epilysi.stargate65535.workers.dev/"]);
+    assert_eq!(task.status, Status::InProcess);
+    assert_eq!(task.description, "先月分をまとめる");
+    assert_eq!(task.categories, ["月次"]);
+    assert_eq!(task.percent, 50);
+    assert!(task.start.is_some());
+    cx.update(|cx| {
+        let store = &db::shared(cx).read(cx).store;
+        assert_eq!(store.subtasks(&task.id).unwrap()[0].title, "金額を確かめる");
+        assert_eq!(store.attachments(&task.id).unwrap()[0].name, "見積.txt");
+    });
 }

@@ -184,6 +184,7 @@ mod tests {
         ("shortcuts.rs", include_str!("shortcuts.rs")),
         ("history_view.rs", include_str!("history_view.rs")),
         ("browser.rs", include_str!("browser.rs")),
+        ("date_pick.rs", include_str!("date_pick.rs")),
     ];
 
     /// コメントを除いたコードの行。

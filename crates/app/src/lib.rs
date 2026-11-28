@@ -8,6 +8,7 @@ pub mod browser;
 pub mod browser_popup;
 mod caret;
 pub mod cli;
+pub mod date_pick;
 pub mod db;
 pub mod downloads;
 pub mod drops;
@@ -15,6 +16,7 @@ mod feel;
 mod history_view;
 pub mod icons;
 pub mod mcp;
+mod mcp_keys;
 pub mod mcp_register;
 pub mod panes;
 pub mod passkey;
@@ -185,6 +187,8 @@ pub fn init_with(store: malakt_core::Store, ai: AiConfig, cx: &mut App) {
         KeyBinding::new("ctrl-b", PanePrefix, Some("MainView")),
     ]);
     shortcuts::bind(cx);
+    // カレンダーの中の矢印などは、一覧のキーより後に割り当てる
+    date_pick::bind(cx);
     // 場所を決めていない割り当て（ロックなど）より後に割り当てる
     shell_keys::bind(cx);
     caret::init(cx);

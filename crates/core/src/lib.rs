@@ -1,11 +1,13 @@
 //! malakt-mahoz のデータとロジック。UI には依存しない。
 //!
 //! - `Store`: SQLite への保存と読み出し
+//! - `access`: アクセスキー（外のエージェントに渡す合い言葉。キーごとに読み取りのみ・ロック中も使えるかを選ぶ）
 //! - `actor`: 誰が変えたか（自分・AI・外のエージェントなど）
 //! - `alert`: 期限の通知のタイミング（何分前・何日前に知らせるか）
 //! - `archive`: zip へのエクスポート / インポート
 //! - `attachment`: 添付ファイル（重複なし・圧縮つきで保存）
 //! - `bulk`: 複数のタスクをまとめて変える操作と、一覧での選択
+//! - `calendar`: 日付を選ぶカレンダー（月の並び・日本の祝日・よく使う日・入力の解釈）
 //! - `diff`: 文字列の差分（変更履歴の赤と緑）
 //! - `done_notice`: ほかの人が完了にしたときに知らせるか（役・担当者・ワークスペースで選ぶ）
 //! - `defaults`: ワークスペースごとのタスク追加時の既定値と基準日
@@ -26,11 +28,13 @@
 
 #![cfg_attr(test, allow(clippy::cloned_ref_to_slice_refs))]
 
+pub mod access;
 pub mod actor;
 pub mod alert;
 pub mod archive;
 pub mod attachment;
 pub mod bulk;
+pub mod calendar;
 pub mod defaults;
 pub mod diff;
 pub mod done_notice;

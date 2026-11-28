@@ -19,8 +19,10 @@ fn main() {
             }
             malakt_mahoz::mcp::exit_when_app_closes(path.clone());
         }
+        let key = std::env::var(malakt_mahoz::mcp::ENV_KEY).ok();
         let code = malakt_mahoz::cli::run(
             &args,
+            key,
             || malakt_core::Store::open(&path),
             &mut std::io::stdin().lock(),
             &mut std::io::stdout(),

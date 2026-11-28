@@ -411,6 +411,7 @@ fn archive_layout_is_portable() {
             "data/comments.json",
             "data/people.json",
             "data/repeats.json",
+            "data/schedule_files.json",
             "data/schedules.json",
             "data/task_alerts.json",
             "data/task_defaults.json",

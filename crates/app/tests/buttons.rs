@@ -128,6 +128,10 @@ const MUST: &[&str] = &[
     "lock-switch",
     "auto-lock",
     "locked-notices",
+    "mcp-keyless",
+    "access-key-add",
+    "access-key-copy",
+    "access-key-hide",
     "alert-timed",
     "alert-date",
     "alert-hour",
@@ -142,7 +146,7 @@ const LOCK: &[&str] = &["lock-disable", "lock-save", "unlock"];
 const ICON_PICKER: &[&str] = &["icon-category", "icon-add-image"];
 
 /// 入力欄。名前が `-input` で終わるもののほかに、ここにあるもの。
-const INPUTS: &[&str] = &["ws-date", "ws-term-dir", "def-categories"];
+const INPUTS: &[&str] = &["ws-term-dir", "def-categories"];
 
 /// 押しても画面とデータが変わらないのが正しいもの。ID（番号つきは番号まで）と理由。
 const QUIET: &[(&str, &str)] = &[
@@ -160,12 +164,10 @@ const QUIET: &[(&str, &str)] = &[
     ("タスクの詳細 > title#1", "今開いているタスク"),
     ("説明を編集中の詳細 > title#1", "今開いているタスク"),
     ("担当を選んでいる詳細 > title#1", "今開いているタスク"),
-    ("ホーム > p-due#0", "期限がもう今日のタスク"),
     (
         "見出しを右クリックしたメニュー > due#3",
         "見出しのメニューの下に隠れている",
     ),
-    ("p-start#0", "開始日がもう今日のタスク"),
     ("def-prio#0", "今選んでいる優先度"),
     ("def-due-none", "今選んでいる期限の決め方"),
     ("bulk-mode#0", "今選んでいる変え方"),
@@ -886,6 +888,18 @@ fn screens() -> Vec<(&'static str, Size<Pixels>, Setup)> {
                 v.show_appearance_section(CustomizeSection::AiGithub, window, cx);
             })
         }),
+        (
+            "設定の MCP（発行したばかりのキーあり）",
+            wide,
+            |cx, w| {
+                with_view(cx, w, |v, window, cx| {
+                    v.open_appearance(window, cx);
+                    v.show_appearance_section(CustomizeSection::AccessKeys, window, cx);
+                    v.issue_access_key(window, cx);
+                    v.save_access_key_name(window, cx);
+                })
+            },
+        ),
         ("設定のデータ", wide, |cx, w| {
             with_view(cx, w, |v, window, cx| {
                 v.open_appearance(window, cx);

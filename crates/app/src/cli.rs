@@ -34,7 +34,10 @@ pub const USAGE: &str = "\
 
 チケットは、環境変数 MALAKT_MAHOZ_TICKET でも渡せます。
 データベースの場所は、環境変数 MALAKT_MAHOZ_DB で変えられます。
-ロックが有効なときは、アプリでロックを解除している間だけタスクを読み書きできます。
+アクセスキーは、環境変数 MALAKT_MAHOZ_KEY で渡します（アプリの設定の「アクセスキー」で発行）。
+終了コードは、成功が 0、失敗が 1、使い方の誤りが 2、ロックやアクセスキーで使えないときが 3 です。
+ロックが有効なときは、アプリでロックを解除している間だけタスクを読み書きできます
+（ロック中も使えるアクセスキーを除く）。
 ";
 
 /// 引数がコマンドか。そうでなければ、アプリを開く。
@@ -42,15 +45,17 @@ pub fn is_command(args: &[String]) -> bool {
     !args.is_empty()
 }
 
-/// 終了コード。0 は成功、1 は失敗、2 は使い方の誤り。
+/// 終了コード。0 は成功、1 は失敗、2 は使い方の誤り、3 はロックやアクセスキーで使えない。
+/// `key` は、環境変数 `MALAKT_MAHOZ_KEY` で渡されたアクセスキー。
 pub fn run(
     args: &[String],
+    key: Option<String>,
     open: impl FnOnce() -> malakt_core::Result<Store>,
     input: &mut dyn BufRead,
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> i32 {
-    match execute(args, open, input, out) {
+    match execute(args, key, open, input, out) {
         Ok(()) => 0,
         Err(Failure::Usage(message)) => {
             let _ = writeln!(err, "{message}\n\n{USAGE}");
@@ -60,12 +65,18 @@ pub fn run(
             let _ = writeln!(err, "{message}");
             1
         }
+        Err(Failure::Denied(message)) => {
+            let _ = writeln!(err, "{message}");
+            3
+        }
     }
 }
 
 enum Failure {
     Usage(String),
     Failed(String),
+    /// ロックやアクセスキー（期限・時間帯・読み取りのみ）で使えない
+    Denied(String),
 }
 
 impl From<malakt_core::Error> for Failure {
@@ -82,6 +93,7 @@ impl From<std::io::Error> for Failure {
 
 fn execute(
     args: &[String],
+    key: Option<String>,
     open: impl FnOnce() -> malakt_core::Result<Store>,
     input: &mut dyn BufRead,
     out: &mut dyn Write,
@@ -100,11 +112,13 @@ fn execute(
             Ok(())
         }
         "mcp" => match rest {
-            [] => Ok(crate::mcp::Server::new(open).serve(input, out)?),
+            [] => Ok(crate::mcp::Server::new(open)
+                .with_key(key)
+                .serve(input, out)?),
             [sub] if sub == "config" => {
                 let exe = std::env::current_exe()?;
                 let db = std::env::var_os(crate::mcp::ENV_DB).map(std::path::PathBuf::from);
-                let config = crate::mcp::config_json(&exe, db.as_deref());
+                let config = crate::mcp::config_json(&exe, db.as_deref(), key.as_deref());
                 let text = serde_json::to_string_pretty(&config)
                     .map_err(|e| Failure::Failed(e.to_string()))?;
                 writeln!(out, "{text}")?;
@@ -116,8 +130,17 @@ fn execute(
             let (tool, tool_args) = tool_call(command, rest)?;
             let mut store = open()?;
             store.set_actor(malakt_core::Actor::Command);
-            let text = crate::mcp::call_tool(&mut store, unix_now(), &tool, &tool_args)
-                .map_err(Failure::Failed)?;
+            let text = crate::mcp::call_tool_checked(
+                &mut store,
+                unix_now(),
+                key.as_deref(),
+                &tool,
+                &tool_args,
+            )
+            .map_err(|refused| match refused {
+                crate::mcp::Refused::Denied(text) => Failure::Denied(text),
+                crate::mcp::Refused::Failed(text) => Failure::Failed(text),
+            })?;
             writeln!(out, "{text}")?;
             Ok(())
         }
@@ -239,10 +262,19 @@ mod tests {
     use malakt_core::{Status, Store, TaskDraft};
 
     fn call(store_path: &std::path::Path, args: &[&str]) -> (i32, String, String) {
+        call_with_key(store_path, None, args)
+    }
+
+    fn call_with_key(
+        store_path: &std::path::Path,
+        key: Option<&str>,
+        args: &[&str],
+    ) -> (i32, String, String) {
         let args: Vec<String> = args.iter().map(|a| (*a).to_owned()).collect();
         let (mut out, mut err) = (Vec::new(), Vec::new());
         let code = run(
             &args,
+            key.map(str::to_owned),
             || Store::open(store_path),
             &mut std::io::empty(),
             &mut out,
@@ -404,9 +436,56 @@ mod tests {
             &["call", "create_task", r#"{"title":"x"}"#],
         ] {
             let (code, out, err) = call(&path, args);
-            assert_eq!((code, out.as_str()), (1, ""), "{args:?}");
+            // 使えないときの終了コードは 3（ツールの失敗の 1 と分ける）
+            assert_eq!((code, out.as_str()), (3, ""), "{args:?}");
             assert_eq!(err.trim(), crate::mcp::LOCKED);
         }
+
+        // ロック中も使えるアクセスキーなら読める。読み取りのみなら書けない
+        let key = {
+            let mut s = Store::open(&path).unwrap();
+            s.issue_access_key("スクリプト", true, true).unwrap().secret
+        };
+        let (code, out, _) = call_with_key(&path, Some(&key), &["task", id]);
+        assert_eq!(code, 0);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&out).unwrap()["title"],
+            "告知を出す"
+        );
+        let (code, _, err) = call_with_key(
+            &path,
+            Some(&key),
+            &["call", "create_task", r#"{"title":"x"}"#],
+        );
+        assert_eq!(code, 3);
+        assert!(err.contains("読み取りのみ"), "{err}");
+        let (code, _, err) = call_with_key(&path, Some("mmak_nope"), &["tasks"]);
+        assert_eq!(code, 3);
+        assert_eq!(err.trim(), crate::mcp::BAD_KEY);
+        // 期限が切れたキーは、期限を添えて断る
+        {
+            let mut s = Store::open(&path).unwrap();
+            let id = s.access_keys().unwrap()[0].id.clone();
+            let patch = malakt_core::access::KeyPatch {
+                expires: Some(Some("2000-01-01 09:00".into())),
+                ..Default::default()
+            };
+            s.update_access_key(&id, &patch).unwrap();
+        }
+        let (code, _, err) = call_with_key(&path, Some(&key), &["tasks"]);
+        assert_eq!(code, 3);
+        assert_eq!(
+            err.trim(),
+            "アクセスキー「スクリプト」の期限が切れています（2000/01/01 09:00 まで）。"
+        );
+        // mcp config は、渡したキーを設定に入れる
+        let (code, out, _) = call_with_key(&path, Some(&key), &["mcp", "config"]);
+        assert_eq!(code, 0);
+        let config: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(
+            config["mcpServers"][crate::mcp::NAME]["env"][crate::mcp::ENV_KEY],
+            key.as_str()
+        );
     }
 
     #[test]
@@ -424,6 +503,7 @@ mod tests {
         let (mut out, mut err) = (Vec::new(), Vec::new());
         let code = run(
             &args,
+            None,
             || Store::open(&path),
             &mut input.as_bytes(),
             &mut out,

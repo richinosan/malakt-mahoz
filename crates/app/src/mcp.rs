@@ -7,12 +7,15 @@
 //! 標準入出力で JSON-RPC を 1 行ずつやり取りする（MCP の stdio）。ネットワークは使わない。
 //! ツールは AI チャットと同じもの（[`malakt_ai::tools`]）に、`undo` と `redo` を足したもの。
 //! ロックが有効なときは、アプリがロックを解除している間だけ動く（[`malakt_core::lock::allows_outside`]）。
+//! 環境変数 [`ENV_KEY`] でアクセスキーを渡すと、キーごとに読み取りのみ・ロック中も使えるかが決まる
+//! （[`malakt_core::access`]）。キーなしの接続をどう扱うかは、アプリの設定で選ぶ。
 
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 
 use malakt_ai::tools;
-use malakt_core::{lock, Store};
+use malakt_core::access::{self, Denied};
+use malakt_core::Store;
 use serde_json::{json, Value};
 
 /// Claude Code などに登録するときの名前。
@@ -21,6 +24,8 @@ pub const NAME: &str = "malakt-mahoz";
 pub const ENV_BIN: &str = "MALAKT_MAHOZ_BIN";
 /// データベースの場所。
 pub const ENV_DB: &str = "MALAKT_MAHOZ_DB";
+/// アクセスキー。MCP サーバーとコマンドは、ここに入っているキーでつなぐ。
+pub const ENV_KEY: &str = "MALAKT_MAHOZ_KEY";
 /// [`config_json`] の中身を書いたファイルの場所。`claude --mcp-config "$MALAKT_MAHOZ_MCP_CONFIG"` で使う。
 pub const ENV_CONFIG: &str = "MALAKT_MAHOZ_MCP_CONFIG";
 
@@ -29,6 +34,37 @@ const PROTOCOLS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
 
 pub const LOCKED: &str =
     "malakt-mahoz はロックされています。アプリを開いて、ロックを解除してください。";
+pub const NEEDS_KEY: &str = "malakt-mahoz にはアクセスキーが必要です。アプリの設定の「アクセスキー」でキーを発行して、環境変数 MALAKT_MAHOZ_KEY に入れてください。";
+pub const BAD_KEY: &str =
+    "アクセスキーが違うか、失効しています。アプリの設定の「アクセスキー」でキーを発行し直してください。";
+
+/// 使えない理由の文。
+pub fn denied_text(denied: &Denied) -> String {
+    denied.to_string()
+}
+
+/// ツールを実行できなかった理由。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Refused {
+    /// ロック・アクセスキー（期限・時間帯・読み取りのみ）で使えない。コマンドの終了コードは 3
+    Denied(String),
+    /// ツールが失敗した。コマンドの終了コードは 1
+    Failed(String),
+}
+
+impl Refused {
+    pub fn text(self) -> String {
+        match self {
+            Refused::Denied(text) | Refused::Failed(text) => text,
+        }
+    }
+}
+
+/// 読み取りのみのキーで使えるツールか。読むだけのツールは名前が list_ か get_ で始まる。
+/// 読み取りのみのときは、ほかに SQLite の `query_only` でも書き込みを止める。
+pub fn reads(name: &str) -> bool {
+    name.starts_with("list_") || name.starts_with("get_")
+}
 
 const INSTRUCTIONS_HEAD: &str = "\
 タスク管理アプリ malakt-mahoz のタスク、ワークスペース、担当者、コメントを読み書きします。\
@@ -84,13 +120,52 @@ pub fn tool_list() -> Vec<Value> {
     list
 }
 
-/// ロックを確かめてから、ツールを 1 つ実行する。コマンド（`malakt-mahoz call`）と共通。
+/// アクセスキーとロックを確かめてから、ツールを 1 つ実行する。コマンド（`malakt-mahoz call`）と共通。
+/// `key` は、つないできたものが渡したアクセスキー。キーは呼び出しのたびに確かめるので、
+/// 失効させたり、できることを変えたりすると、動いているサーバーにもすぐ効く。
 /// 変更は 1 回の呼び出しが 1 つの段になり、`undo` で戻せる。
-pub fn call_tool(store: &mut Store, now: i64, name: &str, args: &Value) -> Result<String, String> {
-    let core = |e: malakt_core::Error| e.to_string();
-    if !lock::allows_outside(store, now).map_err(core)? {
-        return Err(LOCKED.to_owned());
+pub fn call_tool(
+    store: &mut Store,
+    now: i64,
+    key: Option<&str>,
+    name: &str,
+    args: &Value,
+) -> Result<String, String> {
+    call_tool_checked(store, now, key, name, args).map_err(Refused::text)
+}
+
+/// [`call_tool`] と同じ。使えなかったのか、ツールが失敗したのかを分けて返す。
+pub fn call_tool_checked(
+    store: &mut Store,
+    now: i64,
+    key: Option<&str>,
+    name: &str,
+    args: &Value,
+) -> Result<String, Refused> {
+    let core = |e: malakt_core::Error| Refused::Failed(e.to_string());
+    let grant = access::check(store, key, now)
+        .map_err(core)?
+        .map_err(|denied| Refused::Denied(denied_text(&denied)))?;
+    if grant.read_only {
+        if !reads(name) {
+            return Err(Refused::Denied(match &grant.key {
+                Some(key) => format!(
+                    "アクセスキー「{}」は読み取りのみです。{name} は使えません。",
+                    key.name
+                ),
+                None => format!("アクセスキーなしの接続は読み取りのみです。{name} は使えません。"),
+            }));
+        }
+        return store
+            .read_only(|store| run_tool(store, name, args))
+            .map_err(core)?
+            .map_err(Refused::Failed);
     }
+    run_tool(store, name, args).map_err(Refused::Failed)
+}
+
+fn run_tool(store: &mut Store, name: &str, args: &Value) -> Result<String, String> {
+    let core = |e: malakt_core::Error| e.to_string();
     match name {
         "undo" => {
             let done = store.undo().map_err(core)?;
@@ -125,17 +200,36 @@ pub fn call_tool(store: &mut Store, now: i64, name: &str, args: &Value) -> Resul
 }
 
 /// Claude Code の `.mcp.json` や `--mcp-config` に渡す設定。
-/// `db` は、標準でない場所のデータベースを使うときだけ渡す。
-pub fn config_json(exe: &Path, db: Option<&Path>) -> Value {
+/// `db` は、標準でない場所のデータベースを使うときだけ渡す。`key` はアクセスキー。
+pub fn config_json(exe: &Path, db: Option<&Path>, key: Option<&str>) -> Value {
     let mut server = json!({
         "type": "stdio",
         "command": exe.to_string_lossy(),
         "args": ["mcp"],
     });
+    let mut env = serde_json::Map::new();
     if let Some(db) = db {
-        server["env"] = json!({ENV_DB: db.to_string_lossy()});
+        env.insert(ENV_DB.to_owned(), db.to_string_lossy().into());
+    }
+    if let Some(key) = key {
+        env.insert(ENV_KEY.to_owned(), key.into());
+    }
+    if !env.is_empty() {
+        server["env"] = Value::Object(env);
     }
     json!({"mcpServers": {NAME: server}})
+}
+
+/// アクセスキーを付けて Claude Code に登録するコマンド（どのフォルダーの claude からも使える）。
+pub fn claude_add_command(exe: &Path, key: &str) -> String {
+    let exe = exe.to_string_lossy();
+    // 空白を含む場所は、どのシェルでも通るように二重引用符で囲む
+    let exe = if exe.contains(' ') {
+        format!("\"{exe}\"")
+    } else {
+        exe.into_owned()
+    };
+    format!("claude mcp add --scope user {NAME} -e {ENV_KEY}={key} -- {exe} mcp")
 }
 
 /// アプリの中から開くシェルやターミナルに渡す環境変数。
@@ -162,7 +256,7 @@ pub fn shell_env() -> Vec<(String, String)> {
 
 /// [`config_json`] をファイルに書く。中身が同じなら書かない。
 pub fn write_config(path: &Path, exe: &Path, db: Option<&Path>) -> std::io::Result<()> {
-    let text = serde_json::to_string_pretty(&config_json(exe, db))? + "\n";
+    let text = serde_json::to_string_pretty(&config_json(exe, db, None))? + "\n";
     if std::fs::read_to_string(path).is_ok_and(|old| old == text) {
         return Ok(());
     }
@@ -274,6 +368,8 @@ pub fn resume() -> std::io::Result<()> {
 pub struct Server<F> {
     open: Option<F>,
     store: Option<Store>,
+    /// 起動したときに渡されたアクセスキー（[`ENV_KEY`]）。
+    key: Option<String>,
     now: fn() -> i64,
     /// つないできた相手。`initialize` で名乗った名前で、変更履歴に残す。
     actor: malakt_core::Actor,
@@ -285,9 +381,16 @@ impl<F: FnOnce() -> malakt_core::Result<Store>> Server<F> {
         Self {
             open: Some(open),
             store: None,
+            key: None,
             now: unix_now,
             actor: malakt_core::Actor::agent(""),
         }
+    }
+
+    /// つなぐのに使うアクセスキー。
+    pub fn with_key(mut self, key: Option<String>) -> Self {
+        self.key = key;
+        self
     }
 
     /// 時計を差し替える（テスト用）。
@@ -318,9 +421,10 @@ impl<F: FnOnce() -> malakt_core::Result<Store>> Server<F> {
         };
         let now = (self.now)();
         let actor = self.actor.clone();
+        let key = self.key.clone();
         let store = self.store()?;
         store.set_actor(actor);
-        call_tool(store, now, name, args)
+        call_tool(store, now, key.as_deref(), name, args)
     }
 
     /// 受け取った 1 行に答える。通知には何も返さない。
@@ -403,7 +507,7 @@ impl<F: FnOnce() -> malakt_core::Result<Store>> Server<F> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use malakt_core::{Status, TaskDraft};
+    use malakt_core::{lock, Status, TaskDraft};
 
     fn server(path: &Path) -> Server<impl FnOnce() -> malakt_core::Result<Store> + '_> {
         Server::new(move || Store::open(path)).with_clock(|| 1_000)
@@ -685,6 +789,121 @@ mod tests {
         assert_eq!(failure(&mut s, "list_tasks", json!({})), LOCKED);
     }
 
+    fn keyed<'a>(
+        path: &'a Path,
+        key: &str,
+    ) -> Server<impl FnOnce() -> malakt_core::Result<Store> + 'a> {
+        server(path).with_key(Some(key.to_owned()))
+    }
+
+    /// 読み取りのみのキーでは、読むツールはどれも動き、書くツールと undo は使えない。
+    #[test]
+    fn a_read_only_key_reads_everything_and_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("data.sqlite3");
+        let mut app = Store::open(&path).unwrap();
+        app.ensure_self().unwrap();
+        let w = app.create_workspace(None, "冬のイベント").unwrap();
+        let draft = TaskDraft {
+            title: "会場を予約する".into(),
+            ..Default::default()
+        };
+        let task = app.create_task(Some(&w.id), &draft).unwrap();
+        let key = app.issue_access_key("読むだけ", true, false).unwrap();
+
+        let mut s = keyed(&path, &key.secret);
+        let names: Vec<String> = tool_list()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap().to_owned())
+            .collect();
+        let mut read = 0;
+        for name in &names {
+            let args = match name.as_str() {
+                "get_task" => json!({"id": task.id}),
+                "get_due_alerts" => json!({"task_id": task.id}),
+                "get_workspace" | "get_workspace_settings" => json!({"id": w.id}),
+                _ => json!({}),
+            };
+            if reads(name) {
+                tool(&mut s, name, args);
+                read += 1;
+            } else {
+                let text = failure(&mut s, name, args);
+                assert!(
+                    text.contains("「読むだけ」は読み取りのみ"),
+                    "{name}: {text}"
+                );
+            }
+        }
+        assert!(read >= 10, "{read}");
+        // 書くツールは、どれも読み取りのみで止まる
+        for name in tools::WRITES {
+            assert!(!reads(name), "{name}");
+        }
+        assert_eq!(
+            app.tasks(malakt_core::Scope::All, &Default::default())
+                .unwrap()
+                .len(),
+            1
+        );
+        // 読み取りのみをやめると、同じサーバーのまま書ける
+        let patch = malakt_core::access::KeyPatch {
+            read_only: Some(false),
+            ..Default::default()
+        };
+        app.update_access_key(&key.key.id, &patch).unwrap();
+        tool(&mut s, "create_task", json!({"title": "告知を出す"}));
+        // 失効させると、すぐ使えなくなる
+        app.revoke_access_key(&key.key.id).unwrap();
+        assert_eq!(failure(&mut s, "list_tasks", json!({})), BAD_KEY);
+    }
+
+    #[test]
+    fn denials_read_the_same_everywhere() {
+        assert_eq!(denied_text(&Denied::Locked), LOCKED);
+        assert_eq!(denied_text(&Denied::NeedsKey), NEEDS_KEY);
+        assert_eq!(denied_text(&Denied::BadKey), BAD_KEY);
+    }
+
+    #[test]
+    fn keys_and_the_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("data.sqlite3");
+        let mut app = Store::open(&path).unwrap();
+        lock::enable(&mut app).unwrap();
+        let plain = app.issue_access_key("ふつう", false, false).unwrap();
+        let always = app.issue_access_key("いつでも", false, true).unwrap();
+
+        // ロック中は、ロック中も使えるキーだけが読み書きできる
+        let mut s = keyed(&path, &plain.secret);
+        assert_eq!(failure(&mut s, "list_tasks", json!({})), LOCKED);
+        let mut s = keyed(&path, &always.secret);
+        tool(&mut s, "create_task", json!({"title": "夜の作業"}));
+        assert_eq!(tool(&mut s, "undo", json!({}))["undone"], true);
+        let mut s = server(&path);
+        assert_eq!(failure(&mut s, "list_tasks", json!({})), LOCKED);
+
+        // キーなしの接続を使えなくすると、解除していてもキーが要る
+        lock::mark_open(&mut app, 1_000).unwrap();
+        tool(&mut s, "list_tasks", json!({}));
+        access::set_keyless(&mut app, access::Keyless::Off).unwrap();
+        assert_eq!(failure(&mut s, "list_tasks", json!({})), NEEDS_KEY);
+        let mut s = keyed(&path, &plain.secret);
+        tool(&mut s, "list_tasks", json!({}));
+        // キーなしを読み取りのみにすると、読むだけできる
+        access::set_keyless(&mut app, access::Keyless::ReadOnly).unwrap();
+        let mut s = server(&path);
+        tool(&mut s, "list_tasks", json!({}));
+        let text = failure(&mut s, "create_task", json!({"title": "x"}));
+        assert!(
+            text.contains("アクセスキーなしの接続は読み取りのみ"),
+            "{text}"
+        );
+        // 違うキーは、キーなしの扱いにかかわらず使えない
+        let mut s = keyed(&path, "mmak_nope");
+        assert_eq!(failure(&mut s, "list_tasks", json!({})), BAD_KEY);
+    }
+
     #[test]
     fn serve_answers_line_by_line_and_reports_a_database_that_cannot_open() {
         let dir = tempfile::tempdir().unwrap();
@@ -754,13 +973,13 @@ mod tests {
     #[test]
     fn config_and_environment() {
         let exe = Path::new("/opt/malakt-mahoz/malakt-mahoz");
-        let config = config_json(exe, None);
+        let config = config_json(exe, None, None);
         let server = &config["mcpServers"][NAME];
         assert_eq!(server["command"], "/opt/malakt-mahoz/malakt-mahoz");
         assert_eq!(server["args"], json!(["mcp"]));
         assert!(server.get("env").is_none());
         let db = Path::new("/data/タスク.sqlite3");
-        let config = config_json(exe, Some(db));
+        let config = config_json(exe, Some(db), None);
         assert_eq!(
             config["mcpServers"][NAME]["env"][ENV_DB],
             "/data/タスク.sqlite3"
@@ -773,6 +992,24 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
         assert_eq!(written, config);
         write_config(&file, exe, Some(db)).unwrap();
+
+        // アクセスキーは、環境変数で渡す
+        let config = config_json(exe, Some(db), Some("mmak_abc"));
+        let env = &config["mcpServers"][NAME]["env"];
+        assert_eq!(env[ENV_DB], "/data/タスク.sqlite3");
+        assert_eq!(env[ENV_KEY], "mmak_abc");
+        assert_eq!(
+            config_json(exe, None, Some("mmak_abc"))["mcpServers"][NAME]["env"],
+            json!({ENV_KEY: "mmak_abc"})
+        );
+        assert_eq!(
+            claude_add_command(exe, "mmak_abc"),
+            "claude mcp add --scope user malakt-mahoz -e MALAKT_MAHOZ_KEY=mmak_abc -- /opt/malakt-mahoz/malakt-mahoz mcp"
+        );
+        assert_eq!(
+            claude_add_command(Path::new("C:\\Program Files\\malakt-mahoz.exe"), "k"),
+            "claude mcp add --scope user malakt-mahoz -e MALAKT_MAHOZ_KEY=k -- \"C:\\Program Files\\malakt-mahoz.exe\" mcp"
+        );
 
         let env = terminal_env(exe, db, Some(&file));
         let get = |key: &str| env.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str());

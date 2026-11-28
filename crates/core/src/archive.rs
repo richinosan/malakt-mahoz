@@ -65,6 +65,8 @@ pub struct Data {
     pub repeats: Vec<crate::repeat::Repeat>,
     /// 定時タスク。
     pub schedules: Vec<crate::schedule::Schedule>,
+    /// 定時タスクの雛形の添付。中身は添付と同じく zip の `files/<ハッシュ>` に入る。
+    pub schedule_files: Vec<crate::schedule::ScheduleFile>,
 }
 
 impl Data {
@@ -115,6 +117,9 @@ impl Data {
         }
         for a in &mut self.attachments {
             a.name = crate::attachment::clean_name(&a.name);
+        }
+        for f in &mut self.schedule_files {
+            f.name = crate::attachment::clean_name(&f.name);
         }
         for c in &mut self.changes {
             c.old_value = normalize(&c.old_value);
@@ -205,16 +210,35 @@ impl Data {
             )));
         }
         // ハッシュは zip の中のファイル名になるので、16 進 64 桁だけを通す
-        if self.attachments.iter().any(|a| {
-            a.id.is_empty()
-                || a.size > MAX_ATTACHMENT_BYTES
-                || a.hash.len() != 64
-                || !a
-                    .hash
-                    .bytes()
-                    .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
-        }) {
+        let bad_file = |id: &str, size: u64, hash: &str| {
+            id.is_empty()
+                || size > MAX_ATTACHMENT_BYTES
+                || hash.len() != 64
+                || !hash.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        };
+        if self
+            .attachments
+            .iter()
+            .any(|a| bad_file(&a.id, a.size, &a.hash))
+        {
             return bad("添付");
+        }
+        if self
+            .schedule_files
+            .iter()
+            .any(|f| bad_file(&f.id, f.size, &f.hash))
+        {
+            return bad("定時タスクの添付");
+        }
+        if let Some(f) = self
+            .schedule_files
+            .iter()
+            .find(|f| !self.schedules.iter().any(|s| s.id == f.schedule_id))
+        {
+            return Err(Error::Invalid(format!(
+                "定時タスクの添付「{}」の、定時タスクがありません",
+                f.name
+            )));
         }
         Ok(())
     }
@@ -271,14 +295,23 @@ pub fn export<W: Write + Seek>(store: &Store, out: W) -> Result<Manifest> {
     put("data/ai_rules.json", serde_json::to_vec(&data.ai_rules)?)?;
     put("data/repeats.json", serde_json::to_vec(&data.repeats)?)?;
     put("data/schedules.json", serde_json::to_vec(&data.schedules)?)?;
+    put(
+        "data/schedule_files.json",
+        serde_json::to_vec(&data.schedule_files)?,
+    )?;
     for (name, png) in &data.icons {
         put(&icon_entry(name), png.clone())?;
     }
     // 中身は 1 つずつ読んで書く（全部を一度にメモリへ載せない）。同じ中身は 1 回だけ
     let mut written = std::collections::HashSet::new();
-    for a in &data.attachments {
-        if written.insert(a.hash.as_str()) {
-            put(&file_entry(&a.hash), store.blob(&a.hash)?)?;
+    let hashes = data
+        .attachments
+        .iter()
+        .map(|a| a.hash.as_str())
+        .chain(data.schedule_files.iter().map(|f| f.hash.as_str()));
+    for hash in hashes {
+        if written.insert(hash) {
+            put(&file_entry(hash), store.blob(hash)?)?;
         }
     }
     zip.finish()?.flush()?;
@@ -366,6 +399,7 @@ fn read_zip<R: Read + Seek>(zip: &mut ZipArchive<R>) -> Result<(Manifest, Data)>
         .iter()
         .map(crate::schedule::clean)
         .collect::<Result<_>>()?;
+    let schedule_files = read_optional(zip, "data/schedule_files.json")?;
     let workspaces: Vec<Workspace> = read_json(zip, "data/workspaces.json")?;
     let mut icons: Vec<(String, Vec<u8>)> = Vec::new();
     for w in &workspaces {
@@ -398,15 +432,22 @@ fn read_zip<R: Read + Seek>(zip: &mut ZipArchive<R>) -> Result<(Manifest, Data)>
         ai_rules,
         repeats,
         schedules,
+        schedule_files,
     };
     data.normalize();
     data.validate()?;
-    for a in &data.attachments {
-        if zip.index_for_name(&file_entry(&a.hash)).is_none() {
-            return Err(Error::Invalid(format!(
-                "添付「{}」の中身がありません",
-                a.name
-            )));
+    let files = data
+        .attachments
+        .iter()
+        .map(|a| (a.name.as_str(), a.hash.as_str()))
+        .chain(
+            data.schedule_files
+                .iter()
+                .map(|f| (f.name.as_str(), f.hash.as_str())),
+        );
+    for (name, hash) in files {
+        if zip.index_for_name(&file_entry(hash)).is_none() {
+            return Err(Error::Invalid(format!("添付「{name}」の中身がありません")));
         }
     }
     Ok((manifest, data))
@@ -474,8 +515,10 @@ mod tests {
             "2026-11-27 12:00",
         )
         .unwrap();
-        s.create_schedule(Some(&ws.id), "定時", None, "2026-11-27 12:00")
+        let schedule = s
+            .create_schedule(Some(&ws.id), "定時", None, "2026-11-27 12:00")
             .unwrap();
+        s.add_schedule_file(&schedule.id, "b.txt", b"def").unwrap();
         s.add_attachment(&t.id, None, "a.txt", b"abc").unwrap();
         s.set_task_alerts(&crate::alert::TaskAlerts {
             task_id: t.id.clone(),
@@ -488,6 +531,7 @@ mod tests {
         assert_eq!(data.ai_rules.len(), 1);
         assert_eq!(data.repeats.len(), 1);
         assert_eq!(data.schedules.len(), 1);
+        assert_eq!(data.schedule_files.len(), 1);
         assert_eq!(data.attachments.len(), 1);
         assert_eq!(data.task_alerts.len(), 1);
         data
@@ -580,6 +624,46 @@ mod tests {
         ));
         assert!(!rejects(|d| d.schedules[0].workspace_id = None));
         assert!(rejects(|d| d.task_alerts[0].task_id = "ない".into()));
+        assert!(rejects(|d| d.schedule_files[0].schedule_id = "ない".into()));
+    }
+
+    #[test]
+    fn 定時タスクの添付も識別子と大きさとハッシュを確かめる() {
+        assert!(rejects(|d| d.schedule_files[0].id.clear()));
+        assert!(!rejects(|d| d.schedule_files[0].size = MAX_ATTACHMENT_BYTES));
+        assert!(rejects(
+            |d| d.schedule_files[0].size = MAX_ATTACHMENT_BYTES + 1
+        ));
+        assert!(rejects(|d| d.schedule_files[0].hash = "g".repeat(64)));
+        assert!(rejects(|d| d.schedule_files[0].hash.push('0')));
+    }
+
+    #[test]
+    fn 定時タスクの添付の中身がない書き出しは断る() {
+        let mut s = Store::open_in_memory().unwrap();
+        let made = s
+            .create_schedule(None, "定時", None, "2026-11-27 12:00")
+            .unwrap();
+        let file = s.add_schedule_file(&made.id, "b.txt", b"def").unwrap();
+        let mut zip = std::io::Cursor::new(Vec::new());
+        export(&s, &mut zip).unwrap();
+        // 中身のファイルを抜いた zip を作り直す
+        zip.set_position(0);
+        let mut from = ZipArchive::new(zip).unwrap();
+        let mut out = ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        for i in 0..from.len() {
+            let entry = from.by_index(i).unwrap();
+            if entry.name() == file_entry(&file.hash) {
+                continue;
+            }
+            out.raw_copy_file(entry).unwrap();
+        }
+        let mut zip = out.finish().unwrap();
+        zip.set_position(0);
+        let mut other = Store::open_in_memory().unwrap();
+        let error = import(&mut other, zip).unwrap_err();
+        assert!(error.to_string().contains("b.txt"), "{error}");
+        assert!(other.all_schedules().unwrap().is_empty());
     }
 
     #[test]
