@@ -329,7 +329,7 @@ op undo(): void;
 @view
 op redo(): void;
 
-/** ワークスペースに付けられるアイコンを探す。query は英語か日本語の言葉。 */
+/** ワークスペースと AI bot に付けられるアイコンを探す。query は英語か日本語の言葉。 */
 @view
 op find_icons(query: string, @minValue(1) @maxValue(100) limit?: int32): void;
 
@@ -340,6 +340,18 @@ op find_icons(query: string, @minValue(1) @maxValue(100) limit?: int32): void;
  */
 @view
 op set_workspace_icon(
+  id: string,
+  icon?: string | null,
+  image_path?: string,
+  color?: string | null,
+): void;
+
+/**
+ * AI bot のアイコンと色を変える。icon・image_path・color の書き方は set_workspace_icon と同じ。
+ * 渡した項目だけが変わる。
+ */
+@view
+op set_bot_icon(
   id: string,
   icon?: string | null,
   image_path?: string,
@@ -449,6 +461,14 @@ op set_ai_settings(
   /** コマンドの実行と削除を確認なしで行う */
   auto_run?: boolean,
 ): void;
+
+/**
+ * ほかの AI bot に仕事を渡す。渡した bot が並列の会話で message を受け取って動き、終わると会話の一覧に残る。
+ * ユーザーが別の bot に頼むよう言ったときや、ほかの bot のインストラクションに合う仕事のときに使う。
+ * bot_id は list_ai_bots で調べる。message には、渡した先の bot がそれだけで動けるように、頼むことを全部書く。
+ */
+@session
+op hand_off_to_bot(bot_id: string, message: string): void;
 
 /** GitHub の定期チェックを今すぐ 1 回行う。 */
 @session

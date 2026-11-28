@@ -196,6 +196,7 @@ pub enum CustomizeSection {
     Window,
     Browser,
     Data,
+    AiBots,
     AiModel,
     AiBehavior,
     AiRules,
@@ -214,7 +215,7 @@ pub enum CustomizeSection {
 
 impl CustomizeSection {
     /// ページの順に並べた、すべての見出し。
-    pub const ALL: [CustomizeSection; 24] = [
+    pub const ALL: [CustomizeSection; 25] = [
         CustomizeSection::Theme,
         CustomizeSection::Layout,
         CustomizeSection::Backdrop,
@@ -225,6 +226,7 @@ impl CustomizeSection {
         CustomizeSection::Window,
         CustomizeSection::Browser,
         CustomizeSection::Data,
+        CustomizeSection::AiBots,
         CustomizeSection::AiModel,
         CustomizeSection::AiBehavior,
         CustomizeSection::AiRules,
@@ -248,6 +250,7 @@ impl CustomizeSection {
             CustomizeSection::Backdrop => "背景",
             CustomizeSection::Look => "色と書体",
             CustomizeSection::Display => "表示",
+            CustomizeSection::AiBots => crate::ai_settings::AiGroup::Bots.label(),
             CustomizeSection::AiModel => crate::ai_settings::AiGroup::Model.label(),
             CustomizeSection::AiBehavior => crate::ai_settings::AiGroup::Behavior.label(),
             CustomizeSection::AiRules => crate::ai_settings::AiGroup::Rules.label(),
@@ -277,6 +280,7 @@ impl CustomizeSection {
             CustomizeSection::Backdrop => "image",
             CustomizeSection::Look => "type",
             CustomizeSection::Display => "rows-3",
+            CustomizeSection::AiBots => "bot-message-square",
             CustomizeSection::AiModel => "sparkles",
             CustomizeSection::AiBehavior => "bot",
             CustomizeSection::AiRules => "scroll-text",
@@ -312,7 +316,8 @@ impl CustomizeSection {
             | CustomizeSection::Backdrop
             | CustomizeSection::Look
             | CustomizeSection::Display => SettingsPage::Appearance,
-            CustomizeSection::AiModel
+            CustomizeSection::AiBots
+            | CustomizeSection::AiModel
             | CustomizeSection::AiBehavior
             | CustomizeSection::AiRules
             | CustomizeSection::AiSchedules
@@ -332,6 +337,7 @@ impl CustomizeSection {
     pub fn ai_group(self) -> Option<crate::ai_settings::AiGroup> {
         use crate::ai_settings::AiGroup;
         match self {
+            CustomizeSection::AiBots => Some(AiGroup::Bots),
             CustomizeSection::AiModel => Some(AiGroup::Model),
             CustomizeSection::AiBehavior => Some(AiGroup::Behavior),
             CustomizeSection::AiRules => Some(AiGroup::Rules),
