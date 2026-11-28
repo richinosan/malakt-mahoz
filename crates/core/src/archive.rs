@@ -67,6 +67,8 @@ pub struct Data {
     pub schedules: Vec<crate::schedule::Schedule>,
     /// 定時タスクの雛形の添付。中身は添付と同じく zip の `files/<ハッシュ>` に入る。
     pub schedule_files: Vec<crate::schedule::ScheduleFile>,
+    /// ポモドーロの作業の記録。
+    pub work_logs: Vec<crate::pomodoro::WorkLog>,
 }
 
 impl Data {
@@ -230,6 +232,16 @@ impl Data {
         {
             return bad("定時タスクの添付");
         }
+        if let Some(l) = self.work_logs.iter().find(|l| {
+            l.task_id
+                .as_ref()
+                .is_some_and(|t| !self.tasks.iter().any(|x| &x.id == t))
+        }) {
+            return Err(Error::Invalid(format!(
+                "作業の記録の、タスク {} がありません",
+                l.task_id.as_deref().unwrap_or_default()
+            )));
+        }
         if let Some(f) = self
             .schedule_files
             .iter()
@@ -299,6 +311,7 @@ pub fn export<W: Write + Seek>(store: &Store, out: W) -> Result<Manifest> {
         "data/schedule_files.json",
         serde_json::to_vec(&data.schedule_files)?,
     )?;
+    put("data/work_logs.json", serde_json::to_vec(&data.work_logs)?)?;
     for (name, png) in &data.icons {
         put(&icon_entry(name), png.clone())?;
     }
@@ -400,6 +413,11 @@ fn read_zip<R: Read + Seek>(zip: &mut ZipArchive<R>) -> Result<(Manifest, Data)>
         .map(crate::schedule::clean)
         .collect::<Result<_>>()?;
     let schedule_files = read_optional(zip, "data/schedule_files.json")?;
+    let work_logs: Vec<crate::pomodoro::WorkLog> = read_optional(zip, "data/work_logs.json")?;
+    let work_logs = work_logs
+        .iter()
+        .map(crate::pomodoro::clean_log)
+        .collect::<Result<_>>()?;
     let workspaces: Vec<Workspace> = read_json(zip, "data/workspaces.json")?;
     let mut icons: Vec<(String, Vec<u8>)> = Vec::new();
     for w in &workspaces {
@@ -433,6 +451,7 @@ fn read_zip<R: Read + Seek>(zip: &mut ZipArchive<R>) -> Result<(Manifest, Data)>
         repeats,
         schedules,
         schedule_files,
+        work_logs,
     };
     data.normalize();
     data.validate()?;

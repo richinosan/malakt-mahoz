@@ -262,8 +262,11 @@ pub fn definitions() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "open_window",
-            description: "メインのウィンドウをもう 1 枚開く。",
-            schema: empty(),
+            description: "新しいウィンドウを開く。kind は main（タスクの画面をもう 1 枚。標準）か pomodoro（ポモドーロタイマー。開いていれば手前に出す。タイマーの操作は pomodoro ツール）。",
+            schema: object(
+                json!({"kind": {"type": "string", "enum": ["main", "pomodoro"]}}),
+                &[],
+            ),
         },
         ToolDef {
             name: "open_terminal",
@@ -503,7 +506,10 @@ pub fn summary(name: &str, args: &Value) -> Option<String> {
         "set_panels" => "画面の部分を変更".into(),
         "pane" => "ペインを操作".into(),
         "open_dialog" => "ダイアログを開く".into(),
-        "open_window" => "新しいウィンドウを開く".into(),
+        "open_window" => match arg("kind") {
+            "pomodoro" => "ポモドーロのウィンドウを開く".into(),
+            _ => "新しいウィンドウを開く".into(),
+        },
         "open_terminal" => "ターミナルを開く".into(),
         "browser" => match arg("action") {
             "open" => format!("ブラウザで開く: {}", arg("url")),
@@ -717,11 +723,25 @@ impl MainView {
             "set_panels" => self.ai_set_panels(args, window, cx)?,
             "pane" => self.ai_pane(args, window, cx)?,
             "open_dialog" => self.ai_open_dialog(args, window, cx)?,
-            "open_window" => {
-                crate::open_main_window(cx)
-                    .map_err(|e| format!("ウィンドウを開けませんでした: {e}"))?;
-                json!({"opened": true})
-            }
+            "open_window" => match str_arg(args, "kind").unwrap_or("main") {
+                "main" => {
+                    crate::open_main_window(cx)
+                        .map_err(|e| format!("ウィンドウを開けませんでした: {e}"))?;
+                    json!({"opened": true})
+                }
+                "pomodoro" => {
+                    // ウィンドウの更新中なので、終わってから開く
+                    cx.defer(|cx| {
+                        if let Err(e) = crate::pomodoro::open(cx) {
+                            crate::pomodoro::shared(cx).update(cx, |p, cx| {
+                                p.fail(format!("ポモドーロのウィンドウを開けませんでした: {e}"), cx)
+                            });
+                        }
+                    });
+                    json!({"opened": "pomodoro"})
+                }
+                other => return Err(format!("kind は main / pomodoro のどちらかです: {other}")),
+            },
             "open_terminal" => self.ai_open_terminal(args, window, cx)?,
             "browser" => {
                 let mut reveal = false;
