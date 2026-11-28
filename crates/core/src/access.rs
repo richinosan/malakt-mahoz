@@ -125,6 +125,112 @@ impl Window {
     }
 }
 
+/// 使える時間の決め方。設定の「いつでも / 毎日 / 平日 / 曜日ごと」。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HoursMode {
+    /// 時間帯なし
+    Always,
+    /// 毎日、同じ時刻
+    Everyday,
+    /// 月〜金、同じ時刻
+    Weekdays,
+    /// 曜日ごとに時刻を決める
+    PerDay,
+}
+
+/// 時間帯を足したとき・曜日を足したときに、最初に入る時刻（9:00〜18:00）。
+pub const STANDARD_HOURS: (u32, u32) = (9 * 60, 18 * 60);
+
+impl HoursMode {
+    pub const ALL: [HoursMode; 4] = [
+        HoursMode::Always,
+        HoursMode::Everyday,
+        HoursMode::Weekdays,
+        HoursMode::PerDay,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            HoursMode::Always => "いつでも",
+            HoursMode::Everyday => "毎日",
+            HoursMode::Weekdays => "平日",
+            HoursMode::PerDay => "曜日ごと",
+        }
+    }
+
+    /// 時間帯から見た決め方。1 つの時間帯で毎日か平日なら、それ。ほかは曜日ごと。
+    pub fn of(windows: &[Window]) -> HoursMode {
+        let days = |w: &Window| {
+            let mut days = w.days.clone();
+            days.sort_unstable();
+            days.dedup();
+            days
+        };
+        match windows {
+            [] => HoursMode::Always,
+            [w] if days(w) == [0, 1, 2, 3, 4, 5, 6] => HoursMode::Everyday,
+            [w] if days(w) == [0, 1, 2, 3, 4] => HoursMode::Weekdays,
+            _ => HoursMode::PerDay,
+        }
+    }
+
+    /// この決め方にした時間帯。今の時刻（最初の時間帯の時刻）を引き継ぐ。
+    /// 曜日ごとにするときは、今の時間帯をそのまま使う（いつでもからなら、平日 9:00〜18:00）。
+    pub fn apply(self, windows: &[Window]) -> Vec<Window> {
+        let (from, to) = windows
+            .first()
+            .map(|w| (w.from, w.to))
+            .unwrap_or(STANDARD_HOURS);
+        let one = |days: std::ops::Range<u8>| {
+            vec![Window {
+                days: days.collect(),
+                from,
+                to,
+            }]
+        };
+        match self {
+            HoursMode::Always => Vec::new(),
+            HoursMode::Everyday => one(0..7),
+            HoursMode::Weekdays => one(0..5),
+            HoursMode::PerDay if windows.is_empty() => one(0..5),
+            HoursMode::PerDay => windows.to_vec(),
+        }
+    }
+}
+
+/// 曜日ごとの時刻（0 が月曜）。1 つの曜日に時間帯がいくつもあれば、その順に並ぶ。
+pub fn day_hours(windows: &[Window]) -> [Vec<(u32, u32)>; 7] {
+    let mut days: [Vec<(u32, u32)>; 7] = Default::default();
+    for w in windows {
+        for d in &w.days {
+            if let Some(day) = days.get_mut(*d as usize) {
+                if !day.contains(&(w.from, w.to)) {
+                    day.push((w.from, w.to));
+                }
+            }
+        }
+    }
+    days
+}
+
+/// 曜日ごとの時刻から時間帯を作る。同じ時刻の曜日は 1 つの時間帯にまとめる。
+pub fn windows_of(days: &[Vec<(u32, u32)>; 7]) -> Vec<Window> {
+    let mut windows: Vec<Window> = Vec::new();
+    for (day, hours) in days.iter().enumerate() {
+        for &(from, to) in hours {
+            match windows.iter_mut().find(|w| w.from == from && w.to == to) {
+                Some(w) => w.days.push(day as u8),
+                None => windows.push(Window {
+                    days: vec![day as u8],
+                    from,
+                    to,
+                }),
+            }
+        }
+    }
+    windows
+}
+
 /// 0 時からの分を「9:05」の形にする。
 pub fn clock(minutes: u32) -> String {
     format!("{}:{:02}", minutes / 60, minutes % 60)
@@ -333,6 +439,19 @@ pub enum Denied {
     OutsideHours { name: String, hours: String },
     /// キーなしの接続を使える時間の外（`hours` は使えるとき）
     KeylessHours { hours: String },
+}
+
+impl Denied {
+    /// 一覧に出す短い理由（「期限切れ」「時間外」）。
+    pub fn short(&self) -> &'static str {
+        match self {
+            Denied::Locked => "ロック中",
+            Denied::NeedsKey | Denied::BadKey => "キーが必要",
+            Denied::Expired { .. } => "期限切れ",
+            Denied::NotYet { .. } => "開始前",
+            Denied::OutsideHours { .. } | Denied::KeylessHours { .. } => "時間外",
+        }
+    }
 }
 
 impl std::fmt::Display for Denied {
@@ -1280,5 +1399,108 @@ mod tests {
         assert_eq!(Expiry::Week.until(now), "2026-12-05 21:40");
         assert_eq!(Expiry::Month.until(now), "2026-12-28 21:40");
         assert_eq!(Expiry::Quarter.until(now), "2027-02-26 21:40");
+    }
+
+    /// 「いつでも / 毎日 / 平日 / 曜日ごと」と時間帯の行き来。
+    #[test]
+    fn hours_modes_and_per_day_hours() {
+        let w = |days: &[u8], from: u32, to: u32| Window {
+            days: days.to_vec(),
+            from,
+            to,
+        };
+        assert_eq!(HoursMode::of(&[]), HoursMode::Always);
+        assert_eq!(
+            HoursMode::of(&[w(&[6, 0, 1, 2, 3, 4, 5], 0, 60)]),
+            HoursMode::Everyday
+        );
+        assert_eq!(
+            HoursMode::of(&[w(&[0, 1, 2, 3, 4], 0, 60)]),
+            HoursMode::Weekdays
+        );
+        assert_eq!(HoursMode::of(&[w(&[5, 6], 0, 60)]), HoursMode::PerDay);
+        assert_eq!(
+            HoursMode::of(&[w(&[0], 0, 60), w(&[1], 0, 60)]),
+            HoursMode::PerDay
+        );
+
+        // いつでもから毎日・平日・曜日ごとにすると 9:00〜18:00
+        assert_eq!(
+            HoursMode::Everyday.apply(&[]),
+            vec![w(&[0, 1, 2, 3, 4, 5, 6], 540, 1080)]
+        );
+        assert_eq!(
+            HoursMode::PerDay.apply(&[]),
+            vec![w(&[0, 1, 2, 3, 4], 540, 1080)]
+        );
+        // 毎日から平日にしても、時刻はそのまま
+        let night = [w(&[0, 1, 2, 3, 4, 5, 6], 22 * 60, 6 * 60)];
+        assert_eq!(
+            HoursMode::Weekdays.apply(&night),
+            vec![w(&[0, 1, 2, 3, 4], 22 * 60, 6 * 60)]
+        );
+        assert_eq!(HoursMode::PerDay.apply(&night), night.to_vec());
+        assert!(HoursMode::Always.apply(&night).is_empty());
+        for mode in HoursMode::ALL {
+            assert!(!mode.label().is_empty());
+        }
+
+        // 曜日ごとの時刻にばらして、同じ時刻の曜日をまとめ直す
+        let windows = vec![w(&[0, 2], 540, 1080), w(&[2, 5], 1200, 1260)];
+        let days = day_hours(&windows);
+        assert_eq!(days[0], vec![(540, 1080)]);
+        assert!(days[1].is_empty());
+        assert_eq!(days[2], vec![(540, 1080), (1200, 1260)]);
+        assert_eq!(days[5], vec![(1200, 1260)]);
+        assert_eq!(windows_of(&days), windows);
+        // 火曜を足して時刻を変える
+        let mut days = days;
+        days[1] = vec![(600, 1080)];
+        assert_eq!(
+            windows_of(&days),
+            vec![
+                w(&[0, 2], 540, 1080),
+                w(&[1], 600, 1080),
+                w(&[2, 5], 1200, 1260)
+            ]
+        );
+    }
+
+    #[test]
+    fn short_reasons() {
+        let name = String::new();
+        assert_eq!(
+            Denied::Expired {
+                name: name.clone(),
+                until: String::new()
+            }
+            .short(),
+            "期限切れ"
+        );
+        assert_eq!(
+            Denied::NotYet {
+                name: name.clone(),
+                from: String::new()
+            }
+            .short(),
+            "開始前"
+        );
+        assert_eq!(
+            Denied::OutsideHours {
+                name,
+                hours: String::new()
+            }
+            .short(),
+            "時間外"
+        );
+        assert_eq!(
+            Denied::KeylessHours {
+                hours: String::new()
+            }
+            .short(),
+            "時間外"
+        );
+        assert_eq!(Denied::Locked.short(), "ロック中");
+        assert_eq!(Denied::NeedsKey.short(), "キーが必要");
     }
 }

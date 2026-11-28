@@ -134,6 +134,9 @@ const MUST: &[&str] = &[
     "locked-notices",
     "keyless-add",
     "mcp-http-switch",
+    "access-entry-back",
+    "access-entry-expiry-menu",
+    "access-key-revoke",
     "access-key-add",
     "access-key-copy",
     "access-key-hide",
@@ -904,6 +907,19 @@ fn screens() -> Vec<(&'static str, Size<Pixels>, Setup)> {
                     v.show_appearance_section(CustomizeSection::AccessKeys, window, cx);
                     v.issue_access_key(window, cx);
                     v.save_access_key_name(window, cx);
+                })
+            },
+        ),
+        (
+            "設定の MCP の接続（キーなしの決まりの詳細、曜日ごと）",
+            wide,
+            |cx, w| {
+                with_view(cx, w, |v, window, cx| {
+                    v.open_appearance(window, cx);
+                    v.show_appearance_section(CustomizeSection::McpConnection, window, cx);
+                    let rule = v.keyless_rules(cx).remove(0);
+                    v.open_access_entry(&rule.id, cx);
+                    v.set_key_hours_mode(&rule.id, malakt_core::access::HoursMode::PerDay, cx);
                 })
             },
         ),

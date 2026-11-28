@@ -1,56 +1,43 @@
-//! 設定の「アクセスキー」と「MCP の接続」。アクセスキーの発行・名前・できること・失効と、
-//! キーなしの接続の決まり、MCP を HTTP で開くかどうか。
+//! 設定の「アクセスキー」と「MCP の接続」。
 //!
-//! キーなしの接続の決まりは、キーと同じボタン（読み取りのみ・ロック中も・期限と時間帯）で決める。
+//! キーとキーなしの接続の決まりは、一覧に名前・できること・使える時間・今使えるかを文字で並べ、
+//! 押すと詳細を開いて変える（Esc か「←」で一覧に戻る）。詳細では、できること（読み書き /
+//! 読み取りのみ）、ロック中も使うか、開始と期限（タスクと同じカレンダー）、使える時間
+//! （いつでも / 毎日 / 平日 / 曜日ごと、時刻はメニュー）を選ぶ。
 //!
-//! キーは「＋」で「新規アクセスキー」の名前のまま発行し、その行でそのまま名前を書ける。
-//! 発行したキーの文字列は、設定を閉じるまでその行の下に出す（あとからは出せない）。
-//! 「ロック中も使える」をオンにするときは、ロックが有効ならパスキーで本人確認をする。
-//! 時計のボタンで、そのキーの開始・期限・使える時間帯（曜日と時刻）をその場で変える。
+//! キーは「アクセスキーを発行」で「新規アクセスキー」の名前のまま発行し、詳細でそのまま名前を書ける。
+//! 発行したキーの文字列は、設定を閉じるまで詳細に出す（あとからは出せない）。
+//! 「ロック中も使う」をオンにするときは、ロックが有効ならパスキーで本人確認をする。
+//!
+//! 「HTTP で開く」は、ポートを自動（空いているポートを選んで覚える）か固定で選ぶ。
+//! 開けなかった理由は、その欄の中にだけ出す。
 
 use gpui_kit::base::{Disableable, TestSupportExt};
 use gpui_kit::component::button::ButtonVariants;
 use gpui_kit::component::input::Input;
 use gpui_kit::component::menu::PopupMenuItem;
-use gpui_kit::component::{ActiveTheme, Selectable, Sizable};
+use gpui_kit::component::switch::Switch;
+use gpui_kit::component::{ActiveTheme, Sizable};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use malakt_core::access::{
-    self, AccessKey, Expiry, KeyPatch, Window as Hours, NEW_KEY_NAME, WEEKDAYS,
+    self, AccessKey, Expiry, HoursMode, KeyPatch, Window as Hours, NEW_KEY_NAME, STANDARD_HOURS,
+    WEEKDAYS,
 };
 use malakt_core::{view, Id};
 
+use crate::date_pick::{pill, DateTarget};
 use crate::feel::{self, Lit};
 use crate::fonts::MonoFont;
-use crate::mcp_http;
+use crate::mcp_http::{self, PortMode};
 use crate::press::button;
 use crate::render::{app_icon, col, px, row, Framed};
-use crate::state::{LimitField, MainView};
+use crate::state::{CustomizeSection, LimitField, MainView};
 
-/// キーと決まりの行のボタンの id。
-struct EntryIds {
-    off: &'static str,
-    write: &'static str,
-    lock: &'static str,
-    limits: &'static str,
-}
-
-const KEY_IDS: EntryIds = EntryIds {
-    off: "access-key-off",
-    write: "access-key-write",
-    lock: "access-key-lock",
-    limits: "access-key-limits",
-};
-
-const RULE_IDS: EntryIds = EntryIds {
-    off: "keyless-off",
-    write: "keyless-write",
-    lock: "keyless-lock",
-    limits: "keyless-limits",
-};
-
-/// キーの行の高さ。担当者の一覧とそろえる。
-const KEY_ROW_HEIGHT: Pixels = px(32.);
+/// 一覧の 1 行の高さ。
+const ENTRY_ROW_HEIGHT: Pixels = px(52.);
+/// 詳細の左の見出しの幅。
+const LABEL_WIDTH: Pixels = px(96.);
 
 impl MainView {
     pub fn access_keys(&self, cx: &App) -> Vec<AccessKey> {
@@ -77,27 +64,23 @@ impl MainView {
         }
     }
 
-    /// キーなしの接続の決まりを足す（読み書き・いつでも）。足したら、期限と時間帯の欄を開く。
+    /// キーなしの接続の決まりを足す（読み書き・いつでも）。足したら、その詳細を開く。
     pub fn add_keyless_rule(&mut self, cx: &mut Context<Self>) {
         if let Some(rule) = self.write(cx, |s| s.add_keyless_rule(false)) {
-            self.key_limits_open = Some(rule.id);
-            self.key_limit_editing = None;
+            self.open_access_entry(&rule.id, cx);
         }
         cx.notify();
     }
 
     pub fn remove_keyless_rule(&mut self, id: &str, cx: &mut Context<Self>) {
-        if self.write(cx, |s| s.remove_keyless_rule(id)).is_some()
-            && self.key_limits_open.as_deref() == Some(id)
-        {
-            self.key_limits_open = None;
-            self.key_limit_editing = None;
+        if self.write(cx, |s| s.remove_keyless_rule(id)).is_some() {
+            self.forget_access_entry(id);
         }
         cx.notify();
     }
 
     /// キーか、キーなしの接続の決まり。
-    fn access_entry(&self, id: &str, cx: &App) -> Option<AccessKey> {
+    pub(crate) fn access_entry(&self, id: &str, cx: &App) -> Option<AccessKey> {
         self.db.read(cx).store.access_key(id).ok()
     }
 
@@ -105,59 +88,121 @@ impl MainView {
         self.keyless_rules(cx).iter().any(|r| r.id == id)
     }
 
-    /// MCP を HTTP で開くかと、そのポート。
-    pub fn mcp_http(&self, cx: &App) -> (bool, u16) {
-        let store = &self.db.read(cx).store;
-        (
-            mcp_http::enabled(store).unwrap_or(false),
-            mcp_http::port(store).unwrap_or(mcp_http::DEFAULT_PORT),
-        )
+    /// キー（決まり）の詳細を開く。
+    pub fn open_access_entry(&mut self, id: &str, cx: &mut Context<Self>) {
+        // 詳細を見出しの下から出す
+        let section = if self.is_keyless_rule(id, cx) {
+            CustomizeSection::McpConnection
+        } else {
+            CustomizeSection::AccessKeys
+        };
+        self.scroll_to_section(section, cx);
+        self.key_limits_open = Some(id.to_owned());
+        self.key_hours_per_day = None;
+        self.key_limit_editing = None;
+        cx.notify();
+    }
+
+    /// 詳細を閉じて一覧に戻る。開いていたら `true`。
+    pub fn close_access_entry(&mut self) -> bool {
+        self.key_hours_per_day = None;
+        if self.key_limits_open.take().is_none() {
+            return false;
+        }
+        if self.date_pick.as_ref().is_some_and(|p| {
+            matches!(
+                p.target,
+                DateTarget::KeyStarts(_) | DateTarget::KeyExpires(_)
+            )
+        }) {
+            self.date_pick = None;
+        }
+        true
+    }
+
+    /// 消したキー（決まり）の詳細を開いていたら閉じる。
+    fn forget_access_entry(&mut self, id: &str) {
+        if self.key_limits_open.as_deref() == Some(id) {
+            self.close_access_entry();
+        }
+        if self.key_naming.as_deref() == Some(id) {
+            self.key_naming = None;
+        }
+    }
+
+    /// 保存してある MCP の HTTP の設定。
+    pub fn mcp_http(&self, cx: &App) -> mcp_http::Config {
+        mcp_http::config(&self.db.read(cx).store).unwrap_or_default()
     }
 
     pub fn set_mcp_http(&mut self, on: bool, cx: &mut Context<Self>) {
-        let (_, port) = self.mcp_http(cx);
-        self.open_mcp_http(on, port, cx);
+        let next = mcp_http::Config {
+            on,
+            ..self.mcp_http(cx)
+        };
+        self.change_mcp_http(next, cx);
     }
 
-    /// HTTP を開く・閉じるか、ポートを変える。開けなければエラーを出し、設定も前のまま。
-    fn open_mcp_http(&mut self, on: bool, port: u16, cx: &mut Context<Self>) -> bool {
+    /// ポートを自動にするか、固定にするか。固定にするときは、今のポートのまま。
+    pub fn set_mcp_port_mode(&mut self, mode: PortMode, cx: &mut Context<Self>) {
+        let now = self.mcp_http(cx);
+        let next = mcp_http::Config {
+            mode,
+            port: mcp_http::running_port().unwrap_or(now.port),
+            ..now
+        };
+        self.change_mcp_http(next, cx);
+    }
+
+    /// HTTP を開く・閉じるか、ポートを変える。開けなければ理由を欄に出し、設定も前のまま。
+    fn change_mcp_http(&mut self, next: mcp_http::Config, cx: &mut Context<Self>) -> bool {
         let Some(db) = self.db.read(cx).store.file_path() else {
-            self.error =
+            self.mcp_http_error =
                 Some("データベースの場所が分からないので、MCP を HTTP で開けません。".into());
             cx.notify();
             return false;
         };
-        let (was_on, was_port) = self.mcp_http(cx);
-        if let Err(error) = mcp_http::apply(&db, on, port) {
-            self.error = Some(error.into());
-            cx.notify();
-            return false;
-        }
-        if self.write(cx, |s| mcp_http::save(s, on, port)).is_none() {
-            // 保存できなければ、開く前に戻す。戻せなければ、その理由も出す
-            if let Err(error) = mcp_http::apply(&db, was_on, was_port) {
-                self.error = Some(error.into());
+        let before = self.mcp_http(cx);
+        let port = match mcp_http::apply(&db, &next) {
+            Ok(port) => port,
+            Err(error) => {
+                self.mcp_http_error = Some(error.to_string().into());
+                cx.notify();
+                return false;
+            }
+        };
+        // 自動で選んだポートは覚えて、次も使う
+        let saved = mcp_http::Config {
+            port: port.unwrap_or(next.port),
+            ..next
+        };
+        if self.write(cx, |s| mcp_http::save(s, &saved)).is_none() {
+            // 保存できなければ、前の状態に戻す（保存できなかったことは画面に出ている）
+            if let Err(error) = mcp_http::apply(&db, &before) {
+                self.mcp_http_error = Some(error.to_string().into());
             }
             cx.notify();
             return false;
         }
+        self.mcp_http_error = None;
         cx.notify();
         true
     }
 
     /// MCP の URL をコピーする。
     pub fn copy_mcp_url(&mut self, cx: &mut Context<Self>) {
-        let (_, port) = self.mcp_http(cx);
+        let port = mcp_http::running_port().unwrap_or(self.mcp_http(cx).port);
         cx.write_to_clipboard(ClipboardItem::new_string(mcp_http::url(port)));
         self.show_notice("MCP の URL をコピーしました。".into());
         cx.notify();
     }
 
-    /// 「新規アクセスキー」の名前で発行して、その行でそのまま名前を書けるようにする。
+    /// 「新規アクセスキー」の名前で発行して、その詳細を開き、そのまま名前を書けるようにする。
     pub fn issue_access_key(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(issued) = self.write(cx, |s| s.issue_access_key(NEW_KEY_NAME, false, false)) {
             let id = issued.key.id.clone();
             self.issued_access_key = Some(issued);
+            self.open_access_entry(&id, cx);
             self.rename_access_key(id, window, cx);
         }
     }
@@ -203,19 +248,19 @@ impl MainView {
         cx.notify();
     }
 
-    pub fn toggle_key_read_only(&mut self, id: &str, cx: &mut Context<Self>) {
-        let Some(key) = self.access_entry(id, cx) else {
-            return;
-        };
-        let patch = KeyPatch {
-            read_only: Some(!key.read_only),
-            ..Default::default()
-        };
-        self.write(cx, |s| s.update_access_key(id, &patch));
-        cx.notify();
+    /// 読み取りのみにするか、読み書きにするか。
+    pub fn set_key_read_only(&mut self, id: &str, read_only: bool, cx: &mut Context<Self>) {
+        self.update_key(
+            id,
+            KeyPatch {
+                read_only: Some(read_only),
+                ..Default::default()
+            },
+            cx,
+        );
     }
 
-    /// 「ロック中も使える」を切り替える。オンにするときは、ロックが有効ならパスキーで確かめる。
+    /// 「ロック中も使う」を切り替える。オンにするときは、ロックが有効ならパスキーで確かめる。
     pub fn toggle_key_while_locked(&mut self, id: Id, window: &mut Window, cx: &mut Context<Self>) {
         let Some(key) = self.access_entry(&id, cx) else {
             return;
@@ -238,12 +283,14 @@ impl MainView {
     }
 
     fn set_key_while_locked(&mut self, id: &str, on: bool, cx: &mut Context<Self>) {
-        let patch = KeyPatch {
-            while_locked: Some(on),
-            ..Default::default()
-        };
-        self.write(cx, |s| s.update_access_key(id, &patch));
-        cx.notify();
+        self.update_key(
+            id,
+            KeyPatch {
+                while_locked: Some(on),
+                ..Default::default()
+            },
+            cx,
+        );
     }
 
     pub fn revoke_access_key(&mut self, id: &str, cx: &mut Context<Self>) {
@@ -260,9 +307,7 @@ impl MainView {
             {
                 self.issued_access_key = None;
             }
-            if self.key_naming.as_deref() == Some(id) {
-                self.key_naming = None;
-            }
+            self.forget_access_entry(id);
             if let Some(name) = name {
                 self.show_notice(format!("アクセスキー「{name}」を失効させました。").into());
             }
@@ -270,18 +315,7 @@ impl MainView {
         cx.notify();
     }
 
-    /// キーの期限と時間帯の欄を開く・閉じる。
-    pub fn toggle_key_limits(&mut self, id: &str, cx: &mut Context<Self>) {
-        if self.key_limits_open.as_deref() == Some(id) {
-            self.key_limits_open = None;
-        } else {
-            self.key_limits_open = Some(id.to_owned());
-        }
-        self.key_limit_editing = None;
-        cx.notify();
-    }
-
-    fn update_key(&mut self, id: &str, patch: KeyPatch, cx: &mut Context<Self>) -> bool {
+    pub(crate) fn update_key(&mut self, id: &str, patch: KeyPatch, cx: &mut Context<Self>) -> bool {
         let saved = self
             .write(cx, |s| s.update_access_key(id, &patch))
             .is_some();
@@ -330,39 +364,92 @@ impl MainView {
             .unwrap_or_default()
     }
 
-    /// 時間帯を足す。最初は毎日 9:00〜18:00。
-    pub fn add_key_window(&mut self, id: &str, cx: &mut Context<Self>) {
-        let mut windows = self.key_windows(id, cx);
-        windows.push(Hours::standard());
-        self.set_key_windows(id, windows, cx);
-    }
-
-    pub fn remove_key_window(&mut self, id: &str, ix: usize, cx: &mut Context<Self>) {
-        let mut windows = self.key_windows(id, cx);
-        if ix < windows.len() {
-            windows.remove(ix);
-            self.set_key_windows(id, windows, cx);
+    /// 使える時間の決め方（いつでも・毎日・平日・曜日ごと）。
+    fn hours_mode_of(&self, key: &AccessKey) -> HoursMode {
+        if self.key_hours_per_day.as_deref() == Some(key.id.as_str()) && !key.windows.is_empty() {
+            HoursMode::PerDay
+        } else {
+            HoursMode::of(&key.windows)
         }
     }
 
-    /// 時間帯の曜日を付ける・外す。最後の 1 つは外さない（曜日のない時間帯は作れない）。
-    pub fn toggle_key_window_day(&mut self, id: &str, ix: usize, day: u8, cx: &mut Context<Self>) {
-        let mut windows = self.key_windows(id, cx);
-        let Some(window) = windows.get_mut(ix) else {
+    /// 使える時間の決め方を変える。今の時刻は引き継ぐ。
+    pub fn set_key_hours_mode(&mut self, id: &str, mode: HoursMode, cx: &mut Context<Self>) {
+        let windows = self.key_windows(id, cx);
+        self.key_hours_per_day = (mode == HoursMode::PerDay).then(|| id.to_owned());
+        let next = mode.apply(&windows);
+        if next != windows {
+            self.set_key_windows(id, next, cx);
+        }
+        cx.notify();
+    }
+
+    /// 時刻を変える。`day` が `None` なら毎日・平日の時刻、`Some` ならその曜日の `ix` 番目の時刻。
+    pub fn set_key_hours_time(
+        &mut self,
+        id: &str,
+        day: Option<u8>,
+        ix: usize,
+        from: bool,
+        minutes: u32,
+        cx: &mut Context<Self>,
+    ) {
+        let set = |range: &mut (u32, u32)| {
+            if from {
+                range.0 = minutes;
+            } else {
+                range.1 = minutes;
+            }
+        };
+        let windows = self.key_windows(id, cx);
+        let next = match day {
+            None => windows
+                .into_iter()
+                .map(|mut w| {
+                    let mut range = (w.from, w.to);
+                    set(&mut range);
+                    (w.from, w.to) = range;
+                    w
+                })
+                .collect(),
+            Some(day) => {
+                let mut days = access::day_hours(&windows);
+                let Some(range) = days.get_mut(day as usize).and_then(|d| d.get_mut(ix)) else {
+                    return;
+                };
+                set(range);
+                access::windows_of(&days)
+            }
+        };
+        self.set_key_windows(id, next, cx);
+    }
+
+    /// 曜日ごとのときに、その曜日を使う・使わない。最後の 1 つは外さない
+    /// （どの曜日も使わないなら「いつでも」と区別できない）。
+    pub fn toggle_key_day(&mut self, id: &str, day: u8, cx: &mut Context<Self>) {
+        let windows = self.key_windows(id, cx);
+        let mut days = access::day_hours(&windows);
+        let used = days.iter().filter(|d| !d.is_empty()).count();
+        let Some(hours) = days.get(day as usize) else {
             return;
         };
-        if let Some(at) = window.days.iter().position(|d| *d == day) {
-            if window.days.len() == 1 {
-                return;
-            }
-            window.days.remove(at);
+        if hours.is_empty() {
+            // ほかの曜日と同じ時刻で足す
+            let range = days
+                .iter()
+                .find_map(|d| d.first().copied())
+                .unwrap_or(STANDARD_HOURS);
+            days[day as usize].push(range);
+        } else if used > 1 {
+            days[day as usize].clear();
         } else {
-            window.days.push(day);
+            return;
         }
-        self.set_key_windows(id, windows, cx);
+        self.key_hours_per_day = Some(id.to_owned());
+        self.set_key_windows(id, access::windows_of(&days), cx);
     }
 
-    /// 開始・期限・時間帯の時刻を、その場の入力欄で書き直す。
+    /// 名前・ポートを、その場の入力欄で書き直す。
     pub fn edit_key_limit(
         &mut self,
         id: Id,
@@ -370,36 +457,8 @@ impl MainView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let text = if field == LimitField::Port {
-            self.mcp_http(cx).1.to_string()
-        } else {
-            let Some(key) = self.access_entry(&id, cx) else {
-                return;
-            };
-            match field {
-                // 見えている書き方のまま直せるようにする
-                LimitField::Starts => key
-                    .starts
-                    .as_deref()
-                    .map(access::moment_label)
-                    .unwrap_or_default(),
-                LimitField::Expires => key
-                    .expires
-                    .as_deref()
-                    .map(access::moment_label)
-                    .unwrap_or_default(),
-                LimitField::From(ix) => key
-                    .windows
-                    .get(ix)
-                    .map(|w| access::clock(w.from))
-                    .unwrap_or_default(),
-                LimitField::To(ix) => key
-                    .windows
-                    .get(ix)
-                    .map(|w| access::clock(w.to))
-                    .unwrap_or_default(),
-                LimitField::Port => unreachable!("ポートは上で読んだ"),
-            }
+        let text = match field {
+            LimitField::Port => self.mcp_http(cx).port.to_string(),
         };
         self.inputs.key_limit.update(cx, |s, cx| {
             s.set_value(text, window, cx);
@@ -410,83 +469,32 @@ impl MainView {
         cx.notify();
     }
 
-    /// 書いた開始・期限・時刻を保存する。Enter か、ほかの場所を押したとき。
-    /// 読めない書き方なら、何も変えずにエラーを出して、入力欄はそのまま。
+    /// 書いたポートを保存する。Enter か、ほかの場所を押したとき。
+    /// 読めない書き方なら、何も変えずに理由を欄に出して、入力欄はそのまま。
     pub fn save_key_limit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some((id, field)) = self.key_limit_editing.clone() else {
+        let Some((_, field)) = self.key_limit_editing.clone() else {
             return;
         };
         let text = self.inputs.key_limit.read(cx).value().trim().to_owned();
-        if field == LimitField::Port {
-            let port = match text.parse::<u16>() {
-                Ok(port) if port > 0 => port,
-                _ => {
-                    self.error = Some(format!("ポート番号として読めません: {text}").into());
-                    cx.notify();
-                    return;
-                }
-            };
-            let (on, _) = self.mcp_http(cx);
-            if !self.open_mcp_http(on, port, cx) {
-                return;
-            }
-            self.key_limit_editing = None;
-            self.leave_input(&self.inputs.key_limit.clone(), window, cx);
-            cx.notify();
-            return;
-        }
-        let patch = match field {
-            LimitField::Starts | LimitField::Expires => {
-                let value = if text.is_empty() {
-                    None
-                } else {
-                    match malakt_core::when::parse(&text, &view::now(), None) {
-                        Some(value) => Some(value),
-                        None => {
-                            self.error = Some(format!("日時として読めません: {text}").into());
-                            cx.notify();
-                            return;
-                        }
+        match field {
+            LimitField::Port => {
+                let port = match text.parse::<u16>() {
+                    Ok(port) if port > 0 => port,
+                    _ => {
+                        self.mcp_http_error =
+                            Some(format!("ポート番号は 1〜65535 の数字です: {text}").into());
+                        cx.notify();
+                        return;
                     }
                 };
-                if field == LimitField::Starts {
-                    KeyPatch {
-                        starts: Some(value),
-                        ..Default::default()
-                    }
-                } else {
-                    KeyPatch {
-                        expires: Some(value),
-                        ..Default::default()
-                    }
+                let next = mcp_http::Config {
+                    port,
+                    ..self.mcp_http(cx)
+                };
+                if !self.change_mcp_http(next, cx) {
+                    return;
                 }
             }
-            LimitField::From(ix) | LimitField::To(ix) => {
-                let Some(minutes) = access::parse_clock(&text) else {
-                    self.error = Some(format!("時刻として読めません: {text}").into());
-                    cx.notify();
-                    return;
-                };
-                let mut windows = self.key_windows(&id, cx);
-                let Some(w) = windows.get_mut(ix) else {
-                    self.key_limit_editing = None;
-                    cx.notify();
-                    return;
-                };
-                if matches!(field, LimitField::From(_)) {
-                    w.from = minutes.min(24 * 60 - 1);
-                } else {
-                    w.to = minutes;
-                }
-                KeyPatch {
-                    windows: Some(windows),
-                    ..Default::default()
-                }
-            }
-            LimitField::Port => unreachable!("ポートは上で保存した"),
-        };
-        if !self.update_key(&id, patch, cx) {
-            return;
         }
         self.key_limit_editing = None;
         self.leave_input(&self.inputs.key_limit.clone(), window, cx);
@@ -501,7 +509,10 @@ impl MainView {
         let secret = issued.secret.clone();
         let text = match what {
             Copy::Key => secret,
-            Copy::ClaudeHttp => mcp_http::claude_add_command(self.mcp_http(cx).1, &secret),
+            Copy::ClaudeHttp => mcp_http::claude_add_command(
+                mcp_http::running_port().unwrap_or(self.mcp_http(cx).port),
+                &secret,
+            ),
             Copy::Claude | Copy::Config => {
                 let exe = match std::env::current_exe() {
                     Ok(exe) => exe,
@@ -536,300 +547,733 @@ impl MainView {
         cx.notify();
     }
 
-    /// 設定の「アクセスキー」。キーの一覧と、発行のボタン。
-    pub(crate) fn access_keys_editor(&self, cx: &mut Context<Self>) -> Div {
+    /// 設定の「アクセスキー」。キーの一覧と発行のボタン。キーを開いていれば、その詳細。
+    pub(crate) fn access_keys_editor(&self, cx: &mut Context<Self>) -> AnyElement {
+        let keys = self.access_keys(cx);
+        if let Some(key) = self
+            .key_limits_open
+            .as_ref()
+            .and_then(|id| keys.iter().find(|k| &k.id == id))
+        {
+            return self.entry_detail(key.clone(), false, cx);
+        }
         let theme = cx.theme().clone();
-        let mut list = col().gap_1();
-        for (ix, key) in self.access_keys(cx).into_iter().enumerate() {
-            let id = key.id.clone();
-            let name = if self.key_naming.as_ref() == Some(&key.id) {
-                // その場で名前を書く。Enter かほかの場所を押すと保存、Esc で取り消し
-                div()
+        let mut list = col().gap_2();
+        if keys.is_empty() {
+            list = list.child(empty_line("access-key-none", "アクセスキーなし", &theme));
+        }
+        for (ix, key) in keys.iter().enumerate() {
+            list = list.child(self.entry_row(("access-key", ix), key, false, cx));
+        }
+        col()
+            .gap_3()
+            .child(list)
+            .child(
+                row().child(feel::gloss(
+                    button("access-key-add")
+                        .icon(app_icon("plus"))
+                        .label("アクセスキーを発行")
+                        .framed(cx)
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.issue_access_key(window, cx)),
+                        ),
+                )),
+            )
+            .into_any_element()
+    }
+
+    /// 設定の「キーなしの接続」。決まりの一覧と足すボタン。決まりを開いていれば、その詳細。
+    pub(crate) fn keyless_editor(&self, cx: &mut Context<Self>) -> AnyElement {
+        let rules = self.keyless_rules(cx);
+        if let Some(rule) = self
+            .key_limits_open
+            .as_ref()
+            .and_then(|id| rules.iter().find(|r| &r.id == id))
+        {
+            return self.entry_detail(rule.clone(), true, cx);
+        }
+        let theme = cx.theme().clone();
+        let mut list = col().gap_2();
+        if rules.is_empty() {
+            list = list.child(empty_line(
+                "keyless-none",
+                "キーなしではつなげません（アクセスキーが必要）",
+                &theme,
+            ));
+        }
+        for (ix, rule) in rules.iter().enumerate() {
+            list = list.child(self.entry_row(("keyless", ix), rule, true, cx));
+        }
+        col()
+            .gap_3()
+            .child(list)
+            .child(
+                row().child(feel::gloss(
+                    button("keyless-add")
+                        .icon(app_icon("plus"))
+                        .label("キーなしで使える時間を追加")
+                        .framed(cx)
+                        .on_click(cx.listener(|this, _, _, cx| this.add_keyless_rule(cx))),
+                )),
+            )
+            .into_any_element()
+    }
+
+    /// 一覧の 1 行。名前（決まりなら使える時間）、できることとロック中、今使えるか。押すと詳細。
+    fn entry_row(
+        &self,
+        id: impl Into<ElementId>,
+        key: &AccessKey,
+        rule: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = cx.theme().clone();
+        let open = key.id.clone();
+        let (title, icon) = if rule {
+            (key.when_label(), "plug-zap")
+        } else {
+            (key.name.clone(), "key-round")
+        };
+        let mut facts = vec![ability_label(key).to_owned(), lock_label(key).to_owned()];
+        if !rule {
+            facts.push(key.when_label());
+        }
+        div()
+            .id(id)
+            .flex()
+            .items_center()
+            .gap_3()
+            .min_h(ENTRY_ROW_HEIGHT)
+            .px_3()
+            .py_2()
+            .rounded(feel::md())
+            .border_1()
+            .border_color(theme.border)
+            .cursor_pointer()
+            .lit(theme.muted, cx)
+            .child(
+                app_icon(icon)
+                    .size_4()
+                    .flex_none()
+                    .text_color(theme.muted_foreground),
+            )
+            .child(
+                col()
                     .flex_1()
                     .min_w_0()
-                    .on_mouse_down_out(
-                        cx.listener(|this, _, window, cx| this.save_access_key_name(window, cx)),
+                    .gap_0p5()
+                    .child(div().text_sm().truncate().child(title))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .truncate()
+                            .child(facts.join("・")),
+                    )
+                    .when(!rule, |d| {
+                        d.child(
+                            div()
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .truncate()
+                                .child(format!("{}・{}", key.masked(), used_label(key))),
+                        )
+                    }),
+            )
+            .child(status_badge(key, &theme))
+            .child(
+                app_icon("chevron-right")
+                    .size_4()
+                    .flex_none()
+                    .text_color(theme.muted_foreground),
+            )
+            .on_click(
+                cx.listener(move |this, _: &ClickEvent, _, cx| this.open_access_entry(&open, cx)),
+            )
+            .test_support()
+            .into_any_element()
+    }
+
+    /// キー（決まり）の詳細。上に一覧へ戻るボタン、下に失効（外す）のボタン。
+    fn entry_detail(&self, key: AccessKey, rule: bool, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let id = key.id.clone();
+        let mut lines: Vec<(&'static str, AnyElement)> = Vec::new();
+        if !rule {
+            lines.push(("名前", self.key_name_control(&key, cx)));
+            lines.push((
+                "キー",
+                col()
+                    .gap_0p5()
+                    .child(
+                        div()
+                            .id("access-key-masked")
+                            .text_sm()
+                            .mono_font(cx)
+                            .child(key.masked())
+                            .test_support(),
                     )
                     .child(
-                        Input::new(&self.inputs.key_name)
-                            .id("access-key-input")
-                            .aria_label("アクセスキーの名前")
-                            .text_base()
-                            .bg(theme.background)
-                            .border_color(theme.ring)
-                            .px_2(),
+                        div()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(format!(
+                                "発行 {}・{}",
+                                view::format_datetime(key.created_at),
+                                used_label(&key)
+                            )),
                     )
-                    .into_any_element()
+                    .into_any_element(),
+            ));
+        }
+        lines.push((
+            "今の状態",
+            div()
+                .id("access-entry-status")
+                .text_sm()
+                .map(|d| match key.usable_at(access::now_local()) {
+                    Ok(()) => d.child("使えます"),
+                    Err(denied) => d
+                        .text_color(theme.danger)
+                        .child(format!("使えません（{}）", denied.short())),
+                })
+                .test_support()
+                .into_any_element(),
+        ));
+        // できること
+        let (write_id, read_id) = (id.clone(), id.clone());
+        lines.push((
+            "できること",
+            row()
+                .gap_1p5()
+                .flex_wrap()
+                .child(
+                    pill("access-entry-write", "読み書き", !key.read_only, false, cx)
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            this.set_key_read_only(&write_id, false, cx)
+                        }))
+                        .test_support(),
+                )
+                .child(
+                    pill(
+                        "access-entry-read",
+                        "読み取りのみ",
+                        key.read_only,
+                        false,
+                        cx,
+                    )
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.set_key_read_only(&read_id, true, cx)
+                    }))
+                    .test_support(),
+                )
+                .into_any_element(),
+        ));
+        // ロック中
+        let lock_id = id.clone();
+        lines.push((
+            "ロック中",
+            row()
+                .gap_2()
+                .child(
+                    Switch::new("access-entry-lock")
+                        .checked(key.while_locked)
+                        .disabled(self.verifying(cx))
+                        .on_click(cx.listener(move |this, _: &bool, window, cx| {
+                            this.toggle_key_while_locked(lock_id.clone(), window, cx)
+                        })),
+                )
+                .child(div().text_sm().child(lock_label(&key)))
+                .into_any_element(),
+        ));
+        // 開始
+        let starts_text = match &key.starts {
+            Some(at) => div().text_sm().child(access::moment_label(at)),
+            None => div()
+                .text_sm()
+                .text_color(theme.muted_foreground)
+                .child(if rule {
+                    "足したときから"
+                } else {
+                    "発行したときから"
+                }),
+        };
+        let clear_id = id.clone();
+        lines.push((
+            "開始",
+            row()
+                .gap_1()
+                .flex_wrap()
+                .child(self.date_trigger(
+                    "access-entry-starts",
+                    DateTarget::KeyStarts(id.clone()),
+                    starts_text,
+                    cx,
+                ))
+                .when(key.starts.is_some(), |d| {
+                    d.child(feel::gloss(
+                        button("access-entry-starts-clear")
+                            .label("外す")
+                            .ghost()
+                            .small()
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.clear_key_start(&clear_id, cx)
+                            })),
+                    ))
+                })
+                .into_any_element(),
+        ));
+        // 期限。今からの長さでも選べる
+        let expires_text = match &key.expires {
+            Some(at) => div().text_sm().child(access::moment_label(at)),
+            None => div()
+                .text_sm()
+                .text_color(theme.muted_foreground)
+                .child("なし"),
+        };
+        let view_handle = cx.entity().downgrade();
+        let expiry_id = id.clone();
+        lines.push((
+            "期限",
+            row()
+                .gap_1()
+                .flex_wrap()
+                .child(self.date_trigger(
+                    "access-entry-expires",
+                    DateTarget::KeyExpires(id.clone()),
+                    expires_text,
+                    cx,
+                ))
+                .child(
+                    button("access-entry-expiry-menu")
+                        .label("今から")
+                        .icon(app_icon("chevron-down"))
+                        .ghost()
+                        .small()
+                        .pop_menu(move |mut menu, _, _| {
+                            for preset in std::iter::once(None).chain(Expiry::ALL.map(Some)) {
+                                let (view, id) = (view_handle.clone(), expiry_id.clone());
+                                let name = preset.map_or("期限なし", Expiry::label);
+                                menu = menu.item(PopupMenuItem::new(name).on_click(
+                                    move |_, _, cx| {
+                                        // 設定を閉じたあとなら、反映する先がない
+                                        let _ = view.update(cx, |this, cx| {
+                                            this.set_key_expiry_in(&id, preset, cx)
+                                        });
+                                    },
+                                ));
+                            }
+                            menu
+                        }),
+                )
+                .into_any_element(),
+        ));
+        lines.push(("使える時間", self.hours_editor(&key, cx).into_any_element()));
+
+        let back_label = if rule {
+            "キーなしの接続"
+        } else {
+            "アクセスキー"
+        };
+        let header = row().child(feel::gloss(
+            button("access-entry-back")
+                .icon(app_icon("chevron-left"))
+                .label(back_label)
+                .ghost()
+                .small()
+                .tooltip("一覧に戻る")
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.close_access_entry();
+                    cx.notify();
+                })),
+        ));
+        let mut body = col();
+        for (ix, (label, content)) in lines.into_iter().enumerate() {
+            body = body.child(detail_line(label, content, ix == 0, &theme));
+        }
+        let remove_id = id.clone();
+        let footer = if rule {
+            row().child(feel::gloss(
+                button("keyless-remove")
+                    .icon(app_icon("trash"))
+                    .label("この決まりを外す")
+                    .danger()
+                    .small()
+                    .on_click(
+                        cx.listener(move |this, _, _, cx| this.remove_keyless_rule(&remove_id, cx)),
+                    ),
+            ))
+        } else {
+            let view_handle = cx.entity().downgrade();
+            row().child(
+                button("access-key-revoke")
+                    .icon(app_icon("trash"))
+                    .label("失効させる")
+                    .danger()
+                    .small()
+                    .pop_menu(move |menu, _, _| {
+                        let (view, id) = (view_handle.clone(), remove_id.clone());
+                        menu.item(
+                            PopupMenuItem::new("このキーを失効させる（元に戻せません）").on_click(
+                                move |_, _, cx| {
+                                    // 設定を閉じたあとなら、反映する先がない
+                                    let _ =
+                                        view.update(cx, |this, cx| this.revoke_access_key(&id, cx));
+                                },
+                            ),
+                        )
+                    }),
+            )
+        };
+        let issued = self
+            .issued_access_key
+            .as_ref()
+            .filter(|i| i.key.id == key.id)
+            .map(|i| self.issued_key_box(&i.secret, cx));
+        col()
+            .id(if rule {
+                "keyless-detail"
             } else {
-                let id = id.clone();
-                div()
-                    .id(("access-key", ix))
-                    .flex_1()
-                    .min_w_0()
-                    .h(KEY_ROW_HEIGHT)
-                    .flex()
-                    .items_center()
-                    .px_2()
+                "access-key-detail"
+            })
+            .gap_2()
+            .child(header)
+            .children(issued)
+            .child(
+                body.px_3()
                     .rounded(feel::md())
                     .border_1()
-                    .border_color(gpui_kit::transparent_black())
-                    .cursor_pointer()
-                    .lit(theme.muted, cx)
-                    .child(div().truncate().child(key.name.clone()))
-                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                        this.rename_access_key(id.clone(), window, cx)
+                    .border_color(theme.border),
+            )
+            .child(footer)
+            .test_support()
+            .into_any_element()
+    }
+
+    /// 詳細の名前。押すとその場で書ける。
+    fn key_name_control(&self, key: &AccessKey, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        if self.key_naming.as_ref() == Some(&key.id) {
+            // Enter かほかの場所を押すと保存、Esc で取り消し
+            return div()
+                .flex_1()
+                .min_w_0()
+                .on_mouse_down_out(
+                    cx.listener(|this, _, window, cx| this.save_access_key_name(window, cx)),
+                )
+                .child(
+                    Input::new(&self.inputs.key_name)
+                        .id("access-key-input")
+                        .aria_label("アクセスキーの名前")
+                        .small()
+                        .bg(theme.background)
+                        .border_color(theme.ring),
+                )
+                .into_any_element();
+        }
+        let id = key.id.clone();
+        row()
+            .id("access-key-name")
+            .gap_1p5()
+            .px_2()
+            .h(px(26.))
+            .rounded(feel::md())
+            .cursor_pointer()
+            .lit(theme.muted, cx)
+            .child(div().text_sm().truncate().child(key.name.clone()))
+            .child(
+                app_icon("pencil")
+                    .size_3p5()
+                    .text_color(theme.muted_foreground),
+            )
+            .tooltip(|window, cx| {
+                gpui_kit::component::tooltip::Tooltip::new("名前を変更").build(window, cx)
+            })
+            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                this.rename_access_key(id.clone(), window, cx)
+            }))
+            .test_support()
+            .into_any_element()
+    }
+
+    /// 使える時間。いつでも・毎日・平日・曜日ごとと、その時刻。
+    fn hours_editor(&self, key: &AccessKey, cx: &mut Context<Self>) -> Div {
+        let theme = cx.theme().clone();
+        let mode = self.hours_mode_of(key);
+        let mut modes = row().gap_1p5().flex_wrap();
+        for (ix, m) in HoursMode::ALL.into_iter().enumerate() {
+            let id = key.id.clone();
+            modes = modes.child(
+                pill(("access-entry-hours", ix), m.label(), m == mode, false, cx)
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.set_key_hours_mode(&id, m, cx)
                     }))
-                    .test_support()
+                    .test_support(),
+            );
+        }
+        let editor = match mode {
+            HoursMode::Always => None,
+            HoursMode::Everyday | HoursMode::Weekdays => key.windows.first().map(|w| {
+                self.range_line(&key.id, None, 0, (w.from, w.to), cx)
                     .into_any_element()
-            };
-            let used: SharedString = match key.used_at {
-                Some(at) => format!(
-                    "発行 {}・最後に使った日時 {}",
-                    view::format_datetime(key.created_at),
-                    view::format_datetime(at)
-                )
-                .into(),
-                None => format!("発行 {}・未使用", view::format_datetime(key.created_at)).into(),
-            };
-            let masked = row()
-                .id(("access-key-masked", ix))
-                .gap_1p5()
-                .flex_none()
-                .child(
-                    app_icon("key-round")
-                        .size_4()
-                        .text_color(theme.muted_foreground),
-                )
-                .child(
+            }),
+            HoursMode::PerDay => {
+                let days = access::day_hours(&key.windows);
+                let used = days.iter().filter(|d| !d.is_empty()).count();
+                let mut table = col().gap_1();
+                for (d, hours) in days.iter().enumerate() {
+                    let id = key.id.clone();
+                    let on = !hours.is_empty();
+                    let mut ranges = col().gap_1();
+                    if hours.is_empty() {
+                        ranges = ranges.child(
+                            div()
+                                .h(px(28.))
+                                .flex()
+                                .items_center()
+                                .text_sm()
+                                .text_color(theme.muted_foreground)
+                                .child("使えない"),
+                        );
+                    }
+                    for (rx, range) in hours.iter().enumerate() {
+                        ranges =
+                            ranges.child(self.range_line(&key.id, Some(d as u8), rx, *range, cx));
+                    }
+                    table = table.child(
+                        row()
+                            .gap_3()
+                            .items_start()
+                            .child(
+                                row()
+                                    .gap_2()
+                                    .w(px(64.))
+                                    .flex_none()
+                                    .h(px(28.))
+                                    .child(
+                                        Switch::new(("access-entry-day", d))
+                                            .checked(on)
+                                            // 最後の 1 つは外せない
+                                            .disabled(on && used == 1)
+                                            .on_click(cx.listener(move |this, _: &bool, _, cx| {
+                                                this.toggle_key_day(&id, d as u8, cx)
+                                            })),
+                                    )
+                                    .child(div().text_sm().child(WEEKDAYS[d])),
+                            )
+                            .child(ranges),
+                    );
+                }
+                Some(table.into_any_element())
+            }
+        };
+        col().gap_2().child(modes).children(editor)
+    }
+
+    /// 「9:00 〜 18:00」の 1 行。時刻はメニューで選ぶ。日をまたぐときは「翌日」と出す。
+    fn range_line(
+        &self,
+        key: &str,
+        day: Option<u8>,
+        ix: usize,
+        (from, to): (u32, u32),
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let theme = cx.theme().clone();
+        let slot = day.map_or(0, |d| 1 + d as usize * 8 + ix);
+        row()
+            .gap_1p5()
+            .child(self.time_choice(("access-entry-from", slot), key, day, ix, true, from, cx))
+            .child(div().text_sm().child("〜"))
+            .when(to <= from, |d| {
+                d.child(
                     div()
                         .text_sm()
                         .text_color(theme.muted_foreground)
-                        .mono_font(cx)
-                        .child(key.masked()),
+                        .child("翌日"),
                 )
-                .tooltip(move |window, cx| {
-                    gpui_kit::component::tooltip::Tooltip::new(used.clone()).build(window, cx)
-                })
-                .test_support();
-            let (denied, toggles) = self.entry_toggles(&key, &KEY_IDS, ix, cx);
-            let revoke_id = id.clone();
-            let view_handle = cx.entity().downgrade();
-            list = list.child(
-                row()
-                    .gap_2()
-                    .child(name)
-                    .children(denied)
-                    .child(masked)
-                    .child(toggles)
-                    .child(
-                        button(("access-key-revoke", ix))
-                            .icon(app_icon("trash"))
-                            .ghost()
-                            .xsmall()
-                            .tooltip("失効させる")
-                            .pop_menu(move |menu, _, _| {
-                                let (view, id) = (view_handle.clone(), revoke_id.clone());
-                                menu.item(PopupMenuItem::new("失効させる").on_click(
-                                    move |_, _, cx| {
-                                        // 設定を閉じたあとなら、反映する先がない
-                                        let _ = view
-                                            .update(cx, |this, cx| this.revoke_access_key(&id, cx));
-                                    },
-                                ))
-                            }),
-                    ),
-            );
-            if let Some(issued) = self
-                .issued_access_key
-                .as_ref()
-                .filter(|i| i.key.id == key.id)
-            {
-                list = list.child(self.issued_key_box(&issued.secret, cx));
-            }
-            if self.key_limits_open.as_ref() == Some(&key.id) {
-                list = list.child(self.key_limits(&key, false, cx));
-            }
-        }
-        col().gap_3().child(list).child(
-            row().child(feel::gloss(
-                button("access-key-add")
-                    .icon(app_icon("plus"))
-                    .framed(cx)
-                    .tooltip("アクセスキーを発行")
-                    .on_click(cx.listener(|this, _, window, cx| this.issue_access_key(window, cx))),
-            )),
-        )
+            })
+            .child(self.time_choice(("access-entry-to", slot), key, day, ix, false, to, cx))
     }
 
-    /// キーと決まりの行の右側。今使えないときの印と、読み取りのみ・ロック中も・期限と時間帯のボタン。
-    fn entry_toggles(
+    /// 時刻のボタン。押すと 30 分ごとの時刻のメニューが開く。
+    #[allow(clippy::too_many_arguments)]
+    fn time_choice(
         &self,
-        key: &AccessKey,
-        ids: &EntryIds,
+        id: impl Into<ElementId>,
+        key: &str,
+        day: Option<u8>,
         ix: usize,
+        from: bool,
+        minutes: u32,
         cx: &mut Context<Self>,
-    ) -> (Option<AnyElement>, Div) {
+    ) -> impl IntoElement {
+        let view = cx.entity().downgrade();
+        let key = key.to_owned();
+        button(id)
+            .label(access::clock(minutes))
+            .icon(app_icon("chevron-down"))
+            .outline()
+            .small()
+            .accessibility_label(if from {
+                "始まりの時刻"
+            } else {
+                "終わりの時刻"
+            })
+            .pop_menu(move |mut menu, _, _| {
+                menu = menu.max_h(px(320.));
+                for choice in time_choices(minutes, from) {
+                    let (view, key) = (view.clone(), key.clone());
+                    menu = menu.item(
+                        PopupMenuItem::new(access::clock(choice))
+                            .checked(choice == minutes)
+                            .on_click(move |_, _, cx| {
+                                // 設定を閉じたあとなら、反映する先がない
+                                let _ = view.update(cx, |this, cx| {
+                                    this.set_key_hours_time(&key, day, ix, from, choice, cx)
+                                });
+                            }),
+                    );
+                }
+                menu
+            })
+    }
+
+    /// 設定の「HTTP で開く」。スイッチ、今の状態と URL、ポートの決め方、開けなかった理由。
+    pub(crate) fn mcp_http_editor(&self, cx: &mut Context<Self>) -> Div {
         let theme = cx.theme().clone();
-        let (write_id, lock_id, limits_id) = (key.id.clone(), key.id.clone(), key.id.clone());
-        // 今は期限・時間帯の外なら、印を出す（ホバーで理由）
-        let denied = key.usable_at(access::now_local()).err().map(|d| {
-            let why = SharedString::from(d.to_string());
-            div()
-                .id((ids.off, ix))
-                .child(app_icon("calendar-x").size_4().text_color(theme.danger))
-                .tooltip(move |window, cx| {
-                    gpui_kit::component::tooltip::Tooltip::new(why.clone()).build(window, cx)
+        let config = self.mcp_http(cx);
+        let running = mcp_http::running_port();
+        let head = row()
+            .gap_4()
+            .child(
+                col()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_0p5()
+                    .child(div().text_sm().child("HTTP で開く"))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child("この PC（127.0.0.1）からだけつなげます"),
+                    ),
+            )
+            .child(crate::render::on_off(
+                config.on,
+                Switch::new("mcp-http-switch")
+                    .checked(config.on)
+                    .on_click(cx.listener(|this, on: &bool, _, cx| this.set_mcp_http(*on, cx))),
+                cx,
+            ));
+        let status = match running {
+            Some(port) => row()
+                .gap_2()
+                .flex_wrap()
+                .child(div().size_2().rounded_full().bg(theme.success))
+                .child(div().text_sm().child("受付中"))
+                .child(
+                    div()
+                        .id("mcp-http-url")
+                        .text_sm()
+                        .mono_font(cx)
+                        .child(mcp_http::url(port))
+                        .test_support(),
+                )
+                .child(feel::gloss(
+                    button("mcp-http-copy")
+                        .icon(app_icon("copy"))
+                        .label("URL をコピー")
+                        .ghost()
+                        .small()
+                        .on_click(cx.listener(|this, _, _, cx| this.copy_mcp_url(cx))),
+                )),
+            None => row()
+                .gap_2()
+                .child(div().size_2().rounded_full().bg(theme.muted_foreground))
+                .child(
+                    div()
+                        .id("mcp-http-state")
+                        .text_sm()
+                        .text_color(theme.muted_foreground)
+                        .child("停止中")
+                        .test_support(),
+                ),
+        };
+        let mut modes = row().gap_1p5();
+        for (ix, mode) in [PortMode::Auto, PortMode::Fixed].into_iter().enumerate() {
+            modes =
+                modes.child(
+                    pill(
+                        ("mcp-http-port-mode", ix),
+                        mode.label(),
+                        config.mode == mode,
+                        false,
+                        cx,
+                    )
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.set_mcp_port_mode(mode, cx)
+                    }))
+                    .test_support(),
+                );
+        }
+        let port_value = match config.mode {
+            PortMode::Auto => div()
+                .id("mcp-http-port")
+                .text_sm()
+                .text_color(theme.muted_foreground)
+                .child(match running {
+                    Some(port) => {
+                        format!("今は {port}（使われていれば空いているポート）")
+                    }
+                    None => format!("{}（使われていれば空いているポート）", config.port),
                 })
                 .test_support()
-                .into_any_element()
-        });
-        let toggles = row()
-            .gap_2()
-            .child(feel::gloss(
-                button((ids.write, ix))
-                    // 押すたびに切り替える。オンのときは押したままの見た目
-                    .icon(app_icon("eye"))
-                    .ghost()
-                    .xsmall()
-                    .selected(key.read_only)
-                    .tooltip("読み取りのみ")
-                    .on_click(
-                        cx.listener(move |this, _, _, cx| this.toggle_key_read_only(&write_id, cx)),
-                    ),
-            ))
-            .child(feel::gloss(
-                button((ids.lock, ix))
-                    .icon(app_icon("lock-open"))
-                    .ghost()
-                    .xsmall()
-                    .selected(key.while_locked)
-                    .disabled(self.verifying(cx))
-                    .tooltip("ロック中も使える")
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.toggle_key_while_locked(lock_id.clone(), window, cx)
-                    })),
-            ))
-            .child(feel::gloss(
-                button((ids.limits, ix))
-                    .icon(app_icon("calendar-clock"))
-                    .ghost()
-                    .xsmall()
-                    .selected(key.limited())
-                    .tooltip(limits_tip(key))
-                    .on_click(
-                        cx.listener(move |this, _, _, cx| this.toggle_key_limits(&limits_id, cx)),
-                    ),
-            ));
-        (denied, toggles)
-    }
-
-    /// 設定の「キーなしの接続」。決まりの一覧と、足すボタン。
-    pub(crate) fn keyless_editor(&self, cx: &mut Context<Self>) -> Div {
-        let theme = cx.theme().clone();
-        let mut list = col().gap_1();
-        let rules = self.keyless_rules(cx);
-        if rules.is_empty() {
-            list = list.child(
-                div()
-                    .id("keyless-none")
-                    .h(KEY_ROW_HEIGHT)
-                    .px_2()
-                    .flex()
-                    .items_center()
-                    .text_sm()
-                    .text_color(theme.muted_foreground)
-                    .child("アクセスキーが必要")
-                    .test_support(),
-            );
-        }
-        for (ix, rule) in rules.into_iter().enumerate() {
-            let (open_id, remove_id) = (rule.id.clone(), rule.id.clone());
-            let (denied, toggles) = self.entry_toggles(&rule, &RULE_IDS, ix, cx);
-            let label = div()
-                .id(("keyless", ix))
-                .flex_1()
-                .min_w_0()
-                .h(KEY_ROW_HEIGHT)
-                .flex()
-                .items_center()
-                .px_2()
-                .rounded(feel::md())
-                .cursor_pointer()
-                .lit(theme.muted, cx)
-                .child(div().truncate().child(rule.when_label()))
-                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                    this.toggle_key_limits(&open_id, cx)
-                }))
-                .test_support();
-            list = list.child(
-                row()
-                    .gap_2()
-                    .child(label)
-                    .children(denied)
-                    .child(toggles)
-                    .child(feel::gloss(
-                        button(("keyless-remove", ix))
-                            .icon(app_icon("trash"))
-                            .ghost()
-                            .xsmall()
-                            .tooltip("外す")
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.remove_keyless_rule(&remove_id, cx)
-                            })),
-                    )),
-            );
-            if self.key_limits_open.as_ref() == Some(&rule.id) {
-                list = list.child(self.key_limits(&rule, true, cx));
-            }
-        }
-        col().gap_3().child(list).child(
-            row().child(feel::gloss(
-                button("keyless-add")
-                    .icon(app_icon("plus"))
-                    .framed(cx)
-                    .tooltip("キーなしの接続を追加")
-                    .on_click(cx.listener(|this, _, _, cx| this.add_keyless_rule(cx))),
-            )),
-        )
-    }
-
-    /// 「MCP の接続」の HTTP のポート。押すと、その場で書き直す。
-    pub(crate) fn mcp_port_control(&self, cx: &mut Context<Self>) -> AnyElement {
-        let (_, port) = self.mcp_http(cx);
-        self.limit_value(
-            "",
-            LimitField::Port,
-            "mcp-http-port",
-            port.to_string(),
-            false,
-            cx,
-        )
-    }
-
-    /// 「MCP の接続」の URL と、コピーのボタン。
-    pub(crate) fn mcp_url_control(&self, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.theme().clone();
-        let (_, port) = self.mcp_http(cx);
-        row()
-            .gap_1()
+                .into_any_element(),
+            PortMode::Fixed => self.limit_value(
+                "",
+                LimitField::Port,
+                "mcp-http-port",
+                config.port.to_string(),
+                false,
+                cx,
+            ),
+        };
+        let port_line = row()
+            .gap_3()
+            .flex_wrap()
             .child(
                 div()
-                    .id("mcp-http-url")
+                    .w(LABEL_WIDTH)
+                    .flex_none()
                     .text_sm()
                     .text_color(theme.muted_foreground)
-                    .mono_font(cx)
-                    .child(mcp_http::url(port))
-                    .test_support(),
+                    .child("ポート"),
             )
-            .child(feel::gloss(
-                button("mcp-http-copy")
-                    .icon(app_icon("copy"))
-                    .ghost()
-                    .xsmall()
-                    .tooltip("URL をコピー")
-                    .on_click(cx.listener(|this, _, _, cx| this.copy_mcp_url(cx))),
-            ))
-            .into_any_element()
+            .child(modes)
+            .child(port_value);
+        col()
+            .gap_2()
+            .child(head)
+            .when(config.on || running.is_some(), |d| d.child(status))
+            .child(port_line)
+            .when_some(self.mcp_http_error.clone(), |d, error| {
+                d.child(
+                    row()
+                        .id("mcp-http-error")
+                        .gap_1p5()
+                        .items_start()
+                        .child(
+                            app_icon("circle-alert")
+                                .size_4()
+                                .flex_none()
+                                .mt_0p5()
+                                .text_color(theme.danger),
+                        )
+                        .child(div().text_sm().text_color(theme.danger).child(error))
+                        .test_support(),
+                )
+            })
     }
 
     /// その場で書き直す値。書いている最中なら入力欄、そうでなければ押せる文字。
@@ -864,203 +1308,29 @@ impl MainView {
                 .into_any_element();
         }
         let key_id: Id = owner.to_owned();
-        div()
+        row()
             .id(id)
+            .gap_1p5()
             .px_2()
             .h(px(26.))
-            .flex()
-            .items_center()
             .rounded(feel::md())
+            .border_1()
+            .border_color(theme.border)
             .cursor_pointer()
             .text_sm()
             .when(placeholder, |d| d.text_color(theme.muted_foreground))
             .lit(theme.muted, cx)
             .child(text)
+            .child(
+                app_icon("pencil")
+                    .size_3p5()
+                    .text_color(theme.muted_foreground),
+            )
             .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                 this.edit_key_limit(key_id.clone(), field, window, cx)
             }))
             .test_support()
             .into_any_element()
-    }
-
-    /// キーの開始・期限・時間帯。キーの行の下に出す。
-    fn key_limits(&self, key: &AccessKey, rule: bool, cx: &mut Context<Self>) -> Div {
-        let theme = cx.theme().clone();
-        let label = |text: &'static str| {
-            div()
-                .w(px(64.))
-                .flex_none()
-                .text_sm()
-                .text_color(theme.muted_foreground)
-                .child(text)
-        };
-        let shown = |value: &Option<String>, none: &str| match value {
-            Some(v) => (access::moment_label(v), false),
-            None => (none.to_owned(), true),
-        };
-        // 開始
-        let (starts, empty) = shown(
-            &key.starts,
-            if rule {
-                "足したときから"
-            } else {
-                "発行したときから"
-            },
-        );
-        let start_id = key.id.clone();
-        let start_row = row()
-            .gap_2()
-            .child(label("開始"))
-            .child(self.limit_value(
-                &key.id,
-                LimitField::Starts,
-                "access-key-starts",
-                starts,
-                empty,
-                cx,
-            ))
-            .when(key.starts.is_some(), |d| {
-                d.child(feel::gloss(
-                    button("access-key-starts-clear")
-                        .icon(app_icon("x"))
-                        .ghost()
-                        .xsmall()
-                        .tooltip("開始を外す")
-                        .on_click(
-                            cx.listener(move |this, _, _, cx| this.clear_key_start(&start_id, cx)),
-                        ),
-                ))
-            });
-        // 期限。今からの長さでも選べる
-        let (expires, empty) = shown(&key.expires, "なし");
-        let view_handle = cx.entity().downgrade();
-        let expiry_id = key.id.clone();
-        let expiry_row = row()
-            .gap_2()
-            .child(label("期限"))
-            .child(self.limit_value(
-                &key.id,
-                LimitField::Expires,
-                "access-key-expires",
-                expires,
-                empty,
-                cx,
-            ))
-            .child(
-                button("access-key-expiry-menu")
-                    .icon(app_icon("hourglass"))
-                    .ghost()
-                    .xsmall()
-                    .tooltip("今から")
-                    .pop_menu(move |mut menu, _, _| {
-                        for preset in std::iter::once(None).chain(Expiry::ALL.map(Some)) {
-                            let (view, id) = (view_handle.clone(), expiry_id.clone());
-                            let name = preset.map_or("なし", Expiry::label);
-                            menu = menu.item(PopupMenuItem::new(name).on_click(move |_, _, cx| {
-                                // 設定を閉じたあとなら、反映する先がない
-                                let _ = view
-                                    .update(cx, |this, cx| this.set_key_expiry_in(&id, preset, cx));
-                            }));
-                        }
-                        menu
-                    }),
-            );
-        // 時間帯
-        let mut hours = col().gap_1();
-        for (wx, w) in key.windows.iter().enumerate() {
-            let mut days = row().gap_0p5();
-            for (d, name) in WEEKDAYS.iter().enumerate() {
-                let day_id = key.id.clone();
-                days = days.child(feel::gloss(
-                    button(("access-key-day", wx * 7 + d))
-                        .label(*name)
-                        .ghost()
-                        .xsmall()
-                        .selected(w.days.contains(&(d as u8)))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.toggle_key_window_day(&day_id, wx, d as u8, cx)
-                        })),
-                ));
-            }
-            let remove_id = key.id.clone();
-            hours = hours.child(
-                row().gap_2().flex_wrap().child(days).child(
-                    row()
-                        .gap_1()
-                        .child(self.limit_value(
-                            &key.id,
-                            LimitField::From(wx),
-                            ("access-key-from", wx),
-                            access::clock(w.from),
-                            false,
-                            cx,
-                        ))
-                        .child(div().text_sm().child("〜"))
-                        .child(self.limit_value(
-                            &key.id,
-                            LimitField::To(wx),
-                            ("access-key-to", wx),
-                            access::clock(w.to),
-                            false,
-                            cx,
-                        ))
-                        .child(feel::gloss(
-                            button(("access-key-window-remove", wx))
-                                .icon(app_icon("x"))
-                                .ghost()
-                                .xsmall()
-                                .tooltip("時間帯を外す")
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.remove_key_window(&remove_id, wx, cx)
-                                })),
-                        )),
-                ),
-            );
-        }
-        let add_id = key.id.clone();
-        let hours_row = row()
-            .gap_2()
-            .items_start()
-            .child(label("時間帯").pt_1())
-            .child(
-                col()
-                    .gap_1()
-                    .flex_1()
-                    .min_w_0()
-                    .when(key.windows.is_empty(), |d| {
-                        d.child(
-                            div()
-                                .px_2()
-                                .pt_1()
-                                .text_sm()
-                                .text_color(theme.muted_foreground)
-                                .child("いつでも"),
-                        )
-                    })
-                    .child(hours)
-                    .child(
-                        row().child(feel::gloss(
-                            button("access-key-window-add")
-                                .icon(app_icon("plus"))
-                                .ghost()
-                                .xsmall()
-                                .tooltip("時間帯を追加")
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.add_key_window(&add_id, cx)
-                                })),
-                        )),
-                    ),
-            );
-        col()
-            .gap_1()
-            .ml_2()
-            .p_2()
-            .rounded(feel::md())
-            .border_1()
-            .border_color(theme.border)
-            .child(start_row)
-            .child(expiry_row)
-            .child(hours_row)
     }
 
     /// 発行したばかりのキーの文字列と、コピーのボタン。
@@ -1070,44 +1340,33 @@ impl MainView {
             feel::gloss(
                 button(id)
                     .icon(app_icon(icon))
-                    .ghost()
-                    .xsmall()
+                    .label(what.label())
+                    .outline()
+                    .small()
                     .tooltip(what.tip())
                     .on_click(cx.listener(move |this, _, _, cx| this.copy_issued_key(what, cx))),
             )
         };
         col()
-            .gap_1()
-            .ml_2()
-            .p_2()
+            .gap_2()
+            .p_3()
             .rounded(feel::md())
             .bg(theme.secondary)
             .child(
                 row()
-                    .gap_1()
+                    .gap_2()
                     .child(
                         div()
-                            .id("access-key-secret")
                             .flex_1()
-                            .min_w_0()
                             .text_sm()
-                            .mono_font(cx)
-                            .overflow_x_hidden()
-                            .child(secret.to_owned())
-                            .test_support(),
+                            .child("発行したキー（今だけ表示されます）"),
                     )
-                    .child(copy("access-key-copy", "copy", Copy::Key, cx))
-                    .child(copy("access-key-copy-claude", "terminal", Copy::Claude, cx))
-                    .when(self.mcp_http(cx).0, |d| {
-                        d.child(copy("access-key-copy-http", "globe", Copy::ClaudeHttp, cx))
-                    })
-                    .child(copy("access-key-copy-config", "braces", Copy::Config, cx))
                     .child(feel::gloss(
                         button("access-key-hide")
                             .icon(app_icon("x"))
+                            .label("隠す")
                             .ghost()
-                            .xsmall()
-                            .tooltip("閉じる")
+                            .small()
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.issued_access_key = None;
                                 cx.notify();
@@ -1116,9 +1375,23 @@ impl MainView {
             )
             .child(
                 div()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .child("キーは今だけ表示されます"),
+                    .id("access-key-secret")
+                    .text_sm()
+                    .mono_font(cx)
+                    .overflow_x_hidden()
+                    .child(secret.to_owned())
+                    .test_support(),
+            )
+            .child(
+                row()
+                    .gap_1p5()
+                    .flex_wrap()
+                    .child(copy("access-key-copy", "copy", Copy::Key, cx))
+                    .child(copy("access-key-copy-claude", "terminal", Copy::Claude, cx))
+                    .when(mcp_http::running_port().is_some(), |d| {
+                        d.child(copy("access-key-copy-http", "globe", Copy::ClaudeHttp, cx))
+                    })
+                    .child(copy("access-key-copy-config", "braces", Copy::Config, cx)),
             )
     }
 }
@@ -1133,6 +1406,16 @@ enum Copy {
 }
 
 impl Copy {
+    /// ボタンの名前。
+    fn label(self) -> &'static str {
+        match self {
+            Copy::Key => "キーをコピー",
+            Copy::Claude => "Claude Code のコマンド",
+            Copy::ClaudeHttp => "Claude Code（HTTP）のコマンド",
+            Copy::Config => "MCP の設定（JSON）",
+        }
+    }
+
     fn tip(self) -> &'static str {
         match self {
             Copy::Key => "キーをコピー",
@@ -1152,10 +1435,124 @@ impl Copy {
     }
 }
 
-/// 時計のボタンのツールチップ。絞っていれば、その中身。
-fn limits_tip(key: &AccessKey) -> SharedString {
-    if !key.limited() {
-        return "期限と時間帯".into();
+/// できること。
+fn ability_label(key: &AccessKey) -> &'static str {
+    if key.read_only {
+        "読み取りのみ"
+    } else {
+        "読み書き"
     }
-    key.when_label().into()
+}
+
+/// ロック中に使えるか。
+fn lock_label(key: &AccessKey) -> &'static str {
+    if key.while_locked {
+        "ロック中も使える"
+    } else {
+        "ロック中は使えない"
+    }
+}
+
+/// 最後に使った日時。
+fn used_label(key: &AccessKey) -> String {
+    match key.used_at {
+        Some(at) => format!("最後に使った {}", view::format_datetime(at)),
+        None => "未使用".into(),
+    }
+}
+
+/// 一覧の右の、今使えるか。
+fn status_badge(key: &AccessKey, theme: &gpui_kit::component::Theme) -> Div {
+    let (text, color) = match key.usable_at(access::now_local()) {
+        Ok(()) => ("使える".into(), theme.foreground),
+        Err(denied) => (SharedString::from(denied.short()), theme.danger),
+    };
+    div()
+        .flex_none()
+        .px_2()
+        .py_0p5()
+        .rounded_full()
+        .border_1()
+        .border_color(color.opacity(0.5))
+        .text_xs()
+        .text_color(color)
+        .child(text)
+}
+
+/// 一覧が空のときの 1 行。
+fn empty_line(
+    id: &'static str,
+    text: &'static str,
+    theme: &gpui_kit::component::Theme,
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .px_3()
+        .py_2()
+        .text_sm()
+        .text_color(theme.muted_foreground)
+        .child(text)
+        .test_support()
+}
+
+/// 詳細の 1 行。左に見出し、右に中身。
+fn detail_line(
+    label: &'static str,
+    content: AnyElement,
+    first: bool,
+    theme: &gpui_kit::component::Theme,
+) -> Div {
+    row()
+        .items_start()
+        .gap_3()
+        .py_2p5()
+        .when(!first, |d| {
+            d.border_t_1().border_color(theme.border.opacity(0.6))
+        })
+        .child(
+            div()
+                .w(LABEL_WIDTH)
+                .flex_none()
+                .pt_1()
+                .text_sm()
+                .text_color(theme.muted_foreground)
+                .child(label),
+        )
+        .child(div().flex_1().min_w_0().child(content))
+}
+
+/// 時刻のメニューに出す時刻。30 分ごと（始まりは 0:00〜23:30、終わりは 0:30〜24:00）。
+/// 今の時刻が 30 分ごとでなければ、それも入れる。
+fn time_choices(current: u32, from: bool) -> Vec<u32> {
+    let mut times: Vec<u32> = if from {
+        (0..48).map(|i| i * 30).collect()
+    } else {
+        (1..=48).map(|i| i * 30).collect()
+    };
+    if !times.contains(&current) {
+        times.push(current);
+        times.sort_unstable();
+    }
+    times
+}
+
+#[cfg(test)]
+mod tests {
+    use super::time_choices;
+
+    #[test]
+    fn time_menu_choices() {
+        let from = time_choices(9 * 60, true);
+        assert_eq!(from.len(), 48);
+        assert_eq!(from.first(), Some(&0));
+        assert_eq!(from.last(), Some(&(23 * 60 + 30)));
+        let to = time_choices(18 * 60, false);
+        assert_eq!(to.first(), Some(&30));
+        assert_eq!(to.last(), Some(&(24 * 60)));
+        // 30 分ごとでない時刻も、選んだまま出す
+        let odd = time_choices(9 * 60 + 5, true);
+        assert_eq!(odd.len(), 49);
+        assert!(odd.windows(2).all(|w| w[0] < w[1]));
+        assert!(odd.contains(&(9 * 60 + 5)));
+    }
 }
