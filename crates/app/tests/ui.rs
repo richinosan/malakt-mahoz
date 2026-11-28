@@ -7862,6 +7862,8 @@ fn estimate_is_typed_picked_and_counted_in_the_stats(cx: &mut TestAppContext) {
     assert!(task.started_at.is_some());
     ui(cx, window, |window, _| {
         assert!(window.try_find("elapsed-value").is_some());
+        // 予想工数（1時間）に対する所要時間の棒
+        assert!(window.try_find("elapsed-meter").is_some());
     });
     click(cx, "open-stats");
     cx.update(|cx| {
@@ -7871,9 +7873,18 @@ fn estimate_is_typed_picked_and_counted_in_the_stats(cx: &mut TestAppContext) {
         assert_eq!(stats.total.done, 1);
         assert_eq!(stats.total.estimated, 1);
         assert_eq!(stats.total.within, 1);
+        // グラフ: 推移は 1 か月の日ごと、今日の棒に 1 件。分布と比は 1 時間以内・50% 以内に 1 件
+        let charts = &stats.charts;
+        assert_eq!(charts.trend.len(), 30);
+        assert_eq!(charts.trend.last().unwrap().within, 1);
+        assert_eq!(charts.spread[0].within, 1);
+        assert_eq!(charts.ratio[0].within, 1);
     });
     ui(cx, window, |window, _| {
         assert!(window.try_find("stats-done").is_some());
+        assert!(window.try_find("stats-charts").is_some());
+        assert!(window.try_find(("stats-trend", 29usize)).is_some());
+        assert!(window.try_find(("stats-ratio", 0usize)).is_some());
     });
 }
 
