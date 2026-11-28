@@ -95,7 +95,7 @@ pub const NEW_WORKSPACE_NAME: &str = "新規ワークスペース";
 /// 保存したばかりのテーマの名前。同じ名前があれば、後ろの番号を増やす。
 pub const NEW_PRESET_NAME: &str = "マイテーマ";
 
-/// アクセスキーの、その場で書き直す値。
+/// アクセスキーと MCP の接続の、その場で書き直す値。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LimitField {
     Starts,
@@ -104,6 +104,8 @@ pub enum LimitField {
     From(usize),
     /// 何番目かの時間帯の終わり
     To(usize),
+    /// MCP を HTTP で開くポート（キーにはよらない）
+    Port,
 }
 
 impl LimitField {
@@ -113,6 +115,7 @@ impl LimitField {
             LimitField::Expires => "期限",
             LimitField::From(_) => "時間帯の始まり",
             LimitField::To(_) => "時間帯の終わり",
+            LimitField::Port => "ポート",
         }
     }
 }
@@ -132,6 +135,7 @@ pub enum CustomizeSection {
     AiGithub,
     Lock,
     AccessKeys,
+    McpConnection,
     Notices,
     Startup,
     Update,
@@ -144,7 +148,7 @@ pub enum CustomizeSection {
 }
 
 impl CustomizeSection {
-    pub const ALL: [CustomizeSection; 21] = [
+    pub const ALL: [CustomizeSection; 22] = [
         CustomizeSection::Theme,
         CustomizeSection::Layout,
         CustomizeSection::Backdrop,
@@ -157,6 +161,7 @@ impl CustomizeSection {
         CustomizeSection::AiGithub,
         CustomizeSection::Lock,
         CustomizeSection::AccessKeys,
+        CustomizeSection::McpConnection,
         CustomizeSection::Notices,
         CustomizeSection::Startup,
         CustomizeSection::Update,
@@ -182,6 +187,7 @@ impl CustomizeSection {
             CustomizeSection::AiGithub => crate::ai_settings::AiGroup::Github.label(),
             CustomizeSection::Lock => "ロック",
             CustomizeSection::AccessKeys => "アクセスキー",
+            CustomizeSection::McpConnection => "MCP の接続",
             CustomizeSection::Notices => "通知",
             CustomizeSection::Startup => "スタートアップ",
             CustomizeSection::Update => "アップデート",
@@ -208,6 +214,7 @@ impl CustomizeSection {
             CustomizeSection::AiGithub => "github",
             CustomizeSection::Lock => "lock",
             CustomizeSection::AccessKeys => "key-round",
+            CustomizeSection::McpConnection => "plug",
             CustomizeSection::Notices => "bell",
             CustomizeSection::Startup => "power",
             CustomizeSection::Update => "refresh-cw",
@@ -228,7 +235,9 @@ impl CustomizeSection {
             | CustomizeSection::AiRules
             | CustomizeSection::AiSchedules
             | CustomizeSection::AiGithub => "AI",
-            CustomizeSection::Lock | CustomizeSection::AccessKeys => "セキュリティ",
+            CustomizeSection::Lock
+            | CustomizeSection::AccessKeys
+            | CustomizeSection::McpConnection => "セキュリティ",
             CustomizeSection::Notices
             | CustomizeSection::Startup
             | CustomizeSection::Update
@@ -289,6 +298,8 @@ pub enum SubModal {
     DoneWorkspaces,
     /// プラグインを有効にする前の承認
     EnablePlugin,
+    /// 同期するアカウントを足す（プロバイダを選び、アカウントを書く）
+    AddAccount,
 }
 
 /// 詳細で日付と時刻を入れる 2 つの項目。
@@ -722,6 +733,25 @@ impl MainView {
         let mut subs = vec![
             cx.observe(&ai_settings, |_, _, cx| cx.notify()),
             cx.observe(&caldav_settings, |_, _, cx| cx.notify()),
+            // 「同期」の「アカウントを追加」は、設定の上に重ねて出す
+            cx.subscribe_in(
+                &caldav_settings,
+                window,
+                |this, _, event: &crate::caldav_settings::AddDialog, window, cx| {
+                    match event {
+                        crate::caldav_settings::AddDialog::Open => {
+                            this.sub_modal = Some(SubModal::AddAccount);
+                        }
+                        crate::caldav_settings::AddDialog::Close => {
+                            if this.sub_modal == Some(SubModal::AddAccount) {
+                                this.sub_modal = None;
+                                this.focus.focus(window, cx);
+                            }
+                        }
+                    }
+                    cx.notify();
+                },
+            ),
             cx.observe(&db, |this, _, cx| {
                 this.reload(cx);
                 // ロックを解除したら、待っていた AI のおすすめを出す
@@ -5694,6 +5724,7 @@ bundled_icons! {
         "calendar-sync",
         "server",
         "cloud-alert",
+        "cloud",
         "timer",
         "chart-column",
         "minus",

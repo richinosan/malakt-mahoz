@@ -1,9 +1,9 @@
-//! 設定の「同期」。CalDAV のアカウントの追加・外す・今すぐ同期と、サーバーのカレンダーを
-//! ワークスペースにつなぐメニュー。
+//! 設定の「同期」。同期するアカウント（CalDAV のサーバーと、macOS のリマインダー）の一覧、
+//! 追加・外す・今すぐ同期と、サーバーのカレンダーをワークスペースにつなぐメニュー。
 //!
-//! アカウントは「＋」で出る欄に URL・ユーザー名・パスワードを入れて足す。パスワードは OS の
-//! キーチェーンに入れる。サーバーのカレンダーごとに、つなぐワークスペースを選ぶ（新しく作る・
-//! 今あるもの・つながない）。
+//! 「アカウントを追加」で設定の上にダイアログを重ね、プロバイダを選んでから、
+//! サーバー・ユーザー名・パスワード・説明を入れて足す。パスワードは OS のキーチェーンに入れる。
+//! サーバーのカレンダーごとに、つなぐワークスペースを選ぶ（新しく作る・今あるもの・つながない）。
 
 use std::collections::HashMap;
 
@@ -29,6 +29,112 @@ const ROW_HEIGHT: Pixels = px(32.);
 /// ワークスペースを選ぶボタンの幅。
 const PICK_WIDTH: Pixels = px(220.);
 
+/// 項目の名前の幅。追加のダイアログで、入力欄の左をそろえる。
+const LABEL_WIDTH: Pixels = px(96.);
+
+/// アカウントを足す先の種類。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Provider {
+    /// macOS の「リマインダー」
+    Reminders,
+    Fastmail,
+    Nextcloud,
+    /// ほかの CalDAV のサーバー
+    Other,
+}
+
+impl Provider {
+    pub const ALL: [Provider; 4] = [
+        Provider::Reminders,
+        Provider::Fastmail,
+        Provider::Nextcloud,
+        Provider::Other,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Provider::Reminders => "リマインダー",
+            Provider::Fastmail => "Fastmail",
+            Provider::Nextcloud => "Nextcloud",
+            Provider::Other => "その他の CalDAV アカウント",
+        }
+    }
+
+    fn icon(self) -> &'static str {
+        match self {
+            Provider::Reminders => "list-todo",
+            Provider::Fastmail => "mail",
+            Provider::Nextcloud => "cloud",
+            Provider::Other => "server",
+        }
+    }
+
+    /// 一覧の行の id。
+    fn id(self) -> &'static str {
+        match self {
+            Provider::Reminders => "caldav-pick-reminders",
+            Provider::Fastmail => "caldav-pick-fastmail",
+            Provider::Nextcloud => "caldav-pick-nextcloud",
+            Provider::Other => "caldav-pick-other",
+        }
+    }
+
+    /// サーバーが決まっているプロバイダの URL。サーバーの欄を出さない。
+    fn server(self) -> Option<&'static str> {
+        match self {
+            Provider::Fastmail => Some("https://caldav.fastmail.com/"),
+            _ => None,
+        }
+    }
+
+    fn server_hint(self) -> &'static str {
+        match self {
+            Provider::Nextcloud => "cloud.example.com",
+            _ => "caldav.example.com",
+        }
+    }
+
+    fn user_hint(self) -> &'static str {
+        match self {
+            Provider::Fastmail => "メールアドレス",
+            _ => "必須",
+        }
+    }
+
+    fn password_hint(self) -> &'static str {
+        match self {
+            Provider::Fastmail => "アプリパスワード",
+            _ => "必須",
+        }
+    }
+}
+
+/// 追加のダイアログの、今の段階。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Step {
+    /// プロバイダを選ぶ
+    Pick,
+    /// 選んだプロバイダのアカウントを書く
+    Form(Provider),
+}
+
+/// 追加のダイアログを開く・閉じる。設定の上に重ねるのは、設定を出しているビュー。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AddDialog {
+    Open,
+    Close,
+}
+
+/// サーバーの欄に書いたものを URL にする。`https://` などがなければ `https://` を付ける。
+pub fn server_url(input: &str) -> String {
+    let input = input.trim();
+    if input.is_empty() || input.contains("://") {
+        input.to_owned()
+    } else {
+        format!("https://{input}")
+    }
+}
+
 /// カレンダーをどこにつなぐか。
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Target {
@@ -43,31 +149,38 @@ pub struct CalDavSettings {
     url: Entity<InputState>,
     user: Entity<InputState>,
     password: Entity<InputState>,
-    /// アカウントを足す欄を出している。
-    adding: bool,
+    /// 説明（アカウントに付ける名前）
+    name: Entity<InputState>,
+    /// 追加のダイアログの段階。閉じていれば `None`。
+    step: Option<Step>,
+    /// 最後に出した段階。閉じたダイアログが消えるまでの間も、同じ中身を描く。
+    shown: Step,
+    /// 追加のダイアログを開くたび・閉じるたびに進める。古い接続の結果は捨てる。
+    add_gen: u64,
     /// サーバーを調べている。
     connecting: bool,
-    /// 足す欄・つなぐメニューで失敗したこと。
+    /// 追加のダイアログで失敗したこと。
+    add_error: Option<SharedString>,
+    /// 一覧・つなぐメニューで失敗したこと。
     error: Option<SharedString>,
     _subscriptions: Vec<Subscription>,
 }
+
+impl EventEmitter<AddDialog> for CalDavSettings {}
 
 impl CalDavSettings {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let db = db::shared(cx);
         let syncer = crate::caldav::shared(cx);
-        let url = cx.new(|cx| InputState::new(window, cx).placeholder("https://"));
-        let user = cx.new(|cx| InputState::new(window, cx).placeholder("ユーザー名"));
-        let password = cx.new(|cx| {
-            InputState::new(window, cx)
-                .masked(true)
-                .placeholder("パスワード")
-        });
+        let url = cx.new(|cx| InputState::new(window, cx));
+        let user = cx.new(|cx| InputState::new(window, cx));
+        let password = cx.new(|cx| InputState::new(window, cx).masked(true));
+        let name = cx.new(|cx| InputState::new(window, cx).placeholder("省略可"));
         let mut subs = vec![
             cx.observe(&db, |_, _, cx| cx.notify()),
             cx.observe(&syncer, |_, _, cx| cx.notify()),
         ];
-        for input in [&url, &user, &password] {
+        for input in [&url, &user, &password, &name] {
             subs.push(
                 cx.subscribe_in(input, window, |this, _, event: &InputEvent, window, cx| {
                     if matches!(event, InputEvent::PressEnter { .. }) {
@@ -82,8 +195,12 @@ impl CalDavSettings {
             url,
             user,
             password,
-            adding: false,
+            name,
+            step: None,
+            shown: Step::Pick,
+            add_gen: 0,
             connecting: false,
+            add_error: None,
             error: None,
             _subscriptions: subs,
         }
@@ -111,36 +228,96 @@ impl CalDavSettings {
         }
     }
 
-    /// アカウントを足す欄を開く。
-    pub fn start_adding(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.adding = true;
-        self.error = None;
-        self.url.update(cx, |s, cx| s.focus(window, cx));
-        cx.notify();
+    /// 追加のダイアログを出している。
+    pub fn is_adding(&self) -> bool {
+        self.step.is_some()
     }
 
-    fn cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.connecting {
-            return;
+    /// 追加のダイアログの見出し。プロバイダを選んだら、その名前。
+    pub fn add_title(&self) -> &'static str {
+        match self.step.unwrap_or(self.shown) {
+            Step::Form(p) => p.name(),
+            Step::Pick => "アカウントを追加",
         }
-        self.adding = false;
-        self.error = None;
-        for input in [&self.url, &self.user, &self.password] {
+    }
+
+    /// 追加のダイアログを開き、プロバイダを選ぶところから始める。
+    pub fn start_adding(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.add_gen += 1;
+        self.step = Some(Step::Pick);
+        self.shown = Step::Pick;
+        self.connecting = false;
+        self.add_error = None;
+        for input in [&self.url, &self.user, &self.password, &self.name] {
             input.update(cx, |s, cx| s.set_value("", window, cx));
         }
+        cx.emit(AddDialog::Open);
         cx.notify();
     }
 
-    /// 入れた URL・ユーザー名・パスワードでサーバーを調べ、アカウントを足す。
+    /// 追加のダイアログを閉じたことを受ける。調べている途中の結果は捨てる。
+    pub fn end_adding(&mut self, cx: &mut Context<Self>) {
+        if self.step.take().is_some() {
+            self.add_gen += 1;
+            self.connecting = false;
+            self.add_error = None;
+            cx.notify();
+        }
+    }
+
+    fn close_adding(&mut self, cx: &mut Context<Self>) {
+        self.end_adding(cx);
+        cx.emit(AddDialog::Close);
+    }
+
+    /// プロバイダを選ぶ。リマインダーはすぐ同期を始め、ほかはアカウントの欄を出す。
+    fn choose(&mut self, provider: Provider, window: &mut Window, cx: &mut Context<Self>) {
+        if provider == Provider::Reminders {
+            match crate::reminders::set_enabled(true, cx) {
+                Ok(()) => self.close_adding(cx),
+                Err(e) => {
+                    self.add_error =
+                        Some(format!("リマインダーとの同期を始められませんでした。{e}").into());
+                    cx.notify();
+                }
+            }
+            return;
+        }
+        self.step = Some(Step::Form(provider));
+        self.add_error = None;
+        let first = if provider.server().is_some() {
+            &self.user
+        } else {
+            &self.url
+        };
+        for (input, hint) in [
+            (&self.url, provider.server_hint()),
+            (&self.user, provider.user_hint()),
+            (&self.password, provider.password_hint()),
+        ] {
+            input.update(cx, |s, cx| s.set_placeholder(hint, window, cx));
+        }
+        first.update(cx, |s, cx| s.focus(window, cx));
+        cx.notify();
+    }
+
+    /// 入れたサーバー・ユーザー名・パスワードでサーバーを調べ、アカウントを足す。
     fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(Step::Form(provider)) = self.step else {
+            return;
+        };
         if self.connecting {
             return;
         }
-        let url = self.url.read(cx).value().trim().to_owned();
+        let url = match provider.server() {
+            Some(server) => server.to_owned(),
+            None => server_url(&self.url.read(cx).value()),
+        };
         let user = self.user.read(cx).value().trim().to_owned();
         let password = self.password.read(cx).value().to_string();
+        let name = self.name.read(cx).value().trim().to_owned();
         let missing: Vec<&str> = [
-            ("サーバーの URL", &url),
+            ("サーバー", &url),
             ("ユーザー名", &user),
             ("パスワード", &password),
         ]
@@ -149,19 +326,20 @@ impl CalDavSettings {
         .map(|(name, _)| name)
         .collect();
         if !missing.is_empty() {
-            self.error = Some(format!("{}を入れてください", missing.join("・")).into());
+            self.add_error = Some(format!("{}を入れてください", missing.join("・")).into());
             cx.notify();
             return;
         }
         let Some(caldav) = cx.try_global::<CalDav>() else {
-            self.error = Some("この環境ではサーバーに接続できません".into());
+            self.add_error = Some("この環境ではサーバーに接続できません".into());
             cx.notify();
             return;
         };
         let (discover, secrets) = (caldav.discover.clone(), caldav.secrets.clone());
         self.connecting = true;
-        self.error = None;
+        self.add_error = None;
         cx.notify();
+        let gen = self.add_gen;
         let (u, n, p) = (url.clone(), user.clone(), password.clone());
         let task = cx
             .background_executor()
@@ -169,12 +347,16 @@ impl CalDavSettings {
         cx.spawn_in(window, async move |this, cx| {
             let found = task.await;
             // 設定を閉じたあとなら、反映する先がない
-            let _ = this.update_in(cx, |this, window, cx| {
+            let _ = this.update_in(cx, |this, _, cx| {
+                // 待っている間にダイアログを閉じたら、アカウントは足さない
+                if this.add_gen != gen {
+                    return;
+                }
                 this.connecting = false;
                 let found = match found {
                     Ok(found) => found,
                     Err(e) => {
-                        this.error = Some(e.into());
+                        this.add_error = Some(e.into());
                         cx.notify();
                         return;
                     }
@@ -184,7 +366,7 @@ impl CalDavSettings {
                     .iter()
                     .any(|(a, _)| a.url == found.base && a.username == user);
                 if duplicate {
-                    this.error = Some("このアカウントは、もう追加しています".into());
+                    this.add_error = Some("このアカウントは、もう追加しています".into());
                     cx.notify();
                     return;
                 }
@@ -192,6 +374,7 @@ impl CalDavSettings {
                     let added = db.store.add_caldav_account(
                         &found.base,
                         &user,
+                        &name,
                         &found.addresses,
                         &found.calendars,
                     );
@@ -201,7 +384,8 @@ impl CalDavSettings {
                 let account = match added {
                     Ok(a) => a,
                     Err(e) => {
-                        this.error = Some(format!("アカウントを保存できませんでした。{e}").into());
+                        this.add_error =
+                            Some(format!("アカウントを保存できませんでした。{e}").into());
                         cx.notify();
                         return;
                     }
@@ -211,7 +395,7 @@ impl CalDavSettings {
                     let undone = this
                         .db
                         .update(cx, |db, _| db.store.remove_caldav_account(&account.id));
-                    this.error = Some(match undone {
+                    this.add_error = Some(match undone {
                         Ok(()) => e.into(),
                         Err(more) => {
                             format!("{e}（追加したアカウントも外せませんでした。{more}）").into()
@@ -220,18 +404,22 @@ impl CalDavSettings {
                     cx.notify();
                     return;
                 }
-                if found.calendars.is_empty() {
-                    this.error =
-                        Some("このアカウントには、タスクを入れられるカレンダーがありません".into());
-                }
-                this.adding = false;
-                for input in [&this.url, &this.user, &this.password] {
-                    input.update(cx, |s, cx| s.set_value("", window, cx));
-                }
-                cx.notify();
+                this.error = found
+                    .calendars
+                    .is_empty()
+                    .then(|| "このアカウントには、タスクを入れられるカレンダーがありません".into());
+                this.close_adding(cx);
             });
         })
         .detach();
+    }
+
+    /// リマインダーとの同期をやめる。このアプリが「リマインダー」に作ったものは消える。
+    fn stop_reminders(&mut self, cx: &mut Context<Self>) {
+        self.error = crate::reminders::set_enabled(false, cx)
+            .err()
+            .map(|e| format!("リマインダーとの同期をやめられませんでした。{e}").into());
+        cx.notify();
     }
 
     /// カレンダーをワークスペースにつなぐ・外す。つないだらすぐ同期する。
@@ -533,41 +721,159 @@ impl CalDavSettings {
             )
     }
 
-    fn form(&self, has_accounts: bool, cx: &mut Context<Self>) -> Stateful<Div> {
-        let field = |input: &Entity<InputState>, id: &'static str, label: &'static str| {
-            Input::new(input)
-                .id(id)
-                .aria_label(label)
-                .small()
-                .flex_1()
-                .min_w(px(120.))
-        };
+    /// macOS のリマインダーと同期しているときの行。ごみ箱のメニューで同期をやめる。
+    fn reminders_row(&self, cx: &mut Context<Self>) -> Div {
+        let theme = cx.theme().clone();
+        let view = cx.entity().downgrade();
         row()
-            .id("caldav-form")
-            .w_full()
-            .gap_1()
-            .flex_wrap()
-            .key_context("CalDavForm")
-            .on_action(
-                cx.listener(|this, _: &crate::CancelKeyEdit, window, cx| this.cancel(window, cx)),
+            .h(ROW_HEIGHT)
+            .gap_2()
+            .child(
+                app_icon(Provider::Reminders.icon())
+                    .size_4()
+                    .text_color(theme.muted_foreground),
             )
-            .child(field(&self.url, "caldav-url", "サーバーの URL"))
-            .child(field(&self.user, "caldav-user", "ユーザー名"))
-            .child(field(&self.password, "caldav-password", "パスワード"))
-            .child(feel::gloss(
-                icon_button("caldav-connect", "check", "接続")
-                    .primary()
-                    .loading(self.connecting)
-                    .disabled(self.connecting)
-                    .on_click(cx.listener(|this, _, window, cx| this.submit(window, cx))),
-            ))
-            .when(has_accounts || self.adding, |d| {
-                d.child(feel::gloss(
-                    icon_button("caldav-cancel", "x", "キャンセル")
-                        .disabled(self.connecting)
-                        .on_click(cx.listener(|this, _, window, cx| this.cancel(window, cx))),
-                ))
-            })
+            .child(
+                div()
+                    .id("reminders-account")
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .child(Provider::Reminders.name())
+                    .test_support(),
+            )
+            .child(
+                button("reminders-remove")
+                    .icon(app_icon("trash"))
+                    .ghost()
+                    .xsmall()
+                    .tooltip("同期をやめる")
+                    .pop_menu(move |menu, _, _| {
+                        let view = view.clone();
+                        menu.item(
+                            PopupMenuItem::new("同期をやめる").on_click(move |_, _, cx| {
+                                // 設定を閉じたあとなら、反映する先がない
+                                let _ = view.update(cx, |this, cx| this.stop_reminders(cx));
+                            }),
+                        )
+                    }),
+            )
+    }
+
+    /// 追加のダイアログで選べるプロバイダ。リマインダーは、この OS にあって、まだ同期して
+    /// いないときだけ。
+    fn providers(&self, cx: &App) -> Vec<Provider> {
+        let reminders = crate::reminders::is_app(cx) && !crate::reminders::enabled(cx);
+        Provider::ALL
+            .into_iter()
+            .filter(|p| *p != Provider::Reminders || reminders)
+            .collect()
+    }
+
+    /// 設定の上に重ねる、アカウントを足すダイアログの中身。
+    pub fn add_dialog(&mut self, cx: &mut Context<Self>) -> Div {
+        let theme = cx.theme().clone();
+        if let Some(step) = self.step {
+            self.shown = step;
+        }
+        let body = match self.shown {
+            Step::Form(provider) => self.add_form(provider, cx),
+            Step::Pick => {
+                let mut list = col().id("caldav-providers").gap_1();
+                for provider in self.providers(cx) {
+                    list = list.child(feel::gloss(
+                        button(provider.id())
+                            .ghost()
+                            .w_full()
+                            .h(px(40.))
+                            .child(
+                                row()
+                                    .w_full()
+                                    .gap_3()
+                                    .child(
+                                        app_icon(provider.icon())
+                                            .size_4()
+                                            .text_color(theme.muted_foreground),
+                                    )
+                                    .child(div().flex_1().child(provider.name()))
+                                    .child(
+                                        app_icon("chevron-right")
+                                            .size_4()
+                                            .text_color(theme.muted_foreground),
+                                    ),
+                            )
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.choose(provider, window, cx)
+                            })),
+                    ));
+                }
+                col().child(list)
+            }
+        };
+        body.gap_3().children(self.add_error.clone().map(|e| {
+            div()
+                .id("caldav-add-error")
+                .text_sm()
+                .text_color(theme.danger)
+                .child(e)
+                .test_support()
+        }))
+    }
+
+    /// 選んだプロバイダのアカウントの欄。項目の名前を左に、入力欄を右に並べる。
+    fn add_form(&self, provider: Provider, cx: &mut Context<Self>) -> Div {
+        let theme = cx.theme().clone();
+        let line = |label: &'static str, input: &Entity<InputState>, id: &'static str| {
+            row()
+                .gap_3()
+                .child(
+                    div()
+                        .w(LABEL_WIDTH)
+                        .flex_none()
+                        .text_sm()
+                        .text_color(theme.muted_foreground)
+                        .child(label),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(Input::new(input).id(id).aria_label(label)),
+                )
+        };
+        col()
+            .key_context("CalDavForm")
+            .on_action(cx.listener(|this, _: &crate::CancelKeyEdit, _, cx| this.close_adding(cx)))
+            .child(
+                col()
+                    .gap_2()
+                    .when(provider.server().is_none(), |d| {
+                        d.child(line("サーバー", &self.url, "caldav-url"))
+                    })
+                    .child(line("ユーザー名", &self.user, "caldav-user"))
+                    .child(line("パスワード", &self.password, "caldav-password"))
+                    .child(line("説明", &self.name, "caldav-name")),
+            )
+            .child(
+                row()
+                    .gap_2()
+                    .justify_end()
+                    .child(feel::gloss(
+                        button("caldav-cancel")
+                            .label("キャンセル")
+                            .ghost()
+                            .disabled(self.connecting)
+                            .on_click(cx.listener(|this, _, _, cx| this.close_adding(cx))),
+                    ))
+                    .child(feel::gloss(
+                        button("caldav-connect")
+                            .label("追加")
+                            .primary()
+                            .loading(self.connecting)
+                            .disabled(self.connecting)
+                            .on_click(cx.listener(|this, _, window, cx| this.submit(window, cx))),
+                    )),
+            )
     }
 }
 
@@ -582,6 +888,9 @@ impl Render for CalDavSettings {
             .filter_map(|c| Some((c.workspace_id.clone()?, c.name.clone())))
             .collect();
         let mut list = col().w_full().gap_1();
+        if crate::reminders::is_app(cx) && crate::reminders::enabled(cx) {
+            list = list.child(self.reminders_row(cx));
+        }
         let mut cal_ix = 0;
         for (ix, (account, cals)) in accounts.iter().enumerate() {
             list = list.child(self.account_header(account, ix, cx));
@@ -590,24 +899,23 @@ impl Render for CalDavSettings {
                 cal_ix += 1;
             }
         }
-        let has_accounts = !accounts.is_empty();
-        list.when(self.adding, |d| d.child(self.form(has_accounts, cx)))
-            .when(!self.adding, |d| {
-                d.child(row().child(
-                    feel::gloss(
-                        icon_button("caldav-add", "plus", "アカウントを追加").on_click(
-                            cx.listener(|this, _, window, cx| this.start_adding(window, cx)),
-                        ),
-                    ),
-                ))
-            })
-            .children(self.error.clone().map(|e| {
-                div()
-                    .id("caldav-form-error")
-                    .text_xs()
-                    .text_color(theme.danger)
-                    .child(e)
-                    .test_support()
-            }))
+        list.child(
+            row().child(feel::gloss(
+                button("caldav-add")
+                    .label("アカウントを追加")
+                    .icon(app_icon("plus"))
+                    .outline()
+                    .small()
+                    .on_click(cx.listener(|this, _, window, cx| this.start_adding(window, cx))),
+            )),
+        )
+        .children(self.error.clone().map(|e| {
+            div()
+                .id("caldav-form-error")
+                .text_xs()
+                .text_color(theme.danger)
+                .child(e)
+                .test_support()
+        }))
     }
 }

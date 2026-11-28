@@ -421,6 +421,9 @@ enum SettingKey {
     LockNow,
     McpKeyless,
     McpKeys,
+    McpHttp,
+    McpHttpPort,
+    McpHttpUrl,
     People,
     CalDav,
     Keys,
@@ -6708,6 +6711,12 @@ impl MainView {
             Some(SubModal::Font) => ("フォント", px(440.), self.font_picker(false, cx)),
             Some(SubModal::MonoFont) => ("等幅フォント", px(440.), self.font_picker(true, cx)),
             Some(SubModal::Scene) => ("背景の画像", px(680.), self.scene_picker(cx)),
+            Some(SubModal::AddAccount) => {
+                let (title, over) = self
+                    .caldav_settings
+                    .update(cx, |s, cx| (s.add_title(), s.add_dialog(cx)));
+                (title, px(440.), over)
+            }
             Some(SubModal::DonePeople) => ("知らせる担当者", px(400.), self.done_picker(true, cx)),
             Some(SubModal::DoneWorkspaces) => (
                 "知らせるワークスペース",
@@ -7146,33 +7155,74 @@ impl MainView {
                 list(&["ロック"]),
             ));
         }
+        all.extend([Setting::new(
+            Section::AccessKeys,
+            SettingKey::McpKeys,
+            "アクセスキー",
+            None,
+            list(&[
+                "MCP",
+                "キー",
+                "トークン",
+                "エージェント",
+                "Claude Code",
+                "Cursor",
+                "Codex",
+                "期限",
+                "時間帯",
+                "セキュリティ",
+            ]),
+        )]);
         all.extend([
             Setting::new(
-                Section::AccessKeys,
-                SettingKey::McpKeys,
-                "アクセスキー",
+                Section::McpConnection,
+                SettingKey::McpKeyless,
+                "キーなしの接続",
                 None,
                 list(&[
                     "MCP",
-                    "キー",
-                    "トークン",
+                    "アクセスキー",
                     "エージェント",
                     "Claude Code",
-                    "Cursor",
-                    "Codex",
-                    "期限",
+                    "ロック",
                     "時間帯",
                     "セキュリティ",
                 ]),
             ),
             Setting::new(
-                Section::AccessKeys,
-                SettingKey::McpKeyless,
-                "キーなしの接続",
-                None,
-                list(&["MCP", "アクセスキー", "エージェント", "Claude Code"]),
+                Section::McpConnection,
+                SettingKey::McpHttp,
+                "HTTP で開く",
+                Some("この PC からだけ"),
+                list(&[
+                    "MCP",
+                    "HTTP",
+                    "ポート",
+                    "URL",
+                    "Streamable HTTP",
+                    "Claude Code",
+                ]),
             ),
         ]);
+        // ポートと URL は、HTTP で開いているときだけ
+        if self.mcp_http(cx).0 {
+            all.extend([
+                Setting::new(
+                    Section::McpConnection,
+                    SettingKey::McpHttpPort,
+                    "ポート",
+                    None,
+                    list(&["MCP", "HTTP", "ポート"]),
+                ),
+                Setting::new(
+                    Section::McpConnection,
+                    SettingKey::McpHttpUrl,
+                    "URL",
+                    None,
+                    list(&["MCP", "HTTP", "URL", "アドレス"]),
+                ),
+            ]);
+        }
         all.extend([
             Setting::new(
                 Section::Notices,
@@ -7235,7 +7285,10 @@ impl MainView {
                 ),
             ]);
         }
-        if let Some(name) = crate::reminders::setting_label(cx) {
+        // macOS のリマインダーは「同期」のアカウントに並べる。ここは Windows の通知の予約
+        if let Some(name) =
+            crate::reminders::setting_label(cx).filter(|_| !crate::reminders::is_app(cx))
+        {
             all.push(Setting::new(
                 Section::Notices,
                 SettingKey::Reminders,
@@ -7292,12 +7345,18 @@ impl MainView {
             Setting::new(
                 Section::Sync,
                 SettingKey::CalDav,
-                "CalDAV",
+                if crate::reminders::is_app(cx) {
+                    "CalDAV・リマインダー同期"
+                } else {
+                    "CalDAV 同期"
+                },
                 None,
                 list(&[
                     "同期",
+                    "CalDAV",
                     "サーバー",
                     "カレンダー",
+                    "Fastmail",
                     "Nextcloud",
                     "リマインダー",
                     "アカウント",
@@ -7419,9 +7478,14 @@ impl MainView {
                     .into_any_element();
             }
             SettingKey::CalDav => {
-                return edge(div().py_3())
-                    .child(self.caldav_settings.clone())
-                    .into_any_element();
+                return setting_line(
+                    item.name,
+                    item.note,
+                    self.caldav_settings.clone().into_any_element(),
+                    true,
+                    first,
+                    &theme,
+                );
             }
             SettingKey::Keys => {
                 return edge(div().py_3())
@@ -7432,6 +7496,16 @@ impl MainView {
                 return edge(div().py_3())
                     .child(self.access_keys_editor(cx))
                     .into_any_element();
+            }
+            SettingKey::McpKeyless => {
+                return setting_line(
+                    item.name,
+                    item.note,
+                    self.keyless_editor(cx).into_any_element(),
+                    true,
+                    first,
+                    &theme,
+                );
             }
             SettingKey::Plugins => {
                 return edge(div().py_3())
@@ -7500,6 +7574,7 @@ impl MainView {
                 | SettingKey::People
                 | SettingKey::CalDav
                 | SettingKey::McpKeys
+                | SettingKey::McpKeyless
                 | SettingKey::Plugins
                 | SettingKey::PluginFolders
                 | SettingKey::Keys => unreachable!(),
@@ -7895,28 +7970,12 @@ impl MainView {
                         })
                         .into_any_element()
                 }
-                SettingKey::McpKeyless => {
-                    let view = cx.entity().downgrade();
-                    let keyless = self.keyless(cx);
-                    menu_choice("mcp-keyless", keyless.label().into(), &theme)
-                        .pop_menu(move |mut menu, _, _| {
-                            for option in malakt_core::access::Keyless::ALL {
-                                let view = view.clone();
-                                menu = menu.item(
-                                    PopupMenuItem::new(option.label())
-                                        .checked(keyless == option)
-                                        .on_click(move |_, _, cx| {
-                                            // ウィンドウを閉じたあとなら、反映する先がない
-                                            let _ = view.update(cx, |this, cx| {
-                                                this.set_keyless(option, cx);
-                                            });
-                                        }),
-                                );
-                            }
-                            menu
-                        })
-                        .into_any_element()
-                }
+                SettingKey::McpHttp => Switch::new("mcp-http-switch")
+                    .checked(self.mcp_http(cx).0)
+                    .on_click(cx.listener(|this, on: &bool, _, cx| this.set_mcp_http(*on, cx)))
+                    .into_any_element(),
+                SettingKey::McpHttpPort => self.mcp_port_control(cx),
+                SettingKey::McpHttpUrl => self.mcp_url_control(cx),
                 SettingKey::LockedNotices => {
                     let view = cx.entity().downgrade();
                     let notices = self.locked_notices(cx);
@@ -10232,6 +10291,13 @@ impl MainView {
 
 impl Render for MainView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // 「アカウントを追加」を Esc や外側で閉じたら、調べている途中の結果を捨てる。
+        // 前に描いたときに出していたかで見る（開いた直後は、まだ `sub_modal` に入っていない）
+        if self.sub_seen == Some(SubModal::AddAccount)
+            && self.sub_modal != Some(SubModal::AddAccount)
+        {
+            self.caldav_settings.update(cx, |s, cx| s.end_adding(cx));
+        }
         self.tick_dialog_motion(window);
         if self.embedded {
             return self.render_embedded(window, cx);
