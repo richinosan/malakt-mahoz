@@ -16,6 +16,8 @@ const SETTING: &str = "theme";
 const FONT: &str = "font.family";
 /// 同梱している書体。何も選んでいないときに使う。
 pub const DEFAULT_FONT: &str = "LINE Seed JP";
+/// 同梱している、Nerd Font のアイコンを持つ等幅の書体。ターミナルがプロンプトの記号を描くのに使う。
+pub const SYMBOL_FONT: &str = "JetBrainsMono Nerd Font Mono";
 
 const SCENE: &str = "scene";
 const SCENE_CLEAR: &str = "scene.clear";
