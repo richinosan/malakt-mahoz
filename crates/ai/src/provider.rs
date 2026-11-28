@@ -168,12 +168,16 @@ pub struct Endpoint {
     pub headers: Vec<(&'static str, String)>,
     /// Claude が回答を断ったとき、サーバーの側で別のモデルに回す指定を付けるか。
     pub fallbacks: bool,
+    /// Messages API で、ツールと最初の指示のキャッシュを残す時間（[`crate::wire::Request::prefix_ttl`]）。
+    pub prefix_ttl: Option<&'static str>,
 }
 
 /// OpenCode に送る Messages API のバージョン。
 const ANTHROPIC_VERSION_COMPAT: &str = "2023-06-01";
 const ANTHROPIC_VERSION: &str = "2026-10-21";
 const FALLBACK_BETA: &str = "server-side-fallback-2026-07-01";
+/// Claude に送る、ツールと最初の指示のキャッシュを残す時間。
+const PREFIX_TTL: &str = "1h";
 
 /// サーバーの側の回し先（`fallbacks`）を使えるモデル。
 fn claude_has_fallbacks(model: &str) -> bool {
@@ -325,6 +329,8 @@ pub fn opencode_endpoint(
         url: format!("{}/{path}", base.trim_end_matches('/')),
         headers,
         fallbacks: false,
+        // 互換の API には、ttl のない標準の形（5 分）だけを送る
+        prefix_ttl: None,
     })
 }
 
@@ -345,6 +351,9 @@ pub fn endpoint(provider: Provider, model: &str, key: &str) -> Result<Endpoint, 
                 url: "https://api.anthropic.com/v1/messages".into(),
                 headers,
                 fallbacks,
+                // ツールと最初の指示は会話をまたいで同じ。チャットの合間が 5 分を超えても読めるように
+                // 1 時間残す（書き込みは 5 分より高いが、読むのはふつうの入力よりずっと安い）
+                prefix_ttl: Some(PREFIX_TTL),
             })
         }
         Provider::OpenAi => Ok(Endpoint {
@@ -352,6 +361,7 @@ pub fn endpoint(provider: Provider, model: &str, key: &str) -> Result<Endpoint, 
             url: "https://api.openai.com/v1/chat/completions".into(),
             headers: vec![("authorization", format!("Bearer {key}"))],
             fallbacks: false,
+            prefix_ttl: None,
         }),
         Provider::OpenCode | Provider::OpenCodeGo => {
             Err("OpenCode の送り先は、モデルの一覧から決めます".into())
@@ -418,6 +428,9 @@ mod tests {
             .contains(&("anthropic-beta", "server-side-fallback-2026-07-01".into())));
         let haiku = endpoint(Provider::Claude, "claude-haiku-5-5", "k").unwrap();
         assert!(!haiku.fallbacks);
+        // ツールと最初の指示のキャッシュは、どのモデルでも 1 時間
+        assert_eq!(claude.prefix_ttl, Some("1h"));
+        assert_eq!(haiku.prefix_ttl, Some("1h"));
         assert!(!haiku
             .headers
             .iter()
@@ -488,6 +501,8 @@ mod tests {
 
         let messages = route("claude-haiku-5-5", Effort::Default).unwrap();
         assert_eq!(messages.wire, Wire::Messages);
+        // 互換の API には ttl を送らない
+        assert_eq!(messages.prefix_ttl, None);
         assert_eq!(
             messages.url,
             "https://opencode.ai/inference/go/anthropic/v1/messages"

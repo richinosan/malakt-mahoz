@@ -80,6 +80,9 @@ pub struct Request<'a> {
     pub tools: &'a [ToolDef],
     /// Messages API で、断られたときの回し先をサーバーに任せる（`fallbacks: "default"`）。
     pub fallbacks: bool,
+    /// Messages API で、ツールと最初の指示のキャッシュを残す時間（`"1h"` など）。
+    /// `None` なら API の標準（5 分）。
+    pub prefix_ttl: Option<&'static str>,
 }
 
 /// Messages API の 1 回の返事の上限。ストリーミングなしで時間切れにならない大きさにする。
@@ -134,7 +137,12 @@ fn messages_body(request: &Request) -> Value {
             messages.push(json!({"role": "user", "content": std::mem::take(&mut results)}));
         }
         match turn {
-            Turn::User(text) => messages.push(json!({"role": "user", "content": text})),
+            // 文字列ではなくブロックで送る。最後のメッセージにはキャッシュの区切りを付けるので、
+            // 次の回も同じ形にしておく
+            Turn::User(text) => messages.push(json!({
+                "role": "user",
+                "content": [{"type": "text", "text": text}],
+            })),
             Turn::Assistant { text, calls, raw } => {
                 let content = match raw {
                     Some((Wire::Messages, raw)) => raw.clone(),
@@ -174,18 +182,43 @@ fn messages_body(request: &Request) -> Value {
     if !results.is_empty() {
         messages.push(json!({"role": "user", "content": results}));
     }
-    let tools: Vec<Value> = request
+    let mut tools: Vec<Value> = request
         .tools
         .iter()
         .map(|t| json!({"name": t.name, "description": t.description, "input_schema": t.schema}))
         .collect();
+    // プロンプトキャッシュ。並びは tools → system → messages で、前から同じ部分を読み直さずに済む。
+    // 区切りは 3 つ: ツールの最後（最初の指示を変えても、ツールの分は残る）、最初の指示の最後
+    // （会話をまたいで同じ）、最後のメッセージの最後（同じ会話の次の回が、ここまでを読む）
+    let mut prefix = json!({"type": "ephemeral"});
+    if let Some(ttl) = request.prefix_ttl {
+        prefix["ttl"] = ttl.into();
+    }
+    if let Some(last) = tools.last_mut() {
+        last["cache_control"] = prefix.clone();
+    }
+    if let Some(block) = messages
+        .last_mut()
+        .filter(|m| m["role"] == "user")
+        .and_then(|m| m["content"].as_array_mut())
+        .and_then(|blocks| blocks.last_mut())
+    {
+        block["cache_control"] = json!({"type": "ephemeral"});
+    }
     let mut body = json!({
         "model": request.model,
         "max_tokens": MAX_TOKENS,
-        "system": request.system,
         "messages": messages,
         "tools": tools,
     });
+    // 空の文のブロックはサーバーが断るので、最初の指示がなければ送らない
+    if !request.system.is_empty() {
+        body["system"] = json!([{
+            "type": "text",
+            "text": request.system,
+            "cache_control": prefix,
+        }]);
+    }
     if let Some(effort) = request.effort.wire() {
         body["output_config"] = json!({"effort": effort});
     }
@@ -606,6 +639,7 @@ mod tests {
             turns,
             tools,
             fallbacks: false,
+            prefix_ttl: None,
         }
     }
 
@@ -614,7 +648,10 @@ mod tests {
         let (turns, tools) = (conversation(None), tools());
         let body = body(Wire::Messages, &request(&turns, &tools, Effort::High));
         assert_eq!(body["model"], "m");
-        assert_eq!(body["system"], "system");
+        assert_eq!(
+            body["system"],
+            json!([{"type": "text", "text": "system", "cache_control": {"type": "ephemeral"}}])
+        );
         assert_eq!(body["max_tokens"], 16000);
         assert_eq!(body["output_config"], json!({"effort": "high"}));
         assert_eq!(body["tools"][0]["input_schema"]["type"], "object");
@@ -622,7 +659,7 @@ mod tests {
         assert_eq!(messages.len(), 4);
         assert_eq!(
             messages[0],
-            json!({"role": "user", "content": "一覧を見せて"})
+            json!({"role": "user", "content": [{"type": "text", "text": "一覧を見せて"}]})
         );
         assert_eq!(
             messages[1]["content"],
@@ -640,6 +677,70 @@ mod tests {
             ]})
         );
         assert_eq!(messages[3]["role"], "assistant");
+    }
+
+    /// プロンプトキャッシュの区切りは、ツールの最後・最初の指示・最後のメッセージの 3 つ。
+    /// 区切りを外せば、前の回の本文が次の回の本文の頭とそのまま同じになる。
+    #[test]
+    fn messages_body_marks_cache_breakpoints() {
+        let mut turns = vec![Turn::User("一覧を見せて".into())];
+        let mut tools = tools();
+        tools.push(ToolDef {
+            name: "list_people",
+            description: "担当者の一覧",
+            schema: json!({"type": "object", "properties": {}}),
+        });
+        let mut long = request(&turns, &tools, Effort::Default);
+        long.prefix_ttl = Some("1h");
+        let first = body(Wire::Messages, &long);
+        let hour = json!({"type": "ephemeral", "ttl": "1h"});
+        assert!(first["tools"][0].get("cache_control").is_none());
+        assert_eq!(first["tools"][1]["cache_control"], hour);
+        assert_eq!(first["system"][0]["cache_control"], hour);
+        assert_eq!(
+            first["messages"][0]["content"][0]["cache_control"],
+            json!({"type": "ephemeral"}),
+            "会話の区切りは 5 分（長いものが先、の決まりを守る）"
+        );
+        let breakpoints = |body: &Value| body.to_string().matches("cache_control").count();
+        assert_eq!(breakpoints(&first), 3, "区切りは 4 つまで");
+
+        // ツールを呼んで、結果を返す 2 回目。区切りは最後のツールの結果に移る
+        turns.extend(conversation(None)[1..4].iter().cloned());
+        let mut long = request(&turns, &tools, Effort::Default);
+        long.prefix_ttl = Some("1h");
+        let second = body(Wire::Messages, &long);
+        assert_eq!(breakpoints(&second), 3);
+        let results = second["messages"][2]["content"].as_array().unwrap();
+        assert!(results[0].get("cache_control").is_none());
+        assert_eq!(results[1]["cache_control"], json!({"type": "ephemeral"}));
+
+        fn strip(value: &mut Value) {
+            match value {
+                Value::Object(map) => {
+                    map.remove("cache_control");
+                    map.values_mut().for_each(strip);
+                }
+                Value::Array(items) => items.iter_mut().for_each(strip),
+                _ => {}
+            }
+        }
+        let (mut first, mut second) = (first, second);
+        strip(&mut first);
+        strip(&mut second);
+        assert_eq!(first["tools"], second["tools"]);
+        assert_eq!(first["system"], second["system"]);
+        assert_eq!(first["messages"][0], second["messages"][0]);
+
+        // 標準の 5 分なら ttl は送らない。最初の指示が空なら system ごと送らない
+        let mut short = request(&turns, &tools, Effort::Default);
+        short.system = "";
+        let short = body(Wire::Messages, &short);
+        assert_eq!(
+            short["tools"][1]["cache_control"],
+            json!({"type": "ephemeral"})
+        );
+        assert!(short.get("system").is_none());
     }
 
     #[test]
