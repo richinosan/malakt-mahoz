@@ -13,10 +13,12 @@
 //! - `slack`: Slack のリンクの検出と、取得のためのコマンド
 //! - `shell`: コマンドの実行と強制終了
 //! - `keys`: API キーの保存（OS のキーチェーン）
+//! - `chatgpt`: ChatGPT のアカウントでのサインイン（API キーの代わりに ChatGPT のプランを使う）
 //! - `http`: HTTPS の呼び出し
 
 pub mod ansi;
 pub mod api;
+pub mod chatgpt;
 pub mod files;
 pub mod github;
 pub mod http;

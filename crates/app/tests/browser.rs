@@ -260,6 +260,7 @@ fn start(cx: &mut TestAppContext, store: Store) -> World {
         }),
         get: Arc::new(|url, _| Err(format!("テストでは {url} を読めません"))),
         probe: Arc::new(|url, _| Err(format!("テストでは {url} に接続しません"))),
+        form: Arc::new(|url, _| Err(format!("テストでは {url} に送れません"))),
         gh: Arc::new(|_| Spec::shell("exit 1")),
         slack: Arc::new(|_| Vec::new()),
         whoami: Arc::new(|_| vec![Spec::shell("exit 1")]),
