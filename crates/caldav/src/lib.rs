@@ -39,6 +39,12 @@ pub enum Changes {
     },
     /// 差分を出せないサーバーの、今あるもの全部（href と ETag）。
     Full { all: Vec<(String, String)> },
+    /// 印なしで読み直した、今あるもの全部と次の印（初めての同期と、印が古くなったとき）。
+    /// ここにないものは、サーバーで消えたものとして扱う。
+    Reset {
+        token: String,
+        all: Vec<(String, String)>,
+    },
 }
 
 /// 書き込みの失敗。
@@ -148,6 +154,8 @@ pub struct Update {
 /// サーバーで消えたので、アプリでも消すタスク。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Delete {
+    /// つながっていたカレンダー。
+    pub calendar: String,
     pub key: String,
     /// 前の同期の項目。
     pub base: Fields,
@@ -156,6 +164,8 @@ pub struct Delete {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Outcome {
+    /// 同期したカレンダー（失敗したものも含む）。つながりはこのカレンダーの分だけを入れ替える。
+    pub calendars: Vec<String>,
     /// 同期できたカレンダーの、次の印。
     pub tokens: Vec<(String, Option<String>)>,
     /// つながりの全部。`key` が `None` のものは、アプリでタスクを作る。
@@ -489,18 +499,22 @@ impl<S: Server + ?Sized> Run<'_, S> {
         };
         let (token, changed, removed): (Option<String>, Vec<(String, String)>, HashSet<String>) =
             match changes {
+                // 印なしで頼んだ差分は、今あるもの全部
+                Changes::Delta { token, changed, .. } if cal.token.is_none() => {
+                    let removed = absent(&items, &changed);
+                    (Some(token), changed, removed)
+                }
                 Changes::Delta {
                     token,
                     changed,
                     removed,
                 } => (Some(token), changed, removed.into_iter().collect()),
+                Changes::Reset { token, all } => {
+                    let removed = absent(&items, &all);
+                    (Some(token), all, removed)
+                }
                 Changes::Full { all } => {
-                    let present: HashSet<&str> = all.iter().map(|(h, _)| h.as_str()).collect();
-                    let removed = items
-                        .iter()
-                        .filter(|i| !present.contains(i.href.as_str()))
-                        .map(|i| i.href.clone())
-                        .collect();
+                    let removed = absent(&items, &all);
                     (None, all, removed)
                 }
             };
@@ -595,6 +609,7 @@ impl<S: Server + ?Sized> Run<'_, S> {
                     }
                     Some(local) => self.out.deletes.push(Delete {
                         key,
+                        calendar: cal.id.clone(),
                         base: item.base.clone(),
                         expected: local.fields.clone(),
                     }),
@@ -655,6 +670,16 @@ impl<S: Server + ?Sized> Run<'_, S> {
     }
 }
 
+/// 今あるもの全部（href と ETag）にない、つながりの href。
+fn absent(items: &[Item], all: &[(String, String)]) -> HashSet<String> {
+    let present: HashSet<&str> = all.iter().map(|(h, _)| h.as_str()).collect();
+    items
+        .iter()
+        .filter(|i| !present.contains(i.href.as_str()))
+        .map(|i| i.href.clone())
+        .collect()
+}
+
 /// サーバーとアプリを合わせる。サーバーへの書き込みはここで行い、アプリに入れる変更を返す。
 pub fn sync<S: Server + ?Sized>(server: &mut S, input: &Input) -> Outcome {
     let mut run = Run {
@@ -662,6 +687,7 @@ pub fn sync<S: Server + ?Sized>(server: &mut S, input: &Input) -> Outcome {
         input,
         out: Outcome::default(),
     };
+    run.out.calendars = input.calendars.iter().map(|c| c.id.clone()).collect();
     for cal in &input.calendars {
         run.calendar(cal);
     }

@@ -852,12 +852,17 @@ impl Store {
             }
         }
 
-        // サーバーで消えたものを消す。同期の間にこのアプリで変えられていたら残す（次の同期で送り直す）
+        // サーバーで消えたものを消す。同期の間にこのアプリで変えられていたり、ほかのワークスペースへ
+        // 移していたりしたら残す（次の同期で送り直す・つながりを外す）
         for d in &outcome.deletes {
             let Ok(task) = self.task(&d.key) else {
                 continue;
             };
-            if maps.fields_of(&task, Some(&d.base)) != d.expected {
+            let still_there = calendars
+                .get(&d.calendar)
+                .and_then(|c| c.workspace_id.as_deref())
+                .is_some_and(|w| task.workspace_id.as_deref() == Some(w));
+            if !still_there || maps.fields_of(&task, Some(&d.base)) != d.expected {
                 continue;
             }
             match self.delete_task(&d.key) {
@@ -869,8 +874,13 @@ impl Store {
             }
         }
 
-        // つながりと印を保存する
-        let ids: Vec<&Id> = calendars.keys().collect();
+        // つながりと印を保存する。入れ替えるのは、この同期で扱ったカレンダーの分だけ
+        let ids: Vec<&Id> = outcome
+            .calendars
+            .iter()
+            .filter(|id| calendars.contains_key(*id))
+            .collect();
+        let synced: HashSet<&str> = ids.iter().map(|id| id.as_str()).collect();
         let now = now_ms();
         let tx = self.conn.transaction()?;
         for id in &ids {
@@ -881,7 +891,7 @@ impl Store {
             let Some(key) = item.key.as_deref() else {
                 continue;
             };
-            if !calendars.contains_key(&item.calendar) || !seen.insert(key.to_owned()) {
+            if !synced.contains(item.calendar.as_str()) || !seen.insert(key.to_owned()) {
                 continue;
             }
             let base = stale.get(key).unwrap_or(&item.base);

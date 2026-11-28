@@ -253,3 +253,62 @@ fn local_people_get_stable_uris() {
     assert_eq!(name_from_uri("mailto:bob@example.com"), "bob");
     assert_eq!(name_from_uri("https://id.example.com/users/42"), "42");
 }
+
+#[test]
+fn unlinked_calendars_keep_their_links() {
+    let (mut s, account, _, _) = setup();
+    let other = Found {
+        href: "/dav/other/".into(),
+        name: "ほか".into(),
+        read_only: false,
+    };
+    let found = [
+        Found {
+            href: CAL.into(),
+            name: "共有".into(),
+            read_only: false,
+        },
+        other.clone(),
+    ];
+    s.refresh_caldav_calendars(&account.id, &[ME.to_owned()], &found)
+        .unwrap();
+    let cal2 = s
+        .caldav_calendars(&account.id)
+        .unwrap()
+        .into_iter()
+        .find(|c| c.href == other.href)
+        .unwrap();
+    let w2 = s.create_workspace(None, "ほか").unwrap();
+    s.link_caldav_calendar(&cal2.id, Some(&w2.id)).unwrap();
+    let mut server = Memory::new();
+    server.edit("/dav/other/r1.ics", REMOTE);
+    sync(&mut s, &account, &mut server);
+    let t = find(&s, &w2, "記事のレビュー");
+    assert!(!s.caldav_links(&t.id).unwrap().is_empty());
+
+    // 片方だけで同期しても、つないでいないカレンダーのつながりは残る
+    s.link_caldav_calendar(&cal2.id, None).unwrap();
+    sync(&mut s, &account, &mut server);
+    assert!(!s.caldav_links(&t.id).unwrap().is_empty());
+}
+
+#[test]
+fn tasks_moved_away_during_a_sync_are_not_deleted() {
+    let (mut s, account, _, w) = setup();
+    let mut server = Memory::new();
+    server.edit(&format!("{CAL}r1.ics"), REMOTE);
+    sync(&mut s, &account, &mut server);
+    let t = find(&s, &w, "記事のレビュー");
+    server.remove(&format!("{CAL}r1.ics"));
+    let input = s.caldav_input(&account.id).unwrap();
+    let out = malakt_caldav::sync(&mut server, &input);
+    assert_eq!(out.deletes.len(), 1);
+    // 同期の間に、ほかのワークスペースへ移した
+    let w2 = s.create_workspace(None, "ほか").unwrap();
+    s.move_task(&t.id, Some(&w2.id)).unwrap();
+    s.apply_caldav(&account.id, &out).unwrap();
+    assert_eq!(
+        s.task(&t.id).unwrap().workspace_id.as_deref(),
+        Some(w2.id.as_str())
+    );
+}

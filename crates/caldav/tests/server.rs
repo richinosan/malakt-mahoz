@@ -102,7 +102,9 @@ fn round_trip_with_a_real_server() {
     );
     match server.changes(&cal.href, token.as_deref()).unwrap() {
         Changes::Delta { changed, .. } => assert!(changed.iter().any(|(h, _)| *h == item.href)),
-        Changes::Full { all } => assert!(all.iter().any(|(h, _)| *h == item.href)),
+        Changes::Full { all } | Changes::Reset { all, .. } => {
+            assert!(all.iter().any(|(h, _)| *h == item.href))
+        }
     }
 
     // 消す

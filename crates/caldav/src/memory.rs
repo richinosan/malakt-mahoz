@@ -15,6 +15,8 @@ pub struct Memory {
     log: Vec<(u64, String)>,
     /// 差分（sync-collection）を出せる。
     pub delta: bool,
+    /// 前の印を受け付けない（印が古くなったサーバーのまね）。印なしで全部を返す。
+    pub expired: bool,
     /// つながらない。
     pub offline: bool,
     /// 書き込めない。
@@ -73,6 +75,17 @@ impl Server for Memory {
         let inside = |h: &str| h.starts_with(calendar) && h != calendar;
         if !self.delta {
             return Ok(Changes::Full {
+                all: self
+                    .objects
+                    .iter()
+                    .filter(|(h, _)| inside(h))
+                    .map(|(h, (e, _))| (h.clone(), e.clone()))
+                    .collect(),
+            });
+        }
+        if self.expired && token.is_some() {
+            return Ok(Changes::Reset {
+                token: self.version.to_string(),
                 all: self
                     .objects
                     .iter()

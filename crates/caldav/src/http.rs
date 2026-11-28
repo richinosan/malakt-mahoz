@@ -56,6 +56,32 @@ fn origin(url: &str) -> &str {
     }
 }
 
+/// リダイレクトの行き先にパスワードを送ってよいか。同じサーバーと、同じサーバーの http から https へは
+/// 進む。https から http へと、ほかのサーバーへは、パスワードを送らずに止める。
+fn check_redirect(from: &str, to: &str) -> Result<(), String> {
+    let host = |u: &str| {
+        origin(u)
+            .split_once("://")
+            .map(|(_, h)| h.to_ascii_lowercase())
+    };
+    let secure = |u: &str| u.to_ascii_lowercase().starts_with("https://");
+    if secure(from) && !secure(to) {
+        return Err(format!(
+            "サーバーが暗号化されていない URL（{}）へ案内したので、接続をやめました",
+            origin(to)
+        ));
+    }
+    if host(from) != host(to) {
+        return Err(format!(
+            "サーバーが別のサーバー（{}）へ案内したので、パスワードを送らずに止めました。\
+             そのサーバーを使うときは、URL に {} を入れて追加してください",
+            origin(to),
+            to
+        ));
+    }
+    Ok(())
+}
+
 /// `href` を `base` からの URL にする。
 pub fn resolve(base: &str, href: &str) -> String {
     let href = href.trim();
@@ -237,7 +263,9 @@ impl Http {
             };
             if matches!(reply.status, 301 | 302 | 303 | 307 | 308) {
                 if let Some(location) = reply.location {
-                    url = resolve(&url, &location);
+                    let next = resolve(&url, &location);
+                    check_redirect(&url, &next)?;
+                    url = next;
                     continue;
                 }
             }
@@ -480,6 +508,13 @@ impl Server for Http {
                 changed.push((href, etag));
             }
         }
+        // 印なしの返事は、今あるもの全部（RFC 6578 3.4）
+        if token.is_none() {
+            return Ok(Changes::Reset {
+                token: new_token,
+                all: changed,
+            });
+        }
         Ok(Changes::Delta {
             token: new_token,
             changed,
@@ -618,6 +653,21 @@ mod tests {
             to_href("https://a.example/dav/", "https://b.example/x/"),
             "https://b.example/x/"
         );
+    }
+
+    #[test]
+    fn redirects_keep_the_password_on_the_same_server() {
+        let ok = |a: &str, b: &str| check_redirect(a, b).is_ok();
+        assert!(ok(
+            "https://a.example/.well-known/caldav",
+            "https://a.example/dav/"
+        ));
+        assert!(ok("https://A.example/x", "https://a.example/y"));
+        assert!(ok("http://a.example/x", "https://a.example/x"));
+        assert!(!ok("https://a.example/x", "http://a.example/x"));
+        assert!(!ok("https://a.example/x", "https://b.example/x"));
+        let message = check_redirect("https://a.example/x", "https://b.example/dav/").unwrap_err();
+        assert!(message.contains("https://b.example/dav/"), "{message}");
     }
 
     #[test]

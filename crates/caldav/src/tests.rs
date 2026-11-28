@@ -338,3 +338,28 @@ fn a_write_that_loses_the_race_merges_again() {
     assert!(stored.contains("PRIORITY:4"));
     assert_eq!(app.tasks[&key].summary, "A2");
 }
+
+#[test]
+fn a_reset_token_still_finds_deletions() {
+    let mut server = Memory::new();
+    server.edit(&format!("{CAL}a.ics"), &remote_ics("a", "A"));
+    server.edit(&format!("{CAL}b.ics"), &remote_ics("b", "B"));
+    let mut app = App::default();
+    app.sync(&mut server);
+    assert_eq!(app.tasks.len(), 2);
+
+    // 印が古くなって全部を読み直したとき、ないものはサーバーで消えたもの
+    server.remove(&format!("{CAL}a.ics"));
+    server.expired = true;
+    app.sync(&mut server);
+    assert!(!app.tasks.values().any(|f| f.summary == "A"));
+    assert!(app.errors.is_empty(), "{:?}", app.errors);
+
+    // つなぎ直して印がないときも同じ
+    server.expired = false;
+    server.remove(&format!("{CAL}b.ics"));
+    app.token = None;
+    app.sync(&mut server);
+    assert!(app.tasks.is_empty(), "{:?}", app.tasks);
+    assert!(app.items.is_empty());
+}
