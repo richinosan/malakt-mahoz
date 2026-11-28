@@ -415,6 +415,7 @@ enum SettingKey {
     AutoUpdate,
     Export,
     Import,
+    Download(crate::download_settings::DownloadRow),
     BrowserData,
     AlertTimed,
     AlertDate,
@@ -1646,10 +1647,9 @@ impl MainView {
                 this.open_workspace_schedules(&id, window, cx)
             }))
             .separator()
-            .item(item(
-                "AI チャットに添える",
-                |this, id, window, cx| this.attach_workspace_to_chat(&id, window, cx),
-            ))
+            .item(item("AI bot に添える", |this, id, window, cx| {
+                this.attach_workspace_to_chat(&id, window, cx)
+            }))
             .item(item("コピー", |this, id, _, cx| {
                 this.copy_workspace_link(&id, cx)
             }))
@@ -2567,7 +2567,7 @@ impl MainView {
                         .loading(self.ai_session.read(cx).busy)
                         .ghost()
                         .small()
-                        .tooltip("AI チャット")
+                        .tooltip("AI bot")
                         .on_click(cx.listener(|this, _, window, cx| this.toggle_ai(window, cx))),
                 ))
                 // 新しい版を取ってあるときだけ出る。閉じても同じ版に入れ替わる
@@ -7080,7 +7080,7 @@ impl MainView {
         } else {
             detail
         };
-        // AI チャット
+        // AI bot
         let chat_panel = chat.then(|| {
             panel()
                 .w(px(46.))
@@ -7566,6 +7566,27 @@ impl MainView {
             ),
             Setting::new(
                 Section::Browser,
+                SettingKey::Download(crate::download_settings::DownloadRow::Folder),
+                "ダウンロードの保存先",
+                Some("アプリ内ブラウザのダウンロードと PDF の保存先"),
+                list(&["ダウンロード", "保存先", "フォルダー", "PDF"]),
+            ),
+            Setting::new(
+                Section::Browser,
+                SettingKey::Download(crate::download_settings::DownloadRow::Ask),
+                "保存先を毎回確認する",
+                None,
+                list(&["ダウンロード", "保存先", "確認", "名前を付けて保存", "PDF"]),
+            ),
+            Setting::new(
+                Section::Browser,
+                SettingKey::Download(crate::download_settings::DownloadRow::Subfolder),
+                "日付のフォルダ",
+                Some("保存先の中に日付のフォルダを作る（yyyy・yy・mm・dd が日付、/ で区切ると入れ子）"),
+                list(&["ダウンロード", "日付", "フォルダー", "形式", "yyyy-mm-dd", "PDF"]),
+            ),
+            Setting::new(
+                Section::Browser,
                 SettingKey::BrowserData,
                 "ブラウザのデータ",
                 Some("アプリ内ブラウザのログインの情報とキャッシュ"),
@@ -7600,6 +7621,19 @@ impl MainView {
                 return edge(div().py_3())
                     .child(self.layout_tiles(cx))
                     .into_any_element();
+            }
+            SettingKey::Download(row_kind) => {
+                let control = self
+                    .download_settings
+                    .update(cx, |settings, cx| settings.control(row_kind, cx));
+                return setting_line(
+                    item.name,
+                    item.note,
+                    control,
+                    row_kind.wide(),
+                    first,
+                    &theme,
+                );
             }
             SettingKey::Ai(row_kind) => {
                 let control = self
@@ -7716,6 +7750,7 @@ impl MainView {
                 SettingKey::Themes
                 | SettingKey::Layouts
                 | SettingKey::Ai(_)
+                | SettingKey::Download(_)
                 | SettingKey::AlertTimed
                 | SettingKey::AlertDate
                 | SettingKey::People
@@ -8470,7 +8505,7 @@ impl MainView {
         )
     }
 
-    /// レイアウトの見本。一覧・詳細・AI チャットの並び方を、小さい図で出す。
+    /// レイアウトの見本。一覧・詳細・AI bot の並び方を、小さい図で出す。
     fn layout_tiles(&self, cx: &mut Context<Self>) -> Div {
         let theme = cx.theme().clone();
         let chat = self.ai_docked(cx);
@@ -9398,7 +9433,7 @@ impl MainView {
                             .child(feel::gloss(
                                 button("ai-promo-open")
                                     .icon(app_icon("sparkles"))
-                                    .label("AI チャットを開く")
+                                    .label("AI bot を開く")
                                     .primary()
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.open_ai_from_promo(window, cx)
@@ -10224,7 +10259,7 @@ impl MainView {
     /// 一覧と詳細の分け方。`own_width` は一覧と詳細を置く場所の幅。
     ///
     /// 詳細は一覧の右に並ぶカラムで、一覧はその残りの幅に収まる。幅が足りないときは、
-    /// 詳細を `PANEL_MIN` まで狭めて一覧に `LIST_ROOM` を残す（1920 幅の画面で AI チャットを
+    /// 詳細を `PANEL_MIN` まで狭めて一覧に `LIST_ROOM` を残す（1920 幅の画面で AI bot を
     /// 右に並べても、一覧・詳細・チャットの 3 つが並ぶ）。詳細を `PANEL_MIN` にしても一覧に
     /// `LIST_MIN` を残せない狭さでは、詳細が全面を使う（`None`）。返すのは詳細の幅。
     fn panel_split(&self, own_width: Pixels) -> Option<Pixels> {
@@ -10465,7 +10500,7 @@ impl Render for MainView {
         if std::mem::take(&mut self.ai_promo_focus) {
             self.focus.focus(window, cx);
         }
-        // 落とせる場所を覚え直す。描かれなかったペインと AI チャットの場所は残さない
+        // 落とせる場所を覚え直す。描かれなかったペインと AI bot の場所は残さない
         self.drops.begin(crate::drops::ROOT);
         for child in self.children.values() {
             child.read(cx).drops.clear();
@@ -10475,7 +10510,7 @@ impl Render for MainView {
         }
         let theme = cx.theme().clone();
         let window_width = window.viewport_size().width;
-        // 右に AI チャットを置いた分、タスクの画面は狭くなる
+        // 右に AI bot を置いた分、タスクの画面は狭くなる
         let ai = self.ai_docked(cx).then(|| self.ai_pane.clone()).flatten();
         let ai_width = ai.as_ref().and_then(|_| {
             let s = self.ai_session.read(cx);
@@ -10554,7 +10589,7 @@ impl Render for MainView {
 
         // 詳細は右から入って右へ抜け、ダイアログはふわっと出る
         let panel = self.render_panel_motion(panel_width, window, cx);
-        // 幅が足りないときは、AI チャットを上のバーの下で、タスクの画面の右に重ねる
+        // 幅が足りないときは、AI bot を上のバーの下で、タスクの画面の右に重ねる
         let (ai_beside, ai_over) = if ai_width.is_some() {
             (ai, None)
         } else {
@@ -10611,7 +10646,7 @@ impl Render for MainView {
                     .items_stretch()
                     .when(wide, |d| d.child(self.render_side(cx)))
                     .child(
-                        // 上のバーの下に、タスクの画面と AI チャットを横に並べる
+                        // 上のバーの下に、タスクの画面と AI bot を横に並べる
                         row()
                             .flex_1()
                             .min_h_0()
@@ -10629,7 +10664,7 @@ impl Render for MainView {
                                     .min_w_0()
                                     .h_full()
                                     .relative()
-                                    // 浮かせたカードはタスクの画面だけを包み、右に並べた AI チャットの
+                                    // 浮かせたカードはタスクの画面だけを包み、右に並べた AI bot の
                                     // 手前で角丸の端として閉じる。分けているときは、ペインごとにカードを置く
                                     .when(
                                         crate::theme::floating(cx)

@@ -408,9 +408,7 @@ fn list(cx: &mut App) -> Div {
                         .ghost()
                         .small()
                         .tooltip("ダウンロードのフォルダを開く")
-                        .on_click(|_, _, cx| {
-                            cx.open_with_system(&crate::downloads::download_dir(cx))
-                        }),
+                        .on_click(|_, _, cx| cx.open_with_system(&crate::downloads::root_dir(cx))),
                 ))
                 .when(any_done, |d| {
                     let downloads = downloads.clone();
@@ -459,6 +457,21 @@ impl Render for DownloadsBubble {
             .child(
                 row()
                     .child(div().flex_1().text_base().child("ダウンロード"))
+                    .child(feel::gloss(
+                        button("downloads-settings")
+                            .icon(app_icon("settings"))
+                            .tooltip("ダウンロードの設定")
+                            .ghost()
+                            .small()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.hide(cx);
+                                crate::open_settings_in(
+                                    None,
+                                    Some(crate::state::CustomizeSection::Browser),
+                                    cx,
+                                );
+                            })),
+                    ))
                     .child(feel::gloss(
                         button("downloads-close")
                             .icon(app_icon("x"))

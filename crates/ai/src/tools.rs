@@ -639,7 +639,7 @@ fn clip(text: &str, max: usize) -> String {
     }
 }
 
-/// ワークスペース 1 つの中身（`get_workspace`）。AI チャットに添えたワークスペースにも使う。
+/// ワークスペース 1 つの中身（`get_workspace`）。AI bot に添えたワークスペースにも使う。
 /// タスクは `WORKSPACE_TASKS` 件と `WORKSPACE_CHARS` 文字までにして、残りは件数だけを返す。
 pub fn workspace_context(store: &Store, id: &str, include_done: bool) -> Result<Value, String> {
     let core = |e: malakt_core::Error| e.to_string();
