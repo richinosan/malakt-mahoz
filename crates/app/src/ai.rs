@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use gpui_kit::*;
 use malakt_ai::ansi;
+use malakt_ai::chatgpt;
 use malakt_ai::files::{FilePart, Shelf};
 use malakt_ai::github::{self, Link};
 use malakt_ai::keys::{self, KeyStore, Source};
@@ -547,6 +548,8 @@ pub struct AiConfig {
     pub get: Arc<GetFn>,
     /// ローカル AI のサーバーを探す・モデルの一覧を読む。
     pub probe: Arc<ProbeFn>,
+    /// フォームの POST（ChatGPT のサインインのトークン）。
+    pub form: Arc<chatgpt::FormFn>,
     /// GitHub のリンクを取りに行くコマンド。
     pub gh: Arc<dyn Fn(&Link) -> Spec + Send + Sync>,
     /// Slack のリンクを取りに行くコマンド。前のものが起動できなければ、次のものを試す。
@@ -575,6 +578,7 @@ impl Default for AiConfig {
             post: Arc::new(malakt_ai::http::post_json),
             get: Arc::new(malakt_ai::http::get_text),
             probe: Arc::new(malakt_ai::http::probe),
+            form: Arc::new(malakt_ai::http::post_form),
             gh: Arc::new(Link::gh),
             slack: Arc::new(slack::Link::commands),
             whoami: Arc::new(github::whoami),
@@ -638,6 +642,17 @@ pub enum KeyState {
         source: Source,
     },
     Failed(SharedString),
+}
+
+/// ChatGPT のアカウントでのサインインの途中か。
+#[derive(Debug, Clone, Default)]
+pub enum ChatGptSignIn {
+    #[default]
+    Idle,
+    /// ブラウザでのサインインを待っている。立てると待つのをやめる
+    Waiting(Arc<std::sync::atomic::AtomicBool>),
+    /// サインアウトしている（ChatGPT の側でトークンを無効にしている）
+    SigningOut,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -722,6 +737,10 @@ pub struct Session {
     /// モデルごとに選んだ考える深さ。キーは `effort_key`
     efforts: HashMap<String, Effort>,
     pub key: KeyState,
+    /// ChatGPT のアカウントでのサインインの途中か。
+    pub chatgpt: ChatGptSignIn,
+    /// ChatGPT のサインインとサインアウトの失敗。「ChatGPT アカウント」の行に出す。
+    pub chatgpt_error: Option<SharedString>,
     github: GithubAccount,
     /// アカウントを読みに行った回数。古い結果を使わないために数える。
     github_read: u64,
@@ -1086,6 +1105,8 @@ impl Session {
             effort,
             efforts,
             key: KeyState::Unknown,
+            chatgpt: ChatGptSignIn::Idle,
+            chatgpt_error: None,
             github: GithubAccount::Unknown,
             github_read: 0,
             listed: Vec::new(),
@@ -1543,6 +1564,7 @@ impl Session {
             fallbacks: false,
             prefix_ttl: None,
             media: Media::All,
+            plan: false,
         };
         let conversation = malakt_core::new_id();
         let (_, reply) =
@@ -2568,6 +2590,7 @@ impl Session {
             fallbacks: false,
             prefix_ttl: None,
             media: Media::All,
+            plan: false,
         };
         let conversation = malakt_core::new_id();
         let (_, reply) =
@@ -3359,7 +3382,7 @@ impl Session {
                 }
                 this.key = match found {
                     Ok(Some((key, source))) => KeyState::Present {
-                        masked: keys::masked(&key).into(),
+                        masked: keys::shown(&key, source).into(),
                         source,
                     },
                     Ok(None) => KeyState::Missing,
@@ -3438,7 +3461,100 @@ impl Session {
         cx.notify();
     }
 
-    /// サービスにモデルの一覧を聞く（Claude と OpenCode）。
+    /// ChatGPT のアカウントでサインインする。ブラウザでサインインの画面を開き、戻ってくるのを待つ。
+    pub fn sign_in_chatgpt(&mut self, cx: &mut Context<Self>) {
+        if !matches!(self.chatgpt, ChatGptSignIn::Idle) {
+            return;
+        }
+        let keys = self.config.keys.clone();
+        let sign_in = match chatgpt::SignIn::begin(&*keys) {
+            Ok(sign_in) => sign_in,
+            Err(e) => {
+                self.chatgpt_error = Some(e.into());
+                cx.notify();
+                return;
+            }
+        };
+        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.chatgpt = ChatGptSignIn::Waiting(cancel.clone());
+        self.chatgpt_error = None;
+        cx.open_url(&sign_in.url);
+        let form = self.config.form.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let callback = sign_in.wait(&cancel, chatgpt::SIGN_IN_TIMEOUT)?;
+                    sign_in.finish(callback, &*keys, &*form)
+                })
+                .await;
+            // チャットがもうなければ、知らせる先もない
+            let _ = this.update(cx, |this, cx| {
+                this.chatgpt = ChatGptSignIn::Idle;
+                match result {
+                    Ok(_) => {
+                        this.chatgpt_error = None;
+                        if this.provider == Provider::OpenAi {
+                            this.refresh_key(cx);
+                        }
+                    }
+                    // 自分でキャンセルしたときは、何も出さない
+                    Err(e) if e == chatgpt::CANCELED => {}
+                    Err(e) => this.chatgpt_error = Some(e.into()),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// ブラウザでのサインインを待つのをやめる。
+    pub fn cancel_chatgpt(&mut self) {
+        if let ChatGptSignIn::Waiting(cancel) = &self.chatgpt {
+            cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    /// ChatGPT のアカウントからサインアウトする。
+    pub fn sign_out_chatgpt(&mut self, cx: &mut Context<Self>) {
+        if !matches!(self.chatgpt, ChatGptSignIn::Idle) {
+            return;
+        }
+        self.chatgpt = ChatGptSignIn::SigningOut;
+        self.chatgpt_error = None;
+        let config = self.config.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { chatgpt::sign_out(&*config.keys, &*config.form, &*config.get) })
+                .await;
+            // チャットがもうなければ、知らせる先もない
+            let _ = this.update(cx, |this, cx| {
+                this.chatgpt = ChatGptSignIn::Idle;
+                this.chatgpt_error = result.err().map(Into::into);
+                if this.provider == Provider::OpenAi {
+                    this.refresh_key(cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// 選んでいるサービスを、ChatGPT のアカウントで使っているか。
+    pub fn on_chatgpt_plan(&self) -> bool {
+        matches!(
+            self.key,
+            KeyState::Present {
+                source: Source::ChatGpt,
+                ..
+            }
+        )
+    }
+
+    /// サービスにモデルの一覧を聞く（Claude と OpenCode、ChatGPT のアカウント）。
     pub fn fetch_models(&mut self, cx: &mut Context<Self>) {
         // ローカル AI は、サーバーを探し直してモデルの一覧を読み直す（入れたばかりのモデルも出る）
         if self.provider == Provider::Local {
@@ -3457,6 +3573,13 @@ impl Session {
                             .filter(|m| m.api.is_some())
                             .map(|m| (m.id.clone(), m.name.clone()))
                             .collect::<Vec<_>>());
+                    }
+                    if provider == Provider::OpenAi {
+                        let found = keys::lookup(&*config.keys, provider, |n| (config.env)(n))?;
+                        if found.is_some_and(|(_, source)| source == Source::ChatGpt) {
+                            let token = chatgpt::access_token(&*config.keys, &*config.form)?;
+                            return chatgpt::models(&token, &*config.get);
+                        }
                     }
                     if provider != Provider::Claude {
                         return Err(format!(
@@ -4370,6 +4493,7 @@ impl Session {
             fallbacks: false,
             prefix_ttl: None,
             media: Media::All,
+            plan: false,
         };
         Self::request(this, config, provider, key, conversation, request, cx).await
     }
@@ -4442,10 +4566,20 @@ impl Session {
                 };
                 provider::opencode_endpoint(&catalog, model, effort, key, conversation)?
             }
+            None if chatgpt::Account::from_secret(key).is_some() => {
+                // ChatGPT のアカウント。アクセストークンは切れそうなら更新する（通信するので裏で）
+                let config = config.clone();
+                let token = cx
+                    .background_executor()
+                    .spawn(async move { chatgpt::access_token(&*config.keys, &*config.form) })
+                    .await?;
+                chatgpt::endpoint(&token)
+            }
             None => provider::endpoint(provider, model, key)?,
         };
         request.fallbacks = endpoint.fallbacks;
         request.prefix_ttl = endpoint.prefix_ttl;
+        request.plan = endpoint.plan;
         let body = wire::body(endpoint.wire, &request);
         let post = config.post.clone();
         let wire = endpoint.wire;

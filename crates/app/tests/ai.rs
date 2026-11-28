@@ -206,6 +206,15 @@ fn start_with(cx: &mut TestAppContext, store: Store) -> World {
                 .map(|(status, body)| (*status, body.to_string()))
                 .ok_or_else(|| format!("{url} に接続できませんでした"))
         }),
+        // ChatGPT のトークンの更新は、いつも新しいトークンを返す
+        form: Arc::new(|url, pairs| {
+            assert_eq!(url, malakt_ai::chatgpt::TOKEN_URL);
+            assert!(pairs.contains(&("grant_type", "refresh_token".into())));
+            Ok((
+                200,
+                json!({"access_token": "at_test", "refresh_token": "rt_next", "expires_in": 3600}),
+            ))
+        }),
         gh: Arc::new(move |link| {
             let state = github.lock().unwrap().clone();
             // PowerShell の echo は、引数を 1 行ずつに分けて出すので、一重引用符でまとめる
@@ -548,6 +557,100 @@ fn the_key_is_saved_to_the_keychain_from_settings(cx: &mut TestAppContext) {
     ui(cx, window, |window, cx| window.click("ai-key-delete", cx));
     assert_eq!(world.keys.get(Provider::Claude).unwrap(), None);
     assert_eq!(read(cx, |s| s.key.clone()), KeyState::Missing);
+}
+
+/// ChatGPT のアカウントでサインインしていれば、API キーより先にそのアカウント（ChatGPT のプラン）で
+/// 呼ぶ。サインアウトすると API キーに戻る。
+#[gpui_kit::test]
+fn the_chatgpt_account_is_used_instead_of_the_api_key(cx: &mut TestAppContext) {
+    let world = start(cx);
+    world
+        .keys
+        .set(Provider::OpenAi, "sk-proj-12345678")
+        .unwrap();
+    let mut account = malakt_ai::chatgpt::Account::for_this_pc();
+    account.client_id = Some("oaiapp_app_test".into());
+    account.email = Some("kanade@example.com".into());
+    account.refresh_token = Some("rt_test".into());
+    account.save(&*world.keys).unwrap();
+    let (window, view) = open(cx, wide());
+    let pane = open_chat(cx, window, &view);
+    menu(cx, window, 0);
+    ui(cx, window, |window, cx| {
+        window.click(("ai-provider", Provider::OpenAi as usize), cx)
+    });
+    wait(cx, "アカウントを読む", |s| {
+        s.key != KeyState::Unknown
+    });
+    assert_eq!(
+        read(cx, |s| s.key.clone()),
+        KeyState::Present {
+            masked: "kanade@example.com".into(),
+            source: Source::ChatGpt
+        }
+    );
+    // サインインしている間は、API キーの行を出さない
+    ui(cx, window, |window, _| {
+        assert!(window.find("ai-chatgpt-state").visible());
+        assert!(window.find("ai-chatgpt-sign-out").visible());
+        assert!(window.try_find("ai-key-state").is_none());
+        assert!(window.try_find("ai-chatgpt-sign-in").is_none());
+    });
+
+    world.reply(json!({"status": "completed", "output": [
+        {"type": "function_call", "call_id": "c1", "namespace": "malakt",
+         "name": "list_workspaces", "arguments": "{}"},
+    ]}));
+    world.reply(json!({"status": "completed", "output": [
+        {"type": "message", "content": [{"type": "output_text", "text": "ありません"}]},
+    ]}));
+    say(cx, window, &pane, "ワークスペースは？");
+    wait(cx, "返事が来る", |s| !s.busy);
+    let sent = world.sent();
+    assert_eq!(sent.len(), 2);
+    let (url, headers, body) = &sent[0];
+    assert_eq!(url, malakt_ai::chatgpt::RESPONSES_URL);
+    assert!(headers.contains(&("authorization".into(), "Bearer at_test".into())));
+    assert!(!headers.iter().any(|(_, v)| v.contains("sk-proj")));
+    assert_eq!(body["stream"], true);
+    assert_eq!(body["store"], false);
+    assert_eq!(body["tools"][0]["type"], "namespace");
+    // ツールの結果を返して、続きを聞く
+    let input = sent[1].2["input"].as_array().unwrap().clone();
+    assert!(input.iter().any(|i| i["type"] == "function_call_output"));
+    assert_eq!(
+        read(cx, |s| s.items.last().cloned()),
+        Some(Item::Assistant("ありません".into()))
+    );
+    // 新しいリフレッシュトークンはキーチェーンに残し、アクセストークンは残さない
+    let saved = malakt_ai::chatgpt::Account::load(&*world.keys)
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved.refresh_token.as_deref(), Some("rt_next"));
+
+    // サインアウトする。ChatGPT の側で外せなかったことは行に出し、API キーに戻る
+    open_settings(cx, window, &pane);
+    ui(cx, window, |window, cx| {
+        window.click("ai-chatgpt-sign-out", cx)
+    });
+    wait(cx, "サインアウトする", |s| {
+        matches!(
+            s.key,
+            KeyState::Present {
+                source: Source::Keychain,
+                ..
+            }
+        )
+    });
+    assert!(!malakt_ai::chatgpt::Account::load(&*world.keys)
+        .unwrap()
+        .unwrap()
+        .signed_in());
+    ui(cx, window, |window, _| {
+        assert!(window.find("ai-chatgpt-sign-in").visible());
+        assert!(window.find("ai-chatgpt-error").visible());
+        assert!(window.find("ai-key-state").visible());
+    });
 }
 
 /// 頼むと AI がツールでタスクを作り、開いている一覧にすぐ出る。
