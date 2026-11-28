@@ -3042,6 +3042,8 @@ impl AiPane {
                                         this.shell_left = bounds.left();
                                         this.set_shell_width(bounds.size.width, window, cx)
                                     });
+                                    // ターミナルを開くと、この場所に出る
+                                    term::measure_place(bounds.size, window, cx);
                                 },
                                 |_, _, _, _| {},
                             )
