@@ -288,6 +288,8 @@ pub fn watch(cx: &mut App) {
                 });
                 if outside {
                     crate::pr_times::nudge(cx);
+                    // MCP のサーバーが頼んだ、最前面の表示の切り替え
+                    crate::on_top::answer_asks(cx);
                 }
                 crate::pr_times::tick(cx);
             });

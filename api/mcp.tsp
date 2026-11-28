@@ -17,6 +17,22 @@ op get_autostart(): void;
  */
 op set_autostart(enabled: boolean): void;
 
+/**
+ * アプリのウィンドウを常に最前面に表示しているかを読む。
+ * task はメインのウィンドウ（最初に開いた 1 枚）、pomodoro はポモドーロ、chat は AI チャットだけのウィンドウ、shell はシェルだけのウィンドウ。
+ * 開いていないウィンドウは、次に開いたときの状態。
+ */
+op get_on_top(): void;
+
+/**
+ * アプリのウィンドウを常に最前面に表示する（on が true）、または元に戻す（false）。
+ * window は get_on_top と同じ（標準は task）。
+ * アプリが 2 秒以内に切り替える。
+ * 開いていないウィンドウは、次に開いたときに最前面に出す。
+ * undo では戻らないので、戻すときはもう一度呼ぶ。
+ */
+op set_on_top(on: boolean, window?: Malakt.App.OnTopWindow): void;
+
 /** このサーバーからの直前の変更を 1 つ元に戻す。続けて呼ぶと、さらに前の変更を戻す。 */
 op undo(): void;
 

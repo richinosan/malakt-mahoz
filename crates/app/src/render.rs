@@ -254,6 +254,11 @@ pub(crate) fn window_menu(
     } else {
         ("maximize-2", "全画面")
     };
+    let (top_icon, top_label) = if crate::on_top::is_on(window, cx) {
+        ("pin-off", "最前面の表示を解除")
+    } else {
+        ("pin", "常に最前面に表示")
+    };
     let menu = menu.item(
         // ロックが無効なときは、ロックの設定を開く（`lib.rs` の LockNow）
         PopupMenuItem::new("ロックする")
@@ -312,6 +317,11 @@ pub(crate) fn window_menu(
             .icon(app_icon(full_icon))
             .action(Box::new(crate::shortcuts::ToggleFullscreen))
             .on_click(|_, window, _| window.toggle_fullscreen()),
+    )
+    .item(
+        PopupMenuItem::new(top_label)
+            .icon(app_icon(top_icon))
+            .on_click(|_, window, cx| crate::on_top::toggle(window, cx)),
     )
     .separator()
     .item(
@@ -2424,6 +2434,11 @@ impl MainView {
                     row()
                         .occlude()
                         .when(floating, |d| d.pr_2())
+                        .children(crate::on_top::pin(
+                            gpui_kit::component::Size::Small,
+                            window,
+                            cx,
+                        ))
                         .children(window_controls(HEADER_HEIGHT, floating, window, cx)),
                 );
         }
@@ -2554,6 +2569,11 @@ impl MainView {
                         .on_click(
                             cx.listener(|this, _, window, cx| this.open_appearance(window, cx)),
                         ),
+                ))
+                .children(crate::on_top::pin(
+                    gpui_kit::component::Size::Small,
+                    window,
+                    cx,
                 ))
                 .children(controls),
         )

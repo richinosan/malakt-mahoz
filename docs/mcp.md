@@ -88,6 +88,7 @@ Windows のアプリは、起動のときに黒い窓を出さないように作
 | `get_time_stats` / `set_time_basis` | 所要時間の統計（全体かワークスペース、期間、担当者ごと・ワークスペースごと）を読む、所要時間の基準（開始と完了）を全体の標準かワークスペースに決める。タスクの予想工数と基準は `create_task` / `update_task` の `estimate` / `time_basis`、所要時間は `get_task` の `time`（[docs/timing.md](timing.md)） |
 | `get_pomodoro` / `pomodoro` / `list_work_logs` | ポモドーロタイマーの状態を読む、始める・止める・設定を変える、作業の記録を読む（[docs/pomodoro.md](pomodoro.md)） |
 | `get_autostart` / `set_autostart` | PC にログインしたときにアプリを起動するか（スタートアップ）を読む、変える。OS の登録を書き換えるので `undo` では戻らない（[docs/startup.md](startup.md)） |
+| `get_on_top` / `set_on_top` | アプリのウィンドウ（`task` はメインのウィンドウ、`pomodoro`、`chat`、`shell`）を常に最前面に表示しているかを読む、切り替える（`{"on": true, "window": "pomodoro"}`）。切り替えはデータベースに書き、開いているアプリが 2 秒以内に当てる。`undo` では戻らない |
 | `undo` / `redo` | このサーバーからの変更を 1 つ元に戻す、やり直す |
 
 - 担当者は ID でも名前でも指定できます。登録されていない名前は、タスクのワークスペースの担当者としてその場で登録します（どこにも入っていないタスクでは、すべてのワークスペースの担当者）

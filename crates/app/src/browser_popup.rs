@@ -303,6 +303,11 @@ impl PopupView {
                 .child(
                     row()
                         .occlude()
+                        .children(crate::on_top::pin(
+                            gpui_kit::component::Size::XSmall,
+                            window,
+                            cx,
+                        ))
                         .children(window_controls(BAR_HEIGHT, false, window, cx)),
                 );
         };
@@ -358,6 +363,11 @@ impl PopupView {
                     )
                     .disabled(!is_web(&url))
                     .on_click(move |_, _, cx| cx.open_url(&url)),
+                ))
+                .children(crate::on_top::pin(
+                    gpui_kit::component::Size::XSmall,
+                    window,
+                    cx,
                 ))
                 .when(own_bar, |d| {
                     d.children(window_controls(BAR_HEIGHT, false, window, cx))

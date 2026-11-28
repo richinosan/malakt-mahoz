@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use crate::db;
 use crate::state::{MainView, Nav};
 
-const SETTING: &str = "session.windows";
+pub(crate) const SETTING: &str = "session.windows";
 
 /// ウィンドウ 1 枚の状態。保存する形なので、足した項目は `default` で読めるようにする。
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -38,6 +38,8 @@ pub struct WindowState {
     /// 位置と大きさ（x, y, 幅, 高さ）。
     pub bounds: Option<[f32; 4]>,
     pub maximized: bool,
+    /// 常に最前面に表示する（`crate::on_top`）。
+    pub on_top: bool,
     /// ペインの配置（`malakt_core::panes::Layout::encode`）。分けていなければ `None`。
     pub layout: Option<String>,
     /// このウィンドウが中身を兼ねているペインの番号。
@@ -116,9 +118,9 @@ pub(crate) fn set_main(view: EntityId, window: AnyWindowHandle, cx: &mut App) ->
 }
 
 /// メインのウィンドウ。まだ開いていなければ `None`。
-pub fn main_window(cx: &mut App) -> Option<AnyWindowHandle> {
-    cx.default_global::<Sessions>()
-        .main
+pub fn main_window(cx: &App) -> Option<AnyWindowHandle> {
+    cx.try_global::<Sessions>()
+        .and_then(|sessions| sessions.main)
         .map(|(_, window)| window)
 }
 
@@ -265,6 +267,7 @@ impl MainView {
             sidebar_hidden: self.sidebar_hidden,
             bounds: self.window_place.map(|(bounds, _)| bounds),
             maximized: self.window_place.is_some_and(|(_, maximized)| maximized),
+            on_top: self.on_top,
             ..WindowState::default()
         }
     }
@@ -365,6 +368,16 @@ impl MainView {
         .detach();
         cx.observe_self(|this, cx| this.remember_session(cx))
             .detach();
+        // 最前面の表示を切り替えたら、覚えてヘッダーのピンを出し直す
+        cx.observe_global_in::<crate::on_top::Pinned>(window, |this, window, cx| {
+            let on = crate::on_top::is_on(window, cx);
+            if this.on_top != on {
+                this.on_top = on;
+                this.remember_session(cx);
+                cx.notify();
+            }
+        })
+        .detach();
         let id = cx.entity_id();
         cx.on_release(move |_, cx| {
             let sessions = cx.default_global::<Sessions>();
