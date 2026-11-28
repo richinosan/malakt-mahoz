@@ -66,9 +66,9 @@ const NOT_BUTTONS: &[&str] = &[
     "row-cursor",
     "folder-cursor",
     "keys-help",
-    "app-keys",
-    "browser-keys",
-    "terminal-keys",
+    "keys-help-body",
+    "keys-search",
+    "keys-group",
     // ブラウザの入れ物と、ページ・失敗・使用量の文字。ボタンは tests/browser.rs で押す
     "browser",
     "browser-page",

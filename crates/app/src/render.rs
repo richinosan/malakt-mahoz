@@ -302,6 +302,12 @@ pub(crate) fn window_menu(
                 .on_click(move |_, _, cx| crate::open_settings_in(main.as_ref(), None, cx)),
         )
     })
+    .item(
+        PopupMenuItem::new("キー操作")
+            .icon(app_icon("keyboard"))
+            .action(Box::new(crate::shortcuts::ShowKeys))
+            .on_click(|_, window, cx| crate::keys_help::open_from_menu(window, cx)),
+    )
     .separator()
     .when(supported.minimize, |menu| {
         menu.item(
@@ -428,6 +434,7 @@ enum SettingKey {
     People,
     CalDav,
     Keys,
+    PaneKeys,
     NewWindow,
     Pomodoro,
     Timer,
@@ -7330,17 +7337,10 @@ impl MainView {
             people.push(' ');
             people.push_str(&person.name);
         }
-        let mut keys = String::from("キー ショートカット ペイン ブラウザ ターミナル");
-        for (key, about) in crate::shortcuts::help()
-            .into_iter()
-            .chain(crate::shell_keys::browser_help())
-            .chain(crate::shell_keys::terminal_help())
-        {
-            keys.push(' ');
-            keys.push_str(key);
-            keys.push(' ');
-            keys.push_str(about);
-        }
+        let keys = format!(
+            "キー ショートカット 一覧{}",
+            crate::keys_help::search_words()
+        );
         all.extend([
             Setting::new(Section::People, SettingKey::People, "担当者", None, people),
             Setting::new(
@@ -7363,7 +7363,20 @@ impl MainView {
                     "アカウント",
                 ]),
             ),
-            Setting::new(Section::Keys, SettingKey::Keys, "キー操作", None, keys),
+            Setting::new(
+                Section::Keys,
+                SettingKey::Keys,
+                "キー操作の一覧",
+                Some(crate::shortcuts::KEYS_KEY),
+                keys,
+            ),
+            Setting::new(
+                Section::Keys,
+                SettingKey::PaneKeys,
+                "ペインのキー",
+                Some("Ctrl+B のあとに押すキー"),
+                list(&["ペイン", "herdr", "tmux", "Ctrl+B"]),
+            ),
             Setting::new(
                 Section::Window,
                 SettingKey::NewWindow,
@@ -7523,9 +7536,39 @@ impl MainView {
                 );
             }
             SettingKey::Keys => {
-                return edge(div().py_3())
-                    .child(self.keys_help(cx))
-                    .into_any_element();
+                let open = feel::gloss(
+                    button("keys-open")
+                        .icon(app_icon("keyboard"))
+                        .label("開く")
+                        .outline()
+                        .small()
+                        .on_click(cx.listener(|this, _, window, cx| this.open_keys(window, cx))),
+                )
+                .into_any_element();
+                return setting_line(item.name, item.note, open, false, first, &theme);
+            }
+            SettingKey::PaneKeys => {
+                use malakt_core::panes::Keys;
+                let mut schemes = row().gap_1();
+                for scheme in Keys::ALL {
+                    schemes = schemes.child(feel::gloss(
+                        button(("pane-keys", scheme as usize))
+                            .label(scheme.label())
+                            .xsmall()
+                            .when(self.pane_keys == scheme, |b| b.primary())
+                            .on_click(
+                                cx.listener(move |this, _, _, cx| this.set_pane_keys(scheme, cx)),
+                            ),
+                    ));
+                }
+                return setting_line(
+                    item.name,
+                    item.note,
+                    schemes.into_any_element(),
+                    false,
+                    first,
+                    &theme,
+                );
             }
             SettingKey::McpKeys => {
                 return edge(div().py_3())
@@ -7613,7 +7656,8 @@ impl MainView {
                 | SettingKey::McpKeyless
                 | SettingKey::Plugins
                 | SettingKey::PluginFolders
-                | SettingKey::Keys => unreachable!(),
+                | SettingKey::Keys
+                | SettingKey::PaneKeys => unreachable!(),
                 SettingKey::LockNow => feel::gloss(
                     button("lock-now")
                         .icon(app_icon("lock"))
@@ -10349,6 +10393,7 @@ impl Render for MainView {
             return self.render_embedded(window, cx);
         }
         self.arm_notice(cx);
+        self.return_from_keys(window, cx);
         // 起動してすぐ出した AI のおすすめを、Esc で閉じられるようにする
         if std::mem::take(&mut self.ai_promo_focus) {
             self.focus.focus(window, cx);
@@ -10568,8 +10613,9 @@ impl Render for MainView {
             .children(self.ws_drag_listener(cx))
             .children(self.ws_drag_ghost(cx))
             .children(self.panel_drag_layer(cx))
-            .children(self.render_pane_overlay(cx))
             .children(self.render_modal(cx))
+            // キーの一覧は、設定などのダイアログの上にも開く
+            .children(self.render_pane_overlay(cx))
             .children(self.render_closing_dialog(cx))
             .when_some(
                 self.error

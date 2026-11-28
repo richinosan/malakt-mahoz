@@ -6,7 +6,6 @@
 use crate::press::button;
 use gpui_kit::base::TestSupportExt;
 use gpui_kit::component::button::ButtonVariants;
-use gpui_kit::component::scroll::ScrollableElement;
 use gpui_kit::component::{ActiveTheme, Sizable};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
@@ -273,10 +272,7 @@ impl MainView {
                     .then_some(PaneOverlay::Presets)
             }
             Action::PopOut => self.pop_out_pane(window, cx),
-            Action::Help => {
-                self.pane_overlay =
-                    (self.pane_overlay != Some(PaneOverlay::Help)).then_some(PaneOverlay::Help)
-            }
+            Action::Help => self.toggle_keys(window, cx),
         }
         cx.notify();
     }
@@ -610,85 +606,6 @@ impl MainView {
         root.into_any_element()
     }
 
-    /// キー操作の一覧。アプリのキー、ブラウザとターミナルのタブにいるときのキー、
-    /// Ctrl+B のあとに押すペインのキーを並べる。
-    pub(crate) fn keys_help(&self, cx: &mut Context<Self>) -> Div {
-        let theme = cx.theme().clone();
-        let line = |key: SharedString, about: SharedString| {
-            div()
-                .flex()
-                .flex_row()
-                .gap_3()
-                .text_sm()
-                .child(
-                    div()
-                        .w(px(150.) * crate::UI_SCALE)
-                        .flex_none()
-                        .text_color(theme.primary)
-                        .child(key),
-                )
-                .child(div().flex_1().min_w_0().child(about))
-        };
-        let column = || {
-            div()
-                .flex()
-                .flex_col()
-                .flex_1()
-                .min_w(px(280.) * crate::UI_SCALE)
-                .gap_1()
-        };
-        let mut app = column().id("app-keys");
-        for (key, about) in crate::shortcuts::help() {
-            app = app.child(line(key.into(), about.into()));
-        }
-        let caption = |text: &'static str| {
-            div()
-                .text_xs()
-                .text_color(theme.muted_foreground)
-                .child(text)
-        };
-        let mut browser = column().id("browser-keys").child(caption("ブラウザのタブ"));
-        for (key, about) in crate::shell_keys::browser_help() {
-            browser = browser.child(line(key.into(), about.into()));
-        }
-        let mut terminal = column()
-            .id("terminal-keys")
-            .child(caption("ターミナルのタブ"));
-        for (key, about) in crate::shell_keys::terminal_help() {
-            terminal = terminal.child(line(key.into(), about.into()));
-        }
-        let mut keys = div().flex().flex_row().gap_1();
-        for scheme in Keys::ALL {
-            let on = self.pane_keys == scheme;
-            keys = keys.child(feel::gloss(
-                button(("pane-keys", scheme as usize))
-                    .label(scheme.label())
-                    .xsmall()
-                    .when(on, |b| b.primary())
-                    .on_click(cx.listener(move |this, _, _, cx| this.set_pane_keys(scheme, cx))),
-            ));
-        }
-        let mut panes = column().child(keys).child(
-            div()
-                .text_xs()
-                .text_color(theme.muted_foreground)
-                .child("ペイン: Ctrl+B のあとに押すキー"),
-        );
-        for (key, about) in self.pane_keys.help() {
-            panes = panes.child(line(key.into(), about.into()));
-        }
-        div()
-            .flex()
-            .flex_row()
-            .flex_wrap()
-            .gap_x_6()
-            .gap_y_3()
-            .child(app.test_support())
-            .child(browser.test_support())
-            .child(terminal.test_support())
-            .child(panes)
-    }
-
     /// キーの一覧か、配置のプリセットのダイアログ。
     pub(crate) fn pane_overlay_dialog(
         &self,
@@ -696,17 +613,23 @@ impl MainView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let mut body = div().flex().flex_col().gap_1();
-
+        if overlay == PaneOverlay::Help {
+            // 検索の欄と、まとまりごとのキー。入りきらない分はスクロールする
+            let (width, height) = crate::keys_help::size();
+            let help = self.keys_help.clone().map(|help| help.into_any_element());
+            let body = body.flex_1().min_h_0().children(help);
+            // 設定などのダイアログの上に開いたときは、その上に重ねる
+            let id = if self.modal == crate::state::Modal::None {
+                "dialog"
+            } else {
+                "dialog-keys"
+            };
+            return self
+                .dialog_sized(id, width, Some(height), "キー操作", body, cx)
+                .into_any_element();
+        }
         match overlay {
-            PaneOverlay::Help => {
-                // 狭いウィンドウでは縦に並び、入りきらない分はスクロールする
-                body = body.min_h_0().child(
-                    self.keys_help(cx)
-                        .id("keys-help")
-                        .min_h_0()
-                        .overflow_y_scrollbar(),
-                );
-            }
+            PaneOverlay::Help => {}
             PaneOverlay::Presets => {
                 for (n, (name, text)) in PRESETS.into_iter().enumerate() {
                     body = body.child(feel::gloss(
@@ -752,12 +675,14 @@ impl MainView {
                 ));
             }
         }
-        let (title, width) = match overlay {
-            PaneOverlay::Help => ("キー操作", 720.),
-            PaneOverlay::Presets => ("配置のプリセット", 460.),
-        };
-        self.dialog_as("dialog", px(width) * crate::UI_SCALE, title, body, cx)
-            .into_any_element()
+        self.dialog_as(
+            "dialog",
+            px(460.) * crate::UI_SCALE,
+            "配置のプリセット",
+            body,
+            cx,
+        )
+        .into_any_element()
     }
 
     /// Ctrl+B を押したあとの印、リサイズモードの印、キーの一覧、プリセット。

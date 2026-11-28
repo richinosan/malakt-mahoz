@@ -408,6 +408,9 @@ impl Render for PopupView {
             .flex_col()
             .bg(theme.background)
             .text_color(theme.foreground)
+            .on_action(|_: &crate::shortcuts::ShowKeys, window, cx| {
+                crate::keys_help::toggle(window, cx)
+            })
             // ここでもマウスの操作を見張る（自動でロックするまでの時間）
             .child(db::input_watcher());
         let Some((_, can_back, loading, url, zoom, error, shot, page_focused)) =
@@ -482,8 +485,13 @@ impl Render for PopupView {
                     .when(loading, |d| d.child(browser::loading_line(theme.primary))),
             )
             .child(body)
+            .children(crate::keys_help::overlay(window, cx))
             // ブラウザのページを見せるかは、いちばん最後に決める
-            .child(browser::frame_end(false, window, cx))
+            .child(browser::frame_end(
+                crate::keys_help::is_open(window, cx),
+                window,
+                cx,
+            ))
             .test_support()
     }
 }

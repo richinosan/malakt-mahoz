@@ -233,6 +233,9 @@ pub fn page_keys() -> PageKeys {
             "cmd-g",
             "cmd-shift-g",
             "cmd-p",
+            // キー操作の一覧（ページが自分のキーの一覧に使っていなければ）
+            "cmd-/",
+            "cmd-shift-/",
         ])
     } else {
         s(&[
@@ -249,6 +252,9 @@ pub fn page_keys() -> PageKeys {
             "ctrl-g",
             "ctrl-shift-g",
             "ctrl-p",
+            // キー操作の一覧（ページが自分のキーの一覧に使っていなければ）
+            "ctrl-/",
+            "ctrl-shift-/",
         ])
     };
     let script_order = |keys: Vec<String>| keys.iter().map(|k| in_script_order(k)).collect();
