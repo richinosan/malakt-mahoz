@@ -62,8 +62,6 @@ pub enum Modal {
     BulkCategories,
     /// 通知の一覧
     Notices,
-    /// ブラウザのダウンロードと、PDF に保存したファイルの一覧
-    Downloads,
     /// 完了チケットの発行
     Ticket(Id),
     /// 書体と色
@@ -657,8 +655,6 @@ pub struct MainView {
     pub modal_seen: Option<(Modal, Option<crate::panes::PaneOverlay>)>,
     /// 今描いているダイアログの出方。0 で消えていて、1 で出きっている。
     pub dialog_t: std::cell::Cell<f32>,
-    /// 上のバーのダウンロードのボタンの場所。一覧はこの下に出す
-    pub downloads_anchor: Rc<std::cell::Cell<Bounds<Pixels>>>,
     pub today: String,
     pub inputs: Inputs,
     _subscriptions: Vec<Subscription>,
@@ -763,13 +759,6 @@ impl MainView {
             ),
             // 新しい版を取ってきたら、上のバーに印を出す
             cx.observe(&crate::update::shared(cx), |_, _, cx| cx.notify()),
-            // ダウンロードの数と進み具合を、上のバーに出す。一覧を出している間に増えたものは、見たことにする
-            cx.observe(&crate::downloads::shared(cx), |this, downloads, cx| {
-                if this.modal == Modal::Downloads && downloads.read(cx).unseen() > 0 {
-                    downloads.update(cx, |d, cx| d.opened(cx));
-                }
-                cx.notify();
-            }),
             // CalDAV の同期で失敗したこと・知らせることを出す
             cx.subscribe(
                 &crate::caldav::shared(cx),
@@ -1170,7 +1159,6 @@ impl MainView {
             sub_seen: None,
             modal_seen: None,
             dialog_t: std::cell::Cell::new(1.),
-            downloads_anchor: Rc::default(),
             today: view::today(),
             inputs,
             _subscriptions: subs,
@@ -4911,17 +4899,6 @@ impl MainView {
         if !in_window && (!self.ai_open || self.ai_session.read(cx).chat_window.is_some()) {
             self.toggle_ai(window, cx);
         }
-        cx.notify();
-    }
-
-    /// ダウンロードの一覧を出す（上のバーのアイコン、ブラウザの Ctrl+J）。
-    pub fn open_downloads(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.db.read(cx).unlocked {
-            return;
-        }
-        self.modal = Modal::Downloads;
-        crate::downloads::shared(cx).update(cx, |d, cx| d.opened(cx));
-        self.focus.focus(window, cx);
         cx.notify();
     }
 
