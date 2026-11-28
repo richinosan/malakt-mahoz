@@ -5413,4 +5413,19 @@ fn each_bot_talks_with_its_own_instructions_and_chats(cx: &mut TestAppContext) {
     );
     let bots: Vec<Option<String>> = read(cx, |s| s.chats.iter().map(|c| c.bot.clone()).collect());
     assert!(bots.contains(&Some(helper.id.clone())), "{bots:?}");
+
+    // 上の名前のメニューで「bot を追加」を押すと、足した bot の設定が開き、その bot と話す
+    ui(cx, window, |window, cx| window.click("ai-bot-pick", cx));
+    ui(cx, window, |window, cx| {
+        window.press("up", cx);
+        window.press("up", cx);
+        window.press("enter", cx);
+    });
+    cx.run_until_parked();
+    let added = cx.update(|cx| db::shared(cx).read(cx).store.ai_bots().unwrap());
+    assert_eq!(added.len(), 3, "{added:?}");
+    assert_eq!(read(cx, |s| s.bot.clone()), Some(added[2].id.clone()));
+    ui(cx, window, |window, _| {
+        assert!(window.find("ai-bot-name").visible());
+    });
 }

@@ -2067,7 +2067,12 @@ impl AiPane {
                             .on_click(move |_, window, cx| {
                                 let _ = add.update(cx, |this, cx| {
                                     this.settings_open = true;
-                                    this.settings.update(cx, |s, cx| s.add_bot(window, cx));
+                                    // メニューから足した bot と、そのまま話せるようにする
+                                    if let Some(bot) =
+                                        this.settings.update(cx, |s, cx| s.add_bot(window, cx))
+                                    {
+                                        this.session.update(cx, |s, cx| s.set_bot(&bot.id, cx));
+                                    }
                                     cx.notify();
                                 });
                             }),

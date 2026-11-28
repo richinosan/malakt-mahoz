@@ -85,11 +85,10 @@ impl AiSettings {
     }
 
     /// 「新しい bot」を足して開き、名前を全部選んで書けるようにする。
-    pub fn add_bot(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// bot を 1 つ足して開く。足した bot を返す（足せなければ None、失敗は設定の中に出る）。
+    pub fn add_bot(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AiBot> {
         self.save_open_bot(cx);
-        let Some(bot) = self.write_bots(cx, |s| s.create_ai_bot("", "")) else {
-            return;
-        };
+        let bot = self.write_bots(cx, |s| s.create_ai_bot("", ""))?;
         self.open_bot_now(&bot, window, cx);
         let input = self.bot_name.clone();
         // メニューやボタンからフォーカスが戻ったあとに移す
@@ -102,6 +101,7 @@ impl AiSettings {
                 s.select_all(window, cx);
             });
         });
+        Some(bot)
     }
 
     /// その bot を開く（AI bot の画面の「bot を編集」から）。
@@ -246,7 +246,9 @@ impl AiSettings {
                 .tooltip("bot を追加")
                 .ghost()
                 .small()
-                .on_click(cx.listener(|this, _, window, cx| this.add_bot(window, cx))),
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.add_bot(window, cx);
+                })),
         );
         let mut list = col()
             .id("ai-bots")
