@@ -1208,19 +1208,22 @@ fn app_keys_work_inside_the_page(cx: &mut TestAppContext) {
         .unwrap();
     press_in_page(cx, &world, window, tab, key("f11", "ctrl-cmd-f"));
     assert!(fullscreen(cx), "全画面になる");
-    // AI チャットのキー（macOS の ⌘J）。Windows と Linux の Ctrl+J は、Chrome と同じくダウンロード
+    // ダウンロードの一覧（Chrome と同じく Ctrl+J、macOS は ⌥⌘L）
+    press_in_page(cx, &world, window, tab, key("ctrl-j", "cmd-alt-l"));
+    assert_eq!(
+        cx.update(|cx| view.read(cx).modal.clone()),
+        Modal::Downloads,
+        "ダウンロードの一覧が出る"
+    );
+    ui(cx, window, |window, cx| window.press("escape", cx));
+    assert_eq!(cx.update(|cx| view.read(cx).modal.clone()), Modal::None);
+    // AI チャットのキー（macOS の ⌘J）。AI チャットを閉じるとページも隠れるので、最後に確かめる
     #[cfg(target_os = "macos")]
     press_in_page(cx, &world, window, tab, "cmd-j");
     #[cfg(target_os = "macos")]
     assert!(
         !cx.update(|cx| view.read(cx).ai_open),
         "AI チャットを閉じる"
-    );
-    press_in_page(cx, &world, window, tab, key("ctrl-j", "cmd-alt-l"));
-    assert_eq!(
-        cx.update(|cx| view.read(cx).modal.clone()),
-        Modal::Downloads,
-        "ダウンロードの一覧が出る"
     );
 }
 
