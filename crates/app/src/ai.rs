@@ -19,6 +19,7 @@ use malakt_ai::slack;
 use malakt_ai::watch;
 use malakt_ai::wire::{self, Media, Reply, ToolCall, Turn, Wire};
 use malakt_ai::{clip_tail, tools, Effort, Provider, MAX_TOOL_OUTPUT_CHARS};
+use malakt_core::bots::AiBot;
 use serde_json::Value;
 
 use crate::db::{self, Db};
@@ -126,6 +127,8 @@ const EFFORTS_SETTING: &str = "ai.efforts";
 const LEGACY_EFFORT_SETTING: &str = "ai.effort";
 const MAX_MODEL_NAMES: usize = 300;
 const CHATS_SETTING: &str = "ai.chats";
+/// 最後に選んだ AI bot の ID。新しい会話は、この bot と話す。
+const BOT_SETTING: &str = "ai.bot";
 /// アプリが自動で始めた AI の実行の記録。
 const RUNS_SETTING: &str = "ai.runs";
 /// 残しておく会話の数。超えたら、古いものから消す。
@@ -197,6 +200,8 @@ pub struct ChatInfo {
     pub title: SharedString,
     /// この会話を始めたタスク。
     pub task: Option<String>,
+    /// この会話の AI bot。前の版の会話にはない（最初の bot と話したものにする）。
+    pub bot: Option<String>,
     pub updated: i64,
 }
 
@@ -699,8 +704,8 @@ pub struct ShellLine {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Decision {
     Allow,
-    /// このチャットの間、シェルのコマンドを確認なしで実行する
-    AllowShellAlways,
+    /// このチャットの間、同じ種類の操作（ツール）を確認なしで実行する
+    AllowAlways,
     Deny,
 }
 
@@ -708,6 +713,8 @@ pub enum Decision {
 pub struct Pending {
     pub text: SharedString,
     pub shell: bool,
+    /// 確認しているツールの名前。「このチャットでは常に許可」で、この名前を覚える。
+    pub tool: String,
     answer: async_channel::Sender<Decision>,
 }
 
@@ -782,8 +789,8 @@ pub struct Session {
     running: Option<shell::Handle>,
     /// 今動いているのは、シェルに自分で打ったコマンド。
     pub own_command: bool,
-    /// シェルのコマンドを、確認なしで実行する（このチャットの間）。
-    pub allow_shell: bool,
+    /// このチャットの間、確認なしで実行するツールの名前（「このチャットでは常に許可」を選んだもの）。
+    pub allowed: Vec<String>,
     /// AI のコマンドが動くシェル。メッセージを送るたびに、開いているタブから決めて AI に伝える。
     pub turn_shell: Shell,
     /// オート実行。オンの間、コマンドの実行とタスクの削除を確認なしで行う。標準はオフ。
@@ -859,6 +866,8 @@ pub struct Session {
     sending_files: Vec<String>,
     /// ユーザーが今開いているワークスペース。画面が書き込む。
     pub workspace: Option<String>,
+    /// 今の会話の AI bot の ID。`None` や消えた bot なら、最初の bot と話す。
+    pub bot: Option<String>,
     /// 並列の会話を動かすための、裏の会話。保存も自動の処理もしない。
     worker: bool,
     /// 振り分けに使うモデル（サービスごと）。なければ今のモデル。
@@ -926,6 +935,7 @@ impl Session {
         let mut chats = Vec::new();
         let mut model_names = HashMap::new();
         let mut current = None;
+        let bot;
         let mut legacy_chat = false;
         let mut runs = Vec::new();
         let arrange;
@@ -1002,6 +1012,7 @@ impl Session {
                     ],
                 })
                 .unwrap_or_default();
+            bot = read(BOT_SETTING).filter(|b| !b.is_empty());
             if let Some(names) =
                 read(MODEL_NAMES_SETTING).and_then(|v| serde_json::from_str(&v).ok())
             {
@@ -1017,6 +1028,7 @@ impl Session {
                             id: id.to_owned(),
                             title: v["title"].as_str().unwrap_or_default().to_owned().into(),
                             task: v["task"].as_str().map(str::to_owned),
+                            bot: v["bot"].as_str().map(str::to_owned),
                             updated: v["updated"].as_i64().unwrap_or(0),
                         });
                     }
@@ -1134,7 +1146,7 @@ impl Session {
             history: Vec::new(),
             running: None,
             own_command: false,
-            allow_shell: false,
+            allowed: Vec::new(),
             turn_shell: Shell::standard(),
             auto_run,
             chat_window: None,
@@ -1187,6 +1199,7 @@ impl Session {
             next_file: 0,
             sending_files: Vec::new(),
             workspace: None,
+            bot,
             worker,
             coordinators,
             routing: Vec::new(),
@@ -1376,7 +1389,8 @@ impl Session {
             .iter()
             .map(|c| {
                 serde_json::json!({
-                    "id": c.id, "title": c.title, "task": c.task, "updated": c.updated,
+                    "id": c.id, "title": c.title, "task": c.task, "bot": c.bot,
+                    "updated": c.updated,
                 })
             })
             .collect();
@@ -1425,6 +1439,7 @@ impl Session {
                 id,
                 title,
                 task: self.chat_task.as_ref().map(|(id, _)| id.clone()),
+                bot: self.bot.clone(),
                 updated: malakt_core::now_ms(),
             },
         );
@@ -1582,6 +1597,65 @@ impl Session {
 
     /// 別の会話を裏で始める。終わったら、会話の一覧に足す。
     fn start_parallel(&mut self, queued: Queued, cx: &mut Context<Self>) {
+        let bot = self.bot.clone();
+        self.start_parallel_as(queued, bot, None, cx);
+    }
+
+    /// 別の bot に仕事を渡す（`hand_off_to_bot`）。その bot の並列の会話で動き、終わると会話の一覧に残る。
+    pub(crate) fn hand_off(
+        &mut self,
+        bot_id: &str,
+        message: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<String, String> {
+        if self.worker {
+            return Err("並列の会話からは、ほかの bot に渡せません".into());
+        }
+        let message = message.trim();
+        if message.is_empty() {
+            return Err("message が空です".into());
+        }
+        let bot = self
+            .db
+            .read(cx)
+            .store
+            .ai_bot(bot_id)
+            .map_err(|e| e.to_string())?;
+        if self.current_bot(cx)?.id == bot.id {
+            return Err(format!("「{}」は今話している bot です", bot.name));
+        }
+        if self.running_parallel() >= MAX_PARALLEL {
+            return Err(format!(
+                "並列の会話が {MAX_PARALLEL} つ動いています。終わってから渡してください"
+            ));
+        }
+        let queued = Queued {
+            text: message.to_owned(),
+            place: self.place.clone(),
+            attached: Vec::new(),
+            attached_workspaces: Vec::new(),
+            files: Vec::new(),
+        };
+        let before = self.parallel.len();
+        self.start_parallel_as(queued, Some(bot.id.clone()), Some(&bot.name), cx);
+        if self.parallel.len() == before {
+            return Err(self.error.take().map_or_else(
+                || format!("「{}」に渡せませんでした", bot.name),
+                |e| e.to_string(),
+            ));
+        }
+        cx.notify();
+        Ok(serde_json::json!({"started": true, "bot": bot.name}).to_string())
+    }
+
+    /// 並列の会話を `bot` で始める。`label` があれば、入力欄の上の題の前に出す（渡した先の bot の名前）。
+    fn start_parallel_as(
+        &mut self,
+        queued: Queued,
+        bot: Option<String>,
+        label: Option<&str>,
+        cx: &mut Context<Self>,
+    ) {
         let (db, config) = (self.db.clone(), self.config.clone());
         let copy = (
             self.provider,
@@ -1610,6 +1684,7 @@ impl Session {
             ) = copy;
             w.local_server = local.0;
             w.local_lacks = local.1;
+            w.bot = bot;
             w.attached = queued.attached.clone();
             w.attached_workspaces = queued.attached_workspaces.clone();
             w.files = queued.files.clone();
@@ -1631,13 +1706,16 @@ impl Session {
         let watch = cx.observe(&worker, |this, worker, cx| {
             this.parallel_changed(&worker, cx)
         });
+        let title = clip_chars(
+            queued.text.lines().next().unwrap_or_default(),
+            MAX_TITLE_CHARS,
+        );
         self.parallel.push(Parallel {
             session: worker,
-            title: clip_chars(
-                queued.text.lines().next().unwrap_or_default(),
-                MAX_TITLE_CHARS,
-            )
-            .into(),
+            title: match label {
+                Some(name) => format!("{name}: {title}").into(),
+                None => title.into(),
+            },
             done: false,
             error: None,
             _watch: watch,
@@ -1657,7 +1735,7 @@ impl Session {
         if w.busy {
             return;
         }
-        let (id, json) = (w.conversation.clone(), w.chat_json());
+        let (id, json, bot) = (w.conversation.clone(), w.chat_json(), w.bot.clone());
         let error = w.items.iter().rev().find_map(|item| match item {
             Item::Error(e) => Some(e.clone()),
             _ => None,
@@ -1671,6 +1749,7 @@ impl Session {
                     id,
                     title,
                     task: None,
+                    bot,
                     updated: malakt_core::now_ms(),
                 },
             );
@@ -1897,7 +1976,10 @@ impl Session {
         let turns = turns.split_off(turns.len() - (self.turns.len() - start));
         let skip = self.items.len().saturating_sub(MAX_SAVED_ITEMS);
         let items: Vec<Value> = self.items[skip..].iter().map(item_json).collect();
-        serde_json::json!({"id": self.conversation, "items": items, "turns": turns}).to_string()
+        serde_json::json!({
+            "id": self.conversation, "bot": self.bot, "items": items, "turns": turns,
+        })
+        .to_string()
     }
 
     fn load_chat(&mut self, chat: &Value) {
@@ -1942,6 +2024,52 @@ impl Session {
         if let Some(id) = chat["id"].as_str().filter(|id| !id.is_empty()) {
             self.conversation = id.to_owned();
         }
+        if let Some(bot) = chat["bot"].as_str().filter(|b| !b.is_empty()) {
+            self.bot = Some(bot.to_owned());
+        }
+    }
+
+    // ---- AI bot ----
+
+    /// 今の会話の AI bot。
+    pub fn current_bot(&self, cx: &App) -> Result<AiBot, String> {
+        self.db
+            .read(cx)
+            .store
+            .ai_bot_or_first(self.bot.as_deref())
+            .map_err(|e| format!("AI bot を読めませんでした: {e}"))
+    }
+
+    /// 話す AI bot を変える。今の会話が空ならそのまま、話していたら、その bot のいちばん新しい会話を
+    /// 開く（なければ新しい会話にする）。今の会話は一覧に残る。
+    pub fn set_bot(&mut self, id: &str, cx: &mut Context<Self>) {
+        let (first, exists) = {
+            let store = &self.db.read(cx).store;
+            let first = store.ai_bot_or_first(None).map(|b| b.id).ok();
+            (first, store.ai_bot(id).is_ok())
+        };
+        if !exists {
+            self.error = Some(format!("AI bot {id} がありません").into());
+            cx.notify();
+            return;
+        }
+        let now = self.current_bot(cx).map(|b| b.id).ok();
+        if now.as_deref() == Some(id) {
+            return;
+        }
+        if !self.save_setting(BOT_SETTING, id, cx) {
+            return;
+        }
+        if !self.items.is_empty() || self.busy {
+            let of_bot = |c: &ChatInfo| c.bot.as_deref().or(first.as_deref()) == Some(id);
+            match self.chats.iter().find(|c| of_bot(c)).map(|c| c.id.clone()) {
+                Some(chat) => self.open_chat(&chat, cx),
+                None => self.clear(cx),
+            }
+        }
+        self.bot = Some(id.to_owned());
+        self.save_index(cx);
+        cx.notify();
     }
 
     /// この実行で使うルール。グローバルのものは最初の指示に、ワークスペースのものはメッセージに添える。
@@ -3663,7 +3791,7 @@ impl Session {
     fn reset_chat(&mut self) {
         self.turns.clear();
         self.items.clear();
-        self.allow_shell = false;
+        self.allowed.clear();
         self.attached.clear();
         self.attached_workspaces.clear();
         self.files.clear();
@@ -4162,8 +4290,8 @@ impl Session {
         let Some(pending) = self.pending.take() else {
             return;
         };
-        if decision == Decision::AllowShellAlways {
-            self.allow_shell = true;
+        if decision == Decision::AllowAlways && !self.allowed.contains(&pending.tool) {
+            self.allowed.push(pending.tool.clone());
         }
         // 待っている側がもう止まっていれば、答えは要らない
         let _ = pending.answer.try_send(decision);
@@ -4359,6 +4487,15 @@ impl Session {
         let system = this
             .update(cx, |s, cx| {
                 let (global, mut extra) = s.rules(cx)?;
+                // アプリが始めた実行は、bot ではなくアプリとして動く
+                let bot = if s.auto {
+                    None
+                } else {
+                    Some(s.current_bot(cx)?)
+                };
+                if let Some(bot) = &bot {
+                    extra = format!("{}\n{extra}", tools::bot_memory_note(bot));
+                }
                 if let GithubAccount::Login(login) = &s.github {
                     extra = format!("{}\n{extra}", github::account_note(login));
                 }
@@ -4370,7 +4507,7 @@ impl Session {
                 if let Some(Turn::User(message)) = s.turns.last_mut() {
                     message.push_str(&note);
                 }
-                Ok::<_, String>(tools::system_prompt(&global))
+                Ok::<_, String>(tools::system_prompt_as(bot.as_ref(), &global))
             })
             .map_err(gone)??;
         let mut recovered = false;
@@ -4774,7 +4911,7 @@ impl Session {
             let (tx, rx) = async_channel::bounded(1);
             let asked = this
                 .update(cx, |s, cx| {
-                    if s.auto_run || name == tools::RUN_SHELL && s.allow_shell {
+                    if s.auto_run || s.allowed.iter().any(|t| t == name) {
                         return false;
                     }
                     let text = if app_tool {
@@ -4790,6 +4927,7 @@ impl Session {
                     s.pending = Some(Pending {
                         text: text.into(),
                         shell: name == tools::RUN_SHELL,
+                        tool: name.to_owned(),
                         answer: tx,
                     });
                     cx.notify();

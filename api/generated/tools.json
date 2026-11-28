@@ -1152,6 +1152,150 @@
       "writes": true
     },
     {
+      "name": "list_ai_bots",
+      "group": "data",
+      "description": "AI bot の一覧を返す。bot ごとに名前・インストラクション・アイコン・色・動き（motion）・覚えたこと（memories）がある。ユーザーは bot を選んで話し、選んだ bot のインストラクションに従って答える。",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "create_ai_bot",
+      "group": "data",
+      "description": "AI bot を足す。アイコンは set_bot_icon で変える。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "名前（40 文字まで）"
+          },
+          "instructions": {
+            "type": "string",
+            "description": "この bot への指示。口調・役割・得意なことなど（8000 文字まで）"
+          },
+          "motion": {
+            "type": "string",
+            "enum": [
+              "still",
+              "float",
+              "bounce",
+              "sway",
+              "spin",
+              "pulse"
+            ],
+            "description": "アイコンの動き。なし / ふわふわ / ぴょんぴょん / ゆらゆら / くるくる / どきどき"
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "writes": true
+    },
+    {
+      "name": "update_ai_bot",
+      "group": "data",
+      "description": "AI bot を変える。渡した項目だけが変わる。アイコンと色は set_bot_icon で変える。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string",
+            "description": "名前（40 文字まで）"
+          },
+          "instructions": {
+            "type": "string",
+            "description": "この bot への指示（8000 文字まで）"
+          },
+          "motion": {
+            "type": "string",
+            "enum": [
+              "still",
+              "float",
+              "bounce",
+              "sway",
+              "spin",
+              "pulse"
+            ],
+            "description": "アイコンの動き。なし / ふわふわ / ぴょんぴょん / ゆらゆら / くるくる / どきどき"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "additionalProperties": false
+      },
+      "writes": true
+    },
+    {
+      "name": "delete_ai_bot",
+      "group": "data",
+      "description": "AI bot を削除する。最後の 1 つは消せない。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "additionalProperties": false
+      },
+      "writes": true
+    },
+    {
+      "name": "remember_for_bot",
+      "group": "data",
+      "description": "bot に覚えさせる。ユーザーの好み、直されたこと、これから先も覚えておいてほしいことを 1 文で書く。覚えたことは、その bot と話すたびにメッセージに添えられる。同じものは 1 つだけ残る。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "bot_id": {
+            "type": "string"
+          },
+          "fact": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "bot_id",
+          "fact"
+        ],
+        "additionalProperties": false
+      },
+      "writes": true
+    },
+    {
+      "name": "forget_for_bot",
+      "group": "data",
+      "description": "bot が覚えたことを 1 つ消す。fact は list_ai_bots の memories にある文そのまま。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "bot_id": {
+            "type": "string"
+          },
+          "fact": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "bot_id",
+          "fact"
+        ],
+        "additionalProperties": false
+      },
+      "writes": true
+    },
+    {
       "name": "get_pomodoro",
       "group": "data",
       "description": "ポモドーロタイマーの今の状態（段 phase: work / short_break / long_break、run: ready / running / paused、残り秒、作業しているタスク、済んだ作業の数）、設定、今日の作業の合計を返す。",
@@ -2929,7 +3073,7 @@
     {
       "name": "find_icons",
       "group": "app",
-      "description": "ワークスペースに付けられるアイコンを探す。query は英語か日本語の言葉。",
+      "description": "ワークスペースと AI bot に付けられるアイコンを探す。query は英語か日本語の言葉。",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -2953,6 +3097,39 @@
       "name": "set_workspace_icon",
       "group": "app",
       "description": "ワークスペースのアイコンと色を変える。icon は find_icons で見つけた名前（null で最初のアイコン）、image_path は icon の代わりに使う画像ファイル（PNG・JPEG・SVG）の絶対パス（先頭の ~ はホーム）、color は red / orange / yellow / green / teal / blue / purple / pink（null で文字と同じ色）。渡した項目だけが変わる。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "icon": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "image_path": {
+            "type": "string"
+          },
+          "color": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "additionalProperties": false
+      },
+      "view": true
+    },
+    {
+      "name": "set_bot_icon",
+      "group": "app",
+      "description": "AI bot のアイコンと色を変える。icon・image_path・color の書き方は set_workspace_icon と同じ。渡した項目だけが変わる。",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -3272,6 +3449,28 @@
           }
         },
         "required": [],
+        "additionalProperties": false
+      },
+      "session": true
+    },
+    {
+      "name": "hand_off_to_bot",
+      "group": "app",
+      "description": "ほかの AI bot に仕事を渡す。渡した bot が並列の会話で message を受け取って動き、終わると会話の一覧に残る。ユーザーが別の bot に頼むよう言ったときや、ほかの bot のインストラクションに合う仕事のときに使う。bot_id は list_ai_bots で調べる。message には、渡した先の bot がそれだけで動けるように、頼むことを全部書く。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "bot_id": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "bot_id",
+          "message"
+        ],
         "additionalProperties": false
       },
       "session": true

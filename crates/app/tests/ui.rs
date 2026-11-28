@@ -2468,16 +2468,7 @@ fn the_gear_opens_settings_with_everything_inside(cx: &mut TestAppContext) {
         assert!(view.appearance_pinned);
         assert_eq!(view.appearance_section, Section::People);
     });
-    // キー操作
-    ui(cx, window, |window, cx| {
-        window.click(nav(Section::Keys), cx)
-    });
-    ui(cx, window, |window, _| {
-        assert!(window.find("app-keys").visible())
-    });
-
-    // 新しいウィンドウ。目次の下のほうは、目次をスクロールして出す
-    let before = cx.update(|cx| cx.windows().len());
+    // キー操作。目次の下のほうは、目次をスクロールして出す
     ui(cx, window, |window, cx| {
         window.scroll(
             nav(Section::People),
@@ -2485,6 +2476,15 @@ fn the_gear_opens_settings_with_everything_inside(cx: &mut TestAppContext) {
             cx,
         )
     });
+    ui(cx, window, |window, cx| {
+        window.click(nav(Section::Keys), cx)
+    });
+    ui(cx, window, |window, _| {
+        assert!(window.find("app-keys").visible())
+    });
+
+    // 新しいウィンドウ
+    let before = cx.update(|cx| cx.windows().len());
     ui(cx, window, |window, cx| {
         window.click(nav(Section::Window), cx)
     });
@@ -4055,7 +4055,11 @@ fn customize_settings_are_searched(cx: &mut TestAppContext) {
     });
     ui(cx, window, |window, cx| {
         assert!(!nav(window, 0));
-        window.click(("customize-nav", 6usize), cx)
+        let behavior = CustomizeSection::ALL
+            .iter()
+            .position(|s| *s == CustomizeSection::AiBehavior)
+            .unwrap();
+        window.click(("customize-nav", behavior), cx)
     });
     assert!(cx.update(|cx| {
         let v = view.read(cx);
@@ -7419,8 +7423,12 @@ fn the_ai_shell_is_chosen_in_customize(cx: &mut TestAppContext) {
     ui(cx, window, |window, cx| {
         view.update(cx, |v, cx| v.open_appearance(window, cx))
     });
+    let behavior = malakt_mahoz::state::CustomizeSection::ALL
+        .iter()
+        .position(|s| *s == malakt_mahoz::state::CustomizeSection::AiBehavior)
+        .unwrap();
     ui(cx, window, |window, cx| {
-        window.click(("customize-nav", 6usize), cx)
+        window.click(("customize-nav", behavior), cx)
     });
     ui(cx, window, |window, cx| {
         assert!(window.find("shell-choice").visible());

@@ -780,6 +780,36 @@ fn deleting_asks_first(cx: &mut TestAppContext) {
     ui(cx, window, |window, cx| window.click("ai-allow", cx));
     assert!(all_tasks(cx).is_empty());
     assert!(!read(cx, |s| s.busy));
+
+    // 「このチャットでは常に許可」を選ぶと、同じ種類の操作は、この会話の間は聞かれない
+    let mut tasks = Vec::new();
+    for title in ["a", "b"] {
+        let made = cx.update(|cx| {
+            db::shared(cx).update(cx, |db, _| {
+                db.store
+                    .create_task(
+                        None,
+                        &TaskDraft {
+                            title: title.into(),
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap()
+            })
+        });
+        tasks.push(made.id);
+    }
+    world.reply(tool_reply("t3", "delete_task", json!({"id": tasks[0]})));
+    world.reply(tool_reply("t4", "delete_task", json!({"id": tasks[1]})));
+    world.reply(text_reply("2 つ削除しました。"));
+    say(cx, window, &pane, "a と b を消して");
+    ui(cx, window, |window, cx| window.click("ai-allow-always", cx));
+    assert!(all_tasks(cx).is_empty(), "2 つめは聞かれずに消える");
+    assert!(read(cx, |s| s.pending.is_none()));
+    assert_eq!(
+        read(cx, |s| s.allowed.clone()),
+        vec!["delete_task".to_owned()]
+    );
 }
 
 /// シェルのコマンドは確認のあとで動き、コマンドと出力がシェルに出て、AI に結果が返る。
@@ -845,7 +875,7 @@ fn shell_commands_run_after_confirmation(cx: &mut TestAppContext) {
     assert!(read(cx, |s| s.pending.is_none()));
     // 新しい会話にすると、また聞かれる
     ui(cx, window, |window, cx| window.click("ai-new-chat", cx));
-    assert!(!read(cx, |s| s.allow_shell));
+    assert!(read(cx, |s| s.allowed.is_empty()));
     assert!(read(cx, |s| s.items.is_empty()));
 }
 
@@ -5421,4 +5451,84 @@ fn the_ai_promo_can_switch_to_local_ai(cx: &mut TestAppContext) {
         .iter()
         .all(|u| u.starts_with("http://127.0.0.1:")));
     assert!(world.fetched.lock().unwrap().is_empty());
+}
+
+/// bot ごとに名前とインストラクションが最初の指示に入り、覚えたことはメッセージに添える。
+/// bot を変えると、その bot の会話になり、戻すと前の会話が開く。
+#[gpui_kit::test]
+fn each_bot_talks_with_its_own_instructions_and_chats(cx: &mut TestAppContext) {
+    let mut store = Store::open_in_memory().unwrap();
+    let first = store.ai_bots().unwrap().remove(0);
+    let helper = store
+        .create_ai_bot("秘書", "語尾に「です」を付けて短く答える")
+        .unwrap();
+    store
+        .remember_ai_bot(&helper.id, "金曜の午後は会議を入れない")
+        .unwrap();
+    let world = start_with(cx, store);
+    world.keys.set(Provider::Claude, "sk-ant-1").unwrap();
+    let (window, view) = open(cx, wide());
+    let pane = open_chat(cx, window, &view);
+
+    world.reply(text_reply("はい。"));
+    say(cx, window, &pane, "こんにちは");
+    let system = |n: usize| {
+        world.sent()[n].2["system"][0]["text"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    assert!(system(0).contains("「AI bot」という名前"), "{}", system(0));
+    assert!(!system(0).contains("秘書"));
+    let first_chat = read(cx, |s| s.chat_id().to_owned());
+
+    // 秘書に変えると、話していた会話は一覧に残り、新しい会話になる
+    let id = helper.id.clone();
+    session(cx).update(cx, |s, cx| s.set_bot(&id, cx));
+    cx.run_until_parked();
+    assert!(read(cx, |s| s.items.is_empty()));
+    assert_eq!(read(cx, |s| s.bot.clone()), Some(helper.id.clone()));
+    world.reply(text_reply("承知です。"));
+    say(cx, window, &pane, "予定を入れて");
+    assert!(system(1).contains("「秘書」という名前"), "{}", system(1));
+    assert!(system(1).contains("語尾に「です」を付けて短く答える"));
+    let message = world.sent()[1].2["messages"][0]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        message.contains("- 金曜の午後は会議を入れない"),
+        "{message}"
+    );
+    assert!(!system(1).contains("金曜の午後"));
+    ui(cx, window, |window, _| {
+        assert!(window.find("ai-bot-pick").visible());
+    });
+
+    // 最初の bot に戻すと、その bot と話していた会話が開く
+    let id = first.id.clone();
+    session(cx).update(cx, |s, cx| s.set_bot(&id, cx));
+    cx.run_until_parked();
+    assert_eq!(read(cx, |s| s.chat_id().to_owned()), first_chat);
+    assert_eq!(
+        read(cx, |s| s.items.first().cloned()),
+        Some(Item::User("こんにちは".into()))
+    );
+    let bots: Vec<Option<String>> = read(cx, |s| s.chats.iter().map(|c| c.bot.clone()).collect());
+    assert!(bots.contains(&Some(helper.id.clone())), "{bots:?}");
+
+    // 上の名前のメニューで「bot を追加」を押すと、足した bot の設定が開き、その bot と話す
+    ui(cx, window, |window, cx| window.click("ai-bot-pick", cx));
+    ui(cx, window, |window, cx| {
+        window.press("up", cx);
+        window.press("up", cx);
+        window.press("enter", cx);
+    });
+    cx.run_until_parked();
+    let added = cx.update(|cx| db::shared(cx).read(cx).store.ai_bots().unwrap());
+    assert_eq!(added.len(), 3, "{added:?}");
+    assert_eq!(read(cx, |s| s.bot.clone()), Some(added[2].id.clone()));
+    ui(cx, window, |window, _| {
+        assert!(window.find("ai-bot-name").visible());
+    });
 }
