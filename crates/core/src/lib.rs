@@ -34,6 +34,7 @@ pub mod alert;
 pub mod archive;
 pub mod attachment;
 pub mod bulk;
+pub mod caldav;
 pub mod calendar;
 pub mod defaults;
 pub mod diff;

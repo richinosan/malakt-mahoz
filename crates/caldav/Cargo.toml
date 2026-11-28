@@ -1,0 +1,14 @@
+[package]
+name = "malakt-caldav"
+description = "CalDAV（RFC 4791）のタスク（VTODO）との同期。サーバーとのやり取りと、何を送り・受け取るかの判断"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+base64 = "0.22"
+jiff = "1"
+roxmltree = "0.21"
+serde.workspace = true
+ureq = { version = "3", features = ["platform-verifier"] }

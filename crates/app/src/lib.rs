@@ -7,6 +7,8 @@ pub mod ai_view;
 pub mod autostart;
 pub mod browser;
 pub mod browser_popup;
+pub mod caldav;
+mod caldav_settings;
 mod caret;
 pub mod cli;
 pub mod date_pick;
@@ -158,6 +160,7 @@ pub fn init_with(store: malakt_core::Store, ai: AiConfig, cx: &mut App) {
     term::init(cx);
     downloads::init(cx);
     reminders::init(cx);
+    caldav::init(cx);
     update::init(cx);
     autostart::init(cx);
     theme::init(cx);
@@ -187,6 +190,8 @@ pub fn init_with(store: malakt_core::Store, ai: AiConfig, cx: &mut App) {
         KeyBinding::new("escape", Dismiss, Some("MainView")),
         // API キーを変えている間の Esc は、書きかけのキーを捨てるだけ（設定は閉じない）
         KeyBinding::new("escape", CancelKeyEdit, Some("AiKeyEditor")),
+        // CalDAV のアカウントを書いている間の Esc は、書きかけを捨てるだけ（設定は閉じない）
+        KeyBinding::new("escape", CancelKeyEdit, Some("CalDavForm")),
         KeyBinding::new("ctrl-b", PanePrefix, Some("MainView")),
     ]);
     shortcuts::bind(cx);
