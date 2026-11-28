@@ -401,7 +401,7 @@ pub fn definitions() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "apply_layout",
-            description: "レイアウト（一覧と詳細 / 3 カラム / 重ねる詳細 / カード / 浮いたパネル）を名前で選んで使う。",
+            description: "レイアウト（重ねる詳細 / 一覧と詳細 / 3 カラム / カード / 浮いたパネル）を名前で選んで使う。",
             schema: object(json!({"name": {"type": "string"}}), &["name"]),
         },
         ToolDef {

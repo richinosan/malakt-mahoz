@@ -3509,10 +3509,10 @@ fn layouts_are_chosen_in_settings(cx: &mut TestAppContext) {
     ui(cx, window, |window, cx| {
         view.update(cx, |v, cx| v.open_panel(&task, window, cx))
     });
-    // 最初は、詳細が一覧の右のカラムで、一覧はその分せまくなる
-    let beside = list(cx);
-    assert!(beside < full);
+    // 最初は、詳細が一覧の上に重なり、一覧の幅は変わらない
+    assert_eq!(list(cx), full);
     assert!(cx.update(|cx| Layout::PATTERNS[0].shown(false, cx)));
+    assert_eq!(Layout::PATTERNS[0].name, "重ねる詳細");
 
     ui(cx, window, |window, cx| {
         view.update(cx, |v, cx| v.open_appearance(window, cx))
@@ -3537,32 +3537,41 @@ fn layouts_are_chosen_in_settings(cx: &mut TestAppContext) {
         );
     };
 
-    // 重ねる詳細: 一覧は全幅のままで、詳細がその上に乗る
-    choose(cx, "重ねる詳細");
-    assert_eq!(saved(cx, "panel.overlay").as_deref(), Some("1"));
-    assert_eq!(list(cx), full);
+    // 一覧と詳細: 詳細が一覧の右のカラムで、一覧はその分せまくなる
+    choose(cx, "一覧と詳細");
+    assert_eq!(saved(cx, "panel.overlay").as_deref(), Some("0"));
+    let beside = list(cx);
+    assert!(beside < full);
     // テーマを選んでも、詳細の出し方は変わらない
     section(cx, 0);
     ui(cx, window, |window, cx| {
         window.click(("preset", 1usize), cx)
     });
-    assert_eq!(saved(cx, "panel.overlay").as_deref(), Some("1"));
+    assert_eq!(saved(cx, "panel.overlay").as_deref(), Some("0"));
     ui(cx, window, |window, cx| {
         window.click(("preset", 0usize), cx)
     });
 
+    // 重ねる詳細: 一覧は全幅のままで、詳細がその上に乗る
+    choose(cx, "重ねる詳細");
+    assert_eq!(saved(cx, "panel.overlay"), None);
+    assert_eq!(list(cx), full);
+
+    // カードと浮いたパネルも、詳細は重ねて一覧の幅を変えない
     choose(cx, "カード");
     assert_eq!(saved(cx, "panel.overlay"), None);
     assert_eq!(saved(cx, "list.cards").as_deref(), Some("1"));
-    assert_eq!(list(cx), beside);
+    assert_eq!(list(cx), full);
 
     choose(cx, "浮いたパネル");
     assert_eq!(saved(cx, "list.cards"), None);
     assert_eq!(saved(cx, "panels.float").as_deref(), Some("1"));
+    assert_eq!(list(cx), full);
 
     // 3 カラムは AI チャットも右に並べ、「一覧と詳細」はチャットを閉じる
     choose(cx, "3 カラム");
     assert_eq!(saved(cx, "panels.float"), None);
+    assert_eq!(saved(cx, "panel.overlay").as_deref(), Some("0"));
     assert!(cx.update(|cx| view.read(cx).ai_docked(cx)));
     // チャットを開いても、Esc は「カスタマイズ」を閉じる
     assert!(cx.update(|cx| view.read(cx).modal == Modal::Appearance));
@@ -3572,9 +3581,16 @@ fn layouts_are_chosen_in_settings(cx: &mut TestAppContext) {
     assert!(cx.update(|cx| view.read(cx).modal == Modal::None));
 
     // 起動し直しても残る
-    cx.update(|cx| theme::apply_layout(&Layout::PATTERNS[2], cx).unwrap());
+    cx.update(|cx| theme::apply_layout(&Layout::PATTERNS[1], cx).unwrap());
     cx.update(theme::init);
-    assert_eq!(saved(cx, "panel.overlay").as_deref(), Some("1"));
+    assert_eq!(saved(cx, "panel.overlay").as_deref(), Some("0"));
+    assert!(!cx.update(|cx| theme::overlay(cx)));
+    // 前の版で「重ねる詳細」を選んで保存した値も、重ねるとして読む
+    cx.update(|cx| {
+        db::shared(cx).update(cx, |db, _| {
+            db.store.set_setting("panel.overlay", Some("1")).unwrap()
+        })
+    });
     assert!(cx.update(|cx| theme::overlay(cx)));
 }
 
@@ -4219,11 +4235,13 @@ fn tree_caret_has_room_to_press(cx: &mut TestAppContext) {
     });
 }
 
-/// タスクの詳細は、左の境界をドラッグして幅を変えられる。幅は保存され、一覧より広くはならない。
+/// 「一覧と詳細」のタスクの詳細は、左の境界をドラッグして幅を変えられる。幅は保存され、一覧より広くはならない。
 #[gpui_kit::test]
 fn detail_panel_resizes_and_keeps_its_width(cx: &mut TestAppContext) {
     use malakt_mahoz::state::{PANEL_MAX, PANEL_MIN, PANEL_WIDTH};
     start(cx);
+    // 詳細を一覧の右のカラムにする「一覧と詳細」のレイアウトで確かめる
+    cx.update(|cx| malakt_mahoz::theme::set_overlay(false, cx).unwrap());
     let scale = malakt_mahoz::UI_SCALE;
     let (window, view) = open(cx, win(1600., 800.));
     ui(cx, window, |window, cx| {
