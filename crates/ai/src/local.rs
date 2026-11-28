@@ -367,6 +367,7 @@ pub fn endpoint(server: &Server, key: &str) -> Endpoint {
         fallbacks: false,
         // 手元のサーバーは、同じ頭の部分を自分で使い回す（キャッシュの指定はない）
         prefix_ttl: None,
+        plan: false,
     }
 }
 
