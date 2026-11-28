@@ -375,6 +375,49 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     CREATE INDEX work_logs_task ON work_logs(task_id, ended_at);
     CREATE INDEX work_logs_ended ON work_logs(ended_at);
     "#,
+    // 23: CalDAV のサーバーとの同期（`caldav`）。パスワードは OS のキーチェーンに置き、ここには入れない。
+    //     カレンダー 1 つをワークスペース 1 つにつなぐ。items はサーバーのタスクとアプリのタスクのつながりで、
+    //     ics はサーバーの中身、base は前の同期でそろっていた項目（JSON）。people は担当者の URI と担当者。
+    //     その端末だけのものなので、元に戻す相手にも書き出しにも入れない
+    r#"
+    CREATE TABLE caldav_accounts (
+        id TEXT PRIMARY KEY NOT NULL,
+        url TEXT NOT NULL,
+        username TEXT NOT NULL,
+        addresses TEXT NOT NULL DEFAULT '[]',
+        created_at INTEGER NOT NULL
+    ) STRICT;
+    CREATE TABLE caldav_calendars (
+        id TEXT PRIMARY KEY NOT NULL,
+        account_id TEXT NOT NULL REFERENCES caldav_accounts(id) ON DELETE CASCADE,
+        href TEXT NOT NULL,
+        name TEXT NOT NULL,
+        read_only INTEGER NOT NULL DEFAULT 0,
+        workspace_id TEXT,
+        token TEXT,
+        synced_at INTEGER,
+        position INTEGER NOT NULL DEFAULT 0,
+        UNIQUE (account_id, href)
+    ) STRICT;
+    CREATE UNIQUE INDEX caldav_calendars_workspace ON caldav_calendars(workspace_id)
+        WHERE workspace_id IS NOT NULL;
+    CREATE TABLE caldav_items (
+        calendar_id TEXT NOT NULL REFERENCES caldav_calendars(id) ON DELETE CASCADE,
+        href TEXT NOT NULL,
+        task_id TEXT NOT NULL UNIQUE,
+        uid TEXT NOT NULL,
+        etag TEXT NOT NULL,
+        ics TEXT NOT NULL,
+        base TEXT NOT NULL,
+        PRIMARY KEY (calendar_id, href)
+    ) STRICT;
+    CREATE TABLE caldav_people (
+        account_id TEXT NOT NULL REFERENCES caldav_accounts(id) ON DELETE CASCADE,
+        uri TEXT NOT NULL,
+        person_id TEXT NOT NULL,
+        PRIMARY KEY (account_id, uri)
+    ) STRICT;
+    "#,
 ];
 
 pub(crate) fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {

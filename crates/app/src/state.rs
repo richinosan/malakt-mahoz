@@ -136,13 +136,14 @@ pub enum CustomizeSection {
     Startup,
     Update,
     People,
+    Sync,
     Keys,
     Window,
     Data,
 }
 
 impl CustomizeSection {
-    pub const ALL: [CustomizeSection; 19] = [
+    pub const ALL: [CustomizeSection; 20] = [
         CustomizeSection::Theme,
         CustomizeSection::Layout,
         CustomizeSection::Backdrop,
@@ -159,6 +160,7 @@ impl CustomizeSection {
         CustomizeSection::Startup,
         CustomizeSection::Update,
         CustomizeSection::People,
+        CustomizeSection::Sync,
         CustomizeSection::Keys,
         CustomizeSection::Window,
         CustomizeSection::Data,
@@ -182,6 +184,7 @@ impl CustomizeSection {
             CustomizeSection::Startup => "スタートアップ",
             CustomizeSection::Update => "アップデート",
             CustomizeSection::People => "担当者",
+            CustomizeSection::Sync => "同期",
             CustomizeSection::Keys => "キー操作",
             CustomizeSection::Window => "ウィンドウ",
             CustomizeSection::Data => "データ",
@@ -206,6 +209,7 @@ impl CustomizeSection {
             CustomizeSection::Startup => "power",
             CustomizeSection::Update => "refresh-cw",
             CustomizeSection::People => "users",
+            CustomizeSection::Sync => "calendar-sync",
             CustomizeSection::Keys => "keyboard",
             CustomizeSection::Window => "app-window",
             CustomizeSection::Data => "database",
@@ -225,6 +229,7 @@ impl CustomizeSection {
             | CustomizeSection::Startup
             | CustomizeSection::Update
             | CustomizeSection::People
+            | CustomizeSection::Sync
             | CustomizeSection::Keys
             | CustomizeSection::Window
             | CustomizeSection::Data => "アプリ",
@@ -592,6 +597,8 @@ pub struct MainView {
     pub preview_pick: Option<PreviewPick>,
     /// 「設定」の AI のカテゴリに出す行。
     pub ai_settings: Entity<crate::ai_settings::AiSettings>,
+    /// 「設定」の「同期」。
+    pub caldav_settings: Entity<crate::caldav_settings::CalDavSettings>,
     pub appearance_scroll: gpui_kit::ScrollHandle,
     /// 自分で保存したテーマ。
     pub own_presets: Vec<crate::theme::Preset>,
@@ -685,8 +692,10 @@ impl MainView {
 
         let ai_session = ai::shared(cx);
         let ai_settings = cx.new(|cx| crate::ai_settings::AiSettings::new(window, cx));
+        let caldav_settings = cx.new(|cx| crate::caldav_settings::CalDavSettings::new(window, cx));
         let mut subs = vec![
             cx.observe(&ai_settings, |_, _, cx| cx.notify()),
+            cx.observe(&caldav_settings, |_, _, cx| cx.notify()),
             cx.observe(&db, |this, _, cx| {
                 this.reload(cx);
                 // ロックを解除したら、待っていた AI のおすすめを出す
@@ -731,6 +740,14 @@ impl MainView {
                 }
                 cx.notify();
             }),
+            // CalDAV の同期で失敗したこと・知らせることを出す
+            cx.subscribe(
+                &crate::caldav::shared(cx),
+                |this, _, failed: &crate::caldav::Failed, cx| {
+                    this.error = Some(failed.0.clone());
+                    cx.notify();
+                },
+            ),
             cx.subscribe(
                 &crate::update::shared(cx),
                 |this, _, failed: &crate::update::Failed, cx| {
@@ -1092,6 +1109,7 @@ impl MainView {
             appearance_pinned: false,
             preview_pick: None,
             ai_settings,
+            caldav_settings,
             appearance_scroll: gpui_kit::ScrollHandle::new(),
             own_presets: Vec::new(),
             preset_naming: None,
@@ -5586,6 +5604,9 @@ bundled_icons! {
         "zoom-in",
         "zoom-out",
         "chevron-up",
+        "calendar-sync",
+        "server",
+        "cloud-alert",
     ],
 }
 

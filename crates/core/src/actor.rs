@@ -32,6 +32,8 @@ pub enum Actor {
     Repeat,
     /// 定時タスクで、アプリがタスクを作った。
     Schedule,
+    /// CalDAV のサーバーから受け取った変更。名前はサーバー（`ホスト名`）。
+    Sync(String),
 }
 
 /// 名前から、改行などの制御文字を除き、長すぎる分を切る。
@@ -50,6 +52,11 @@ impl Actor {
             name: clean(name),
             run: run.map(clean).filter(|r| !r.is_empty()),
         }
+    }
+
+    /// CalDAV のサーバー。
+    pub fn sync(name: &str) -> Self {
+        Actor::Sync(clean(name))
     }
 
     /// 外のエージェント。名乗らなかったら「外部エージェント」と出す。
@@ -72,6 +79,7 @@ impl Actor {
             Actor::Reminders => "reminders".into(),
             Actor::Repeat => "repeat".into(),
             Actor::Schedule => "schedule".into(),
+            Actor::Sync(name) => format!("sync:{name}"),
         }
     }
 
@@ -94,6 +102,7 @@ impl Actor {
                 None => Actor::ai(rest, None),
             },
             Some(("mcp", name)) => Actor::agent(name),
+            Some(("sync", name)) => Actor::sync(name),
             _ => Actor::Unknown,
         }
     }
@@ -111,7 +120,12 @@ impl Actor {
     pub fn is_machine(&self) -> bool {
         matches!(
             self,
-            Actor::Ai { .. } | Actor::Agent(_) | Actor::Command | Actor::Repeat | Actor::Schedule
+            Actor::Ai { .. }
+                | Actor::Agent(_)
+                | Actor::Command
+                | Actor::Repeat
+                | Actor::Schedule
+                | Actor::Sync(_)
         )
     }
 
@@ -134,6 +148,8 @@ impl Actor {
             Actor::Command => Some("コマンド".into()),
             Actor::Repeat => Some("繰り返し".into()),
             Actor::Schedule => Some("定時タスク".into()),
+            Actor::Sync(name) if name.is_empty() => Some("CalDAV".into()),
+            Actor::Sync(name) => Some(name.clone()),
             _ => None,
         }
     }
@@ -146,6 +162,7 @@ impl Actor {
             Actor::Ai { run: None, .. } => Some("AI".into()),
             Actor::Agent(_) => Some("外部エージェント".into()),
             Actor::Reminders => Some("リマインダー".into()),
+            Actor::Sync(_) => Some("CalDAV".into()),
             _ => None,
         }
     }
@@ -157,6 +174,7 @@ impl Actor {
             Actor::Agent(_) => "plug",
             Actor::Repeat => "repeat",
             Actor::Schedule => "alarm-clock",
+            Actor::Sync(_) => "refresh-cw",
             _ => "terminal",
         }
     }
@@ -210,6 +228,7 @@ mod tests {
             Actor::Reminders,
             Actor::Repeat,
             Actor::Schedule,
+            Actor::sync("dav.example.com"),
         ];
         for actor in all {
             assert_eq!(Actor::parse(&actor.as_string()), actor, "{actor:?}");

@@ -2270,8 +2270,15 @@ fn the_gear_opens_settings_with_everything_inside(cx: &mut TestAppContext) {
         assert!(window.find("app-keys").visible())
     });
 
-    // 新しいウィンドウ
+    // 新しいウィンドウ。目次の下のほうは、目次をスクロールして出す
     let before = cx.update(|cx| cx.windows().len());
+    ui(cx, window, |window, cx| {
+        window.scroll(
+            nav(Section::People),
+            gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(-1000.))),
+            cx,
+        )
+    });
     ui(cx, window, |window, cx| {
         window.click(nav(Section::Window), cx)
     });
@@ -7771,4 +7778,160 @@ fn repeat_is_chosen_in_place_and_makes_the_next_copy(cx: &mut TestAppContext) {
     ui(cx, window, |window, cx| window.click("task-repeat", cx));
     pick(cx, window, "なし");
     assert!(store(cx, |s| s.repeat(&copy.id).unwrap()).is_none());
+}
+
+/// CalDAV のサーバー（メモリの中）とパスワードの置き場を差し替える。
+fn caldav(
+    cx: &mut TestAppContext,
+    refuse: Option<&'static str>,
+) -> (
+    malakt_caldav::memory::Shared,
+    std::sync::Arc<malakt_mahoz::caldav::MemorySecrets>,
+) {
+    use malakt_caldav::http::{Discovery, Found};
+    use malakt_mahoz::caldav::{CalDav, MemorySecrets};
+    let server = malakt_caldav::memory::Shared::new(malakt_caldav::memory::Memory::new());
+    let secrets = std::sync::Arc::new(MemorySecrets::default());
+    let connect_to = server.clone();
+    let caldav = CalDav {
+        secrets: secrets.clone(),
+        discover: std::sync::Arc::new(move |url, user, password| match refuse {
+            Some(reason) => Err(reason.into()),
+            None => {
+                assert_eq!(
+                    (url, user, password),
+                    ("https://dav.example.com/", "me", "pw")
+                );
+                Ok(Discovery {
+                    base: "https://dav.example.com/dav/".into(),
+                    addresses: vec!["https://id.example.com/users/me".into()],
+                    calendars: vec![Found {
+                        href: "/dav/cal/".into(),
+                        name: "イベントの準備".into(),
+                        read_only: false,
+                    }],
+                })
+            }
+        }),
+        connect: std::sync::Arc::new(move |_, _, _| Box::new(connect_to.clone())),
+    };
+    cx.update(|cx| malakt_mahoz::caldav::connect(caldav, cx));
+    (server, secrets)
+}
+
+/// 「設定」の「同期」を開き、アカウントの欄に入れて Enter で足す。
+fn add_caldav_account(cx: &mut TestAppContext, window: AnyWindowHandle, view: &Entity<MainView>) {
+    ui(cx, window, |window, cx| window.click("open-settings", cx));
+    ui(cx, window, |window, cx| {
+        view.update(cx, |v, cx| {
+            v.show_appearance_section(malakt_mahoz::state::CustomizeSection::Sync, window, cx)
+        })
+    });
+    ui(cx, window, |window, cx| window.click("caldav-add", cx));
+    ui(cx, window, |window, cx| {
+        window.input("https://dav.example.com/", cx)
+    });
+    ui(cx, window, |window, cx| window.click("caldav-user", cx));
+    ui(cx, window, |window, cx| window.input("me", cx));
+    ui(cx, window, |window, cx| window.click("caldav-password", cx));
+    ui(cx, window, |window, cx| {
+        window.input("pw", cx);
+        window.press("enter", cx);
+    });
+    cx.run_until_parked();
+}
+
+/// アカウントを足し、カレンダーを新しいワークスペースにつなぐと、サーバーのタスクが入り、
+/// アプリのタスクがサーバーへ出る。説明の末尾の URL は URL 欄に出る。外してもタスクは残る。
+#[gpui_kit::test]
+fn caldav_calendar_syncs_with_a_workspace(cx: &mut TestAppContext) {
+    start(cx);
+    let (server, secrets) = caldav(cx, None);
+    server.lock().edit(
+        "/dav/cal/r1.ics",
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Other//EN\r\nBEGIN:VTODO\r\nUID:r1\r\n\
+         SUMMARY:記事のレビュー\r\nDESCRIPTION:下書きを読む\\n\\nhttps://tasks.example.com/t/r1\r\n\
+         STATUS:NEEDS-ACTION\r\nEND:VTODO\r\nEND:VCALENDAR\r\n",
+    );
+    let (window, view) = open(cx, wide());
+    cx.run_until_parked();
+    // アカウントを足すまでは、サーバーに触らない
+    assert!(server.lock().calls.is_empty());
+
+    add_caldav_account(cx, window, &view);
+    let accounts = store(cx, |s| s.caldav_accounts().unwrap());
+    assert_eq!(accounts.len(), 1);
+    assert_eq!(accounts[0].label(), "me@dav.example.com");
+    use malakt_mahoz::caldav::Secrets;
+    assert_eq!(secrets.get(&accounts[0].id).unwrap().as_deref(), Some("pw"));
+    // つなぐまでは同期しない
+    assert!(server.lock().calls.is_empty());
+
+    ui(cx, window, |window, cx| {
+        window.click(("caldav-link", 0usize), cx)
+    });
+    pick(cx, window, "新しいワークスペース");
+    cx.run_until_parked();
+    let w = store(cx, |s| s.workspaces().unwrap())
+        .into_iter()
+        .find(|w| w.name == "イベントの準備")
+        .expect("カレンダーの名前のワークスペース");
+    let task = store(cx, |s| {
+        s.tasks(w.id.as_str(), &TaskFilter::default()).unwrap()
+    })
+    .into_iter()
+    .find(|t| t.title == "記事のレビュー")
+    .expect("サーバーのタスク");
+    assert_eq!(task.description, "下書きを読む");
+    assert_eq!(task.urls, vec!["https://tasks.example.com/t/r1".to_owned()]);
+
+    // アプリで足したタスクは、少し待つとサーバーへ出る
+    cx.update(|cx| {
+        view.update(cx, |v, cx| {
+            v.write(cx, |s| {
+                s.add_task_in(Some(&w.id), "会場を押さえる").map(|_| ())
+            })
+        })
+    });
+    cx.executor()
+        .advance_clock(std::time::Duration::from_secs(2));
+    cx.run_until_parked();
+    assert!(server
+        .lock()
+        .objects
+        .values()
+        .any(|(_, ics)| ics.contains("SUMMARY:会場を押さえる")));
+    cx.update(|cx| assert!(view.read(cx).error.is_none()));
+
+    // 外すと、アカウントとパスワードが消え、タスクは両方に残る
+    ui(cx, window, |window, cx| {
+        window.click(("caldav-remove", 0usize), cx)
+    });
+    pick(cx, window, "アカウントを外す");
+    assert!(store(cx, |s| s.caldav_accounts().unwrap()).is_empty());
+    assert_eq!(secrets.get(&accounts[0].id).unwrap(), None);
+    assert_eq!(
+        store(cx, |s| s
+            .tasks(w.id.as_str(), &TaskFilter::default())
+            .unwrap())
+        .len(),
+        2
+    );
+    assert_eq!(server.lock().objects.len(), 2);
+}
+
+/// サーバーに接続できなければ、アカウントは足さず、理由を欄の下に出す。
+#[gpui_kit::test]
+fn caldav_account_that_fails_is_not_added(cx: &mut TestAppContext) {
+    start(cx);
+    caldav(cx, Some("ユーザー名かパスワードが違います"));
+    let (window, view) = open(cx, wide());
+    cx.run_until_parked();
+    add_caldav_account(cx, window, &view);
+    assert!(store(cx, |s| s.caldav_accounts().unwrap()).is_empty());
+    ui(cx, window, |window, _| {
+        assert!(window.find("caldav-form-error").visible());
+        // 欄は開いたまま、直してもう一度送れる
+        assert!(window.find("caldav-url").visible());
+    });
 }

@@ -407,6 +407,7 @@ enum SettingKey {
     McpKeyless,
     McpKeys,
     People,
+    CalDav,
     Keys,
     NewWindow,
     Pomodoro,
@@ -7499,6 +7500,20 @@ impl MainView {
         }
         all.extend([
             Setting::new(Section::People, SettingKey::People, "担当者", None, people),
+            Setting::new(
+                Section::Sync,
+                SettingKey::CalDav,
+                "CalDAV",
+                None,
+                list(&[
+                    "同期",
+                    "サーバー",
+                    "カレンダー",
+                    "Nextcloud",
+                    "リマインダー",
+                    "アカウント",
+                ]),
+            ),
             Setting::new(Section::Keys, SettingKey::Keys, "キー操作", None, keys),
             Setting::new(
                 Section::Window,
@@ -7588,6 +7603,11 @@ impl MainView {
                     .child(self.people_editor(cx))
                     .into_any_element();
             }
+            SettingKey::CalDav => {
+                return edge(div().py_3())
+                    .child(self.caldav_settings.clone())
+                    .into_any_element();
+            }
             SettingKey::Keys => {
                 return edge(div().py_3())
                     .child(self.keys_help(cx))
@@ -7648,6 +7668,7 @@ impl MainView {
                 | SettingKey::AlertTimed
                 | SettingKey::AlertDate
                 | SettingKey::People
+                | SettingKey::CalDav
                 | SettingKey::McpKeys
                 | SettingKey::Keys => unreachable!(),
                 SettingKey::LockNow => feel::gloss(

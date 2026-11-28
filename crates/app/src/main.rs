@@ -61,6 +61,7 @@ fn main() {
             // GitHub のアカウントは、gh にログインしているものを使う
             malakt_mahoz::ai::shared(cx).update(cx, |ai, cx| ai.read_github(cx));
             malakt_mahoz::reminders::connect_system(cx);
+            malakt_mahoz::caldav::connect_system(cx);
             malakt_mahoz::update::connect_system(cx);
             let autostart = malakt_mahoz::autostart::connect_system(cx);
             malakt_mahoz::db::watch(cx);
