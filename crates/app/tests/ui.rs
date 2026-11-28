@@ -1394,17 +1394,21 @@ fn bulk_changes_and_full_new_task_form(cx: &mut TestAppContext) {
     cx.run_until_parked();
     cx.update(|cx| assert_eq!(view.read(cx).selected_ids(), shown[..3]));
 
-    // 期限: 正しくない値は断り、ダイアログを開いたままにする
+    // 期限: 選ばずに変更すると断り、ダイアログを開いたままにする
     ui(cx, window, |window, cx| window.click("bulk-due", cx));
-    set(cx, |v| &v.inputs.bulk_due, "そのうち");
     ui(cx, window, |window, cx| window.click("bulk-due-submit", cx));
     cx.update(|cx| {
         let view = view.read(cx);
         assert_eq!(view.modal, Modal::BulkDue);
         assert!(view.error.is_some());
     });
-    set(cx, |v| &v.inputs.bulk_due, "2026/12/24 午後6時");
-    ui(cx, window, |window, cx| window.click("bulk-due-submit", cx));
+    // ダイアログの中のカレンダーの日付の欄に書いて Enter で変える
+    ui(cx, window, |window, cx| {
+        window.click("pick-date-input", cx);
+        window.input("2026/12/24 午後6時", cx);
+        window.press("enter", cx);
+    });
+    cx.update(|cx| assert_eq!(view.read(cx).modal, Modal::None));
     let due = |cx: &mut TestAppContext, id: &str| store(cx, |s| s.task(id).unwrap().due);
     assert_eq!(due(cx, &shown[1]).as_deref(), Some("2026-12-24 18:00"));
     assert_eq!(due(cx, &shown[3]), None);
@@ -2592,10 +2596,12 @@ fn urls_are_added_and_removed_under_the_title(cx: &mut TestAppContext) {
     assert_eq!(urls(cx).len(), 2);
 }
 
-/// 詳細の期限は、日付の欄と時刻の欄で決める。「明日」「11/27 14時」のような書き方も読み、
-/// 保存すると欄は保存した形に直る。一覧のメニューで日付を変えても時刻は残る。
+/// 詳細の開始日と期限は、値を押すとその場に開くカレンダーで決める。日付の欄は「明日」「11/27 14時」の
+/// ような書き方も読み、Enter で保存して閉じる。カレンダーの日やチップは押すとすぐ保存し、開いたまま
+/// 続けて選べる。選んでいる日をもう 1 度押すと閉じる。書きかけは外を押したときにも保存する。
 #[gpui_kit::test]
-fn due_takes_a_time_and_many_spellings(cx: &mut TestAppContext) {
+fn due_picker_takes_days_times_and_spellings(cx: &mut TestAppContext) {
+    use chrono::{Datelike, NaiveDate};
     use malakt_core::view::{add_days, today};
     start(cx);
     let (window, view) = open(cx, wide());
@@ -2607,12 +2613,14 @@ fn due_takes_a_time_and_many_spellings(cx: &mut TestAppContext) {
     });
     ui(cx, window, |window, cx| window.click(("title", 0usize), cx));
     let due = |cx: &mut TestAppContext| all_tasks(cx)[0].due.clone();
+    let start = |cx: &mut TestAppContext| all_tasks(cx)[0].start.clone();
+    let open_now = |cx: &mut TestAppContext| cx.update(|cx| view.read(cx).date_pick.is_some());
     let shown = |cx: &mut TestAppContext| {
         cx.update(|cx| {
             let inputs = &view.read(cx).inputs;
             (
-                inputs.due.read(cx).value().to_string(),
-                inputs.due_time.read(cx).value().to_string(),
+                inputs.pick_date.read(cx).value().to_string(),
+                inputs.pick_time.read(cx).value().to_string(),
             )
         })
     };
@@ -2627,88 +2635,107 @@ fn due_takes_a_time_and_many_spellings(cx: &mut TestAppContext) {
             window.press("enter", cx);
         });
     };
-
-    // 時刻だけを入れると、今日のその時刻になる
-    type_in(cx, "due-time-input", "14時");
-    assert_eq!(due(cx), Some(format!("{} 14:00", today())));
-    assert_eq!(shown(cx), (today(), "14:00".to_owned()));
-
-    // 日付だけを書き換えても、時刻は残る
-    type_in(cx, "due-input", "明日");
+    let click = |cx: &mut TestAppContext, id: &'static str| {
+        ui(cx, window, |window, cx| window.click(id, cx));
+    };
+    let chip = |cx: &mut TestAppContext, id: &'static str, ix: usize| {
+        ui(cx, window, |window, cx| window.click((id, ix), cx));
+    };
     let tomorrow = add_days(&today(), 1);
+    let slash = |date: &str| {
+        let d = NaiveDate::parse_from_str(date, "%Y-%m-%d").unwrap();
+        format!("{}/{}/{}", d.year(), d.month(), d.day())
+    };
+
+    // 値を押すと開き、日付の欄に「明日」と書いて Enter で保存して閉じる
+    click(cx, "due-value");
+    assert!(open_now(cx));
+    type_in(cx, "pick-date-input", "明日");
+    assert_eq!(due(cx), Some(tomorrow.clone()));
+    assert!(!open_now(cx));
+
+    // 時刻の欄に書くと、日付はそのままで時刻が付く
+    click(cx, "due-value");
+    assert_eq!(shown(cx), (slash(&tomorrow), String::new()));
+    type_in(cx, "pick-time-input", "14時");
     assert_eq!(due(cx), Some(format!("{tomorrow} 14:00")));
-    assert_eq!(shown(cx), (tomorrow.clone(), "14:00".to_owned()));
 
     // 日付の欄に時刻まで書くと、両方が変わる
-    type_in(cx, "due-input", "2027/1/5 午後3時半");
+    click(cx, "due-value");
+    type_in(cx, "pick-date-input", "2027/1/5 午後3時半");
     assert_eq!(due(cx).as_deref(), Some("2027-01-05 15:30"));
-    assert_eq!(shown(cx), ("2027-01-05".to_owned(), "15:30".to_owned()));
-    type_in(cx, "due-time-input", "9:05");
-    assert_eq!(due(cx).as_deref(), Some("2027-01-05 09:05"));
 
-    // 読めない書き方は断り、書いたものと元の期限を残す
-    type_in(cx, "due-time-input", "25時");
-    assert!(cx.update(|cx| view.read(cx).error.is_some()));
-    assert_eq!(due(cx).as_deref(), Some("2027-01-05 09:05"));
-    assert_eq!(shown(cx).1, "25時");
+    // 読めない書き方では保存せず、開いたまま。Esc で書きかけを捨てて閉じる
+    click(cx, "due-value");
+    type_in(cx, "pick-time-input", "25時");
+    assert!(open_now(cx));
+    assert_eq!(due(cx).as_deref(), Some("2027-01-05 15:30"));
+    ui(cx, window, |window, cx| window.press("escape", cx));
+    assert!(!open_now(cx));
+    assert_eq!(due(cx).as_deref(), Some("2027-01-05 15:30"));
 
-    // 時刻を空にすると、日付だけの期限に戻る
-    type_in(cx, "due-time-input", "");
+    // チップは押すとすぐ保存し、開いたまま続けて選べる。日付のチップは時刻を残す
+    click(cx, "due-value");
+    chip(cx, "time-chip", 4);
     assert_eq!(due(cx).as_deref(), Some("2027-01-05"));
-    assert!(cx.update(|cx| view.read(cx).error.is_none()));
+    chip(cx, "time-chip", 0);
+    assert_eq!(due(cx).as_deref(), Some("2027-01-05 09:00"));
+    chip(cx, "date-chip", 1);
+    assert_eq!(due(cx), Some(format!("{tomorrow} 09:00")));
+    assert!(open_now(cx));
+    assert_eq!(shown(cx), (slash(&tomorrow), "09:00".to_owned()));
+    // 選んでいる日をもう 1 度押すと閉じる
+    chip(cx, "date-chip", 1);
+    assert!(!open_now(cx));
 
-    // ボタンで日付を変えても時刻は残り、クリアで両方の欄が空になる
-    type_in(cx, "due-time-input", "2pm");
-    ui(cx, window, |window, cx| window.click(("p-due", 1usize), cx));
-    assert_eq!(due(cx), Some(format!("{tomorrow} 14:00")));
-    assert_eq!(shown(cx), (tomorrow.clone(), "14:00".to_owned()));
-
-    // 書き換えてからほかの場所を押しても保存する
-    cx.update_window(window, |_, window, _| window.activate_window())
-        .unwrap();
-    cx.run_until_parked();
+    // 次の月を出して、カレンダーの日を押す
+    click(cx, "due-value");
+    click(cx, "date-next");
+    let (year, month) = cx.update(|cx| view.read(cx).date_pick.as_ref().unwrap().month);
+    let first = NaiveDate::from_ymd_opt(year, month, 1).unwrap();
     ui(cx, window, |window, cx| {
-        window.click("due-time-input", cx);
-        window.press("secondary-a", cx);
-        window.press("backspace", cx);
-        window.input("18:00", cx);
+        window.click(("date-day", first.num_days_from_ce() as usize), cx)
     });
-    ui(cx, window, |window, cx| window.click("due-input", cx));
-    assert_eq!(due(cx), Some(format!("{tomorrow} 18:00")));
+    assert_eq!(due(cx), Some(format!("{} 09:00", first.format("%Y-%m-%d"))));
 
-    ui(cx, window, |window, cx| window.click(("p-due", 3usize), cx));
-    assert_eq!(due(cx), None);
-    assert_eq!(shown(cx), (String::new(), String::new()));
-
-    // 開始日も同じ書き方を読む
-    type_in(cx, "start-input", "20270104 10時");
-    let start = |cx: &mut TestAppContext| all_tasks(cx)[0].start.clone();
-    let start_shown = |cx: &mut TestAppContext| {
-        cx.update(|cx| {
-            let inputs = &view.read(cx).inputs;
-            (
-                inputs.start.read(cx).value().to_string(),
-                inputs.start_time.read(cx).value().to_string(),
-            )
-        })
-    };
-    assert_eq!(start(cx).as_deref(), Some("2027-01-04 10:00"));
+    // キーでも日を選べる（→ で次の日、Enter で選ぶ）
+    ui(cx, window, |window, cx| {
+        window.press("right", cx);
+        window.press("enter", cx);
+    });
+    let second = first.succ_opt().unwrap();
     assert_eq!(
-        start_shown(cx),
-        ("2027-01-04".to_owned(), "10:00".to_owned())
+        due(cx),
+        Some(format!("{} 09:00", second.format("%Y-%m-%d")))
     );
 
-    // 開始日も、時刻の欄とボタンで決められる
-    type_in(cx, "start-time-input", "17時");
-    assert_eq!(start(cx).as_deref(), Some("2027-01-04 17:00"));
+    // 「クリア」で期限をなくして閉じる
+    click(cx, "date-clear");
+    assert_eq!(due(cx), None);
+    assert!(!open_now(cx));
+
+    // 開始日も同じ書き方を読む
+    click(cx, "start-value");
+    type_in(cx, "pick-date-input", "20270104 10時");
+    assert_eq!(start(cx).as_deref(), Some("2027-01-04 10:00"));
+
+    // 書きかけのまま外（一覧の行）を押すと、書いたものを保存して閉じる
+    click(cx, "start-value");
+    chip(cx, "date-chip", 1);
+    assert_eq!(start(cx), Some(format!("{tomorrow} 10:00")));
     ui(cx, window, |window, cx| {
-        window.click(("p-start", 1usize), cx)
+        window.click("pick-time-input", cx);
+        window.press("secondary-a", cx);
+        window.press("backspace", cx);
+        window.input("17時", cx);
     });
+    ui(cx, window, |window, cx| window.click(("title", 0usize), cx));
     assert_eq!(start(cx), Some(format!("{tomorrow} 17:00")));
-    assert_eq!(start_shown(cx), (tomorrow.clone(), "17:00".to_owned()));
+    assert!(!open_now(cx));
 
     // 開始と期限が同じ日なら、一覧では時間帯で出る
-    type_in(cx, "due-input", "明日 18時");
+    click(cx, "due-value");
+    type_in(cx, "pick-date-input", "明日 18時");
     let day = malakt_core::view::format_date(&tomorrow, &today());
     cx.update(|cx| {
         let task = &view.read(cx).tasks[0];
@@ -2722,11 +2749,11 @@ fn due_takes_a_time_and_many_spellings(cx: &mut TestAppContext) {
         );
     });
 
-    ui(cx, window, |window, cx| {
-        window.click(("p-start", 3usize), cx)
-    });
-    assert_eq!(start(cx), None);
-    assert_eq!(start_shown(cx), (String::new(), String::new()));
+    // 一覧の期限のセルからも開き、選ぶとすぐ保存する
+    ui(cx, window, |window, cx| window.click(("due", 0usize), cx));
+    assert!(open_now(cx));
+    chip(cx, "date-chip", 0);
+    assert_eq!(due(cx), Some(format!("{} 18:00", today())));
 }
 
 /// 上のバーの配色のボタンで、画面の色がその場で変わり、選択が保存される。

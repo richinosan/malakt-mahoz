@@ -142,7 +142,7 @@ const LOCK: &[&str] = &["lock-disable", "lock-save", "unlock"];
 const ICON_PICKER: &[&str] = &["icon-category", "icon-add-image"];
 
 /// 入力欄。名前が `-input` で終わるもののほかに、ここにあるもの。
-const INPUTS: &[&str] = &["ws-date", "ws-term-dir", "def-categories"];
+const INPUTS: &[&str] = &["ws-term-dir", "def-categories"];
 
 /// 押しても画面とデータが変わらないのが正しいもの。ID（番号つきは番号まで）と理由。
 const QUIET: &[(&str, &str)] = &[
@@ -160,12 +160,10 @@ const QUIET: &[(&str, &str)] = &[
     ("タスクの詳細 > title#1", "今開いているタスク"),
     ("説明を編集中の詳細 > title#1", "今開いているタスク"),
     ("担当を選んでいる詳細 > title#1", "今開いているタスク"),
-    ("ホーム > p-due#0", "期限がもう今日のタスク"),
     (
         "見出しを右クリックしたメニュー > due#3",
         "見出しのメニューの下に隠れている",
     ),
-    ("p-start#0", "開始日がもう今日のタスク"),
     ("def-prio#0", "今選んでいる優先度"),
     ("def-due-none", "今選んでいる期限の決め方"),
     ("bulk-mode#0", "今選んでいる変え方"),

@@ -1132,54 +1132,29 @@ fn card(cx: &App) -> Div {
 }
 
 impl MainView {
-    /// 詳細の開始日か期限。日付の欄、時刻の欄、今日からの日数で決めるボタン。
-    fn when_property(&self, which: When, cx: &mut Context<Self>) -> Div {
-        let (date, time, name, label) = match which {
-            When::Start => (
-                &self.inputs.start,
-                &self.inputs.start_time,
-                "start",
-                "開始日",
-            ),
-            When::Due => (&self.inputs.due, &self.inputs.due_time, "due", "期限"),
+    /// 詳細の開始日か期限。値を押すと、その場にカレンダーが開く。
+    fn when_property(&self, task: &Todo, which: When, cx: &mut Context<Self>) -> Div {
+        let (value, name) = match which {
+            When::Start => (task.start.as_deref(), "start"),
+            When::Due => (task.due.as_deref(), "due"),
         };
-        let mut line = row()
-            .gap_1p5()
-            .flex_wrap()
-            .child(
-                Input::new(date)
-                    .id(SharedString::from(format!("{name}-input")))
-                    .aria_label(label)
-                    .small()
-                    .w(px(128.)),
-            )
-            .child(
-                Input::new(time)
-                    .id(SharedString::from(format!("{name}-time-input")))
-                    .aria_label(format!("{label}の時刻"))
-                    .small()
-                    .w(px(72.)),
-            );
-        let buttons = [
-            ("今日", Some(0)),
-            ("明日", Some(1)),
-            ("1 週間後", Some(7)),
-            ("クリア", None),
-        ];
-        let chips = match which {
-            When::Start => "p-start",
-            When::Due => "p-due",
+        let shown = match value {
+            Some(value) => div().text_sm().child(view::format_date(value, &self.today)),
+            None => div()
+                .text_sm()
+                .text_color(cx.theme().muted_foreground)
+                .child("未設定"),
         };
-        for (i, (text, days)) in buttons.into_iter().enumerate() {
-            line = line.child(
-                chip((chips, i), text, false, cx)
-                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                        this.set_when_in(which, days, window, cx)
-                    }))
-                    .test_support(),
-            );
-        }
-        line
+        self.date_trigger(
+            SharedString::from(format!("{name}-value")),
+            crate::date_pick::DateTarget::Task {
+                id: task.id.clone(),
+                which,
+                list: false,
+            },
+            shown,
+            cx,
+        )
     }
 
     /// 詳細の「通知」。押すと、期限をいつ知らせるかのメニューが開く。期限がなければ出さない。
@@ -3675,25 +3650,6 @@ impl MainView {
             .collect()
     }
 
-    /// 期限の選択肢。今日からの日数で決める。いまの期限に時刻があれば、時刻は残す。
-    fn due_options(&self, current: Option<&str>) -> Vec<(SharedString, bool, Option<String>)> {
-        let mut options: Vec<(SharedString, bool, Option<String>)> =
-            [("今日", 0), ("明日", 1), ("1 週間後", 7), ("1 か月後", 30)]
-                .into_iter()
-                .map(|(label, days)| {
-                    let date = view::add_days(&self.today, days);
-                    let checked = current.map(malakt_core::date_of) == Some(date.as_str());
-                    (
-                        label.into(),
-                        checked,
-                        Some(view::with_time_of(&date, current)),
-                    )
-                })
-                .collect();
-        options.push(("なし".into(), current.is_none(), None));
-        options
-    }
-
     /// サブワークスペースの見出しの行。左の矢印で開く・閉じる。行を押すと、そのワークスペースへ移る。
     /// 一覧の上のパンくず（最上位 › … › 今いる所）。押すとそのワークスペースへ移り、タスクを落とすとそこへ移す。
     /// 最上位のワークスペースでは出さない（上のバーの名前と同じになる）。
@@ -4098,18 +4054,20 @@ impl MainView {
             )
         };
         let due = {
-            let id = id.clone();
             let format = crate::theme::due_format(cx);
             let view = cx.entity().downgrade();
             div()
                 .id(("due-cell", ix))
                 .max_w_full()
-                .child(self.value_menu(
+                .child(self.date_trigger(
                     ("due", ix),
+                    crate::date_pick::DateTarget::Task {
+                        id: id.clone(),
+                        which: When::Due,
+                        list: true,
+                    },
                     // 列の幅に入らない範囲は、後ろを「…」にする
                     self.due_label(task, cx).min_w_0().truncate().text_sm(),
-                    self.due_options(task.due.as_deref()),
-                    move |this, value, cx| this.edit_task_by_id(&id, cx, |d| d.due = value),
                     cx,
                 ))
                 .test_support()
@@ -4296,20 +4254,15 @@ impl MainView {
             },
             cx,
         );
-        let due = self.value_menu(
+        let due = self.date_trigger(
             "quick-due",
+            crate::date_pick::DateTarget::Quick,
             match &quick.due {
                 Some(due) => div().text_sm().child(view::format_date(due, &self.today)),
                 None => div()
                     .text_sm()
                     .text_color(theme.muted_foreground)
                     .child("—"),
-            },
-            self.due_options(quick.due.as_deref()),
-            |this, value, cx| {
-                this.quick.due = value;
-                this.quick_touched = true;
-                cx.notify();
             },
             cx,
         );
@@ -5488,8 +5441,8 @@ impl MainView {
 
         let people = self.assignee_property(task, cx);
 
-        let start = self.when_property(When::Start, cx);
-        let due = self.when_property(When::Due, cx);
+        let start = self.when_property(task, When::Start, cx);
+        let due = self.when_property(task, When::Due, cx);
 
         let mut percent = row().gap_1p5().flex_wrap().items_center().child(
             row()
@@ -9027,11 +8980,8 @@ impl MainView {
             Modal::BulkDue => {
                 let body = col()
                     .gap_3()
-                    .child(
-                        Input::new(&self.inputs.bulk_due)
-                            .id("bulk-due-input")
-                            .aria_label("期限"),
-                    )
+                    .w(px(340.))
+                    .child(self.date_inline(cx))
                     .when_some(self.error.clone(), |d, error| {
                         d.child(div().text_sm().text_color(cx.theme().danger).child(error))
                     })
@@ -9277,18 +9227,12 @@ impl MainView {
                                 .id("def-time")
                                 .aria_label("時刻"),
                         ),
-                    DueRule::Fixed { .. } => col()
-                        .gap_1()
-                        .child(
-                            Input::new(&self.inputs.def_date)
-                                .id("def-date")
-                                .aria_label("日付"),
-                        )
-                        .child(
-                            Input::new(&self.inputs.def_time)
-                                .id("def-time")
-                                .aria_label("時刻"),
-                        ),
+                    DueRule::Fixed { .. } => col().child(self.date_trigger(
+                        "def-date",
+                        crate::date_pick::DateTarget::DefaultDue,
+                        self.date_shown(&crate::date_pick::DateTarget::DefaultDue, cx),
+                        cx,
+                    )),
                 };
                 let mut priority = row().gap_1().flex_wrap();
                 for (ix, (text, value)) in [
@@ -9332,11 +9276,15 @@ impl MainView {
                 let form = col()
                     .gap_3()
                     .child(
-                        col().gap_1().child(label("基準日")).child(
-                            Input::new(&self.inputs.ws_date)
-                                .id("ws-date")
-                                .aria_label("基準日"),
-                        ),
+                        col()
+                            .gap_1()
+                            .child(label("基準日"))
+                            .child(self.date_trigger(
+                                "ws-date",
+                                crate::date_pick::DateTarget::BaseDate,
+                                self.date_shown(&crate::date_pick::DateTarget::BaseDate, cx),
+                                cx,
+                            )),
                     )
                     .child(div().h(px(1.)).bg(theme.border))
                     .child(col().gap_1().child(label("担当者")).child(assignees))
