@@ -38,6 +38,7 @@ fn the_second_request_reads_the_cache() {
             fallbacks: endpoint.fallbacks,
             prefix_ttl: endpoint.prefix_ttl,
             media: Media::All,
+            plan: false,
         };
         let body = wire::body(Wire::Messages, &request);
         let response = http::post_json(&endpoint.url, &endpoint.headers, &body).unwrap();

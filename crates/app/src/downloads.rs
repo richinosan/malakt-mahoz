@@ -6,6 +6,7 @@
 //! 一覧はデータベースの設定に残す。残すのは [`MAX_ITEMS`] 件まで（古いものから消す）。
 //! 進み具合は残さない（書き込みを増やさない）。一覧から消しても、ファイルそのものは消さない。
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -13,6 +14,7 @@ use gpui_kit::*;
 use serde::{Deserialize, Serialize};
 
 use crate::db::{self, Db};
+use crate::download_rules::{self, Rules};
 
 /// 一覧に残す数。超えたら古いものから消す。
 pub const MAX_ITEMS: usize = 50;
@@ -67,6 +69,9 @@ pub struct Item {
     /// ファイルが見つからない（一覧を開いたときに調べる）。
     #[serde(skip)]
     pub missing: bool,
+    /// 保存先を聞いていて、まだ選ばれていない。
+    #[serde(skip)]
+    pub waiting: bool,
 }
 
 impl Item {
@@ -92,6 +97,7 @@ impl Item {
     pub fn detail(&self, now_ms: i64) -> String {
         use malakt_core::view::{format_bytes, format_relative};
         match &self.state {
+            State::Running if self.waiting => "保存先の確認待ち".to_owned(),
             State::Running => match (self.kind, self.total) {
                 (Kind::Pdf, _) => "PDF を作成中".to_owned(),
                 (Kind::File, Some(total)) => {
@@ -113,8 +119,12 @@ impl Item {
 /// ページから届いた、ダウンロードの知らせ。
 #[derive(Debug, Clone, PartialEq)]
 pub enum Note {
-    /// 始まった。`path` に保存する。
-    Started { url: String, path: PathBuf },
+    /// 始まった。`path` に保存する。`ask` なら、保存先を聞いて、終わったらそこへ移す。
+    Started {
+        url: String,
+        path: PathBuf,
+        ask: bool,
+    },
     /// 進んだ。進み具合を知らせる OS（Windows・Linux）だけが送る。
     Progress {
         url: String,
@@ -138,6 +148,19 @@ pub struct Downloads {
     pub error: Option<SharedString>,
     /// ダウンロード中のファイルの大きさを見ている。
     polling: Option<Task<()>>,
+    /// 保存先の決まり（設定の「ダウンロード」）。
+    pub rules: Rules,
+    /// 保存先を聞いているダウンロード。一覧の番号ごと。
+    asking: HashMap<u64, Ask>,
+}
+
+/// 保存先を聞いているダウンロードの様子。選ばれて、ダウンロードも終わったら、選ばれた場所へ移す。
+#[derive(Default)]
+struct Ask {
+    /// 選ばれた場所。`Some(None)` はキャンセル。
+    choice: Option<Option<PathBuf>>,
+    /// ダウンロードが終わった。
+    finished: bool,
 }
 
 pub struct SharedDownloads(pub Entity<Downloads>);
@@ -162,9 +185,53 @@ impl Downloads {
             next: 1,
             error: None,
             polling: None,
+            rules: Rules::default(),
+            asking: HashMap::new(),
         };
         this.restore(cx);
+        this.restore_rules(cx);
         this
+    }
+
+    /// 保存先の決まりを読む。読めなければ標準の決まりで始めて、読めなかったことを出す。
+    fn restore_rules(&mut self, cx: &mut Context<Self>) {
+        let saved = self
+            .db
+            .read(cx)
+            .store
+            .setting(download_rules::SETTING)
+            .map_err(|e| e.to_string())
+            .and_then(|saved| match saved {
+                Some(saved) => serde_json::from_str::<Rules>(&saved).map_err(|e| e.to_string()),
+                None => Ok(Rules::default()),
+            })
+            .and_then(|rules| rules.check().map(|()| rules));
+        match saved {
+            Ok(rules) => self.rules = rules,
+            Err(e) => {
+                self.error = Some(format!("ダウンロードの設定を読めませんでした: {e}").into())
+            }
+        }
+        download_rules::set_current(&self.rules);
+    }
+
+    /// 保存先の決まりを変えて覚える。保存できなければ、前の決まりのままにする。
+    pub fn set_rules(&mut self, rules: Rules, cx: &mut Context<Self>) -> Result<(), String> {
+        if self.rules == rules {
+            return Ok(());
+        }
+        rules.check()?;
+        let value = serde_json::to_string(&rules)
+            .map_err(|e| format!("ダウンロードの設定を保存できませんでした: {e}"))?;
+        self.db
+            .update(cx, |db, _| {
+                db.store.set_setting(download_rules::SETTING, Some(&value))
+            })
+            .map_err(|e| format!("ダウンロードの設定を保存できませんでした: {e}"))?;
+        download_rules::set_current(&rules);
+        self.rules = rules;
+        cx.notify();
+        Ok(())
     }
 
     /// 前に残した一覧を読む。途中で終わったもの（アプリを閉じた）は、失敗にする。
@@ -249,6 +316,7 @@ impl Downloads {
                 started_at: malakt_core::now_ms(),
                 seen: false,
                 missing: false,
+                waiting: false,
             },
         );
         self.items.truncate(MAX_ITEMS);
@@ -261,8 +329,11 @@ impl Downloads {
     /// ページからの知らせ。
     pub fn on_note(&mut self, note: Note, cx: &mut Context<Self>) {
         match note {
-            Note::Started { url, path } => {
-                self.add(url, path, Kind::File, cx);
+            Note::Started { url, path, ask } => {
+                let id = self.add(url, path, Kind::File, cx);
+                if ask {
+                    self.ask_where(id, cx);
+                }
             }
             Note::Progress {
                 url,
@@ -284,11 +355,27 @@ impl Downloads {
                 let Some(at) = finished_at(&self.items, &url, path.as_deref()) else {
                     return;
                 };
+                let id = self.items[at].id;
+                let asked = self.asking.get_mut(&id);
                 let item = &mut self.items[at];
                 if let Some(path) = path {
                     item.path = path;
                 }
                 item.seen = false;
+                if let Some(ask) = asked {
+                    if ok {
+                        // 保存先が選ばれていれば移す。まだなら、選ばれたときに移す
+                        if let Ok(meta) = std::fs::metadata(&item.path) {
+                            item.received = meta.len();
+                            item.total = Some(meta.len());
+                        }
+                        ask.finished = true;
+                        self.settle(id, cx);
+                        return;
+                    }
+                    self.asking.remove(&id);
+                    item.waiting = false;
+                }
                 if ok {
                     item.state = State::Done;
                     // 終わったら、大きさはファイルから読む
@@ -305,6 +392,117 @@ impl Downloads {
                 cx.notify();
             }
         }
+    }
+
+    /// 保存先を聞く（設定の「保存先を毎回確認する」）。ダウンロードは決まりの場所に続けて置き、
+    /// 選ばれて終わったら、選ばれた場所へ移す。キャンセルなら、ファイルを消して一覧からも消す。
+    fn ask_where(&mut self, id: u64, cx: &mut Context<Self>) {
+        let Some(item) = self.items.iter_mut().find(|i| i.id == id) else {
+            return;
+        };
+        item.waiting = true;
+        let dir = item
+            .path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(default_download_dir);
+        let chosen = cx.prompt_for_new_path(&dir, Some(&item.name()));
+        self.asking.insert(id, Ask::default());
+        cx.spawn(async move |this, cx| {
+            let choice = match chosen.await {
+                Ok(Ok(choice)) => Ok(choice),
+                Ok(Err(e)) => Err(format!("保存先を選べませんでした: {e}")),
+                Err(_) => Err("保存先を選ぶ画面が閉じられました".to_owned()),
+            };
+            // アプリを閉じている途中なら、反映する先がない
+            let _ = this.update(cx, |this, cx| this.chose(id, choice, cx));
+        })
+        .detach();
+    }
+
+    /// 保存先が選ばれた（`None` はキャンセル）。選べなかったときは、決まりの場所に残して失敗を出す。
+    fn chose(&mut self, id: u64, choice: Result<Option<PathBuf>, String>, cx: &mut Context<Self>) {
+        let Some(ask) = self.asking.get_mut(&id) else {
+            return;
+        };
+        match choice {
+            Ok(choice) => {
+                ask.choice = Some(choice);
+                self.settle(id, cx);
+            }
+            Err(e) => {
+                self.asking.remove(&id);
+                if let Some(item) = self.items.iter_mut().find(|i| i.id == id) {
+                    item.waiting = false;
+                    self.error =
+                        Some(format!("{e}（{} に保存します）", item.path.display()).into());
+                }
+                cx.notify();
+            }
+        }
+    }
+
+    /// 選ばれていて、ダウンロードも終わっていたら、選ばれた場所へ移す（キャンセルなら消す）。
+    fn settle(&mut self, id: u64, cx: &mut Context<Self>) {
+        let ready = self
+            .asking
+            .get(&id)
+            .is_some_and(|ask| ask.finished && ask.choice.is_some());
+        if !ready {
+            cx.notify();
+            return;
+        }
+        let Some(Ask {
+            choice: Some(choice),
+            ..
+        }) = self.asking.remove(&id)
+        else {
+            return;
+        };
+        let Some(at) = self.items.iter().position(|i| i.id == id) else {
+            return;
+        };
+        let from = self.items[at].path.clone();
+        let Some(to) = choice else {
+            // キャンセル: 決まりの場所に置いたファイルを消して、一覧からも消す
+            self.items.remove(at);
+            if let Err(e) = std::fs::remove_file(&from) {
+                self.error = Some(
+                    format!(
+                        "キャンセルしたダウンロード {} を消せませんでした: {e}",
+                        from.display()
+                    )
+                    .into(),
+                );
+            }
+            self.save(cx);
+            cx.notify();
+            return;
+        };
+        let moved = cx.background_spawn({
+            let to = to.clone();
+            async move { move_file(&from, &to) }
+        });
+        cx.spawn(async move |this, cx| {
+            let moved = moved.await;
+            // アプリを閉じている途中なら、反映する先がない
+            let _ = this.update(cx, |this, cx| {
+                let Some(item) = this.items.iter_mut().find(|i| i.id == id) else {
+                    return;
+                };
+                item.waiting = false;
+                item.state = match moved {
+                    Ok(()) => {
+                        item.path = to;
+                        State::Done
+                    }
+                    Err(reason) => State::Failed { reason },
+                };
+                this.save(cx);
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// PDF に保存し始めた。保存し終わったら [`Downloads::pdf_done`] を呼ぶ。
@@ -510,12 +708,26 @@ pub struct DownloadDir(pub PathBuf);
 
 impl Global for DownloadDir {}
 
-/// PDF を保存するフォルダ（OS のダウンロードのフォルダ）。
-pub fn download_dir(cx: &App) -> PathBuf {
-    if let Some(dir) = cx.try_global::<DownloadDir>() {
-        return dir.0.clone();
+/// 保存先のフォルダ（設定で選んだフォルダ、なければ OS のダウンロードのフォルダ）。日付のフォルダの外。
+pub fn root_dir(cx: &App) -> PathBuf {
+    let rules = &shared(cx).read(cx).rules;
+    rules.folder.clone().unwrap_or_else(|| base_dir(cx))
+}
+
+/// 保存先を選んでいないときのフォルダ。テストでは [`DownloadDir`] に変える。
+fn base_dir(cx: &App) -> PathBuf {
+    match cx.try_global::<DownloadDir>() {
+        Some(dir) => dir.0.clone(),
+        None => default_download_dir(),
     }
-    default_download_dir()
+}
+
+/// 今日保存するフォルダ（日付のフォルダがあれば、その中）。
+pub fn download_dir(cx: &App) -> Result<PathBuf, String> {
+    shared(cx)
+        .read(cx)
+        .rules
+        .dir(&base_dir(cx), download_rules::today())
 }
 
 /// OS のダウンロードのフォルダ。決まっていなければ（Linux で XDG の設定がないなど）ホームの `Downloads`。
@@ -525,10 +737,14 @@ pub fn default_download_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
-/// ページからのダウンロードを置く場所。部品が OS のダウンロードのフォルダの外を選んだとき
-/// （Linux で XDG の設定がないと、アプリを起動したフォルダになる）は、ダウンロードのフォルダに移す。
+/// ページからのダウンロードを置く場所。部品が選んだ名前を、設定の決まりのフォルダに置く
+/// （Linux で XDG の設定がないと、部品はアプリを起動したフォルダを選ぶ）。
 pub fn download_target(suggested: &Path) -> PathBuf {
-    let dir = default_download_dir();
+    let base = default_download_dir();
+    // 決まりは読んだときと変えたときに確かめているので、ここで失敗することはない
+    let dir = download_rules::current()
+        .dir(&base, download_rules::today())
+        .unwrap_or(base);
     if suggested.parent() == Some(dir.as_path()) {
         return suggested.to_path_buf();
     }
@@ -558,6 +774,22 @@ pub fn pdf_name(title: &str) -> String {
         name.push_str(".pdf");
     }
     name
+}
+
+/// ファイルを移す。ドライブをまたぐときは、写してから元を消す。
+fn move_file(from: &Path, to: &Path) -> Result<(), String> {
+    let failed = |e: std::io::Error| {
+        format!(
+            "{} を {} に移せませんでした: {e}",
+            from.display(),
+            to.display()
+        )
+    };
+    if std::fs::rename(from, to).is_ok() {
+        return Ok(());
+    }
+    std::fs::copy(from, to).map_err(failed)?;
+    std::fs::remove_file(from).map_err(failed)
 }
 
 /// `dir` の中で、まだない名前にする（`a.pdf` があれば `a (1).pdf`）。
@@ -676,6 +908,7 @@ mod tests {
             started_at: 0,
             seen: false,
             missing: false,
+            waiting: false,
         }
     }
 

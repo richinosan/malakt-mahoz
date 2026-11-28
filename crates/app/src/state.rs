@@ -639,6 +639,7 @@ pub struct MainView {
     pub preview_pick: Option<PreviewPick>,
     /// 「設定」の AI のカテゴリに出す行。
     pub ai_settings: Entity<crate::ai_settings::AiSettings>,
+    pub download_settings: Entity<crate::download_settings::DownloadSettings>,
     /// 「設定」の「同期」。
     pub caldav_settings: Entity<crate::caldav_settings::CalDavSettings>,
     pub appearance_scroll: gpui_kit::ScrollHandle,
@@ -735,9 +736,12 @@ impl MainView {
 
         let ai_session = ai::shared(cx);
         let ai_settings = cx.new(|cx| crate::ai_settings::AiSettings::new(window, cx));
+        let download_settings =
+            cx.new(|cx| crate::download_settings::DownloadSettings::new(window, cx));
         let caldav_settings = cx.new(|cx| crate::caldav_settings::CalDavSettings::new(window, cx));
         let mut subs = vec![
             cx.observe(&ai_settings, |_, _, cx| cx.notify()),
+            cx.observe(&download_settings, |_, _, cx| cx.notify()),
             cx.observe(&caldav_settings, |_, _, cx| cx.notify()),
             // 「同期」の「アカウントを追加」は、設定の上に重ねて出す
             cx.subscribe_in(
@@ -1173,6 +1177,7 @@ impl MainView {
             appearance_pinned: false,
             preview_pick: None,
             ai_settings,
+            download_settings,
             caldav_settings,
             appearance_scroll: gpui_kit::ScrollHandle::new(),
             own_presets: Vec::new(),

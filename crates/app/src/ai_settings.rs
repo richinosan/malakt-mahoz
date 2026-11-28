@@ -83,6 +83,7 @@ pub enum AiRow {
     Model,
     Effort,
     Coordinator,
+    ChatGpt,
     Key,
     AutoRun,
     Rules,
@@ -97,11 +98,12 @@ pub enum AiRow {
 }
 
 impl AiRow {
-    pub const ALL: [AiRow; 17] = [
+    pub const ALL: [AiRow; 18] = [
         AiRow::Bots,
         AiRow::Service,
         AiRow::Server,
         // キーはサービスごとなので、サービスのすぐ下に置く
+        AiRow::ChatGpt,
         AiRow::Key,
         AiRow::Model,
         AiRow::Effort,
@@ -126,6 +128,7 @@ impl AiRow {
             | AiRow::Model
             | AiRow::Effort
             | AiRow::Coordinator
+            | AiRow::ChatGpt
             | AiRow::Key => AiGroup::Model,
             AiRow::AutoRun | AiRow::Arrange | AiRow::Track | AiRow::Shell => AiGroup::Behavior,
             AiRow::Rules => AiGroup::Rules,
@@ -144,6 +147,7 @@ impl AiRow {
             AiRow::Model => "モデル",
             AiRow::Effort => "考える深さ",
             AiRow::Coordinator => "振り分けのモデル",
+            AiRow::ChatGpt => "ChatGPT アカウント",
             AiRow::Key => "API キー",
             AiRow::AutoRun => "オート実行",
             AiRow::Rules => "ルール",
@@ -188,6 +192,7 @@ impl AiRow {
             }
             AiRow::Model => "AI",
             AiRow::Effort => "AI 考える",
+            AiRow::ChatGpt => "AI ChatGPT OpenAI サインイン ログイン プラン SSO",
             AiRow::Key => "AI キー 鍵",
             AiRow::Shell => "ターミナル シェル",
             AiRow::Account => "gh ログイン",
@@ -220,6 +225,9 @@ impl AiRow {
             AiRow::Server => session.provider == Provider::Local,
             AiRow::Effort => session.provider.supports_effort(),
             AiRow::Coordinator => session.provider != Provider::Cursor,
+            AiRow::ChatGpt => session.provider == Provider::OpenAi,
+            // ChatGPT のアカウントでサインインしている間は、API キーを使わない
+            AiRow::Key => !session.on_chatgpt_plan(),
             AiRow::WatchMinutes | AiRow::WatchInstruction => session.watch.enabled,
             _ => true,
         }
@@ -491,6 +499,94 @@ impl AiSettings {
         self.session.update(cx, |s, cx| s.set_local_url(base, cx));
     }
 
+    /// ChatGPT のアカウントの行。サインインしていればメールアドレスとサインアウト、
+    /// していなければ「ChatGPT で続ける」。
+    fn chatgpt_row(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let session = self.session.read(cx);
+        let error = session.chatgpt_error.clone();
+        let errors = |d: Div| {
+            d.children(error.clone().map(|e| {
+                div()
+                    .id("ai-chatgpt-error")
+                    .text_xs()
+                    .text_color(theme.danger)
+                    .child(e)
+                    .test_support()
+            }))
+        };
+        if matches!(session.key, KeyState::Unknown) {
+            return div()
+                .id("ai-chatgpt-state")
+                .text_sm()
+                .text_color(theme.muted_foreground)
+                .child("確認中…")
+                .test_support()
+                .into_any_element();
+        }
+        let body = match (&session.chatgpt, &session.key) {
+            (ai::ChatGptSignIn::Waiting(_), _) => row()
+                .gap_1()
+                .child(
+                    button("ai-chatgpt-waiting")
+                        .label("ブラウザでサインイン中")
+                        .outline()
+                        .small()
+                        .loading(true)
+                        .disabled(true)
+                        // 待っている間は押せない。やめるときは ✕
+                        .on_click(|_, _, _| {}),
+                )
+                .child(feel::gloss(
+                    icon_button("ai-chatgpt-cancel", "x", "キャンセル").on_click(cx.listener(
+                        |this, _, _, cx| this.session.update(cx, |s, _| s.cancel_chatgpt()),
+                    )),
+                )),
+            (
+                chatgpt,
+                KeyState::Present {
+                    masked,
+                    source: Source::ChatGpt,
+                },
+            ) => row()
+                .gap_1()
+                .child(
+                    row()
+                        .id("ai-chatgpt-state")
+                        .gap_2()
+                        .pr_1()
+                        .child(
+                            app_icon("circle-user-round")
+                                .size_4()
+                                .text_color(theme.muted_foreground),
+                        )
+                        .child(div().text_sm().child(masked.clone()))
+                        .tooltip(|window, cx| {
+                            gpui_kit::component::tooltip::Tooltip::new("ChatGPT のプランを使用中")
+                                .build(window, cx)
+                        })
+                        .test_support(),
+                )
+                .child(feel::gloss(
+                    icon_button("ai-chatgpt-sign-out", "log-out", "サインアウト")
+                        .disabled(matches!(chatgpt, ai::ChatGptSignIn::SigningOut))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.session.update(cx, |s, cx| s.sign_out_chatgpt(cx));
+                        })),
+                )),
+            _ => row().child(
+                button("ai-chatgpt-sign-in")
+                    .label("ChatGPT で続ける")
+                    .outline()
+                    .small()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.session.update(cx, |s, cx| s.sign_in_chatgpt(cx));
+                    })),
+            ),
+        };
+        errors(col().items_end().gap_1().child(body)).into_any_element()
+    }
+
     fn save_key(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let key = self.key_input.read(cx).value().to_string();
         self.session.update(cx, |s, cx| s.save_key(&key, cx));
@@ -757,6 +853,7 @@ impl AiSettings {
                     })
                     .into_any_element()
             }
+            AiRow::ChatGpt => self.chatgpt_row(cx),
             AiRow::Key => {
                 // 保存済みなら、伏せたキーを 1 行で出す。入力欄は、未設定のときと変えるときだけ
                 let saved = match &session.key {
@@ -783,6 +880,8 @@ impl AiSettings {
                             "variable",
                             format!("環境変数 {}", provider.env_var()).into(),
                         ),
+                        // ChatGPT のアカウントは「ChatGPT アカウント」の行に出す（この行は出さない）
+                        Source::ChatGpt => ("circle-user-round", "ChatGPT アカウント".into()),
                     };
                     return row()
                         .gap_1()
@@ -1135,7 +1234,9 @@ impl AiSettings {
                             .flex_1(),
                     )
                     .when(
-                        provider == Provider::Claude || provider.catalog_url().is_some(),
+                        provider == Provider::Claude
+                            || provider.catalog_url().is_some()
+                            || session.on_chatgpt_plan(),
                         |d| {
                             d.child(feel::gloss(
                                 icon_button("ai-fetch-models", "refresh-cw", "モデル一覧を更新")

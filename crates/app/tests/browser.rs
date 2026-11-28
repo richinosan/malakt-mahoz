@@ -17,6 +17,7 @@ use malakt_ai::Provider;
 use malakt_core::{Store, TaskDraft};
 use malakt_mahoz::ai::{self, ShellPlace};
 use malakt_mahoz::browser::{self, Engine, Event, Factory, Setup, Shot, Zoom};
+use malakt_mahoz::download_rules::{self, Rules};
 use malakt_mahoz::downloads::{self, Note};
 use malakt_mahoz::print_setup::{self, Margins, Pages, PrintSetup};
 use malakt_mahoz::term::{self, Terms};
@@ -260,6 +261,7 @@ fn start(cx: &mut TestAppContext, store: Store) -> World {
         }),
         get: Arc::new(|url, _| Err(format!("テストでは {url} を読めません"))),
         probe: Arc::new(|url, _| Err(format!("テストでは {url} に接続しません"))),
+        form: Arc::new(|url, _| Err(format!("テストでは {url} に送れません"))),
         gh: Arc::new(|_| Spec::shell("exit 1")),
         slack: Arc::new(|_| Vec::new()),
         whoami: Arc::new(|_| vec![Spec::shell("exit 1")]),
@@ -1586,6 +1588,7 @@ fn downloads_show_in_the_header_with_a_count(cx: &mut TestAppContext) {
         Event::Download(Note::Started {
             url: url.clone(),
             path: path.clone(),
+            ask: false,
         }),
     );
     world.send(
@@ -1697,6 +1700,7 @@ fn a_failed_download_says_so(cx: &mut TestAppContext) {
         Event::Download(Note::Started {
             url: url.clone(),
             path: "/nowhere/a.zip".into(),
+            ask: false,
         }),
     );
     world.send(
@@ -1982,4 +1986,147 @@ fn a_pdf_without_embedded_fonts_fails(cx: &mut TestAppContext) {
         "{reason}"
     );
     assert!(!saved.exists());
+}
+
+/// 設定の保存先と日付のフォルダに、PDF を保存する。
+#[gpui_kit::test]
+fn pdfs_follow_the_download_rules(cx: &mut TestAppContext) {
+    let (world, window, tab, fake, _dir) = pdf_page(cx);
+    let chosen = tempfile::tempdir().unwrap();
+    let rules = Rules {
+        folder: Some(chosen.path().to_owned()),
+        ask: false,
+        subfolder: Some("yyyy/mm-dd".into()),
+    };
+    cx.update(|cx| {
+        downloads::shared(cx).update(cx, |d, cx| d.set_rules(rules.clone(), cx).unwrap())
+    });
+    press_in_page(cx, &world, window, tab, key("ctrl-p", "cmd-p"));
+    ui(cx, window, |window, cx| {
+        window.click("browser-print-submit", cx)
+    });
+    let today = download_rules::today();
+    let want = chosen
+        .path()
+        .join(download_rules::subfolder("yyyy/mm-dd", today).unwrap())
+        .join("報告.pdf");
+    assert_eq!(last_pdf(&fake), format!("pdf {}", want.display()));
+    assert!(want.parent().unwrap().is_dir(), "日付のフォルダを作る");
+    // 決まりは覚えている
+    let stored = cx.update(|cx| {
+        malakt_mahoz::db::shared(cx)
+            .read(cx)
+            .store
+            .setting(download_rules::SETTING)
+            .unwrap()
+    });
+    let stored: Rules = serde_json::from_str(&stored.unwrap()).unwrap();
+    assert_eq!(stored, rules);
+}
+
+/// 「保存先を毎回確認する」なら、PDF は選んだ場所に保存する。キャンセルなら作らない。
+#[gpui_kit::test]
+fn pdfs_ask_where_to_save(cx: &mut TestAppContext) {
+    let (world, window, tab, fake, dir) = pdf_page(cx);
+    cx.update(|cx| {
+        downloads::shared(cx).update(cx, |d, cx| {
+            d.set_rules(
+                Rules {
+                    ask: true,
+                    ..Rules::default()
+                },
+                cx,
+            )
+            .unwrap()
+        })
+    });
+    press_in_page(cx, &world, window, tab, key("ctrl-p", "cmd-p"));
+    ui(cx, window, |window, cx| {
+        window.click("browser-print-submit", cx)
+    });
+    assert!(cx.did_prompt_for_new_path());
+    cx.simulate_new_path_selection(|_| None);
+    cx.run_until_parked();
+    assert!(fake.pdf_setup.borrow().is_empty(), "キャンセルなら作らない");
+    press_in_page(cx, &world, window, tab, key("ctrl-p", "cmd-p"));
+    ui(cx, window, |window, cx| {
+        window.click("browser-print-submit", cx)
+    });
+    let target = dir.path().join("選んだ名前.pdf");
+    let chosen = target.clone();
+    cx.simulate_new_path_selection(move |_| Some(chosen));
+    cx.run_until_parked();
+    assert_eq!(last_pdf(&fake), format!("pdf {}", target.display()));
+}
+
+/// 「保存先を毎回確認する」なら、ダウンロードは終わってから選んだ場所へ移す。キャンセルなら消す。
+#[gpui_kit::test]
+fn downloads_move_to_the_chosen_place(cx: &mut TestAppContext) {
+    let world = start(cx, Store::open_in_memory().unwrap());
+    let (window, _view) = open(cx);
+    ui(cx, window, |window, cx| window.click("ai-toggle", cx));
+    let tab = open_page(cx, window, "https://example.com/files");
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("資料.zip");
+    let url = "https://example.com/資料.zip".to_owned();
+    world.send(
+        tab,
+        Event::Download(Note::Started {
+            url: url.clone(),
+            path: path.clone(),
+            ask: true,
+        }),
+    );
+    cx.run_until_parked();
+    assert!(cx.did_prompt_for_new_path());
+    let item =
+        |cx: &mut TestAppContext| cx.update(|cx| downloads::shared(cx).read(cx).items[0].clone());
+    assert!(item(cx).waiting);
+    // 選ぶ前に終わっても、選ぶまで待つ
+    std::fs::write(&path, b"zip").unwrap();
+    world.send(
+        tab,
+        Event::Download(Note::Finished {
+            url: url.clone(),
+            path: Some(path.clone()),
+            ok: true,
+        }),
+    );
+    cx.run_until_parked();
+    assert!(item(cx).running());
+    let target = dir.path().join("まとめ").join("資料 2026.zip");
+    std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+    let chosen = target.clone();
+    cx.simulate_new_path_selection(move |_| Some(chosen));
+    cx.run_until_parked();
+    let done = item(cx);
+    assert_eq!(done.state, downloads::State::Done);
+    assert_eq!(done.path, target);
+    assert!(target.is_file() && !path.exists(), "選んだ場所へ移す");
+    // キャンセルなら、ファイルを消して一覧からも消す
+    let other = dir.path().join("b.zip");
+    world.send(
+        tab,
+        Event::Download(Note::Started {
+            url: "https://example.com/b.zip".into(),
+            path: other.clone(),
+            ask: true,
+        }),
+    );
+    cx.run_until_parked();
+    cx.simulate_new_path_selection(|_| None);
+    cx.run_until_parked();
+    std::fs::write(&other, b"b").unwrap();
+    world.send(
+        tab,
+        Event::Download(Note::Finished {
+            url: "https://example.com/b.zip".into(),
+            path: Some(other.clone()),
+            ok: true,
+        }),
+    );
+    cx.run_until_parked();
+    assert!(!other.exists());
+    let items = cx.update(|cx| downloads::shared(cx).read(cx).items.clone());
+    assert_eq!(items.len(), 1, "{items:?}");
 }

@@ -783,12 +783,31 @@ impl Terms {
         }
     }
 
-    /// ページを PDF にして、ダウンロードのフォルダに `name` で保存する。同じ名前があれば番号を付ける。
-    /// 保存したファイルは、ダウンロードの一覧に出る。
+    /// ページを PDF にして、ダウンロードの保存先（設定の決まりのフォルダ）に `name` で保存する。
+    /// 同じ名前があれば番号を付ける。保存したファイルは、ダウンロードの一覧に出る。
     pub fn save_page_pdf(
         &mut self,
         id: u64,
         name: &str,
+        setup: &crate::print_setup::PrintSetup,
+        cx: &mut Context<Self>,
+    ) {
+        let dir = match crate::downloads::download_dir(cx) {
+            Ok(dir) => dir,
+            Err(e) => {
+                self.fail(format!("PDF を保存できませんでした: {e}"), cx);
+                return;
+            }
+        };
+        let path = crate::downloads::unique_path(&dir, &crate::downloads::pdf_name(name));
+        self.save_page_pdf_at(id, path, setup, cx);
+    }
+
+    /// ページを PDF にして `path` に保存する（保存先を聞いて選ばれた場所など）。
+    pub fn save_page_pdf_at(
+        &mut self,
+        id: u64,
+        path: PathBuf,
         setup: &crate::print_setup::PrintSetup,
         cx: &mut Context<Self>,
     ) {
@@ -798,15 +817,15 @@ impl Terms {
         else {
             return;
         };
-        let dir = crate::downloads::download_dir(cx);
-        if let Err(e) = std::fs::create_dir_all(&dir) {
-            self.fail(
-                format!("{} に PDF を保存できませんでした: {e}", dir.display()),
-                cx,
-            );
-            return;
+        if let Some(dir) = path.parent() {
+            if let Err(e) = std::fs::create_dir_all(dir) {
+                self.fail(
+                    format!("{} に PDF を保存できませんでした: {e}", dir.display()),
+                    cx,
+                );
+                return;
+            }
         }
-        let path = crate::downloads::unique_path(&dir, &crate::downloads::pdf_name(name));
         let downloads = crate::downloads::shared(cx);
         let item = downloads.update(cx, |d, cx| d.pdf_started(url, path.clone(), cx));
         // ページを選んで 1 枚に何ページも並べるときは、並べる前のページの数が要るので、先に 1 回数える。
@@ -2166,6 +2185,36 @@ impl PrintDialog {
         }
         let name = self.name.read(cx).value().trim().to_string();
         let setup = self.setup.clone();
+        if pdf && crate::downloads::shared(cx).read(cx).rules.ask {
+            // 設定の「保存先を毎回確認する」: 保存する場所を聞いてから作る
+            let dir = match crate::downloads::download_dir(cx) {
+                Ok(dir) if dir.is_dir() => dir,
+                Ok(_) => crate::downloads::root_dir(cx),
+                Err(e) => {
+                    self.error = Some(e);
+                    cx.notify();
+                    return;
+                }
+            };
+            let chosen = cx.prompt_for_new_path(&dir, Some(&crate::downloads::pdf_name(&name)));
+            self.hide(cx);
+            let terms = self.terms.clone();
+            cx.spawn(async move |_, cx| match chosen.await {
+                Ok(Ok(Some(path))) => {
+                    terms.update(cx, |terms, cx| terms.save_page_pdf_at(id, path, &setup, cx))
+                }
+                // キャンセルした
+                Ok(Ok(None)) => {}
+                Ok(Err(e)) => terms.update(cx, |terms, cx| {
+                    terms.fail(format!("PDF の保存先を選べませんでした: {e}"), cx)
+                }),
+                Err(_) => terms.update(cx, |terms, cx| {
+                    terms.fail("PDF の保存先を選ぶ画面が閉じられました".to_owned(), cx)
+                }),
+            })
+            .detach();
+            return;
+        }
         self.hide(cx);
         self.terms.update(cx, |terms, cx| {
             if pdf {
