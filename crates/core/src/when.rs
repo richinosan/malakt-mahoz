@@ -48,6 +48,11 @@ pub fn parse(input: &str, now: &str, base: Option<&str>) -> Option<String> {
     }
 }
 
+/// 時刻だけの入力（`9`、`9:30`、`21時`、`午後3時半`、`2pm` など）を、時と分にする。読めなければ `None`。
+pub fn parse_time(input: &str) -> Option<(u32, u32)> {
+    time(normalize(input).trim())
+}
+
 /// 入力を読めたら保存する形を、読めなければ入力のままを返す。
 /// 読めなかった入力は、保存のときに「正しくありません」のエラーになる。
 pub fn resolve(input: &str, now: &str, base: Option<&str>) -> String {
