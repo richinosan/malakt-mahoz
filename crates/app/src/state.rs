@@ -128,6 +128,7 @@ pub enum CustomizeSection {
     Backdrop,
     Look,
     Display,
+    AiBots,
     AiModel,
     AiBehavior,
     AiRules,
@@ -148,12 +149,13 @@ pub enum CustomizeSection {
 }
 
 impl CustomizeSection {
-    pub const ALL: [CustomizeSection; 22] = [
+    pub const ALL: [CustomizeSection; 23] = [
         CustomizeSection::Theme,
         CustomizeSection::Layout,
         CustomizeSection::Backdrop,
         CustomizeSection::Look,
         CustomizeSection::Display,
+        CustomizeSection::AiBots,
         CustomizeSection::AiModel,
         CustomizeSection::AiBehavior,
         CustomizeSection::AiRules,
@@ -180,6 +182,7 @@ impl CustomizeSection {
             CustomizeSection::Backdrop => "背景",
             CustomizeSection::Look => "色と書体",
             CustomizeSection::Display => "表示",
+            CustomizeSection::AiBots => crate::ai_settings::AiGroup::Bots.label(),
             CustomizeSection::AiModel => crate::ai_settings::AiGroup::Model.label(),
             CustomizeSection::AiBehavior => crate::ai_settings::AiGroup::Behavior.label(),
             CustomizeSection::AiRules => crate::ai_settings::AiGroup::Rules.label(),
@@ -207,6 +210,7 @@ impl CustomizeSection {
             CustomizeSection::Backdrop => "image",
             CustomizeSection::Look => "type",
             CustomizeSection::Display => "rows-3",
+            CustomizeSection::AiBots => "bot-message-square",
             CustomizeSection::AiModel => "sparkles",
             CustomizeSection::AiBehavior => "bot",
             CustomizeSection::AiRules => "scroll-text",
@@ -230,7 +234,8 @@ impl CustomizeSection {
     /// 左に並べるときの見出し。
     pub fn group(self) -> &'static str {
         match self {
-            CustomizeSection::AiModel
+            CustomizeSection::AiBots
+            | CustomizeSection::AiModel
             | CustomizeSection::AiBehavior
             | CustomizeSection::AiRules
             | CustomizeSection::AiSchedules
@@ -255,6 +260,7 @@ impl CustomizeSection {
     pub fn ai_group(self) -> Option<crate::ai_settings::AiGroup> {
         use crate::ai_settings::AiGroup;
         match self {
+            CustomizeSection::AiBots => Some(AiGroup::Bots),
             CustomizeSection::AiModel => Some(AiGroup::Model),
             CustomizeSection::AiBehavior => Some(AiGroup::Behavior),
             CustomizeSection::AiRules => Some(AiGroup::Rules),

@@ -495,6 +495,25 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     r#"
     ALTER TABLE caldav_accounts ADD COLUMN name TEXT NOT NULL DEFAULT '';
     "#,
+    // 29: AI bot。名前・インストラクション・アイコン・色・動き・覚えたこと。最初の bot「AI bot」を 1 つ作る
+    r#"
+    CREATE TABLE ai_bots (
+        id TEXT PRIMARY KEY NOT NULL,
+        name TEXT NOT NULL,
+        instructions TEXT NOT NULL DEFAULT '',
+        icon TEXT,
+        color TEXT,
+        motion TEXT NOT NULL DEFAULT 'float',
+        memory TEXT NOT NULL DEFAULT '',
+        position INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+    ) STRICT;
+    INSERT INTO ai_bots(id, name, created_at, updated_at)
+        VALUES (lower(hex(randomblob(13))), 'AI bot',
+                CAST(strftime('%s', 'now') AS INTEGER) * 1000,
+                CAST(strftime('%s', 'now') AS INTEGER) * 1000);
+    "#,
 ];
 
 pub(crate) fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {

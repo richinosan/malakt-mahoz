@@ -5,6 +5,7 @@ pub mod ai_settings;
 pub mod ai_tools;
 pub mod ai_view;
 pub mod autostart;
+mod bot_look;
 pub mod browser;
 pub mod browser_popup;
 pub mod caldav;

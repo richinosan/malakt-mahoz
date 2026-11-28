@@ -1105,7 +1105,7 @@ fn field_label(text: &'static str, cx: &App) -> Div {
 }
 
 /// ワークスペースのアイコンの色。`None` は文字と同じ色。
-fn workspace_color(color: Option<&str>) -> Option<Hsla> {
+pub(crate) fn workspace_color(color: Option<&str>) -> Option<Hsla> {
     let hex = match color? {
         "red" => 0xe5484d,
         "orange" => 0xf76b15,
@@ -7115,6 +7115,7 @@ impl MainView {
                 continue;
             }
             let section = match row_kind.group() {
+                crate::ai_settings::AiGroup::Bots => Section::AiBots,
                 crate::ai_settings::AiGroup::Model => Section::AiModel,
                 crate::ai_settings::AiGroup::Behavior => Section::AiBehavior,
                 crate::ai_settings::AiGroup::Rules => Section::AiRules,

@@ -20,6 +20,7 @@ use crate::feel::{self, Lit};
 use crate::render::app_icon;
 use crate::shadow::{Elevate, Elevation};
 
+mod bots;
 mod rules;
 mod schedules;
 
@@ -42,6 +43,7 @@ fn col() -> Div {
 /// AI の設定のまとまり。「設定」のウィンドウでは、左のカテゴリ 1 つずつになる。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AiGroup {
+    Bots,
     Model,
     Behavior,
     Rules,
@@ -50,7 +52,8 @@ pub enum AiGroup {
 }
 
 impl AiGroup {
-    pub const ALL: [AiGroup; 5] = [
+    pub const ALL: [AiGroup; 6] = [
+        AiGroup::Bots,
         AiGroup::Model,
         AiGroup::Behavior,
         AiGroup::Rules,
@@ -60,6 +63,7 @@ impl AiGroup {
 
     pub fn label(self) -> &'static str {
         match self {
+            AiGroup::Bots => "bot",
             AiGroup::Model => "モデル",
             AiGroup::Behavior => "動作",
             AiGroup::Rules => "ルール",
@@ -72,6 +76,7 @@ impl AiGroup {
 /// AI の設定の 1 行。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AiRow {
+    Bots,
     Service,
     /// ローカル AI のサーバー
     Server,
@@ -92,7 +97,8 @@ pub enum AiRow {
 }
 
 impl AiRow {
-    pub const ALL: [AiRow; 16] = [
+    pub const ALL: [AiRow; 17] = [
+        AiRow::Bots,
         AiRow::Service,
         AiRow::Server,
         // キーはサービスごとなので、サービスのすぐ下に置く
@@ -114,6 +120,7 @@ impl AiRow {
 
     pub fn group(self) -> AiGroup {
         match self {
+            AiRow::Bots => AiGroup::Bots,
             AiRow::Service
             | AiRow::Server
             | AiRow::Model
@@ -131,6 +138,7 @@ impl AiRow {
 
     pub fn name(self) -> &'static str {
         match self {
+            AiRow::Bots => "bot",
             AiRow::Service => "サービス",
             AiRow::Server => "サーバー",
             AiRow::Model => "モデル",
@@ -154,6 +162,7 @@ impl AiRow {
         Some(match self {
             AiRow::Coordinator => "考え中に送ったメッセージを、続きか並列かに振り分ける",
             AiRow::AutoRun => "コマンド実行とタスク削除を確認なしで行う",
+            AiRow::Bots => "名前・インストラクション・アイコン・動き",
             AiRow::Rules => "AI がいつも従う指示",
             AiRow::Schedules => {
                 "決まった時刻に新しいタスクを作り、AI への指示があれば AI が実行する"
@@ -172,6 +181,7 @@ impl AiRow {
     /// 検索で当たる、名前と補足のほかの言葉。
     pub fn words(self) -> &'static str {
         match self {
+            AiRow::Bots => "AI bot ボット キャラクター 名前 インストラクション 指示 アイコン 動き アニメーション 記憶 覚えたこと",
             AiRow::Service => "AI Claude OpenCode Cursor プロバイダー ローカル Ollama LM Studio",
             AiRow::Server => {
                 "AI ローカル Ollama LM Studio llama.cpp vLLM LocalAI Jan URL ポート localhost"
@@ -193,7 +203,8 @@ impl AiRow {
     pub fn wide(self) -> bool {
         matches!(
             self,
-            AiRow::Service
+            AiRow::Bots
+                | AiRow::Service
                 | AiRow::Server
                 | AiRow::Model
                 | AiRow::Rules
@@ -228,6 +239,16 @@ pub struct AiSettings {
     model_input: Entity<InputState>,
     /// 定期チェックの指示。
     watch_input: Entity<TextareaState>,
+    /// 開いている（中身を変えている）bot。
+    pub bot_open: Option<String>,
+    bot_name: Entity<InputState>,
+    bot_text: Entity<TextareaState>,
+    /// bot のアイコンを探す欄。
+    bot_icon_query: Entity<InputState>,
+    /// bot のアイコンを選ぶところを開いている。
+    bot_icons_open: bool,
+    /// bot を保存できなかった理由。
+    bots_error: Option<SharedString>,
     /// ルールの一覧で見ている場所。`None` はグローバル（すべてのワークスペース）。
     pub rules_scope: Option<String>,
     /// 開いている（名前と本文を書いている）ルール。
@@ -274,6 +295,12 @@ impl AiSettings {
             state.set_value(instruction, window, cx);
             state
         });
+        let bot_name = cx.new(|cx| InputState::new(window, cx));
+        let bot_text = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .placeholder("例: 敬語で短く答える。タスクの期限には厳しく")
+        });
+        let bot_icon_query = cx.new(|cx| InputState::new(window, cx).placeholder("検索"));
         let rule_name = cx.new(|cx| InputState::new(window, cx));
         let rule_body = cx.new(|cx| {
             TextareaState::new(window, cx).placeholder("例: PR のタスクは優先度を高にする")
@@ -324,6 +351,25 @@ impl AiSettings {
             cx.observe(&crate::term::shared(cx), |_, _, cx| cx.notify()),
             // AI や外のエージェントがルールを変えたら、一覧を読み直す
             cx.observe(&crate::db::shared(cx), |_, _, cx| cx.notify()),
+            cx.subscribe_in(&bot_name, window, |this, _, event: &InputEvent, _, cx| {
+                if matches!(event, InputEvent::PressEnter { .. } | InputEvent::Blur) {
+                    this.save_bot_name(cx);
+                }
+            }),
+            cx.subscribe_in(&bot_text, window, |this, _, event: &InputEvent, _, cx| {
+                if matches!(event, InputEvent::Blur) {
+                    this.save_bot_text(cx);
+                }
+            }),
+            cx.subscribe_in(
+                &bot_icon_query,
+                window,
+                |_, _, event: &InputEvent, _, cx| {
+                    if matches!(event, InputEvent::Change) {
+                        cx.notify();
+                    }
+                },
+            ),
             cx.subscribe_in(&rule_name, window, |this, _, event: &InputEvent, _, cx| {
                 if matches!(event, InputEvent::PressEnter { .. } | InputEvent::Blur) {
                     this.save_rule_name(cx);
@@ -386,6 +432,12 @@ impl AiSettings {
             key_editing: false,
             model_input,
             watch_input,
+            bot_open: None,
+            bot_name,
+            bot_text,
+            bot_icon_query,
+            bot_icons_open: false,
+            bots_error: None,
             rules_scope: None,
             rule_open: None,
             rule_name,
@@ -835,6 +887,7 @@ impl AiSettings {
                     this.session.update(cx, |s, cx| s.set_auto_run(on, cx));
                 }))
                 .into_any_element(),
+            AiRow::Bots => self.bots_editor(cx),
             AiRow::Rules => self.rules_editor(true, cx),
             AiRow::Schedules => self.schedules_editor(true, cx),
             AiRow::Arrange => Switch::new("ai-arrange")
