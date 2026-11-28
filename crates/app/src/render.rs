@@ -409,6 +409,7 @@ enum SettingKey {
     AutoUpdate,
     Export,
     Import,
+    Download(crate::download_settings::DownloadRow),
     BrowserData,
     AlertTimed,
     AlertDate,
@@ -7419,6 +7420,27 @@ impl MainView {
             ),
             Setting::new(
                 Section::Data,
+                SettingKey::Download(crate::download_settings::DownloadRow::Folder),
+                "ダウンロードの保存先",
+                Some("アプリ内ブラウザのダウンロードと PDF の保存先"),
+                list(&["ダウンロード", "保存先", "フォルダー", "PDF"]),
+            ),
+            Setting::new(
+                Section::Data,
+                SettingKey::Download(crate::download_settings::DownloadRow::Ask),
+                "保存先を毎回確認する",
+                None,
+                list(&["ダウンロード", "保存先", "確認", "名前を付けて保存", "PDF"]),
+            ),
+            Setting::new(
+                Section::Data,
+                SettingKey::Download(crate::download_settings::DownloadRow::Subfolder),
+                "日付のフォルダ",
+                Some("保存先の中に日付のフォルダを作る（yyyy・yy・mm・dd が日付、/ で区切ると入れ子）"),
+                list(&["ダウンロード", "日付", "フォルダー", "形式", "yyyy-mm-dd", "PDF"]),
+            ),
+            Setting::new(
+                Section::Data,
                 SettingKey::BrowserData,
                 "ブラウザのデータ",
                 Some("アプリ内ブラウザのログインの情報とキャッシュ"),
@@ -7453,6 +7475,19 @@ impl MainView {
                 return edge(div().py_3())
                     .child(self.layout_tiles(cx))
                     .into_any_element();
+            }
+            SettingKey::Download(row_kind) => {
+                let control = self
+                    .download_settings
+                    .update(cx, |settings, cx| settings.control(row_kind, cx));
+                return setting_line(
+                    item.name,
+                    item.note,
+                    control,
+                    row_kind.wide(),
+                    first,
+                    &theme,
+                );
             }
             SettingKey::Ai(row_kind) => {
                 let control = self
@@ -7569,6 +7604,7 @@ impl MainView {
                 SettingKey::Themes
                 | SettingKey::Layouts
                 | SettingKey::Ai(_)
+                | SettingKey::Download(_)
                 | SettingKey::AlertTimed
                 | SettingKey::AlertDate
                 | SettingKey::People

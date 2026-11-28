@@ -14,6 +14,8 @@ pub mod cli;
 pub(crate) mod clock;
 pub mod date_pick;
 pub mod db;
+pub mod download_rules;
+pub mod download_settings;
 pub mod downloads;
 pub mod downloads_ui;
 pub mod drops;

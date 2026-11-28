@@ -1163,6 +1163,7 @@ pub fn create(window: &mut Window, setup: Setup) -> Result<Rc<dyn Engine>, Strin
                     send(Event::Download(Note::Started {
                         url,
                         path: path.clone(),
+                        ask: crate::download_rules::current().ask,
                     }));
                     true
                 }
