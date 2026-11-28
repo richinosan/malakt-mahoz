@@ -98,12 +98,6 @@ pub const NEW_PRESET_NAME: &str = "マイテーマ";
 /// アクセスキーと MCP の接続の、その場で書き直す値。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LimitField {
-    Starts,
-    Expires,
-    /// 何番目かの時間帯の始まり
-    From(usize),
-    /// 何番目かの時間帯の終わり
-    To(usize),
     /// MCP を HTTP で開くポート（キーにはよらない）
     Port,
 }
@@ -111,10 +105,6 @@ pub enum LimitField {
 impl LimitField {
     pub fn label(self) -> &'static str {
         match self {
-            LimitField::Starts => "開始",
-            LimitField::Expires => "期限",
-            LimitField::From(_) => "時間帯の始まり",
-            LimitField::To(_) => "時間帯の終わり",
             LimitField::Port => "ポート",
         }
     }
@@ -506,11 +496,15 @@ pub struct MainView {
     pub issued_access_key: Option<malakt_core::access::IssuedKey>,
     /// パスキーの確認が済んだら「ロック中も使える」にするアクセスキー。
     pub pending_key_unlock: Option<Id>,
-    /// 期限と時間帯の欄を開いているアクセスキー。
+    /// 詳細を開いているアクセスキーか、キーなしの接続の決まり。
     pub key_limits_open: Option<Id>,
+    /// 使える時間を「曜日ごと」で決めているアクセスキー（時刻が毎日・平日と同じでも、曜日ごとに出す）。
+    pub key_hours_per_day: Option<Id>,
+    /// MCP を HTTP で開けなかった理由。設定の「HTTP で開く」の欄に出す。
+    pub mcp_http_error: Option<SharedString>,
     /// 承認の画面を出しているプラグインの ID と、出したときのファイルのハッシュ。
     pub plugin_approving: Option<(String, String)>,
-    /// その場で書き直している、アクセスキーの開始・期限・時刻。
+    /// その場で書き直している値（MCP の HTTP のポート）。
     pub key_limit_editing: Option<(Id, LimitField)>,
     /// 左のメニューで名前を書いているワークスペース。
     pub workspace_naming: Option<WorkspaceNaming>,
@@ -1145,6 +1139,8 @@ impl MainView {
             issued_access_key: None,
             pending_key_unlock: None,
             key_limits_open: None,
+            key_hours_per_day: None,
+            mcp_http_error: None,
             plugin_approving: None,
             key_limit_editing: None,
             naming_task: None,
@@ -3180,6 +3176,7 @@ impl MainView {
         self.key_naming = None;
         self.issued_access_key = None;
         self.key_limits_open = None;
+        self.key_hours_per_day = None;
         self.key_limit_editing = None;
         self.plugin_approving = None;
         // プラグインのフォルダーは、開くたびに読み直す
@@ -3281,6 +3278,12 @@ impl MainView {
                 .set_offset(gpui_kit::Point::default());
             self.preview_pick = None;
         }
+        self.scroll_to_section(section, cx);
+        cx.notify();
+    }
+
+    /// 設定のページの中で、その見出しを上に出す。
+    pub(crate) fn scroll_to_section(&mut self, section: CustomizeSection, cx: &App) {
         // ページの中で何番目の見出しか。スクロールする所の子 1 つが、見出し 1 つ
         if let Some(ix) = self
             .customize_sections(cx)
@@ -3290,7 +3293,6 @@ impl MainView {
         {
             self.appearance_scroll.scroll_to_top_of_item(ix);
         }
-        cx.notify();
     }
 
     /// 「設定」のプレビューに、マウスを乗せた選択肢を映す。外れたら今の設定に戻す。
@@ -5313,7 +5315,11 @@ impl MainView {
         if self.date_pick.as_ref().is_some_and(|p| {
             matches!(
                 p.target,
-                DateTarget::Bulk | DateTarget::DefaultDue | DateTarget::BaseDate
+                DateTarget::Bulk
+                    | DateTarget::DefaultDue
+                    | DateTarget::BaseDate
+                    | DateTarget::KeyStarts(_)
+                    | DateTarget::KeyExpires(_)
             )
         }) {
             self.date_pick = None;
@@ -5355,6 +5361,8 @@ impl MainView {
             || self.key_limit_editing.take().is_some()
         {
             // 書きかけの名前を捨てる。ダイアログは開いたまま
+        } else if self.close_access_entry() {
+            // アクセスキーの詳細から、一覧に戻る
         } else if self.modal != Modal::None {
             self.modal = Modal::None;
             self.issued_ticket = None;
@@ -5383,6 +5391,7 @@ impl MainView {
             || self.preset_naming.take().is_some()
             || self.key_naming.take().is_some()
             || self.key_limit_editing.take().is_some()
+            || self.close_access_entry()
         {
         } else if self.modal != Modal::None {
             self.modal = Modal::None;
@@ -5903,6 +5912,7 @@ bundled_icons! {
         "timer",
         "chart-column",
         "minus",
+        "circle-alert",
     ],
 }
 

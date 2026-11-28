@@ -435,8 +435,6 @@ enum SettingKey {
     McpKeyless,
     McpKeys,
     McpHttp,
-    McpHttpPort,
-    McpHttpUrl,
     People,
     CalDav,
     Keys,
@@ -462,8 +460,6 @@ impl SettingKey {
                 | SettingKey::DoneRoles
                 | SettingKey::DonePeople
                 | SettingKey::DoneWorkspaces
-                | SettingKey::McpHttpPort
-                | SettingKey::McpHttpUrl
         )
     }
 }
@@ -7401,30 +7397,13 @@ impl MainView {
                     "HTTP",
                     "ポート",
                     "URL",
+                    "自動",
+                    "固定",
                     "Streamable HTTP",
                     "Claude Code",
                 ]),
             ),
         ]);
-        // ポートと URL は、HTTP で開いているときだけ
-        if self.mcp_http(cx).0 {
-            all.extend([
-                Setting::new(
-                    Section::McpConnection,
-                    SettingKey::McpHttpPort,
-                    "ポート",
-                    None,
-                    list(&["MCP", "HTTP", "ポート"]),
-                ),
-                Setting::new(
-                    Section::McpConnection,
-                    SettingKey::McpHttpUrl,
-                    "URL",
-                    None,
-                    list(&["MCP", "HTTP", "URL", "アドレス"]),
-                ),
-            ]);
-        }
         all.extend([
             Setting::new(
                 Section::Notices,
@@ -7778,11 +7757,16 @@ impl MainView {
                 return setting_line(
                     item.name,
                     item.note,
-                    self.keyless_editor(cx).into_any_element(),
+                    self.keyless_editor(cx),
                     true,
                     first,
                     &theme,
                 );
+            }
+            SettingKey::McpHttp => {
+                return edge(div().py_3())
+                    .child(self.mcp_http_editor(cx))
+                    .into_any_element();
             }
             SettingKey::Plugins => {
                 return edge(div().py_3())
@@ -7853,6 +7837,7 @@ impl MainView {
                 | SettingKey::CalDav
                 | SettingKey::McpKeys
                 | SettingKey::McpKeyless
+                | SettingKey::McpHttp
                 | SettingKey::Plugins
                 | SettingKey::PluginFolders
                 | SettingKey::Keys
@@ -8270,18 +8255,6 @@ impl MainView {
                         })
                         .into_any_element()
                 }
-                SettingKey::McpHttp => {
-                    let on = self.mcp_http(cx).0;
-                    on_off(
-                        on,
-                        Switch::new("mcp-http-switch").checked(on).on_click(
-                            cx.listener(|this, on: &bool, _, cx| this.set_mcp_http(*on, cx)),
-                        ),
-                        cx,
-                    )
-                }
-                SettingKey::McpHttpPort => self.mcp_port_control(cx),
-                SettingKey::McpHttpUrl => self.mcp_url_control(cx),
                 SettingKey::LockedNotices => {
                     let view = cx.entity().downgrade();
                     let notices = self.locked_notices(cx);

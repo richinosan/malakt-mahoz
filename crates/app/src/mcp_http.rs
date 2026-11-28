@@ -41,26 +41,72 @@ const MAX_SESSIONS: usize = 64;
 /// つないだまま何も来ないとき、閉じるまでの時間。
 const IDLE: Duration = Duration::from_secs(120);
 
-/// HTTP で開くか。
-pub fn enabled(store: &Store) -> malakt_core::Result<bool> {
-    Ok(store.setting(ON_KEY)?.as_deref() == Some("on"))
+/// ポートの決め方。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PortMode {
+    /// 前に使ったポート（はじめは標準のポート）が空いていればそれ、使われていれば空いているポート。
+    /// 選んだポートは覚えて、次も使う
+    Auto,
+    /// 決めたポートだけ。使われていれば開かない
+    Fixed,
 }
 
-/// 開くポート。読めない値なら標準のポート。
-pub fn port(store: &Store) -> malakt_core::Result<u16> {
-    Ok(store
-        .setting(PORT_KEY)?
-        .and_then(|p| p.parse().ok())
-        .filter(|p| *p != 0)
-        .unwrap_or(DEFAULT_PORT))
+impl PortMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            PortMode::Auto => "自動",
+            PortMode::Fixed => "固定",
+        }
+    }
 }
 
-pub fn save(store: &mut Store, on: bool, port: u16) -> malakt_core::Result<()> {
-    store.set_setting(ON_KEY, on.then_some("on"))?;
-    let port = port.to_string();
+/// HTTP の設定。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Config {
+    pub on: bool,
+    pub mode: PortMode,
+    /// 固定ならそのポート、自動なら前に使ったポート
+    pub port: u16,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Config {
+            on: false,
+            mode: PortMode::Auto,
+            port: DEFAULT_PORT,
+        }
+    }
+}
+
+const MODE_KEY: &str = "mcp.http.port_mode";
+
+/// 保存した設定。読めない値は標準のもの。
+pub fn config(store: &Store) -> malakt_core::Result<Config> {
+    Ok(Config {
+        on: store.setting(ON_KEY)?.as_deref() == Some("on"),
+        mode: match store.setting(MODE_KEY)?.as_deref() {
+            Some("fixed") => PortMode::Fixed,
+            _ => PortMode::Auto,
+        },
+        port: store
+            .setting(PORT_KEY)?
+            .and_then(|p| p.parse().ok())
+            .filter(|p| *p != 0)
+            .unwrap_or(DEFAULT_PORT),
+    })
+}
+
+pub fn save(store: &mut Store, config: &Config) -> malakt_core::Result<()> {
+    store.set_setting(ON_KEY, config.on.then_some("on"))?;
+    store.set_setting(
+        MODE_KEY,
+        (config.mode == PortMode::Fixed).then_some("fixed"),
+    )?;
+    let port = config.port.to_string();
     store.set_setting(
         PORT_KEY,
-        (port != DEFAULT_PORT.to_string()).then_some(port.as_str()),
+        (config.port != DEFAULT_PORT).then_some(port.as_str()),
     )
 }
 
@@ -141,32 +187,125 @@ impl Drop for Http {
 
 static RUNNING: Mutex<Option<Http>> = Mutex::new(None);
 
-/// 設定に合わせて開く・閉じる。開けなければ（ポートが使われているなど）理由の文を返し、前の状態のまま。
-pub fn apply(db: &Path, on: bool, port: u16) -> Result<(), String> {
-    let mut running = RUNNING.lock().unwrap_or_else(|e| e.into_inner());
-    if !on {
-        *running = None;
-        return Ok(());
+/// 開けなかった理由。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OpenError {
+    /// ほかのものがそのポートで受けている。`ours` なら、ほかに起動している Malakt Mahoz
+    Busy { port: u16, ours: bool },
+    /// OS が使わせない（Windows が予約しているポートなど）
+    Denied { port: u16 },
+    /// 空いているポートが見つからない、ほか
+    Failed { port: u16 },
+}
+
+impl std::fmt::Display for OpenError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            OpenError::Busy { port, ours: true } => write!(
+                f,
+                "ポート {port} は、ほかに起動している Malakt Mahoz が使っています。"
+            ),
+            OpenError::Busy { port, ours: false } => write!(
+                f,
+                "ポート {port} はほかのアプリが使っています。ポートを自動にするか、別のポートにしてください。"
+            ),
+            OpenError::Denied { port } => write!(
+                f,
+                "ポート {port} は OS が使わせないポートです（Windows が予約しているなど）。ポートを自動にするか、別のポートにしてください。"
+            ),
+            OpenError::Failed { port } => write!(f, "ポート {port} で MCP を開けませんでした。"),
+        }
     }
-    if running.as_ref().is_some_and(|h| h.port() == port) {
-        return Ok(());
+}
+
+/// そのポートで受けているのが Malakt Mahoz の MCP か。答えの `Server` を見る。
+fn answered_by_us(port: u16) -> bool {
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    let Ok(mut stream) = TcpStream::connect_timeout(&addr, Duration::from_millis(300)) else {
+        return false;
+    };
+    // 時間切れを付けられなくても、読むときに待つだけ
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(800)));
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(800)));
+    let ask = format!("GET {PATH} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n");
+    if stream.write_all(ask.as_bytes()).is_err() {
+        return false;
+    }
+    let mut head = Vec::new();
+    let _ = stream.take(4096).read_to_end(&mut head);
+    let head = String::from_utf8_lossy(&head).to_ascii_lowercase();
+    head.contains(&format!("\r\nserver: {}\r\n", crate::mcp::NAME))
+}
+
+/// `port` で開く。開けなければ理由。
+fn open_on(db: &Path, port: u16) -> Result<Http, OpenError> {
+    Http::start(db.to_owned(), port).map_err(|error| match error.kind() {
+        std::io::ErrorKind::AddrInUse => OpenError::Busy {
+            port,
+            ours: answered_by_us(port),
+        },
+        // Windows の予約（除外）しているポートは、ここに来る
+        std::io::ErrorKind::PermissionDenied => OpenError::Denied { port },
+        _ => OpenError::Failed { port },
+    })
+}
+
+/// 自動のときに試すポート。前に使ったポート、標準のポートから 100 個、OS の選ぶ空きポート。
+fn auto_ports(preferred: u16) -> impl Iterator<Item = u16> {
+    std::iter::once(preferred)
+        .chain((DEFAULT_PORT..DEFAULT_PORT + 100).filter(move |p| *p != preferred))
+        .chain(std::iter::once(0))
+}
+
+/// 設定に合わせて開く・閉じる。開いていれば、そのポートを返す。
+/// 開けなければ理由を返し、前の状態のまま（開いていたら、前のポートで開いたまま）。
+pub fn apply(db: &Path, config: &Config) -> Result<Option<u16>, OpenError> {
+    let mut running = RUNNING.lock().unwrap_or_else(|e| e.into_inner());
+    if !config.on {
+        *running = None;
+        return Ok(None);
+    }
+    if let Some(now) = running.as_ref().map(Http::port) {
+        // 開いているポートのままでよいなら、そのまま
+        if now == config.port || config.mode == PortMode::Auto {
+            return Ok(Some(now));
+        }
     }
     // 同じポートで開き直すときのために、先に閉じる
-    let before = running.as_ref().map(Http::port);
-    *running = None;
-    match Http::start(db.to_owned(), port) {
+    let before = running.take();
+    let before_port = before.as_ref().map(Http::port);
+    drop(before);
+    let opened = match config.mode {
+        PortMode::Fixed => open_on(db, config.port),
+        PortMode::Auto => {
+            let mut first = None;
+            let mut found = None;
+            for port in auto_ports(config.port) {
+                match open_on(db, port) {
+                    Ok(http) => {
+                        found = Some(http);
+                        break;
+                    }
+                    Err(error) => {
+                        first.get_or_insert(error);
+                    }
+                }
+            }
+            found.ok_or_else(|| first.unwrap_or(OpenError::Failed { port: config.port }))
+        }
+    };
+    match opened {
         Ok(http) => {
+            let port = http.port();
             *running = Some(http);
-            Ok(())
+            Ok(Some(port))
         }
         Err(error) => {
-            if let Some(before) = before {
-                // 前のポートで開き直す。開けなければ閉じたまま（その理由は前に出ている）
+            if let Some(before) = before_port {
+                // 前のポートで開き直す。開けなければ閉じたまま（理由は返す文のとおり）
                 *running = Http::start(db.to_owned(), before).ok();
             }
-            Err(format!(
-                "MCP の HTTP をポート {port} で開けませんでした: {error}"
-            ))
+            Err(error)
         }
     }
 }
@@ -180,11 +319,17 @@ pub fn running_port() -> Option<u16> {
         .map(Http::port)
 }
 
-/// 起動したときに、保存した設定で開く。
-pub fn start_saved(store: &Store, db: &Path) -> Result<(), String> {
-    let on = enabled(store).map_err(|e| format!("MCP の HTTP の設定を読めませんでした: {e}"))?;
-    let port = port(store).map_err(|e| format!("MCP の HTTP の設定を読めませんでした: {e}"))?;
-    apply(db, on, port)
+/// 起動したときに、保存した設定で開く。自動で前と違うポートになったら、そのポートを覚える。
+pub fn start_saved(store: &mut Store, db: &Path) -> Result<Option<u16>, String> {
+    let mut saved =
+        config(store).map_err(|e| format!("MCP の HTTP の設定を読めませんでした: {e}"))?;
+    let port = apply(db, &saved).map_err(|e| format!("MCP を HTTP で開けませんでした。{e}"))?;
+    if let Some(port) = port.filter(|p| *p != saved.port) {
+        saved.port = port;
+        save(store, &saved)
+            .map_err(|e| format!("MCP の HTTP のポートを保存できませんでした: {e}"))?;
+    }
+    Ok(port)
 }
 
 type Opener = Box<dyn FnOnce() -> malakt_core::Result<Store> + Send>;
@@ -421,6 +566,8 @@ impl Response {
             head.push_str(&format!("Content-Type: {content_type}\r\n"));
         }
         head.push_str(&format!("Content-Length: {}\r\n", self.body.len()));
+        // 同じポートを開こうとしたほかの Malakt Mahoz が、相手を見分けられるように
+        head.push_str(&format!("Server: {}\r\n", crate::mcp::NAME));
         for (name, value) in &self.headers {
             head.push_str(&format!("{name}: {value}\r\n"));
         }
@@ -809,30 +956,109 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("data.sqlite3");
         let mut store = Store::open(&path).unwrap();
-        assert!(!enabled(&store).unwrap());
-        assert_eq!(port(&store).unwrap(), DEFAULT_PORT);
-        save(&mut store, true, 40001).unwrap();
-        assert!(enabled(&store).unwrap());
-        assert_eq!(port(&store).unwrap(), 40001);
-        save(&mut store, false, DEFAULT_PORT).unwrap();
+        assert_eq!(config(&store).unwrap(), Config::default());
+        let fixed = Config {
+            on: true,
+            mode: PortMode::Fixed,
+            port: 40001,
+        };
+        save(&mut store, &fixed).unwrap();
+        assert_eq!(config(&store).unwrap(), fixed);
+        save(&mut store, &Config::default()).unwrap();
         assert!(store.setting(PORT_KEY).unwrap().is_none());
+        assert!(store.setting(MODE_KEY).unwrap().is_none());
         assert_eq!(url(40001), "http://127.0.0.1:40001/mcp");
         assert_eq!(
             claude_add_command(40001, "mmak_x"),
             "claude mcp add --scope user --transport http malakt-mahoz http://127.0.0.1:40001/mcp --header \"Authorization: Bearer mmak_x\""
         );
+        assert_eq!(PortMode::Auto.label(), "自動");
+        assert_eq!(PortMode::Fixed.label(), "固定");
+    }
 
-        // 使われているポートでは開けず、理由を返す
+    /// 開こうとしたポートを、先にほかのものが使っている（Windows の os error 10048 と同じ）。
+    #[test]
+    fn opening_a_port_that_is_already_taken() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("data.sqlite3");
+        let mut store = Store::open(&path).unwrap();
         let taken = TcpListener::bind("127.0.0.1:0").unwrap();
         let busy = taken.local_addr().unwrap().port();
-        let error = apply(&path, true, busy).unwrap_err();
-        assert!(error.contains(&format!("ポート {busy}")), "{error}");
+
+        // 固定なら開かず、ほかのアプリが使っていると返す。OS の文は出さない
+        let fixed = Config {
+            on: true,
+            mode: PortMode::Fixed,
+            port: busy,
+        };
+        let error = apply(&path, &fixed).unwrap_err();
+        assert_eq!(
+            error,
+            OpenError::Busy {
+                port: busy,
+                ours: false
+            }
+        );
+        let text = error.to_string();
+        assert!(
+            text.contains(&format!("ポート {busy} はほかのアプリ")),
+            "{text}"
+        );
+        assert!(!text.contains("os error"), "{text}");
         assert_eq!(running_port(), None);
-        // 空いたポートで開き、閉じる
+
+        // 自動なら、空いているポートで開く
+        let auto = Config {
+            mode: PortMode::Auto,
+            ..fixed
+        };
+        let port = apply(&path, &auto).unwrap().unwrap();
+        assert_ne!(port, busy);
+        assert_eq!(running_port(), Some(port));
+        // 開いているポートで MCP に答える
+        let ping = json!({"jsonrpc": "2.0", "id": 1, "method": "ping"});
+        assert_eq!(post(port, "", &ping).0, 200);
+        // 開いたまま自動でもう一度オンにしても、同じポート
+        assert_eq!(apply(&path, &auto).unwrap(), Some(port));
+
+        // 固定で使われているポートにしようとしたら、前のポートで開いたまま
+        assert!(apply(&path, &fixed).is_err());
+        assert_eq!(running_port(), Some(port));
+        assert_eq!(post(port, "", &ping).0, 200);
+
+        // ほかの Malakt Mahoz が使っているポートは、そう分かる
+        let other = Http::start(path.clone(), 0).unwrap();
+        let theirs = Config {
+            port: other.port(),
+            ..fixed
+        };
+        assert_eq!(
+            apply(&path, &theirs).unwrap_err(),
+            OpenError::Busy {
+                port: other.port(),
+                ours: true
+            }
+        );
+        drop(other);
+
+        // 起動したとき、自動で前のポートが使われていたら、空いているポートで開いて覚える
+        apply(&path, &Config::default()).unwrap();
+        save(&mut store, &auto).unwrap();
+        let opened = start_saved(&mut store, &path).unwrap().unwrap();
+        assert_ne!(opened, busy);
+        assert_eq!(config(&store).unwrap().port, opened);
+        // 起動したとき、固定で使われていたら、開かずに理由を返す
+        apply(&path, &Config::default()).unwrap();
+        save(&mut store, &fixed).unwrap();
+        let error = start_saved(&mut store, &path).unwrap_err();
+        assert!(error.contains("ほかのアプリが使っています"), "{error}");
+        assert_eq!(running_port(), None);
+
+        // 空いたら固定で開き、オフで閉じる
         drop(taken);
-        apply(&path, true, busy).unwrap();
+        assert_eq!(apply(&path, &fixed).unwrap(), Some(busy));
         assert_eq!(running_port(), Some(busy));
-        apply(&path, false, busy).unwrap();
+        assert_eq!(apply(&path, &Config::default()).unwrap(), None);
         assert_eq!(running_port(), None);
         assert!(TcpStream::connect(("127.0.0.1", busy)).is_err());
     }
