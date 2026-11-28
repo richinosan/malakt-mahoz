@@ -73,6 +73,8 @@ impl AiGroup {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AiRow {
     Service,
+    /// ローカル AI のサーバー
+    Server,
     Model,
     Effort,
     Coordinator,
@@ -90,8 +92,9 @@ pub enum AiRow {
 }
 
 impl AiRow {
-    pub const ALL: [AiRow; 15] = [
+    pub const ALL: [AiRow; 16] = [
         AiRow::Service,
+        AiRow::Server,
         // キーはサービスごとなので、サービスのすぐ下に置く
         AiRow::Key,
         AiRow::Model,
@@ -111,9 +114,12 @@ impl AiRow {
 
     pub fn group(self) -> AiGroup {
         match self {
-            AiRow::Service | AiRow::Model | AiRow::Effort | AiRow::Coordinator | AiRow::Key => {
-                AiGroup::Model
-            }
+            AiRow::Service
+            | AiRow::Server
+            | AiRow::Model
+            | AiRow::Effort
+            | AiRow::Coordinator
+            | AiRow::Key => AiGroup::Model,
             AiRow::AutoRun | AiRow::Arrange | AiRow::Track | AiRow::Shell => AiGroup::Behavior,
             AiRow::Rules => AiGroup::Rules,
             AiRow::Schedules => AiGroup::Schedules,
@@ -126,6 +132,7 @@ impl AiRow {
     pub fn name(self) -> &'static str {
         match self {
             AiRow::Service => "サービス",
+            AiRow::Server => "サーバー",
             AiRow::Model => "モデル",
             AiRow::Effort => "考える深さ",
             AiRow::Coordinator => "振り分けのモデル",
@@ -165,7 +172,10 @@ impl AiRow {
     /// 検索で当たる、名前と補足のほかの言葉。
     pub fn words(self) -> &'static str {
         match self {
-            AiRow::Service => "AI Claude OpenCode Cursor プロバイダー",
+            AiRow::Service => "AI Claude OpenCode Cursor プロバイダー ローカル Ollama LM Studio",
+            AiRow::Server => {
+                "AI ローカル Ollama LM Studio llama.cpp vLLM LocalAI Jan URL ポート localhost"
+            }
             AiRow::Model => "AI",
             AiRow::Effort => "AI 考える",
             AiRow::Key => "AI キー 鍵",
@@ -184,6 +194,7 @@ impl AiRow {
         matches!(
             self,
             AiRow::Service
+                | AiRow::Server
                 | AiRow::Model
                 | AiRow::Rules
                 | AiRow::Schedules
@@ -195,6 +206,7 @@ impl AiRow {
     pub fn shown(self, cx: &App) -> bool {
         let session = ai::shared(cx).read(cx);
         match self {
+            AiRow::Server => session.provider == Provider::Local,
             AiRow::Effort => session.provider.supports_effort(),
             AiRow::Coordinator => session.provider != Provider::Cursor,
             AiRow::WatchMinutes | AiRow::WatchInstruction => session.watch.enabled,
@@ -207,6 +219,10 @@ impl AiRow {
 pub struct AiSettings {
     session: Entity<Session>,
     key_input: Entity<InputState>,
+    /// ローカル AI のサーバーの URL。
+    local_input: Entity<InputState>,
+    /// キーの入力欄が、任意のキー（ローカル AI）の案内になっている。
+    key_optional: bool,
     /// 保存済みの API キーを、新しいキーに変えている。
     key_editing: bool,
     model_input: Entity<InputState>,
@@ -238,7 +254,18 @@ pub struct AiSettings {
 impl AiSettings {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let session = ai::shared(cx);
-        let key_input = cx.new(|cx| InputState::new(window, cx).masked(true));
+        let optional = !session.read(cx).provider.needs_key();
+        let key_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .masked(true)
+                .placeholder(if optional { "任意" } else { "" })
+        });
+        let local_url = session.read(cx).local_url.clone();
+        let local_input = cx.new(|cx| {
+            let mut state = InputState::new(window, cx).placeholder("自動で探す");
+            state.set_value(local_url, window, cx);
+            state
+        });
         let model_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("検索、またはモデル ID を入力"));
         let instruction = session.read(cx).watch.instruction.clone();
@@ -284,6 +311,16 @@ impl AiSettings {
                 },
             ),
             cx.observe(&session, |_, _, cx| cx.notify()),
+            // ローカル AI のキーは任意。サービスに合わせて、入力欄の案内を変える
+            cx.observe_in(&session, window, |this, session, window, cx| {
+                let optional = !session.read(cx).provider.needs_key();
+                if this.key_optional != optional {
+                    this.key_optional = optional;
+                    let placeholder = if optional { "任意" } else { "" };
+                    this.key_input
+                        .update(cx, |s, cx| s.set_placeholder(placeholder, window, cx));
+                }
+            }),
             cx.observe(&crate::term::shared(cx), |_, _, cx| cx.notify()),
             // AI や外のエージェントがルールを変えたら、一覧を読み直す
             cx.observe(&crate::db::shared(cx), |_, _, cx| cx.notify()),
@@ -297,6 +334,15 @@ impl AiSettings {
                     this.save_rule_body(cx);
                 }
             }),
+            cx.subscribe_in(
+                &local_input,
+                window,
+                |this, _, event: &InputEvent, _, cx| {
+                    if matches!(event, InputEvent::PressEnter { .. } | InputEvent::Blur) {
+                        this.save_local_url(cx);
+                    }
+                },
+            ),
             cx.subscribe_in(
                 &key_input,
                 window,
@@ -335,6 +381,8 @@ impl AiSettings {
         Self {
             session,
             key_input,
+            local_input,
+            key_optional: optional,
             key_editing: false,
             model_input,
             watch_input,
@@ -360,7 +408,9 @@ impl AiSettings {
         if self.model_open {
             self.model_input.update(cx, |s, cx| s.focus(window, cx));
             self.session.update(cx, |s, cx| {
-                if s.listed.is_empty() && matches!(s.key, KeyState::Present { .. }) {
+                // ローカル AI は、開くたびに読み直す（入れたばかりのモデルも出す）
+                let local = s.provider == Provider::Local && !s.local_searching;
+                if local || (s.listed.is_empty() && matches!(s.key, KeyState::Present { .. })) {
                     s.fetch_models(cx);
                 }
             });
@@ -374,6 +424,19 @@ impl AiSettings {
         watch.instruction = self.watch_input.read(cx).value().to_string();
         change(&mut watch);
         self.session.update(cx, |s, cx| s.set_watch(watch, cx));
+    }
+
+    /// 入力欄の URL を、ローカル AI のサーバーにする。空なら手元のポートを探す。
+    fn save_local_url(&mut self, cx: &mut Context<Self>) {
+        let url = self.local_input.read(cx).value().to_string();
+        self.session.update(cx, |s, cx| s.set_local_url(&url, cx));
+    }
+
+    /// 見つけたサーバーを選ぶ。
+    fn pick_server(&mut self, base: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.local_input
+            .update(cx, |s, cx| s.set_value(base.to_owned(), window, cx));
+        self.session.update(cx, |s, cx| s.set_local_url(base, cx));
     }
 
     fn save_key(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -477,6 +540,76 @@ impl AiSettings {
                 }
                 providers.into_any_element()
             }
+            AiRow::Server => {
+                // 見つけたサーバーと、URL で選んだサーバー
+                let mut servers: Vec<malakt_ai::local::Server> = session.local_found.clone();
+                if let Some(used) = &session.local_server {
+                    if !servers.contains(used) {
+                        servers.push(used.clone());
+                    }
+                }
+                let mut chips = row().gap_1().flex_wrap();
+                for (ix, server) in servers.into_iter().enumerate() {
+                    let active = session.local_server.as_ref() == Some(&server);
+                    let address: SharedString = server.address().to_owned().into();
+                    let base = server.base.clone();
+                    chips = chips.child(
+                        chip(("ai-local-server", ix), server.kind.label(), active, cx)
+                            .tooltip(move |window, cx| {
+                                gpui_kit::component::tooltip::Tooltip::new(address.clone())
+                                    .build(window, cx)
+                            })
+                            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                                this.pick_server(&base, window, cx)
+                            }))
+                            .test_support(),
+                    );
+                }
+                let searching = session.local_searching;
+                col()
+                    .w_full()
+                    .gap_2()
+                    .child(
+                        row()
+                            .gap_1()
+                            .child(
+                                Input::new(&self.local_input)
+                                    .id("ai-local-url")
+                                    .aria_label("サーバーの URL")
+                                    .small()
+                                    .flex_1(),
+                            )
+                            .child(if searching {
+                                div()
+                                    .size_6()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .child(gpui_kit::component::spinner::Spinner::new().small())
+                                    .into_any_element()
+                            } else {
+                                feel::gloss(
+                                    icon_button("ai-local-search", "refresh-cw", "探し直す")
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.session.update(cx, |s, cx| s.search_local(cx));
+                                        })),
+                                )
+                                .into_any_element()
+                            }),
+                    )
+                    .child(chips)
+                    .when_some(session.local_error.clone(), |d, error| {
+                        d.child(
+                            div()
+                                .id("ai-local-error")
+                                .text_xs()
+                                .text_color(theme.danger)
+                                .child(error)
+                                .test_support(),
+                        )
+                    })
+                    .into_any_element()
+            }
             AiRow::Model => {
                 let model_open = self.model_open;
                 let button = feel::gloss(
@@ -575,7 +708,9 @@ impl AiSettings {
             AiRow::Key => {
                 // 保存済みなら、伏せたキーを 1 行で出す。入力欄は、未設定のときと変えるときだけ
                 let saved = match &session.key {
-                    KeyState::Present { masked, source } if !self.key_editing => {
+                    KeyState::Present { masked, source }
+                        if !self.key_editing && *source != Source::None =>
+                    {
                         Some((masked.clone(), *source))
                     }
                     _ => None,
@@ -592,7 +727,7 @@ impl AiSettings {
                 if let Some((masked, source)) = saved {
                     let (icon, place): (&str, SharedString) = match source {
                         Source::Keychain => ("key-round", "OS のキーチェーン".into()),
-                        Source::Env => (
+                        Source::Env | Source::None => (
                             "variable",
                             format!("環境変数 {}", provider.env_var()).into(),
                         ),
@@ -629,7 +764,8 @@ impl AiSettings {
                         .into_any_element();
                 }
                 // 保存済みのキーがあるときだけ、変えるのをキャンセルできる
-                let editing = self.key_editing && matches!(session.key, KeyState::Present { .. });
+                let editing = self.key_editing
+                    && matches!(&session.key, KeyState::Present { source, .. } if *source != Source::None);
                 // 読めなかった理由と保存できなかった理由は、入力欄のすぐ下に出す
                 let errors: Vec<SharedString> = [
                     match &session.key {
@@ -884,10 +1020,23 @@ impl AiSettings {
                                 .truncate()
                                 .child(session.model_label(&m)),
                         )
+                        // ローカル AI のモデルは、ツールと画像を使えるかを印で出す
+                        .children(session.model_abilities(&m).into_iter().map(|(icon, _)| {
+                            app_icon(icon).size_3p5().text_color(theme.muted_foreground)
+                        }))
                         .tooltip({
-                            let id = m.clone();
+                            let abilities: Vec<&str> = session
+                                .model_abilities(&m)
+                                .into_iter()
+                                .map(|(_, name)| name)
+                                .collect();
+                            let tip: SharedString = if abilities.is_empty() {
+                                m.clone()
+                            } else {
+                                format!("{m}（{}）", abilities.join("・")).into()
+                            };
                             move |window, cx| {
-                                gpui_kit::component::tooltip::Tooltip::new(id.clone())
+                                gpui_kit::component::tooltip::Tooltip::new(tip.clone())
                                     .build(window, cx)
                             }
                         })

@@ -5013,6 +5013,14 @@ impl MainView {
         cx.notify();
     }
 
+    /// AI のおすすめから、ローカル AI に切り替えてチャットを開く。手元のサーバーを探し、
+    /// 見つけたサーバーの最初のモデルを使う。
+    pub fn use_local_ai_from_promo(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.ai_session
+            .update(cx, |s, cx| s.set_provider(malakt_ai::Provider::Local, cx));
+        self.open_ai_from_promo(window, cx);
+    }
+
     /// このウィンドウの右に、チャットを出すか。
     pub fn ai_docked(&self, cx: &App) -> bool {
         self.ai_open && self.ai_session.read(cx).chat_window.is_none()
