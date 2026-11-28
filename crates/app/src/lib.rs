@@ -23,6 +23,7 @@ pub mod icons;
 pub mod mcp;
 mod mcp_keys;
 pub mod mcp_register;
+pub mod on_top;
 pub mod panes;
 pub mod passkey;
 pub mod pomodoro;
@@ -291,6 +292,9 @@ pub(crate) fn open_window_with(
             view
         })
     })?;
+    // 前に最前面に出していたウィンドウは、また出す
+    let pinned = saved.as_ref().is_some_and(|state| state.on_top);
+    on_top::opened(opened.0, on_top::Kind::Task, Some(pinned), cx);
     if session::set_main(opened.1.entity_id(), opened.0, cx) {
         // メインを最小化したら、ほかのウィンドウも最小化する。元に戻したら、一緒に戻す
         opened.0.update(cx, |_, window, _| {
@@ -518,10 +522,15 @@ pub fn open_ai_window(mode: PaneMode, cx: &mut App) -> Result<AnyWindowHandle> {
         icon: window_icon(),
         ..gpui_kit::component::TitleBar::window_options()
     };
-    gpui_kit::open_window(options, cx, |window, cx| {
+    let (handle, _) = gpui_kit::open_window(options, cx, |window, cx| {
         cx.new(|cx| AiPane::new(mode, None, window, cx))
-    })
-    .map(|(handle, _)| handle)
+    })?;
+    let kind = match mode {
+        PaneMode::ShellWindow => on_top::Kind::Shell,
+        _ => on_top::Kind::Chat,
+    };
+    on_top::opened(handle, kind, None, cx);
+    Ok(handle)
 }
 
 /// 同梱のフォントを読み込んで、画面全体の書体にする。

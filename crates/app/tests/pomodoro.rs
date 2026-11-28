@@ -351,3 +351,48 @@ fn follows_the_ai_tools(cx: &mut TestAppContext) {
     assert_eq!(timer(cx).run(), Run::Ready);
     let _ = Settings::default();
 }
+
+/// ポモドーロのウィンドウも最前面に出せる。閉じて開き直しても最前面のまま。
+/// MCP のサーバーからの頼み（データベースに書く）でも切り替わる。
+#[gpui_kit::test]
+fn the_window_stays_on_top_after_reopening(cx: &mut TestAppContext) {
+    use malakt_mahoz::on_top::{self, Kind};
+    start(cx);
+    let _main = open(cx);
+    let first = cx.update(|cx| pomodoro::open(cx).unwrap());
+    cx.run_until_parked();
+    cx.update_window(first, |_, window, cx| on_top::toggle(window, cx))
+        .unwrap();
+    ui(cx, first, |window, _| {
+        assert!(window.try_find("window-on-top").is_some());
+    });
+    cx.update_window(first, |_, window, _| window.remove_window())
+        .unwrap();
+    cx.run_until_parked();
+    let again = cx.update(|cx| pomodoro::open(cx).unwrap());
+    cx.run_until_parked();
+    let on = |cx: &mut TestAppContext| {
+        cx.update_window(again, |_, window, cx| on_top::is_on(window, cx))
+            .unwrap()
+    };
+    assert!(on(cx), "開き直しても最前面に出る");
+
+    cx.update(|cx| {
+        db::shared(cx).update(cx, |db, _| {
+            on_top::ask(&mut db.store, Kind::Pomodoro, false)
+        })
+    })
+    .unwrap();
+    cx.update(on_top::answer_asks);
+    cx.run_until_parked();
+    assert!(!on(cx));
+    let ask = cx.update(|cx| {
+        db::shared(cx)
+            .read(cx)
+            .store
+            .setting(&format!("{}pomodoro", on_top::ASK_PREFIX))
+            .unwrap()
+    });
+    assert_eq!(ask, None, "読んだ頼みは消す");
+    assert!(!cx.update(|cx| on_top::saved(Kind::Pomodoro, cx)));
+}

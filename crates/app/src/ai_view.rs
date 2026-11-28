@@ -2671,12 +2671,21 @@ impl AiPane {
                     .child(title),
             )
             // バーの判定に取られないよう、ボタンのある場所はマウスを受け止める
-            .child(row().occlude().children(crate::render::window_controls(
-                TITLE_BAR_HEIGHT,
-                false,
-                window,
-                cx,
-            )))
+            .child(
+                row()
+                    .occlude()
+                    .children(crate::on_top::pin(
+                        gpui_kit::component::Size::XSmall,
+                        window,
+                        cx,
+                    ))
+                    .children(crate::render::window_controls(
+                        TITLE_BAR_HEIGHT,
+                        false,
+                        window,
+                        cx,
+                    )),
+            )
             .debug_selector(|| "window-header".into())
             .right_menu({
                 let main = self.main.clone();

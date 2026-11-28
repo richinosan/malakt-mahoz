@@ -558,6 +558,8 @@ pub struct MainView {
     pub column_drag: Option<ColumnDrag>,
     /// ウィンドウの位置と大きさ（x, y, 幅, 高さ）と、最大化しているか。
     pub window_place: Option<([f32; 4], bool)>,
+    /// ウィンドウを常に最前面に表示しているか（`crate::on_top`）。
+    pub on_top: bool,
     /// ペインの配置と、今のペイン。
     pub layout: malakt_core::panes::Layout,
     /// このウィンドウが中身を兼ねているペイン。
@@ -1144,6 +1146,7 @@ impl MainView {
             pane_presets: Vec::new(),
             border_drag: None,
             window_place: None,
+            on_top: false,
             motion: true,
             modal_opened: None,
             modal_closing: None,

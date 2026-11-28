@@ -789,3 +789,37 @@ fn the_ai_changes_the_lock_options(cx: &mut TestAppContext) {
         );
     });
 }
+
+/// AI がウィンドウを常に最前面に表示し、元に戻す。開いていないウィンドウは、次に開いたときのために覚える。
+#[gpui_kit::test]
+fn the_ai_keeps_windows_on_top(cx: &mut TestAppContext) {
+    use malakt_mahoz::on_top::{self, Kind};
+    let world = start(cx, Store::open_in_memory().unwrap());
+    let (window, view) = open(cx);
+    let pane = open_chat(cx, window, &view);
+    let on = |cx: &mut TestAppContext| {
+        cx.update_window(window, |_, window, cx| on_top::is_on(window, cx))
+            .unwrap()
+    };
+
+    world.call("set_on_top", json!({"on": true}), "最前面にしました。");
+    say(cx, window, &pane, "このウィンドウを最前面に");
+    assert!(on(cx));
+    ui(cx, window, |window, _| {
+        assert!(window.try_find("window-on-top").is_some());
+    });
+
+    world.call(
+        "set_on_top",
+        json!({"on": true, "window": "pomodoro"}),
+        "覚えました。",
+    );
+    say(cx, window, &pane, "ポモドーロも最前面に");
+    assert!(cx.update(|cx| on_top::saved(Kind::Pomodoro, cx)));
+
+    world.call("set_on_top", json!({"on": false}), "戻しました。");
+    say(cx, window, &pane, "元に戻して");
+    assert!(!on(cx));
+    let (text, error) = world.last_result();
+    assert!(!error, "{text}");
+}

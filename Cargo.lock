@@ -5004,6 +5004,7 @@ dependencies = [
  "webview2-com",
  "windows 0.62.2",
  "wry",
+ "x11rb",
 ]
 
 [[package]]

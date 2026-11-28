@@ -273,14 +273,20 @@ pub fn watch(cx: &mut App) {
             let new_day = std::mem::replace(&mut day, today.clone()) != today;
             cx.update(|cx| {
                 lock_if_idle(unix_now(), cx);
-                shared(cx).update(cx, |db, cx| {
+                let outside = shared(cx).update(cx, |db, cx| {
                     db.sync_open_mark(unix_now());
                     let alert_due = db.next_alert.is_some_and(|at| unix_now() >= at);
                     let repeated = db.sweep_repeats(&malakt_core::view::now());
-                    if db.changed_outside() || new_day || alert_due || repeated {
+                    let outside = db.changed_outside();
+                    if outside || new_day || alert_due || repeated {
                         cx.notify();
                     }
-                })
+                    outside
+                });
+                // MCP のサーバーが頼んだ、最前面の表示の切り替え
+                if outside {
+                    crate::on_top::answer_asks(cx);
+                }
             });
         }
     })

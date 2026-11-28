@@ -385,6 +385,7 @@ pub fn open(cx: &mut App) -> Result<AnyWindowHandle> {
         cx.new(|cx| PomodoroView::new(window, cx))
     })?;
     shared(cx).update(cx, |this, _| this.window = Some(handle));
+    crate::on_top::opened(handle, crate::on_top::Kind::Pomodoro, None, cx);
     db::shared(cx).update(cx, |db, _| db.store.set_setting(OPEN_KEY, Some("1")))?;
     Ok(handle)
 }
@@ -646,6 +647,11 @@ impl PomodoroView {
                                 })),
                         ))
                     })
+                    .children(crate::on_top::pin(
+                        gpui_kit::component::Size::XSmall,
+                        window,
+                        cx,
+                    ))
                     .when(own_bar, |d| {
                         d.children(window_controls(BAR_HEIGHT, false, window, cx))
                     }),
