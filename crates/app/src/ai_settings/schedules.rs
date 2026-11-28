@@ -2,9 +2,9 @@
 //!
 //! 「＋」で「新規定時タスク」を足し、その場でタイトルを書く。行を押すと開き、いつ・AI への指示と、
 //! 作るタスクの項目（タスクの詳細と同じもの: URL・状態・優先度・担当と役・開始日・期限・通知・進捗・
-//! カテゴリ・親タスク・ほかのワークスペース・説明・サブタスク・添付）をその場で変えられる。
-//! タイトル・説明・AI への指示は Enter かほかの場所を押すと保存し（説明と AI への指示は Shift+Enter
-//! で改行）、URL・カテゴリ・サブタスクは Enter で足す。Esc で書きかけを捨てて閉じる。
+//! 予想工数・所要時間の基準・カテゴリ・親タスク・ほかのワークスペース・説明・サブタスク・添付）を
+//! その場で変えられる。タイトル・説明・予想工数・AI への指示は Enter かほかの場所を押すと保存し
+//! （説明と AI への指示は Shift+Enter で改行）、URL・カテゴリ・サブタスクは Enter で足す。Esc で書きかけを捨てて閉じる。
 
 use crate::press::button;
 use gpui_kit::base::TestSupportExt;
@@ -15,8 +15,10 @@ use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{ActiveTheme, Sizable};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
+use malakt_core::estimate::{self, Reading};
 use malakt_core::repeat::{self, Rule};
 use malakt_core::schedule::{due_days_label, Schedule, SchedulePatch, Template};
+use malakt_core::timing::{self, Basis, EndBasis, StartBasis};
 use malakt_core::view::Priority;
 use malakt_core::{alert, Person, Role, Roles, Status, Store, Task, Workspace};
 
@@ -99,6 +101,7 @@ fn on_patch(
 /// 開いた定時タスクの、雛形の説明・URL・カテゴリ・サブタスクを書く欄。
 pub struct TemplateInputs {
     description: Entity<TextareaState>,
+    estimate: Entity<InputState>,
     url: Entity<InputState>,
     category: Entity<InputState>,
     subtask: Entity<InputState>,
@@ -113,6 +116,7 @@ impl TemplateInputs {
                     .auto_grow(2, 8)
                     .placeholder("ワークスペースの設定")
             }),
+            estimate: cx.new(|cx| InputState::new(window, cx).placeholder("1日3時間、90分、1.5h")),
             url: cx.new(|cx| InputState::new(window, cx).placeholder("URL を追加")),
             category: cx.new(|cx| InputState::new(window, cx).placeholder("カテゴリを追加")),
             subtask: cx.new(|cx| InputState::new(window, cx).placeholder("サブタスクを追加")),
@@ -135,6 +139,15 @@ impl TemplateInputs {
                         InputEvent::PressEnter { shift: false, .. } | InputEvent::Blur
                     ) {
                         this.save_schedule_description(cx);
+                    }
+                },
+            ),
+            cx.subscribe_in(
+                &self.estimate,
+                window,
+                |this, _, event: &InputEvent, window, cx| {
+                    if matches!(event, InputEvent::PressEnter { .. } | InputEvent::Blur) {
+                        this.save_schedule_estimate(window, cx);
                     }
                 },
             ),
@@ -173,6 +186,9 @@ impl TemplateInputs {
         let description = s.task.description.clone().unwrap_or_default();
         self.description
             .update(cx, |i, cx| i.set_value(description, window, cx));
+        let estimate = s.task.estimate.map(|e| e.label()).unwrap_or_default();
+        self.estimate
+            .update(cx, |i, cx| i.set_value(estimate, window, cx));
         for input in [&self.url, &self.category, &self.subtask] {
             input.update(cx, |i, cx| i.set_value("", window, cx));
         }
@@ -472,6 +488,36 @@ impl AiSettings {
             },
             cx,
         );
+    }
+
+    /// 書いた予想工数を保存する。空にしたら外す。読めないときは、書いたまま理由を出す。
+    fn save_schedule_estimate(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(s) = self
+            .schedule_open
+            .clone()
+            .and_then(|id| self.schedule(&id, cx))
+        else {
+            return;
+        };
+        let text = self.schedule_inputs.estimate.read(cx).value().to_string();
+        let value = match estimate::read(&text) {
+            Reading::Empty => None,
+            Reading::Value(e) => e.non_zero(),
+            Reading::Unreadable => {
+                self.schedules_error =
+                    Some(format!("予想工数「{}」を読めませんでした", text.trim()).into());
+                cx.notify();
+                return;
+            }
+        };
+        let label = value.map(|e| e.label()).unwrap_or_default();
+        self.schedule_inputs
+            .estimate
+            .update(cx, |i, cx| i.set_value(label, window, cx));
+        if value == s.task.estimate {
+            return;
+        }
+        self.patch_template(&s.id, cx, |t| t.estimate = value);
     }
 
     pub(super) fn save_schedule_ai(&mut self, cx: &mut Context<Self>) {
@@ -817,6 +863,12 @@ impl AiSettings {
         };
         let standard =
             take(&mut problems, "通知の標準", store.due_alert_standard()).unwrap_or_default();
+        let time_standard = take(
+            &mut problems,
+            "所要時間の基準の標準",
+            store.time_basis_standard(),
+        )
+        .unwrap_or_default();
         // 親にできるタスク: 同じ場所の、終わっていないタスク
         let scope = match workspace {
             Some(w) => malakt_core::Scope::Workspace(w),
@@ -1225,6 +1277,71 @@ impl AiSettings {
                 }
             });
 
+        // 予想工数。書いて Enter かほかの場所を押すと保存する
+        let estimate_input = div()
+            .id("schedule-estimate")
+            .w(CONTROL_WIDTH)
+            .child(
+                Input::new(&self.schedule_inputs.estimate)
+                    .aria_label("予想工数")
+                    .small(),
+            )
+            .test_support();
+
+        // 所要時間の基準。決めていなければ、ワークスペース（なければ全体の標準）
+        let inherited = workspace
+            .and_then(|w| timing::workspace_basis(&workspaces, w))
+            .unwrap_or(time_standard);
+        let inherited_text = if workspace.is_some() {
+            format!("ワークスペースの設定（{}）", inherited.label())
+        } else {
+            format!("標準（{}）", inherited.label())
+        };
+        let shown_basis: SharedString = match t.time_basis {
+            Some(b) => b.label().into(),
+            None => inherited_text.clone().into(),
+        };
+        let basis = button("schedule-time-basis")
+            .accessibility_label(format!("所要時間の基準: {shown_basis}"))
+            .outline()
+            .small()
+            .child(menu_face("timer", shown_basis, cx))
+            .pop_menu({
+                let (settings, s) = (settings.clone(), s.clone());
+                move |mut menu, _, _| {
+                    let now = s.task.time_basis.unwrap_or(inherited);
+                    let set = |b: Option<Basis>| {
+                        on_patch(
+                            settings.clone(),
+                            s.id.clone(),
+                            task_patch(&s, |t| t.time_basis = b),
+                        )
+                    };
+                    menu = menu.item(
+                        PopupMenuItem::new(inherited_text.clone())
+                            .checked(s.task.time_basis.is_none())
+                            .on_click(set(None)),
+                    );
+                    menu = menu.separator().label("開始");
+                    for start in StartBasis::ALL {
+                        menu = menu.item(
+                            PopupMenuItem::new(start.label())
+                                .checked(s.task.time_basis.is_some() && now.start == start)
+                                .on_click(set(Some(Basis::new(start, now.end)))),
+                        );
+                    }
+                    menu = menu.separator().label("完了");
+                    for end in EndBasis::ALL {
+                        menu = menu.item(
+                            PopupMenuItem::new(end.label())
+                                .checked(s.task.time_basis.is_some() && now.end == end)
+                                .on_click(set(Some(Basis::new(now.start, end)))),
+                        );
+                    }
+                    menu
+                }
+            });
+
         // カテゴリ。決めていなければ、ワークスペースの設定
         let mut categories = row().w_full().gap_1p5().flex_wrap().items_center();
         match &t.categories {
@@ -1551,6 +1668,8 @@ impl AiSettings {
             .child(field("期限", due, cx))
             .when_some(alerts, |d, menu| d.child(field("通知", menu, cx)))
             .child(field("進捗", percent, cx))
+            .child(field("予想工数", estimate_input, cx))
+            .child(field("所要時間", basis, cx))
             .child(field("カテゴリ", categories, cx))
             .child(field("親タスク", parent_menu, cx))
             .when_some(links, |d, menu| d.child(field("同期先", menu, cx)))

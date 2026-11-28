@@ -1328,7 +1328,7 @@ fn hint_line(hint: &Hint, theme: &gpui_kit::component::Theme) -> Div {
 }
 
 /// 丸いチップ。選んでいるものは金の縁と淡い面、太字。
-fn pill(
+pub(crate) fn pill(
     id: impl Into<ElementId>,
     text: impl Into<SharedString>,
     active: bool,

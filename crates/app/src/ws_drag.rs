@@ -424,6 +424,7 @@ mod tests {
             date: None,
             icon: None,
             color: None,
+            time_basis: None,
             position,
             created_at: 0,
             updated_at: 0,

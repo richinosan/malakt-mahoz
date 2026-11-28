@@ -90,6 +90,127 @@ fn task_fields() -> Value {
         "add_urls": {"type": "array", "items": {"type": "string"},
                      "description": "今の URL の後ろに足す URL。同じものは足さない"},
         "remove_urls": {"type": "array", "items": {"type": "string"}, "description": "外す URL"},
+        "estimate": estimate_schema("予想工数"),
+        "time_basis": basis_schema("このタスクの所要時間の基準。null でワークスペースか全体の標準に合わせる"),
+    })
+}
+
+fn estimate_schema(what: &str) -> Value {
+    json!({"type": ["string", "null"],
+           "description": format!("{what}。月・日・時間・分を組み合わせて書く（「1日3時間」「90分」「1.5h」「2週間」「1か月」「P1DT3H」）。単位のない数は時間。null か空でなくす")})
+}
+
+fn basis_schema(what: &str) -> Value {
+    json!({
+        "type": ["object", "null"],
+        "description": format!("{what}。所要時間はこの始まりから終わりまでの時計の経過"),
+        "properties": {
+            "start": {"type": "string", "enum": ["created", "assigned", "in_process", "start_date"],
+                      "description": "作った時 / 担当が付いた時 / 進行中にした時 / 開始日"},
+            "end": {"type": "string", "enum": ["completed", "self_done"],
+                    "description": "完了にした時 / 自分の分を完了にした時"},
+        },
+        "required": ["start", "end"],
+        "additionalProperties": false,
+    })
+}
+
+/// 予想工数の引数。null か空で `Some(None)`、なければ `None`。
+fn estimate_arg(
+    args: &Value,
+    key: &str,
+) -> Result<Option<Option<malakt_core::estimate::Estimate>>, String> {
+    use malakt_core::estimate::{read, Reading};
+    match args.get(key) {
+        None => Ok(None),
+        Some(Value::Null) => Ok(Some(None)),
+        Some(Value::String(text)) => match read(text) {
+            Reading::Empty => Ok(Some(None)),
+            Reading::Value(e) => Ok(Some(Some(e))),
+            Reading::Unreadable => Err(format!("{key} が読めません: {text}")),
+        },
+        Some(other) => Err(format!("{key} は文字列か null です: {other}")),
+    }
+}
+
+/// 所要時間の基準の引数。null で `Some(None)`、なければ `None`。
+fn basis_arg(
+    args: &Value,
+    key: &str,
+) -> Result<Option<Option<malakt_core::timing::Basis>>, String> {
+    use malakt_core::timing::{Basis, EndBasis, StartBasis};
+    match args.get(key) {
+        None => Ok(None),
+        Some(Value::Null) => Ok(Some(None)),
+        Some(v) => {
+            let part = |name: &str| v.get(name).and_then(Value::as_str).unwrap_or_default();
+            let start = StartBasis::parse(part("start"))
+                .ok_or_else(|| format!("{key}.start が正しくありません: {v}"))?;
+            let end = EndBasis::parse(part("end"))
+                .ok_or_else(|| format!("{key}.end が正しくありません: {v}"))?;
+            Ok(Some(Some(Basis::new(start, end))))
+        }
+    }
+}
+
+fn basis_json(basis: Option<malakt_core::timing::Basis>) -> Value {
+    match basis {
+        Some(b) => json!({"start": b.start.code(), "end": b.end.code(), "text": b.label()}),
+        None => Value::Null,
+    }
+}
+
+/// タスクの所要時間（基準と、数えた区間）。
+fn time_json(store: &Store, task: &Task) -> Result<Value, String> {
+    use malakt_core::timing;
+    let core = |e: malakt_core::Error| e.to_string();
+    let workspaces = store.workspaces().map_err(core)?;
+    let standard = store.time_basis_standard().map_err(core)?;
+    let basis = timing::basis_of(task, &workspaces, standard);
+    let me = store
+        .people()
+        .map_err(core)?
+        .into_iter()
+        .find(|p| p.is_self)
+        .map(|p| p.id);
+    let span = timing::span(task, basis, me.as_deref(), malakt_core::now_ms());
+    let at = |ms: Option<i64>| ms.map(malakt_core::view::format_datetime);
+    Ok(json!({
+        "basis": basis_json(Some(basis)),
+        "basis_is_own": task.time_basis.is_some(),
+        "started_at": at(task.started_at),
+        "assigned_at": at(task.assigned_at),
+        "completed_at": at(task.completed_at),
+        "elapsed": span.map(|s| json!({
+            "from": malakt_core::view::format_datetime(s.start),
+            "to": if s.running { Value::Null } else { json!(malakt_core::view::format_datetime(s.end)) },
+            "running": s.running,
+            "minutes": s.ms() / 60_000,
+            "text": malakt_core::estimate::elapsed_label(s.ms()),
+            "counted_from": s.from.code(),
+            "over_estimate": timing::over_estimate(task, Some(s)),
+        })),
+    }))
+}
+
+/// 統計（`get_time_stats`）。
+fn stats_json(stats: &malakt_core::timing::Stats) -> Value {
+    let text = |ms: Option<i64>| ms.map(malakt_core::estimate::elapsed_label);
+    json!({
+        "done": stats.done,
+        "total": (stats.done > 0).then(|| malakt_core::estimate::elapsed_label(stats.total_ms)),
+        "mean": text(stats.mean_ms),
+        "median": text(stats.median_ms),
+        "longest": text(stats.longest_ms),
+        "mean_minutes": stats.mean_ms.map(|m| m / 60_000),
+        "estimated": stats.estimated,
+        "within_estimate": stats.within,
+        "within_percent": stats.within_percent(),
+        "actual_percent_of_estimate": stats.actual_percent(),
+        "open": stats.open,
+        "open_estimated": stats.open_estimated,
+        "open_estimate": (stats.open_estimated > 0).then(|| malakt_core::estimate::elapsed_label(stats.open_estimate_ms)),
+        "open_over_estimate": stats.open_over,
     })
 }
 
@@ -180,6 +301,8 @@ fn schedule_fields(extra: Value) -> Value {
             "linked_workspace_ids": {"type": ["array", "null"], "items": {"type": "string"},
                                      "description": "作るタスクを、入れるワークスペースのほかにも出すワークスペース（link_task と同じ）。null でワークスペースの既定値"},
             "subtasks": {"type": "array", "items": {"type": "string"}, "description": format!("作るタスクのサブタスクのタイトル（{} 件まで）。渡すとこの並びになる", malakt_core::schedule::MAX_SUBTASKS)},
+            "estimate": estimate_schema("作るタスクの予想工数"),
+            "time_basis": basis_schema("作るタスクの所要時間の基準。null でワークスペースか全体の標準に合わせる"),
         }),
         extra,
     )
@@ -540,6 +663,29 @@ pub fn definitions() -> Vec<ToolDef> {
             ),
         },
         ToolDef {
+            name: "get_time_stats",
+            description: "予想工数と所要時間の統計を返す。workspace_id を渡すとそのワークスペース（サブワークスペースを含む）、省くと全体。period で、その期間に終わったタスクだけを数える。完了数・所要時間の合計／平均／中央値・予想工数に収まった割合・予想工数に対する所要時間の割合・未完了の予想工数の合計を、全体と担当者ごとに返す。所要時間は、タスクごとの基準（タスク → ワークスペース → 全体の標準）で数えた時計の経過（ポモドーロの作業時間とは別）。",
+            schema: object(
+                json!({
+                    "workspace_id": {"type": "string"},
+                    "period": {"type": "string", "enum": ["week", "month", "quarter", "year", "all"],
+                               "description": "7 日 / 30 日 / 90 日 / 1 年 / すべて（標準は month）"},
+                }),
+                &[],
+            ),
+        },
+        ToolDef {
+            name: "set_time_basis",
+            description: "所要時間の基準（どこから数え、どこまで数えるか）を変える。workspace_id を省くと全体の標準、渡すとそのワークスペース（サブワークスペースも従う）。ワークスペースで basis に null を渡すと、親のワークスペースか全体の標準に合わせる。タスクごとの基準は update_task の time_basis で変える。",
+            schema: object(
+                json!({
+                    "workspace_id": {"type": "string"},
+                    "basis": basis_schema("基準"),
+                }),
+                &["basis"],
+            ),
+        },
+        ToolDef {
             name: "set_repeat",
             description: "タスクに繰り返しを付ける・変える・外す。繰り返しのあるタスクは、次の回の時刻になるとアプリがタスクを写して次の回を作り、繰り返しは新しい回へ移る（開始日と期限は回の日に合わせてずれる）。ai_instruction を付けると、回を作ったときにアプリの AI がその指示を実行して、結果をその回のタスクにコメントする（例: 週次の報告の下書き）。アプリが動いている間だけ動く。渡した項目だけが変わる。",
             schema: object(
@@ -684,6 +830,7 @@ pub const WRITES: &[&str] = &[
     "add_schedule_attachment",
     "delete_schedule_attachment",
     "delete_schedule",
+    "set_time_basis",
 ];
 
 /// 確認に出す文。`shell` は、[`RUN_SHELL`] のコマンドが動くシェル。
@@ -903,6 +1050,12 @@ fn apply_fields(draft: &mut TaskDraft, args: &Value) -> Result<(), String> {
         if let Some(v) = args.get(key) {
             *slot = strings(v, key)?;
         }
+    }
+    if let Some(v) = estimate_arg(args, "estimate")? {
+        draft.estimate = v;
+    }
+    if let Some(v) = basis_arg(args, "time_basis")? {
+        draft.time_basis = v;
     }
     edit_urls(&mut draft.urls, args)
 }
@@ -1124,6 +1277,8 @@ fn task_json(task: &Task) -> Value {
         })).collect::<Vec<_>>(),
         "categories": task.categories,
         "urls": task.urls,
+        "estimate": task.estimate.map(|e| e.label()),
+        "time_basis": basis_json(task.time_basis),
     })
 }
 
@@ -1413,6 +1568,8 @@ fn schedule_json(store: &Store, s: &malakt_core::schedule::Schedule) -> Result<V
         "urls": t.urls,
         "linked_workspace_ids": t.linked_workspace_ids,
         "subtasks": t.subtasks,
+        "estimate": t.estimate.map(|e| e.label()),
+        "time_basis": basis_json(t.time_basis),
         "attachments": files,
     }))
 }
@@ -1463,6 +1620,8 @@ fn apply_template(t: &mut malakt_core::schedule::Template, args: &Value) -> Resu
         "remove_urls",
         "linked_workspace_ids",
         "subtasks",
+        "estimate",
+        "time_basis",
     ];
     if !KEYS.iter().any(|k| args.get(*k).is_some()) {
         return Ok(false);
@@ -1504,6 +1663,12 @@ fn apply_template(t: &mut malakt_core::schedule::Template, args: &Value) -> Resu
     }
     if let Some(v) = args.get("subtasks") {
         t.subtasks = strings(v, "subtasks")?;
+    }
+    if let Some(v) = estimate_arg(args, "estimate")? {
+        t.estimate = v;
+    }
+    if let Some(v) = basis_arg(args, "time_basis")? {
+        t.time_basis = v;
     }
     edit_urls(&mut t.urls, args)?;
     match args.get("due_alerts") {
@@ -1779,6 +1944,7 @@ pub fn execute(
                 .collect();
             task["active_tickets"] = json!(store.active_ticket_count(id).map_err(core)?);
             task["due_alerts"] = due_alerts_json(store, Some(id))?;
+            task["time"] = time_json(store, &store.task(id).map_err(core)?)?;
             task["repeat"] = repeat_json(store, id)?;
             let (count, seconds) = store.work_total(id).map_err(core)?;
             task["work"] = json!({"count": count, "seconds": seconds});
@@ -2483,6 +2649,79 @@ pub fn execute(
             store.delete_schedule(required(args, "id")?).map_err(core)?;
             json!({"deleted": true})
         }
+        "get_time_stats" => {
+            use malakt_core::timing::{self, Period};
+            let period = match optional(args, "period") {
+                None => Period::Month,
+                Some(p) => {
+                    Period::parse(p).ok_or_else(|| format!("period が正しくありません: {p}"))?
+                }
+            };
+            let workspace = optional(args, "workspace_id").filter(|w| !w.is_empty());
+            let filter = TaskFilter {
+                include_descendants: true,
+                ..Default::default()
+            };
+            let tasks = match workspace {
+                Some(w) => store.tasks(w, &filter).map_err(core)?,
+                None => store.tasks(Scope::All, &filter).map_err(core)?,
+            };
+            let workspaces = store.workspaces().map_err(core)?;
+            let standard = store.time_basis_standard().map_err(core)?;
+            let people = store.people().map_err(core)?;
+            let me = people.iter().find(|p| p.is_self).map(|p| p.id.clone());
+            let now = malakt_core::now_ms();
+            let since = period.since(now);
+            let items: Vec<timing::Item> = tasks
+                .iter()
+                .map(|task| timing::Item {
+                    task,
+                    basis: timing::basis_of(task, &workspaces, standard),
+                })
+                .collect();
+            let total = timing::stats(&items, me.as_deref(), now, since);
+            let by_person: Vec<Value> = timing::stats_by_person(&items, me.as_deref(), now, since)
+                .into_iter()
+                .map(|(id, s)| {
+                    let name = id
+                        .as_deref()
+                        .and_then(|id| people.iter().find(|p| p.id == id))
+                        .map(|p| p.name.clone());
+                    let mut row = stats_json(&s);
+                    row["person_id"] = json!(id);
+                    row["name"] = json!(name);
+                    row
+                })
+                .collect();
+            let basis = match workspace {
+                Some(w) => timing::workspace_basis(&workspaces, w).unwrap_or(standard),
+                None => standard,
+            };
+            json!({
+                "workspace_id": workspace,
+                "period": optional(args, "period").unwrap_or("month"),
+                "basis": basis_json(Some(basis)),
+                "total": stats_json(&total),
+                "by_person": by_person,
+            })
+        }
+        "set_time_basis" => {
+            let basis =
+                basis_arg(args, "basis")?.ok_or_else(|| "basis を渡してください".to_owned())?;
+            match optional(args, "workspace_id").filter(|w| !w.is_empty()) {
+                Some(w) => {
+                    let ws = store.set_workspace_time_basis(w, basis).map_err(core)?;
+                    json!({"workspace_id": ws.id, "basis": basis_json(ws.time_basis)})
+                }
+                None => {
+                    let basis = basis.ok_or_else(|| {
+                        "全体の標準は null にできません。start と end を渡してください".to_owned()
+                    })?;
+                    store.set_time_basis_standard(basis).map_err(core)?;
+                    json!({"standard": basis_json(Some(basis))})
+                }
+            }
+        }
         "set_due_alerts" => {
             let task_id = optional(args, "task_id");
             let list = |key: &str| -> Result<Option<Option<Vec<u32>>>, String> {
@@ -2825,6 +3064,8 @@ pub fn summary(name: &str, args: &Value) -> String {
         "list_work_logs" => "作業の記録を取得".into(),
         "get_due_alerts" => "期限の通知のタイミングを取得".into(),
         "set_due_alerts" => "期限の通知のタイミングを変更".into(),
+        "get_time_stats" => "予想工数と所要時間の統計を取得".into(),
+        "set_time_basis" => "所要時間の基準を変更".into(),
         "update_workspace_settings" => "ワークスペースの設定を変更".into(),
         "list_ai_rules" => "AI のルールを取得".into(),
         "create_ai_rule" => format!("AI のルールを追加: {}", arg("name")),
@@ -4483,5 +4724,84 @@ mod tests {
         let note = turn_note("2026-11-24", "ユーザーは「家」を開いています。", "");
         assert!(note.contains("2026-11-24") && note.ends_with("「家」を開いています。"));
         assert!(turn_note("2026-11-24", "", "敬語で").ends_with("です。\n敬語で"));
+    }
+
+    #[test]
+    fn 予想工数と所要時間の基準と統計() {
+        let mut store = Store::open_in_memory().unwrap();
+        store.ensure_self().unwrap();
+        let ws = run(&mut store, "create_workspace", json!({"name": "開発"}));
+        let ws = ws["id"].as_str().unwrap().to_owned();
+        let task = run(
+            &mut store,
+            "create_task",
+            json!({"title": "レビュー", "workspace_id": ws, "estimate": "1日3時間",
+                   "time_basis": {"start": "created", "end": "completed"}}),
+        );
+        assert_eq!(task["estimate"], "1日3時間");
+        assert_eq!(task["time_basis"]["start"], "created");
+        let id = task["id"].as_str().unwrap().to_owned();
+        // 読めない予想工数は何も変えない
+        assert!(execute(
+            &mut store,
+            None,
+            "update_task",
+            &json!({"id": id, "estimate": "そこそこ"})
+        )
+        .is_err());
+        assert!(execute(
+            &mut store,
+            None,
+            "update_task",
+            &json!({"id": id, "time_basis": {"start": "x", "end": "completed"}})
+        )
+        .is_err());
+        let task = run(
+            &mut store,
+            "update_task",
+            json!({"id": id, "status": "completed"}),
+        );
+        assert_eq!(task["status"], "completed");
+        let got = run(&mut store, "get_task", json!({"id": id}));
+        assert_eq!(got["time"]["elapsed"]["running"], false);
+        assert_eq!(got["time"]["basis_is_own"], true);
+        assert_eq!(got["time"]["elapsed"]["over_estimate"], false);
+        // 基準を null にすると、ワークスペースか全体の標準に合わせる
+        let task = run(
+            &mut store,
+            "update_task",
+            json!({"id": id, "time_basis": null, "estimate": null}),
+        );
+        assert!(task["time_basis"].is_null() && task["estimate"].is_null());
+        let set = run(
+            &mut store,
+            "set_time_basis",
+            json!({"workspace_id": ws, "basis": {"start": "assigned", "end": "self_done"}}),
+        );
+        assert_eq!(set["basis"]["end"], "self_done");
+        assert!(execute(&mut store, None, "set_time_basis", &json!({"basis": null})).is_err());
+        let set = run(
+            &mut store,
+            "set_time_basis",
+            json!({"basis": {"start": "created", "end": "completed"}}),
+        );
+        assert_eq!(set["standard"]["start"], "created");
+        let stats = run(
+            &mut store,
+            "get_time_stats",
+            json!({"workspace_id": ws, "period": "all"}),
+        );
+        assert_eq!(stats["total"]["done"], 1);
+        assert_eq!(stats["basis"]["start"], "assigned");
+        let stats = run(&mut store, "get_time_stats", json!({}));
+        assert_eq!(stats["basis"]["start"], "created");
+        assert!(execute(
+            &mut store,
+            None,
+            "get_time_stats",
+            &json!({"period": "decade"})
+        )
+        .is_err());
+        assert!(WRITES.contains(&"set_time_basis"));
     }
 }

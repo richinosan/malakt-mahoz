@@ -25,6 +25,8 @@ pub struct WindowState {
     pub my_role: Option<String>,
     pub priority: Option<String>,
     pub category: Option<String>,
+    /// 予想工数と所要時間での絞り込み。
+    pub time: Option<String>,
     pub sort: String,
     pub descending: bool,
     /// タスクの一覧で開いているサブワークスペース。
@@ -245,6 +247,7 @@ impl MainView {
             my_role: q.my_role.map(name),
             priority: q.priority.map(name),
             category: q.category.clone(),
+            time: q.time.map(name),
             sort: name(q.sort),
             descending: q.descending,
             list_open: {
@@ -295,6 +298,10 @@ impl MainView {
             .as_deref()
             .and_then(|s| named(&PRIORITIES, s));
         q.category = state.category.clone();
+        q.time = state
+            .time
+            .as_deref()
+            .and_then(|s| named(&malakt_core::view::TimeFilter::ALL, s));
         q.sort = named(&Sort::ALL, &state.sort).unwrap_or_default();
         q.descending = state.descending;
         self.list_open = state.list_open.iter().cloned().collect();

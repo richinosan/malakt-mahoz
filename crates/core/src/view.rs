@@ -25,12 +25,16 @@ pub enum Sort {
     Status,
     /// 担当者の名前の順。未割り当ては最後。
     Assignee,
+    /// 予想工数が短い順。予想工数のないものは最後。
+    Estimate,
+    /// 所要時間が短い順。数えていないものは最後。
+    Elapsed,
     /// ドラッグで決めた順。
     Manual,
 }
 
 impl Sort {
-    pub const ALL: [Sort; 8] = [
+    pub const ALL: [Sort; 10] = [
         Sort::Due,
         Sort::Priority,
         Sort::Updated,
@@ -38,6 +42,8 @@ impl Sort {
         Sort::Title,
         Sort::Status,
         Sort::Assignee,
+        Sort::Estimate,
+        Sort::Elapsed,
         Sort::Manual,
     ];
 
@@ -50,6 +56,8 @@ impl Sort {
             Sort::Title => "タイトル順",
             Sort::Status => "状態順",
             Sort::Assignee => "担当順",
+            Sort::Estimate => "予想工数が短い順",
+            Sort::Elapsed => "所要時間が短い順",
             Sort::Manual => "手動の順",
         }
     }
@@ -108,6 +116,49 @@ pub enum AssigneeFilter {
     Person(Id),
 }
 
+/// 予想工数と所要時間での絞り込み。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TimeFilter {
+    /// 予想工数を入れたもの
+    Estimated,
+    /// 予想工数を入れていないもの
+    NotEstimated,
+    /// 所要時間が予想工数を超えたもの（数えている途中のものを含む）
+    Over,
+}
+
+impl TimeFilter {
+    pub const ALL: [TimeFilter; 3] = [
+        TimeFilter::Estimated,
+        TimeFilter::NotEstimated,
+        TimeFilter::Over,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            TimeFilter::Estimated => "予想工数あり",
+            TimeFilter::NotEstimated => "予想工数なし",
+            TimeFilter::Over => "予想工数を超えた",
+        }
+    }
+}
+
+/// 所要時間を数えるのに要るもの。
+#[derive(Debug, Clone, Copy)]
+pub struct Timing<'a> {
+    pub workspaces: &'a [Workspace],
+    pub standard: crate::timing::Basis,
+    pub now: i64,
+}
+
+impl Timing<'_> {
+    /// そのタスクの所要時間の区間。
+    pub fn span(&self, task: &Task, self_id: Option<&str>) -> Option<crate::timing::Span> {
+        let basis = crate::timing::basis_of(task, self.workspaces, self.standard);
+        crate::timing::span(task, basis, self_id, self.now)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ListQuery {
     pub tab: Tab,
@@ -118,6 +169,7 @@ pub struct ListQuery {
     pub my_role: Option<Role>,
     pub priority: Option<Priority>,
     pub category: Option<String>,
+    pub time: Option<TimeFilter>,
     pub sort: Sort,
     /// 並び順を逆にする。
     pub descending: bool,
@@ -132,6 +184,7 @@ impl ListQuery {
             + usize::from(self.my_role.is_some())
             + usize::from(self.priority.is_some())
             + usize::from(self.category.is_some())
+            + usize::from(self.time.is_some())
     }
 
     /// 絞り込みを外す。タブと並び順は残す。
@@ -163,11 +216,38 @@ pub fn apply_named(
     self_id: Option<&str>,
     name: &dyn Fn(&str) -> String,
 ) -> Vec<usize> {
+    let timing = Timing {
+        workspaces: &[],
+        standard: crate::timing::Basis::default(),
+        now: crate::model::now_ms(),
+    };
+    apply_timed(tasks, query, self_id, name, &timing)
+}
+
+/// [`apply_named`] と同じ。所要時間は `timing` の基準と時刻で数える。
+pub fn apply_timed(
+    tasks: &[Task],
+    query: &ListQuery,
+    self_id: Option<&str>,
+    name: &dyn Fn(&str) -> String,
+    timing: &Timing<'_>,
+) -> Vec<usize> {
+    let needs_span = query.time == Some(TimeFilter::Over) || query.sort == Sort::Elapsed;
+    let spans: HashMap<usize, Option<i64>> = if needs_span {
+        tasks
+            .iter()
+            .enumerate()
+            .map(|(i, t)| (i, timing.span(t, self_id).map(|s| s.ms())))
+            .collect()
+    } else {
+        HashMap::new()
+    };
     let q = crate::text::normalize_line(&query.q).to_lowercase();
     let mut hits: Vec<usize> = tasks
         .iter()
         .enumerate()
-        .filter(|(_, t)| {
+        .filter(|(i, t)| {
+            let i = *i;
             let tab_ok = match query.status {
                 // 状態を選んだら、タブより状態を優先する
                 Some(s) => t.status == s,
@@ -192,6 +272,14 @@ pub fn apply_named(
                     .category
                     .as_ref()
                     .is_none_or(|c| t.categories.contains(c))
+                && query.time.is_none_or(|f| match f {
+                    TimeFilter::Estimated => t.estimate.is_some(),
+                    TimeFilter::NotEstimated => t.estimate.is_none(),
+                    TimeFilter::Over => match (t.estimate, spans.get(&i).copied().flatten()) {
+                        (Some(est), Some(ms)) => ms > est.total_ms(),
+                        _ => false,
+                    },
+                })
                 && (q.is_empty()
                     || t.title.to_lowercase().contains(&q)
                     || t.description.to_lowercase().contains(&q))
@@ -233,6 +321,20 @@ pub fn apply_named(
             Sort::Title => a.title.to_lowercase().cmp(&b.title.to_lowercase()),
             Sort::Status => (a.status as u8).cmp(&(b.status as u8)),
             Sort::Assignee => person(ia).cmp(&person(ib)).then(due(a).cmp(&due(b))),
+            Sort::Estimate => {
+                let key = |t: &Task| {
+                    let m = t.estimate.map(|e| e.total_minutes());
+                    (m.is_none(), m)
+                };
+                key(a).cmp(&key(b)).then(due(a).cmp(&due(b)))
+            }
+            Sort::Elapsed => {
+                let key = |i: usize| {
+                    let ms = spans.get(&i).copied().flatten();
+                    (ms.is_none(), ms)
+                };
+                key(ia).cmp(&key(ib)).then(due(a).cmp(&due(b)))
+            }
             Sort::Manual => a.position.cmp(&b.position),
         };
         if query.descending {
@@ -718,6 +820,10 @@ mod tests {
             completed_at: None,
             created_by: crate::Actor::Unknown,
             updated_by: crate::Actor::Unknown,
+            estimate: None,
+            time_basis: None,
+            started_at: None,
+            assigned_at: None,
         }
     }
 
@@ -736,6 +842,7 @@ mod tests {
             date: None,
             icon: None,
             color: None,
+            time_basis: None,
             position,
             created_at: 0,
             updated_at: 0,
@@ -1096,8 +1203,71 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(ids(&tasks, &reversed, None), ["e", "a", "b", "c", "d"]);
-        assert_eq!(Sort::ALL.map(Sort::label).len(), 8);
+        assert_eq!(Sort::ALL.map(Sort::label).len(), 10);
         assert_eq!(Sort::Due.label(), "期限が近い順");
+    }
+
+    #[test]
+    fn 予想工数と所要時間で並べ替えて絞り込む() {
+        use crate::estimate::Estimate;
+        const H: i64 = 60 * 60 * 1000;
+        let mk = |id: &str, est: Option<Estimate>, took: Option<i64>| {
+            let mut t = task(id, Status::Completed);
+            t.estimate = est;
+            if let Some(took) = took {
+                t.started_at = Some(0);
+                t.completed_at = Some(took);
+            } else {
+                t.status = Status::NeedsAction;
+            }
+            t
+        };
+        let tasks = vec![
+            mk("a", Some(Estimate::new(0, 1, 0, 0)), Some(2 * H)),
+            mk("b", Some(Estimate::new(0, 0, 1, 0)), Some(3 * H)),
+            mk("c", None, Some(H)),
+            mk("d", Some(Estimate::new(0, 0, 0, 30)), None),
+        ];
+        let timing = Timing {
+            workspaces: &[],
+            standard: crate::timing::Basis::default(),
+            now: 10 * H,
+        };
+        let run = |query: ListQuery| -> Vec<String> {
+            apply_timed(&tasks, &query, None, &|id| id.to_owned(), &timing)
+                .into_iter()
+                .map(|i| tasks[i].id.clone())
+                .collect()
+        };
+        let all = |sort, time| ListQuery {
+            sort,
+            time,
+            status: None,
+            tab: Tab::Closed,
+            ..Default::default()
+        };
+        // 完了のタブなので d（未着手）は出ない
+        assert_eq!(run(all(Sort::Estimate, None)), ["b", "a", "c"]);
+        assert_eq!(run(all(Sort::Elapsed, None)), ["c", "a", "b"]);
+        assert_eq!(run(all(Sort::Title, Some(TimeFilter::Over))), ["b"]);
+        assert_eq!(run(all(Sort::Title, Some(TimeFilter::NotEstimated))), ["c"]);
+        assert_eq!(
+            run(all(Sort::Title, Some(TimeFilter::Estimated))),
+            ["a", "b"]
+        );
+        let open = ListQuery {
+            sort: Sort::Estimate,
+            ..Default::default()
+        };
+        assert_eq!(run(open), ["d"]);
+        let mut q = ListQuery {
+            time: Some(TimeFilter::Over),
+            ..Default::default()
+        };
+        assert_eq!(q.active_count(), 1);
+        q.clear_filters();
+        assert_eq!(q.time, None);
+        assert_eq!(TimeFilter::Over.label(), "予想工数を超えた");
     }
 
     #[test]
