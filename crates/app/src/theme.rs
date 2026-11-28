@@ -580,12 +580,15 @@ pub struct Layout {
 
 impl Layout {
     /// 選べるレイアウト。先頭は、何も変えていないときの並べ方。
+    ///
+    /// 詳細は一覧の上に重ね、一覧の幅は変えない。一覧を詳細の分だけ狭めるのは
+    /// 「一覧と詳細」と「3 カラム」を選んだときだけ。
     pub const PATTERNS: [Layout; 5] = [
+        Layout::new("重ねる詳細", true, false, false, None),
         Layout::new("一覧と詳細", false, false, false, Some(false)),
         Layout::new("3 カラム", false, false, false, Some(true)),
-        Layout::new("重ねる詳細", true, false, false, None),
-        Layout::new("カード", false, true, false, None),
-        Layout::new("浮いたパネル", false, false, true, None),
+        Layout::new("カード", true, true, false, None),
+        Layout::new("浮いたパネル", true, false, true, None),
     ];
 
     const fn new(
@@ -611,15 +614,21 @@ impl Layout {
     }
 }
 
-/// 詳細を一覧の上に重ねる。
+/// 詳細を一覧の上に重ねる。何も選んでいないときは重ねる。一覧の右のカラムにするのは、
+/// `"0"` を保存したときだけ（前の版が重ねるときに保存した `"1"` も、そのまま重ねる）。
 pub fn overlay(cx: &App) -> bool {
     let store = &db::shared(cx).read(cx).store;
-    store.setting(OVERLAY).ok().flatten().as_deref() == Some("1")
+    store.setting(OVERLAY).ok().flatten().as_deref() != Some("0")
+}
+
+/// 保存する値。重ねるのは何も保存しない。
+fn overlay_value(on: bool) -> Option<&'static str> {
+    (!on).then_some("0")
 }
 
 /// 詳細を一覧の上に重ねるかを変える。
 pub fn set_overlay(on: bool, cx: &mut App) -> malakt_core::Result<()> {
-    db::shared(cx).update(cx, |db, _| db.store.set_setting(OVERLAY, on.then_some("1")))?;
+    db::shared(cx).update(cx, |db, _| db.store.set_setting(OVERLAY, overlay_value(on)))?;
     cx.refresh_windows();
     Ok(())
 }
@@ -628,7 +637,7 @@ pub fn set_overlay(on: bool, cx: &mut App) -> malakt_core::Result<()> {
 pub fn apply_layout(layout: &Layout, cx: &mut App) -> malakt_core::Result<()> {
     let flag = |on: bool| on.then_some("1");
     let values = [
-        (OVERLAY, flag(layout.overlay)),
+        (OVERLAY, overlay_value(layout.overlay)),
         (CARDS, flag(layout.cards)),
         (FLOAT, flag(layout.floating)),
     ];
