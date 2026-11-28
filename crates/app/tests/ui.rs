@@ -1977,6 +1977,134 @@ fn auto_lock_after_the_chosen_minutes(cx: &mut TestAppContext) {
     });
 }
 
+/// 設定の「MCP」で、アクセスキーを発行し、名前を付け、できることを変え、失効させる。
+/// キーの文字列は発行した行の下にだけ出て、キーなしの接続の扱いもその場のメニューで選ぶ。
+#[gpui_kit::test]
+fn access_keys_are_issued_named_limited_and_revoked(cx: &mut TestAppContext) {
+    use malakt_core::access::{self, Keyless, NEW_KEY_NAME};
+    use malakt_mahoz::state::CustomizeSection;
+    start(cx);
+    let (window, view) = open(cx, wide());
+    ui(cx, window, |window, cx| {
+        view.update(cx, |v, cx| {
+            v.open_appearance(window, cx);
+            v.show_appearance_section(CustomizeSection::Mcp, window, cx);
+        })
+    });
+    let keys = |cx: &mut TestAppContext| store(cx, |s| s.access_keys().unwrap());
+
+    // キーなしの接続は、最初は今までどおり読み書きできる
+    cx.update(|cx| assert_eq!(view.read(cx).keyless(cx), Keyless::Full));
+    ui(cx, window, |window, cx| window.click("mcp-keyless", cx));
+    pick(cx, window, "読み取りのみ");
+    cx.update(|cx| assert_eq!(view.read(cx).keyless(cx), Keyless::ReadOnly));
+
+    // ＋ で「新規アクセスキー」が増え、その行で名前を書ける。キーの文字列はその下に出る
+    ui(cx, window, |window, cx| window.click("access-key-add", cx));
+    assert_eq!(keys(cx)[0].name, NEW_KEY_NAME);
+    let secret = cx.update(|cx| view.read(cx).issued_access_key.clone().unwrap().secret);
+    ui(cx, window, |window, cx| {
+        assert!(window.find("access-key-input").visible());
+        assert!(window.find("access-key-secret").visible());
+        window.input("Claude Code", cx);
+        window.press("enter", cx);
+    });
+    assert_eq!(keys(cx)[0].name, "Claude Code");
+    // 発行したキーで、外からつなげる
+    let check = |cx: &mut TestAppContext, secret: &str| {
+        cx.update(|cx| {
+            db::shared(cx).update(cx, |db, _| {
+                access::check(&mut db.store, Some(secret), 1_000).unwrap()
+            })
+        })
+    };
+    let grant = check(cx, &secret).unwrap();
+    assert!(!grant.read_only);
+
+    // コピーのボタンは、キーと、Claude Code に登録するコマンド
+    ui(cx, window, |window, cx| window.click("access-key-copy", cx));
+    let copied = cx.update(|cx| cx.read_from_clipboard().and_then(|i| i.text()));
+    assert_eq!(copied.as_deref(), Some(secret.as_str()));
+    ui(cx, window, |window, cx| {
+        window.click("access-key-copy-claude", cx)
+    });
+    let copied = cx
+        .update(|cx| cx.read_from_clipboard().and_then(|i| i.text()))
+        .unwrap();
+    assert!(copied.starts_with("claude mcp add --scope user malakt-mahoz -e MALAKT_MAHOZ_KEY="));
+    assert!(copied.contains(&secret));
+    ui(cx, window, |window, cx| {
+        window.click("access-key-copy-config", cx)
+    });
+    let copied = cx
+        .update(|cx| cx.read_from_clipboard().and_then(|i| i.text()))
+        .unwrap();
+    let config: serde_json::Value = serde_json::from_str(&copied).unwrap();
+    assert_eq!(
+        config["mcpServers"]["malakt-mahoz"]["env"]["MALAKT_MAHOZ_KEY"],
+        secret.as_str()
+    );
+
+    // 読み取りのみと、ロック中も使えるを、行のボタンで切り替える
+    ui(cx, window, |window, cx| {
+        window.click(("access-key-write", 0usize), cx)
+    });
+    assert!(keys(cx)[0].read_only);
+    // ロックが無効なら、パスキーは聞かない
+    let asked = passkey(cx, Ok(()));
+    ui(cx, window, |window, cx| {
+        window.click(("access-key-lock", 0usize), cx)
+    });
+    assert!(keys(cx)[0].while_locked);
+    assert!(asked.lock().unwrap().is_empty());
+    ui(cx, window, |window, cx| {
+        window.click(("access-key-lock", 0usize), cx)
+    });
+    assert!(!keys(cx)[0].while_locked);
+    // ロックが有効なら、オンにするときだけパスキーで確かめる。断ったら変えない
+    enable_lock(cx);
+    passkey(cx, Err(Failure::Denied));
+    ui(cx, window, |window, cx| {
+        window.click(("access-key-lock", 0usize), cx)
+    });
+    cx.run_until_parked();
+    assert!(!keys(cx)[0].while_locked);
+    let asked = passkey(cx, Ok(()));
+    ui(cx, window, |window, cx| {
+        window.click(("access-key-lock", 0usize), cx)
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        *asked.lock().unwrap(),
+        ["ロック中も使えるアクセスキーにする"]
+    );
+    assert!(keys(cx)[0].while_locked);
+
+    // 文字列は ✕ で隠すと、もう出ない
+    ui(cx, window, |window, cx| window.click("access-key-hide", cx));
+    ui(cx, window, |window, _| {
+        assert!(window.try_find("access-key-secret").is_none())
+    });
+
+    // 失効は、ゴミ箱のメニューから
+    ui(cx, window, |window, cx| {
+        window.click(("access-key-revoke", 0usize), cx)
+    });
+    pick(cx, window, "失効させる");
+    assert!(keys(cx).is_empty());
+    assert_eq!(check(cx, &secret), Err(access::Denied::BadKey));
+
+    // 発行したキーの文字列は、設定を閉じると消える
+    ui(cx, window, |window, cx| window.click("access-key-add", cx));
+    ui(cx, window, |window, cx| window.press("enter", cx));
+    ui(cx, window, |window, cx| window.press("escape", cx));
+    cx.update(|cx| {
+        let v = view.read(cx);
+        assert_eq!(v.modal, Modal::None);
+        assert!(v.issued_access_key.is_none());
+    });
+}
+
 /// 歯車を押すと、メニューを挟まずに「設定」が開く。担当者・キー操作・新しいウィンドウ・今すぐロック・版も
 /// 「設定」の中にあり、左の目次を押すとその見出しまでスクロールして、目次のその行が光る。
 #[gpui_kit::test]
@@ -2278,6 +2406,7 @@ fn completion_ticket_issued_here_and_redeemed_by_command(cx: &mut TestAppContext
     let (mut out, mut err) = (Vec::new(), Vec::new());
     let code = malakt_mahoz::cli::run(
         &args,
+        None,
         || Store::open(&path),
         &mut std::io::empty(),
         &mut out,

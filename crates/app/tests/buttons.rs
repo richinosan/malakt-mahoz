@@ -128,6 +128,10 @@ const MUST: &[&str] = &[
     "lock-switch",
     "auto-lock",
     "locked-notices",
+    "mcp-keyless",
+    "access-key-add",
+    "access-key-copy",
+    "access-key-hide",
     "alert-timed",
     "alert-date",
     "alert-hour",
@@ -884,6 +888,18 @@ fn screens() -> Vec<(&'static str, Size<Pixels>, Setup)> {
                 v.show_appearance_section(CustomizeSection::AiGithub, window, cx);
             })
         }),
+        (
+            "設定の MCP（発行したばかりのキーあり）",
+            wide,
+            |cx, w| {
+                with_view(cx, w, |v, window, cx| {
+                    v.open_appearance(window, cx);
+                    v.show_appearance_section(CustomizeSection::Mcp, window, cx);
+                    v.issue_access_key(window, cx);
+                    v.save_access_key_name(window, cx);
+                })
+            },
+        ),
         ("設定のデータ", wide, |cx, w| {
             with_view(cx, w, |v, window, cx| {
                 v.open_appearance(window, cx);

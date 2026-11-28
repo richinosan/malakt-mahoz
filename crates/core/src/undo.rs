@@ -36,6 +36,7 @@ const TABLES: &[&str] = &[
     "ai_rules",
     "task_repeats",
     "schedules",
+    "schedule_files",
 ];
 
 /// 1 回の操作の記録（`undo_log` の行の範囲）。

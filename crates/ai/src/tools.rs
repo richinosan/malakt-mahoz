@@ -119,6 +119,7 @@ fn rule_fields(extra: Value) -> Value {
 }
 
 fn schedule_fields(extra: Value) -> Value {
+    let max_days = malakt_core::schedule::MAX_DUE_DAYS;
     with(
         json!({
             "title": {"type": "string", "description": format!("作るタスクのタイトル（{} 文字まで）", malakt_core::schedule::MAX_TITLE_CHARS)},
@@ -135,10 +136,50 @@ fn schedule_fields(extra: Value) -> Value {
                 "required": ["unit"],
             },
             "ai_instruction": {"type": "string", "description": "作ったタスクで AI に頼むこと。空で頼まない"},
-            "assignee_ids": {"type": "array", "items": {"type": "string"}, "description": "作るタスクの担当。[] でワークスペースの既定値"},
-            "due_days": {"type": ["integer", "null"], "minimum": 0, "maximum": malakt_core::schedule::MAX_DUE_DAYS, "description": "期限を作った日の何日後にするか（0 で当日）。null でワークスペースの既定値"},
-            "due_time": {"type": ["string", "null"], "description": "期限の時刻 HH:MM。null か空で日付だけ"},
             "enabled": {"type": "boolean", "description": "false で止める"},
+            // ここから下は、作るタスクの項目（create_task と同じもの）
+            "description": {"type": ["string", "null"], "description": "作るタスクの説明。null でワークスペースの既定値"},
+            "status": {"type": "string", "enum": ["needs_action", "in_process", "completed", "cancelled"],
+                       "description": "作るタスクの状態。未着手 / 進行中 / 完了 / 中止"},
+            "priority": {"type": ["string", "null"], "enum": ["none", "high", "mid", "low", null],
+                         "description": "作るタスクの優先度。null でワークスペースの既定値"},
+            "start_days": {"type": ["integer", "null"], "minimum": 0, "maximum": max_days, "description": "開始日を作った日の何日後にするか（0 で当日）。null で開始日なし"},
+            "start_time": {"type": ["string", "null"], "description": "開始日の時刻 HH:MM。null か空で日付だけ"},
+            "due_days": {"type": ["integer", "null"], "minimum": 0, "maximum": max_days, "description": "期限を作った日の何日後にするか（0 で当日）。null でワークスペースの既定値"},
+            "due_time": {"type": ["string", "null"], "description": "期限の時刻 HH:MM。null か空で日付だけ"},
+            "due_alerts": {
+                "type": ["object", "null"],
+                "description": "作るタスクの、期限をいつ知らせるか（set_due_alerts と同じ）。null で全体の標準",
+                "properties": {
+                    "timed_minutes": {"type": ["array", "null"], "items": {"type": "integer", "minimum": 0, "maximum": malakt_core::alert::MAX_MINUTES}, "description": "時刻つきの期限の何分前か。[] で知らせない、null で標準"},
+                    "date_days": {"type": ["array", "null"], "items": {"type": "integer", "minimum": 0, "maximum": malakt_core::alert::MAX_DAYS}, "description": "日付だけの期限の何日前か。[] で知らせない、null で標準"},
+                },
+            },
+            "percent": {"type": "integer", "minimum": 0, "maximum": 100, "description": "作るタスクの進捗"},
+            "parent_id": {"type": ["string", "null"], "description": "親のタスクの ID（作るタスクをそのサブタスクにする）。null で親なし"},
+            "assignee_ids": {"type": "array", "items": {"type": "string"}, "description": "作るタスクの担当者の ID。[] でワークスペースの既定値。足した人の役は R。役も決めるときは assignees を使う"},
+            "assignees": {
+                "type": "array",
+                "description": "作るタスクの担当者と役（RACI）。渡すと担当者がこの並びになる（assignee_ids と一緒には渡さない）。\
+                                person は担当者の ID か名前。登録されていない名前は、その場で担当者に登録する",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "person": {"type": "string", "description": "担当者の ID か名前（敬称は付けない）"},
+                        "roles": roles_schema("省くと、もう担当の人は今の役のまま、新しい人は R"),
+                    },
+                    "required": ["person"],
+                    "additionalProperties": false,
+                },
+            },
+            "categories": {"type": ["array", "null"], "items": {"type": "string"}, "description": "作るタスクのカテゴリ。null でワークスペースの既定値"},
+            "urls": {"type": "array", "items": {"type": "string"},
+                     "description": "作るタスクに付ける URL。渡すと URL がこの並びになる（足すだけなら add_urls）"},
+            "add_urls": {"type": "array", "items": {"type": "string"}, "description": "今の URL の後ろに足す URL。同じものは足さない"},
+            "remove_urls": {"type": "array", "items": {"type": "string"}, "description": "外す URL"},
+            "linked_workspace_ids": {"type": ["array", "null"], "items": {"type": "string"},
+                                     "description": "作るタスクを、入れるワークスペースのほかにも出すワークスペース（link_task と同じ）。null でワークスペースの既定値"},
+            "subtasks": {"type": "array", "items": {"type": "string"}, "description": format!("作るタスクのサブタスクのタイトル（{} 件まで）。渡すとこの並びになる", malakt_core::schedule::MAX_SUBTASKS)},
         }),
         extra,
     )
@@ -493,13 +534,26 @@ pub fn definitions() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "create_schedule",
-            description: "定時タスクを足す。時刻が来るたびに、そのワークスペース（workspace_id を省くとワークスペースの外）に新しいタスクを 1 件作る。作ったタスクにはワークスペースの既定値が入り、assignee_ids と due_days を渡すとそちらを使う。ai_instruction を付けると、作ったタスクでアプリの AI がその指示を実行して、結果をそのタスクにコメントする（例: 週次定例の報告の下書き）。前のタスクは書き換えない。1 つのタスクを毎回写すなら set_repeat。アプリが動いている間だけ動く。schedule を省くと今日の曜日の毎週 9:00。",
+            description: "定時タスクを足す。時刻が来るたびに、そのワークスペース（workspace_id を省くとワークスペースの外）に新しいタスクを 1 件作る。雛形にはタスクと同じ項目（説明・状態・優先度・担当と役・開始日・期限・通知・進捗・カテゴリ・URL・親タスク・ほかのワークスペース・サブタスク）を決められ、決めていない項目にはワークスペースの既定値が入る。開始日と期限は作った日の何日後か（start_days・due_days）で決める。添付は add_schedule_attachment。ai_instruction を付けると、作ったタスクでアプリの AI がその指示を実行して、結果をそのタスクにコメントする（例: 週次定例の報告の下書き）。前のタスクは書き換えない。1 つのタスクを毎回写すなら set_repeat。アプリが動いている間だけ動く。schedule を省くと今日の曜日の毎週 9:00。",
             schema: object(schedule_fields(json!({"workspace_id": {"type": "string"}})), &["title"]),
         },
         ToolDef {
             name: "update_schedule",
-            description: "定時タスクを変える。渡した項目だけが変わる。schedule を変えたときと、enabled を true にしたときは、次の時刻を今から決め直す。",
+            description: "定時タスクを変える。渡した項目だけが変わる（作るタスクの項目も同じ）。schedule を変えたときと、enabled を true にしたときは、次の時刻を今から決め直す。",
             schema: object(schedule_fields(json!({"id": {"type": "string"}})), &["id"]),
+        },
+        ToolDef {
+            name: "add_schedule_attachment",
+            description: "ユーザーの PC のファイルを定時タスクの雛形に添付する。作るタスクには毎回この添付が付く。path はファイルの絶対パス（先頭の ~ はホーム）。1 ファイル 10 MiB まで。",
+            schema: object(
+                json!({"schedule_id": {"type": "string"}, "path": {"type": "string"}}),
+                &["schedule_id", "path"],
+            ),
+        },
+        ToolDef {
+            name: "delete_schedule_attachment",
+            description: "定時タスクの雛形から添付を外す。作ったタスクの添付は残る。",
+            schema: object(json!({"id": {"type": "string"}}), &["id"]),
         },
         ToolDef {
             name: "delete_schedule",
@@ -592,6 +646,8 @@ pub const WRITES: &[&str] = &[
     "set_repeat",
     "create_schedule",
     "update_schedule",
+    "add_schedule_attachment",
+    "delete_schedule_attachment",
     "delete_schedule",
 ];
 
@@ -808,11 +864,18 @@ fn apply_fields(draft: &mut TaskDraft, args: &Value) -> Result<(), String> {
     for (key, slot) in [
         ("assignee_ids", &mut draft.assignee_ids),
         ("categories", &mut draft.categories),
-        ("urls", &mut draft.urls),
     ] {
         if let Some(v) = args.get(key) {
             *slot = strings(v, key)?;
         }
+    }
+    edit_urls(&mut draft.urls, args)
+}
+
+/// `urls`（置き換え）・`add_urls`・`remove_urls` を URL の並びに当てる。
+fn edit_urls(urls: &mut Vec<String>, args: &Value) -> Result<(), String> {
+    if let Some(v) = args.get("urls") {
+        *urls = strings(v, "urls")?;
     }
     // URL は書いた形（https:// を省いたものなど）でも、保存した形と同じものとして扱う
     let same = |a: &str, b: &str| {
@@ -821,8 +884,8 @@ fn apply_fields(draft: &mut TaskDraft, args: &Value) -> Result<(), String> {
     };
     if let Some(v) = args.get("add_urls") {
         for url in strings(v, "add_urls")? {
-            if !draft.urls.iter().any(|u| same(u, &url)) {
-                draft.urls.push(url);
+            if !urls.iter().any(|u| same(u, &url)) {
+                urls.push(url);
             }
         }
     }
@@ -830,13 +893,13 @@ fn apply_fields(draft: &mut TaskDraft, args: &Value) -> Result<(), String> {
         let remove = strings(v, "remove_urls")?;
         let missing: Vec<&String> = remove
             .iter()
-            .filter(|r| !draft.urls.iter().any(|u| same(u, r)))
+            .filter(|r| !urls.iter().any(|u| same(u, r)))
             .collect();
         if !missing.is_empty() {
             let names: Vec<String> = missing.iter().map(|m| format!("「{m}」")).collect();
             return Err(format!("タスクに付いていない URL です: {}", names.join("")));
         }
-        draft.urls.retain(|u| !remove.iter().any(|r| same(u, r)));
+        urls.retain(|u| !remove.iter().any(|r| same(u, r)));
     }
     Ok(())
 }
@@ -1275,27 +1338,186 @@ fn rule_value(rule: &malakt_core::repeat::Rule) -> Value {
     })
 }
 
-fn schedule_json(s: &malakt_core::schedule::Schedule) -> Value {
-    json!({
+fn schedule_json(store: &Store, s: &malakt_core::schedule::Schedule) -> Result<Value, String> {
+    let t = &s.task;
+    let files = store
+        .schedule_files(&s.id)
+        .map_err(|e| e.to_string())?
+        .iter()
+        .map(|f| json!({"id": f.id, "name": f.name, "size": f.size}))
+        .collect::<Vec<_>>();
+    Ok(json!({
         "id": s.id,
         "workspace_id": s.workspace_id,
         "title": s.title,
         "schedule": rule_value(&s.rule),
         "ai_instruction": s.ai,
-        "assignee_ids": s.assignee_ids,
-        "due_days": s.due_days,
-        "due_time": s.due_time,
         "enabled": s.enabled,
         "next_at": s.next_at,
         "next_text": malakt_core::repeat::next_label(&s.next_at),
-    })
+        "description": t.description,
+        "status": t.status.as_str(),
+        "priority": t.priority.map(priority_name),
+        "start_days": t.start_days,
+        "start_time": t.start_time,
+        "due_days": s.due_days,
+        "due_time": s.due_time,
+        "due_alerts": if t.alerts_timed.is_none() && t.alerts_date.is_none() {
+            Value::Null
+        } else {
+            json!({"timed_minutes": t.alerts_timed, "date_days": t.alerts_date})
+        },
+        "percent": t.percent,
+        "parent_id": t.parent_id,
+        "assignee_ids": s.assignee_ids,
+        "assignees": s.assignee_ids.iter().map(|id| json!({
+            "person_id": id,
+            "roles": role_codes(s.roles_of(id).unwrap_or_default()),
+        })).collect::<Vec<_>>(),
+        "categories": t.categories,
+        "urls": t.urls,
+        "linked_workspace_ids": t.linked_workspace_ids,
+        "subtasks": t.subtasks,
+        "attachments": files,
+    }))
+}
+
+/// null なら `Some(None)`、文字列なら `Some(Some(…))`、なければ `None`。
+fn nullable_string(args: &Value, key: &str) -> Result<Option<Option<String>>, String> {
+    match args.get(key) {
+        None => Ok(None),
+        Some(Value::Null) => Ok(Some(None)),
+        Some(Value::String(t)) => Ok(Some(Some(t.clone()))),
+        Some(other) => Err(format!("{key} は文字列か null です: {other}")),
+    }
+}
+
+/// null なら `Some(None)`、整数なら `Some(Some(…))`、なければ `None`。
+fn nullable_days(args: &Value, key: &str) -> Result<Option<Option<i64>>, String> {
+    match args.get(key) {
+        None => Ok(None),
+        Some(Value::Null) => Ok(Some(None)),
+        Some(n) => {
+            Ok(Some(Some(n.as_i64().ok_or_else(|| {
+                format!("{key} は 0 以上の整数か null です: {n}")
+            })?)))
+        }
+    }
+}
+
+/// 時刻（HH:MM）。null か空で「なし」。
+fn nullable_time(args: &Value, key: &str) -> Result<Option<Option<String>>, String> {
+    Ok(nullable_string(args, key)?
+        .map(|t| t.map(|t| t.trim().to_owned()).filter(|t| !t.is_empty())))
+}
+
+/// 雛形の、作るタスクの項目のうち、渡されたものだけを `t` に重ねる。何か渡されていれば true。
+fn apply_template(t: &mut malakt_core::schedule::Template, args: &Value) -> Result<bool, String> {
+    const KEYS: &[&str] = &[
+        "description",
+        "status",
+        "priority",
+        "start_days",
+        "start_time",
+        "due_alerts",
+        "percent",
+        "parent_id",
+        "categories",
+        "urls",
+        "add_urls",
+        "remove_urls",
+        "linked_workspace_ids",
+        "subtasks",
+    ];
+    if !KEYS.iter().any(|k| args.get(*k).is_some()) {
+        return Ok(false);
+    }
+    if let Some(v) = nullable_string(args, "description")? {
+        t.description = v;
+    }
+    if let Some(v) = optional(args, "status") {
+        t.status = Status::parse(v).ok_or_else(|| format!("status が正しくありません: {v}"))?;
+    }
+    if let Some(v) = nullable_string(args, "priority")? {
+        t.priority = v.as_deref().map(parse_priority).transpose()?;
+    }
+    if let Some(v) = nullable_days(args, "start_days")? {
+        t.start_days = v;
+    }
+    if let Some(v) = nullable_time(args, "start_time")? {
+        t.start_time = v;
+    }
+    if let Some(v) = args.get("percent") {
+        let n = v
+            .as_u64()
+            .filter(|n| *n <= 100)
+            .ok_or_else(|| format!("percent が正しくありません: {v}"))?;
+        t.percent = n as u8;
+    }
+    if let Some(v) = nullable_string(args, "parent_id")? {
+        t.parent_id = v.filter(|p| !p.is_empty());
+    }
+    match args.get("categories") {
+        None => {}
+        Some(Value::Null) => t.categories = None,
+        Some(v) => t.categories = Some(strings(v, "categories")?),
+    }
+    match args.get("linked_workspace_ids") {
+        None => {}
+        Some(Value::Null) => t.linked_workspace_ids = None,
+        Some(v) => t.linked_workspace_ids = Some(strings(v, "linked_workspace_ids")?),
+    }
+    if let Some(v) = args.get("subtasks") {
+        t.subtasks = strings(v, "subtasks")?;
+    }
+    edit_urls(&mut t.urls, args)?;
+    match args.get("due_alerts") {
+        None => {}
+        Some(Value::Null) => {
+            t.alerts_timed = None;
+            t.alerts_date = None;
+        }
+        Some(Value::Object(alerts)) => {
+            let list = |key: &str| -> Result<Option<Option<Vec<u32>>>, String> {
+                match alerts.get(key) {
+                    None => Ok(None),
+                    Some(Value::Null) => Ok(Some(None)),
+                    Some(Value::Array(items)) => items
+                        .iter()
+                        .map(|v| {
+                            v.as_u64()
+                                .and_then(|n| u32::try_from(n).ok())
+                                .ok_or_else(|| {
+                                    format!("due_alerts.{key} は 0 以上の整数の並びです: {v}")
+                                })
+                        })
+                        .collect::<Result<Vec<u32>, String>>()
+                        .map(|v| Some(Some(v))),
+                    Some(v) => Err(format!("due_alerts.{key} は整数の並びです: {v}")),
+                }
+            };
+            if let Some(v) = list("timed_minutes")? {
+                t.alerts_timed = v;
+            }
+            if let Some(v) = list("date_days")? {
+                t.alerts_date = v;
+            }
+        }
+        Some(other) => return Err(format!("due_alerts が正しくありません: {other}")),
+    }
+    Ok(true)
 }
 
 /// 定時タスクの書き換え。渡された項目だけを持つ。`from` は決まりの起点を省いたときの日。
+/// `old` は今の定時タスク（足すときは `None`）、`root` は入れるワークスペースのいちばん上。
+/// 担当者の登録はしない（名前だけの人は `Plan` に残す）。
 fn schedule_patch(
+    store: &Store,
     args: &Value,
     from: &str,
-) -> Result<malakt_core::schedule::SchedulePatch, String> {
+    old: Option<&malakt_core::schedule::Schedule>,
+    root: Option<&str>,
+) -> Result<(malakt_core::schedule::SchedulePatch, Option<Plan>), String> {
     let rule = match args.get("schedule") {
         None | Some(Value::Null) => None,
         Some(v) => Some(parse_rule(v, "schedule", from)?),
@@ -1305,35 +1527,53 @@ fn schedule_patch(
         Some(Value::Bool(on)) => Some(*on),
         Some(other) => return Err(format!("enabled が正しくありません: {other}")),
     };
-    let due_days = match args.get("due_days") {
-        None => None,
-        Some(Value::Null) => Some(None),
-        Some(n) => {
-            Some(Some(n.as_i64().ok_or_else(|| {
-                format!("due_days は 0 以上の整数か null です: {n}")
-            })?))
-        }
-    };
-    let due_time = match args.get("due_time") {
-        None => None,
-        Some(Value::Null) => Some(None),
-        Some(Value::String(t)) if t.trim().is_empty() => Some(None),
-        Some(Value::String(t)) => Some(Some(t.trim().to_owned())),
-        Some(other) => return Err(format!("due_time は HH:MM です: {other}")),
-    };
     let assignee_ids = match args.get("assignee_ids") {
         None => None,
         Some(v) => Some(strings(v, "assignee_ids")?),
     };
-    Ok(malakt_core::schedule::SchedulePatch {
-        title: optional(args, "title").map(str::to_owned),
-        rule,
-        ai: optional(args, "ai_instruction").map(str::to_owned),
-        assignee_ids,
-        due_days,
-        due_time,
-        enabled,
-    })
+    let mut task = old.map(|s| s.task.clone()).unwrap_or_default();
+    let touched = apply_template(&mut task, args)?;
+    let plan = plan_assignees(store, args, root)?;
+    Ok((
+        malakt_core::schedule::SchedulePatch {
+            title: optional(args, "title").map(str::to_owned),
+            rule,
+            ai: optional(args, "ai_instruction").map(str::to_owned),
+            assignee_ids,
+            due_days: nullable_days(args, "due_days")?,
+            due_time: nullable_time(args, "due_time")?,
+            enabled,
+            task: touched.then_some(task),
+        },
+        plan,
+    ))
+}
+
+/// `assignees` で決めた担当者を登録し、担当と役を `patch` に入れる。
+fn settle_schedule_assignees(
+    store: &mut Store,
+    patch: &mut malakt_core::schedule::SchedulePatch,
+    plan: Plan,
+    old: Option<&malakt_core::schedule::Schedule>,
+    workspace: Option<&str>,
+) -> Result<(), String> {
+    let mut ids = Vec::new();
+    let mut roles = Vec::new();
+    for (who, wanted) in plan {
+        let id = settle_person(store, who, workspace)?;
+        let current = old.and_then(|s| s.roles_of(&id));
+        roles.push(wanted.or(current).unwrap_or_default());
+        ids.push(id);
+    }
+    let mut task = patch
+        .task
+        .take()
+        .or_else(|| old.map(|s| s.task.clone()))
+        .unwrap_or_default();
+    task.roles = roles;
+    patch.assignee_ids = Some(ids);
+    patch.task = Some(task);
+    Ok(())
 }
 
 fn repeat_json(store: &Store, task_id: &str) -> Result<Value, String> {
@@ -1362,6 +1602,31 @@ fn task_row(task: &Task) -> Value {
         map.remove("percent");
     }
     row
+}
+
+/// 添付するファイルを読む。名前と中身。
+fn read_upload(path: &str) -> Result<(String, Vec<u8>), String> {
+    let path = expand_dir(path);
+    let meta = std::fs::metadata(&path)
+        .map_err(|e| format!("ファイルを読めません（{}）: {e}", path.display()))?;
+    if !meta.is_file() {
+        return Err(format!("ファイルではありません: {}", path.display()));
+    }
+    if meta.len() > malakt_core::MAX_ATTACHMENT_BYTES {
+        return Err(format!(
+            "添付できるのは 1 ファイル {} MiB までです（{} は {} MiB）",
+            malakt_core::MAX_ATTACHMENT_BYTES / 1024 / 1024,
+            path.display(),
+            meta.len() / 1024 / 1024
+        ));
+    }
+    let bytes = std::fs::read(&path)
+        .map_err(|e| format!("ファイルを読めません（{}）: {e}", path.display()))?;
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    Ok((name, bytes))
 }
 
 /// データベースに対するツールを実行する。返すのは AI に渡す文字列。
@@ -1735,26 +2000,7 @@ pub fn execute(
         }
         "add_attachment" => {
             let task_id = required(args, "task_id")?;
-            let path = expand_dir(required(args, "path")?);
-            let meta = std::fs::metadata(&path)
-                .map_err(|e| format!("ファイルを読めません（{}）: {e}", path.display()))?;
-            if !meta.is_file() {
-                return Err(format!("ファイルではありません: {}", path.display()));
-            }
-            if meta.len() > malakt_core::MAX_ATTACHMENT_BYTES {
-                return Err(format!(
-                    "添付できるのは 1 ファイル {} MiB までです（{} は {} MiB）",
-                    malakt_core::MAX_ATTACHMENT_BYTES / 1024 / 1024,
-                    path.display(),
-                    meta.len() / 1024 / 1024
-                ));
-            }
-            let bytes = std::fs::read(&path)
-                .map_err(|e| format!("ファイルを読めません（{}）: {e}", path.display()))?;
-            let name = path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default();
+            let (name, bytes) = read_upload(required(args, "path")?)?;
             let a = store
                 .add_attachment(task_id, author_id, &name, &bytes)
                 .map_err(core)?;
@@ -1894,42 +2140,49 @@ pub fn execute(
             }
             json!({"task_id": id, "repeat": repeat_json(store, id)?})
         }
-        "list_schedules" => match optional(args, "workspace_id").filter(|w| !w.is_empty()) {
-            Some(id) => {
-                store.workspace(id).map_err(core)?;
-                store
-                    .schedules(Some(id))
-                    .map_err(core)?
-                    .iter()
-                    .map(schedule_json)
-                    .collect()
-            }
-            None => {
-                let mut workspaces = Vec::new();
-                for w in store.workspaces().map_err(core)? {
-                    let list = store.schedules(Some(&w.id)).map_err(core)?;
-                    if !list.is_empty() {
-                        workspaces.push(json!({
-                            "id": w.id,
-                            "name": w.name,
-                            "schedules": list.iter().map(schedule_json).collect::<Vec<_>>(),
-                        }));
-                    }
+        "list_schedules" => {
+            let json_of = |list: &[malakt_core::schedule::Schedule]| {
+                list.iter()
+                    .map(|s| schedule_json(store, s))
+                    .collect::<Result<Vec<Value>, String>>()
+            };
+            match optional(args, "workspace_id").filter(|w| !w.is_empty()) {
+                Some(id) => {
+                    store.workspace(id).map_err(core)?;
+                    Value::Array(json_of(&store.schedules(Some(id)).map_err(core)?)?)
                 }
-                let outside: Vec<Value> = store
-                    .schedules(None)
-                    .map_err(core)?
-                    .iter()
-                    .map(schedule_json)
-                    .collect();
-                json!({"outside": outside, "workspaces": workspaces})
+                None => {
+                    let mut workspaces = Vec::new();
+                    for w in store.workspaces().map_err(core)? {
+                        let list = store.schedules(Some(&w.id)).map_err(core)?;
+                        if !list.is_empty() {
+                            workspaces.push(json!({
+                                "id": w.id,
+                                "name": w.name,
+                                "schedules": json_of(&list)?,
+                            }));
+                        }
+                    }
+                    let outside = json_of(&store.schedules(None).map_err(core)?)?;
+                    json!({"outside": outside, "workspaces": workspaces})
+                }
             }
-        },
+        }
         "create_schedule" => {
             let workspace = optional(args, "workspace_id").filter(|w| !w.is_empty());
             let now = malakt_core::view::now();
+            let root = match workspace {
+                Some(w) => Some(store.workspace_root(w).map_err(core)?),
+                None => None,
+            };
             // 先に全部の値を確かめ、1 つでも正しくなければ何も作らない
-            let patch = schedule_patch(args, malakt_core::date_of(&now))?;
+            let (mut patch, plan) = schedule_patch(
+                store,
+                args,
+                malakt_core::date_of(&now),
+                None,
+                root.as_deref(),
+            )?;
             let title = required(args, "title")?;
             if let Some(ids) = &patch.assignee_ids {
                 let people = store.people().map_err(core)?;
@@ -1945,12 +2198,19 @@ pub fn execute(
                     ));
                 }
             }
-            if let Some(Some(days)) = patch.due_days {
-                if !(0..=malakt_core::schedule::MAX_DUE_DAYS).contains(&days) {
-                    return Err(format!(
-                        "due_days は 0 から {} です",
-                        malakt_core::schedule::MAX_DUE_DAYS
-                    ));
+            for key in ["due_days", "start_days"] {
+                let days = if key == "due_days" {
+                    patch.due_days
+                } else {
+                    patch.task.as_ref().map(|t| t.start_days)
+                };
+                if let Some(Some(days)) = days {
+                    if !(0..=malakt_core::schedule::MAX_DUE_DAYS).contains(&days) {
+                        return Err(format!(
+                            "{key} は 0 から {} です",
+                            malakt_core::schedule::MAX_DUE_DAYS
+                        ));
+                    }
                 }
             }
             if let Some(Some(time)) = &patch.due_time {
@@ -1958,20 +2218,36 @@ pub fn execute(
                     return Err(format!("due_time が正しくありません: {time}"));
                 }
             }
+            if let Some(task) = &patch.task {
+                let count = patch.assignee_ids.as_ref().map_or(0, Vec::len);
+                malakt_core::schedule::clean_template(task, count).map_err(core)?;
+                if let Some(parent) = &task.parent_id {
+                    store.task(parent).map_err(core)?;
+                }
+                for id in task.linked_workspace_ids.iter().flatten() {
+                    store.workspace(id).map_err(core)?;
+                }
+            }
             let made = store
                 .create_schedule(workspace, title, patch.rule.as_ref(), &now)
                 .map_err(core)?;
-            let rest = malakt_core::schedule::SchedulePatch {
-                title: None,
-                rule: None,
-                ..patch
-            };
-            match store.update_schedule(&made.id, &rest, &now) {
-                Ok(s) => schedule_json(&s),
+            let result = (|| {
+                if let Some(plan) = plan {
+                    settle_schedule_assignees(store, &mut patch, plan, None, workspace)?;
+                }
+                let rest = malakt_core::schedule::SchedulePatch {
+                    title: None,
+                    rule: None,
+                    ..patch
+                };
+                store.update_schedule(&made.id, &rest, &now).map_err(core)
+            })();
+            match result {
+                Ok(s) => schedule_json(store, &s)?,
                 Err(e) => {
                     // 半分だけの定時タスクを残さない
                     store.delete_schedule(&made.id).map_err(core)?;
-                    return Err(core(e));
+                    return Err(e);
                 }
             }
         }
@@ -1979,8 +2255,50 @@ pub fn execute(
             let id = required(args, "id")?;
             let old = store.schedule(id).map_err(core)?;
             let now = malakt_core::view::now();
-            let patch = schedule_patch(args, &old.rule.from)?;
-            schedule_json(&store.update_schedule(id, &patch, &now).map_err(core)?)
+            let root = match &old.workspace_id {
+                Some(w) => Some(store.workspace_root(w).map_err(core)?),
+                None => None,
+            };
+            let (mut patch, plan) =
+                schedule_patch(store, args, &old.rule.from, Some(&old), root.as_deref())?;
+            if let Some(task) = &patch.task {
+                let count = patch
+                    .assignee_ids
+                    .as_ref()
+                    .map_or(old.assignee_ids.len(), Vec::len);
+                // 担当者を登録する前に、ほかの項目を確かめる
+                malakt_core::schedule::clean_template(task, count).map_err(core)?;
+                if let Some(parent) = &task.parent_id {
+                    store.task(parent).map_err(core)?;
+                }
+                for id in task.linked_workspace_ids.iter().flatten() {
+                    store.workspace(id).map_err(core)?;
+                }
+            }
+            if let Some(plan) = plan {
+                settle_schedule_assignees(
+                    store,
+                    &mut patch,
+                    plan,
+                    Some(&old),
+                    old.workspace_id.as_deref(),
+                )?;
+            }
+            let s = store.update_schedule(id, &patch, &now).map_err(core)?;
+            schedule_json(store, &s)?
+        }
+        "add_schedule_attachment" => {
+            let schedule_id = required(args, "schedule_id")?;
+            let (name, bytes) = read_upload(required(args, "path")?)?;
+            let f = store
+                .add_schedule_file(schedule_id, &name, &bytes)
+                .map_err(core)?;
+            json!({"id": f.id, "name": f.name, "size": f.size})
+        }
+        "delete_schedule_attachment" => {
+            let id = required(args, "id")?;
+            store.delete_schedule_file(id).map_err(core)?;
+            json!({"deleted": id})
         }
         "delete_schedule" => {
             store.delete_schedule(required(args, "id")?).map_err(core)?;
@@ -2326,6 +2644,8 @@ pub fn summary(name: &str, args: &Value) -> String {
         "list_schedules" => "定時タスクを取得".into(),
         "create_schedule" => format!("定時タスクを追加: {}", arg("title")),
         "update_schedule" => "定時タスクを変更".into(),
+        "add_schedule_attachment" => format!("定時タスクにファイルを添付: {}", arg("path")),
+        "delete_schedule_attachment" => "定時タスクの添付を外す".into(),
         "delete_schedule" => "定時タスクを削除".into(),
         "set_repeat" => match args.get("repeat") {
             Some(Value::Null) => "繰り返しを外す".into(),
@@ -2450,7 +2770,7 @@ pub fn system_prompt(rules: &str) -> String {
          - タスクの追加、書き換え、整理のように元に戻せる操作は、「〜しましょうか」と聞き返さずに実行し、結果だけを伝えてください。聞き返すのは、頼まれたことが 2 通り以上に読めて、どちらかで結果が大きく変わるときだけです。\n\
          - ツールが失敗したら、やり方を変えてやり直してください。返事には最後の結果だけを書き、途中の失敗、その原因、ツールやシェルの事情は書かないでください。どうしてもできなかったときだけ、できなかったことと、ユーザーにしてほしいことを 1 文で書いてください。\n\
          - {COMMENT_RULE}ユーザーが文面を決めてコメントを頼んだときは、その文面のまま書いてください。\n\
-         - 「毎週」「毎朝」のように、決まった時刻ごとに新しいタスクを作ってほしいと頼まれたら（週次定例の報告など）、create_schedule で定時タスクにしてください。時刻が来るたびに新しいタスクを 1 件作ります。作ったタスクで AI にしてほしい作業（報告の下書きなど）は ai_instruction に書いてください。今あるタスクに繰り返しを付けるよう頼まれたときは、set_repeat を使ってください。\n\
+         - 「毎週」「毎朝」のように、決まった時刻ごとに新しいタスクを作ってほしいと頼まれたら（週次定例の報告など）、create_schedule で定時タスクにしてください。時刻が来るたびに新しいタスクを 1 件作ります。作ったタスクで AI にしてほしい作業（報告の下書きなど）は ai_instruction に書いてください。今あるタスクに繰り返しを付けるよう頼まれたときは、set_repeat を使ってください。定時タスクの雛形には、タスクと同じ項目（URL・説明・状態・優先度・担当と役・開始日・期限・通知・進捗・カテゴリ・親タスク・ほかのワークスペース・サブタスク・添付）を入れられます。次から作るタスクに入れるよう頼まれたものは、update_schedule（添付は add_schedule_attachment）で雛形に入れてください。\n\
          - ユーザーに「これからはこうして」「いつも〜して」のように、これから先も続けてほしいことを頼まれたら、list_ai_rules で今のルールを読み、create_ai_rule か update_ai_rule でルールにしてください。あるワークスペースだけのことなら、そのワークスペースのルールにしてください。\n\
          - 返事は短く、ユーザーの言葉（ふつうは日本語）で書いてください。記法は使わず、ふつうの文章で書いてください。"
     );
@@ -2606,6 +2926,152 @@ mod tests {
         );
         run(&mut store, "delete_schedule", json!({"id": id}));
         assert!(store.all_schedules().unwrap().is_empty());
+    }
+
+    #[test]
+    fn schedule_templates_take_every_task_field() {
+        let mut store = Store::open_in_memory().unwrap();
+        let ws = run(&mut store, "create_workspace", json!({"name": "経理"}));
+        let ws_id = ws["id"].as_str().unwrap();
+        let other = run(&mut store, "create_workspace", json!({"name": "共有"}));
+        let other_id = other["id"].as_str().unwrap();
+        let parent = run(
+            &mut store,
+            "create_task",
+            json!({"title": "経理", "workspace_id": ws_id}),
+        );
+        let made = run(
+            &mut store,
+            "create_schedule",
+            json!({
+                "workspace_id": ws_id,
+                "title": "ktc 請求書の作成",
+                // 2099-11-28 は土曜
+                "schedule": {"unit": "month", "from": "2099-11-28", "time": "09:00"},
+                "urls": ["https://epilysi.stargate65535.workers.dev/"],
+                "description": "先月分",
+                "status": "in_process",
+                "priority": "high",
+                "start_days": 0,
+                "start_time": "10:00",
+                "due_days": 3,
+                "due_alerts": {"date_days": [1]},
+                "percent": 10,
+                "parent_id": parent["id"],
+                "assignees": [{"person": "経理担当", "roles": ["R", "A"]}],
+                "categories": ["請求"],
+                "linked_workspace_ids": [other_id],
+                "subtasks": ["金額を確かめる"],
+            }),
+        );
+        assert_eq!(
+            made["urls"],
+            json!(["https://epilysi.stargate65535.workers.dev/"])
+        );
+        assert_eq!(made["description"], "先月分");
+        assert_eq!(made["status"], "in_process");
+        assert_eq!(made["priority"], "high");
+        assert_eq!(made["start_days"], 0);
+        assert_eq!(made["start_time"], "10:00");
+        assert_eq!(
+            made["due_alerts"],
+            json!({"timed_minutes": null, "date_days": [1]})
+        );
+        assert_eq!(made["percent"], 10);
+        assert_eq!(made["parent_id"], parent["id"]);
+        assert_eq!(made["assignees"][0]["roles"], json!(["R", "A"]));
+        assert_eq!(made["categories"], json!(["請求"]));
+        assert_eq!(made["linked_workspace_ids"], json!([other_id]));
+        assert_eq!(made["subtasks"], json!(["金額を確かめる"]));
+        // 名前だけの担当者は、そのワークスペースの担当者として登録する
+        let people = run(&mut store, "list_people", json!({}));
+        assert!(people
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["name"] == "経理担当"));
+        let id = made["id"].as_str().unwrap();
+
+        // 渡した項目だけが変わる。URL は足すことも外すこともできる
+        let changed = run(
+            &mut store,
+            "update_schedule",
+            json!({"id": id, "add_urls": ["b.example/x"], "remove_urls": ["epilysi.stargate65535.workers.dev/"], "priority": null}),
+        );
+        assert_eq!(changed["urls"], json!(["https://b.example/x"]));
+        assert!(changed["priority"].is_null());
+        assert_eq!(changed["description"], "先月分");
+        assert_eq!(changed["assignees"][0]["roles"], json!(["R", "A"]));
+
+        // 添付も付けられ、作るタスクに入る
+        let dir = std::env::temp_dir().join(format!("malakt-schedule-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("見積.txt");
+        std::fs::write(&path, b"abc").unwrap();
+        let file = run(
+            &mut store,
+            "add_schedule_attachment",
+            json!({"schedule_id": id, "path": path.to_string_lossy()}),
+        );
+        assert_eq!(file["name"], "見積.txt");
+        let list = run(&mut store, "list_schedules", json!({"workspace_id": ws_id}));
+        assert_eq!(list[0]["attachments"][0]["name"], "見積.txt");
+        let tasks = store.sweep_schedules("2099-11-28 09:00").unwrap();
+        let task = run(&mut store, "get_task", json!({"id": tasks[0]}));
+        assert_eq!(task["urls"], json!(["https://b.example/x"]));
+        assert_eq!(task["status"], "in_process");
+        assert_eq!(task["start"], "2099-11-28 10:00");
+        assert_eq!(task["due"], "2099-12-01");
+        assert_eq!(task["attachments"][0]["name"], "見積.txt");
+        assert_eq!(task["subtasks"][0]["title"], "金額を確かめる");
+        assert_eq!(task["due_alerts"]["own"]["date_days"], json!([1]));
+        run(
+            &mut store,
+            "delete_schedule_attachment",
+            json!({"id": file["id"]}),
+        );
+        assert!(store.schedule_files(id).unwrap().is_empty());
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(WRITES.contains(&"add_schedule_attachment"));
+        assert!(WRITES.contains(&"delete_schedule_attachment"));
+
+        // 正しくない値は何も変えない
+        for bad in [
+            json!({"id": id, "status": "done"}),
+            json!({"id": id, "priority": "urgent"}),
+            json!({"id": id, "percent": 101}),
+            json!({"id": id, "start_days": -1}),
+            json!({"id": id, "urls": ["リンク"]}),
+            json!({"id": id, "remove_urls": ["https://none.example/"]}),
+            json!({"id": id, "parent_id": "ない"}),
+            json!({"id": id, "linked_workspace_ids": ["ない"]}),
+            json!({"id": id, "due_alerts": {"date_days": [99]}}),
+            json!({"id": id, "assignees": [{"person": "x", "roles": []}]}),
+        ] {
+            let before = store.schedule(id).unwrap();
+            assert!(
+                execute(&mut store, None, "update_schedule", &bad).is_err(),
+                "{bad}"
+            );
+            assert_eq!(store.schedule(id).unwrap(), before, "{bad}");
+        }
+        // 足すときも、正しくない値なら何も作らない
+        let count = store.all_schedules().unwrap().len();
+        assert!(execute(
+            &mut store,
+            None,
+            "create_schedule",
+            &json!({"title": "x", "urls": ["リンク"]})
+        )
+        .is_err());
+        assert!(execute(
+            &mut store,
+            None,
+            "create_schedule",
+            &json!({"title": "x", "parent_id": "ない"})
+        )
+        .is_err());
+        assert_eq!(store.all_schedules().unwrap().len(), count);
     }
 
     #[test]

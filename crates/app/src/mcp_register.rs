@@ -251,7 +251,13 @@ pub fn merge_cursor(file: &Path, exe: &str) -> Result<bool, String> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => json!({}),
         Err(e) => return Err(format!("{shown} を読めません（{e}）")),
     };
-    let wanted = crate::mcp::config_json(Path::new(exe), None)["mcpServers"][NAME].clone();
+    // 前に書いた登録にアクセスキーがあれば、そのまま残す
+    let key = root
+        .pointer(&format!("/mcpServers/{NAME}/env/{}", crate::mcp::ENV_KEY))
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let wanted =
+        crate::mcp::config_json(Path::new(exe), None, key.as_deref())["mcpServers"][NAME].clone();
     let Some(top) = root.as_object_mut() else {
         return Err(format!("{shown} の形が違います"));
     };
@@ -488,6 +494,23 @@ mod tests {
         );
         assert_eq!(after["extra"], 1);
         assert_eq!(after["mcpServers"]["malakt-mahoz"]["command"], "/apps/two");
+
+        // アクセスキーを付けて登録してあれば、場所を書き直してもキーは残す
+        let mut keyed = read();
+        keyed["mcpServers"]["malakt-mahoz"]["env"] =
+            json!({crate::mcp::ENV_KEY: "mmak_abc", "OTHER": "x"});
+        std::fs::write(&file, keyed.to_string()).unwrap();
+        assert!(merge_cursor(&file, "/apps/three").unwrap());
+        let after = read();
+        assert_eq!(
+            after["mcpServers"]["malakt-mahoz"]["command"],
+            "/apps/three"
+        );
+        assert_eq!(
+            after["mcpServers"]["malakt-mahoz"]["env"],
+            json!({crate::mcp::ENV_KEY: "mmak_abc"})
+        );
+        assert!(!merge_cursor(&file, "/apps/three").unwrap());
     }
 
     #[test]

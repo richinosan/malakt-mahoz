@@ -63,15 +63,25 @@ fn base64_url(bytes: &[u8]) -> String {
     out
 }
 
-fn generate_secret() -> String {
+/// `prefix` のあとに 256 ビットの乱数を付けた secret。アクセスキー（`access`）も同じ形。
+pub(crate) fn random_secret(prefix: &str) -> String {
     let mut bytes = [0u8; SECRET_BYTES];
     rand::rngs::OsRng.fill_bytes(&mut bytes);
-    format!("{SECRET_PREFIX}{}", base64_url(&bytes))
+    format!("{prefix}{}", base64_url(&bytes))
+}
+
+fn generate_secret() -> String {
+    random_secret(SECRET_PREFIX)
 }
 
 /// 発行する secret の形か。この形でないものは、探すまでもなく「見つからない」。
 fn looks_like_secret(secret: &str) -> bool {
-    secret.strip_prefix(SECRET_PREFIX).is_some_and(|body| {
+    has_secret_shape(secret, SECRET_PREFIX)
+}
+
+/// [`random_secret`] が作る形か。
+pub(crate) fn has_secret_shape(secret: &str, prefix: &str) -> bool {
+    secret.strip_prefix(prefix).is_some_and(|body| {
         body.len() == SECRET_BODY_CHARS
             && body
                 .bytes()
