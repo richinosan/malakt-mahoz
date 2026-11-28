@@ -5,6 +5,7 @@ pub mod console;
 pub mod drop;
 pub mod env_path;
 pub mod keys;
+pub mod links;
 pub mod profile;
 mod settle;
 
@@ -26,6 +27,7 @@ use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor, Rgb};
 
 pub use drop::{drop_text, PathStyle};
 pub use keys::{Action, Button, Key};
+pub use links::Link;
 pub use profile::Profile;
 
 /// さかのぼれる行数。メモリの中だけに置き、これより古い行は捨てる。
@@ -600,6 +602,67 @@ impl Terminal {
             .lock()
             .selection_to_string()
             .filter(|text| !text.is_empty())
+    }
+
+    /// マス（桁、行）にあるリンク。OSC 8 のハイパーリンクを先に見て、なければ文字の中の URL を探す。
+    /// URL が折り返して次の行に続いていれば、続きも 1 つのリンクにする。
+    pub fn link_at(&self, at: (usize, usize)) -> Option<Link> {
+        let term = self.term.lock();
+        let point = Self::point(&term, at);
+        let offset = term.grid().display_offset();
+        let on_screen = |point: Point| {
+            term::point_to_viewport(offset, point)
+                .filter(|at| at.line < term.screen_lines())
+                .map(|at| (at.column.0, at.line))
+        };
+        if let Some(hyperlink) = term.grid()[point].hyperlink() {
+            let url = hyperlink.uri().to_owned();
+            if !links::openable(&url) {
+                return None;
+            }
+            let mut cells = Vec::new();
+            for row in 0..term.screen_lines() {
+                for col in 0..term.columns() {
+                    let point = Self::point(&term, (col, row));
+                    if term.grid()[point].hyperlink().as_ref() == Some(&hyperlink) {
+                        cells.push((col, row));
+                    }
+                }
+            }
+            return Some(Link { url, cells });
+        }
+        // 折り返しでつながった 1 行の文字と、それぞれのマス
+        let start = term.line_search_left(point);
+        let end = term.line_search_right(point);
+        let mut chars = Vec::new();
+        let mut points = Vec::new();
+        let mut line = start.line;
+        while line <= end.line {
+            for col in 0..term.columns() {
+                let at = Point::new(line, Column(col));
+                let cell = &term.grid()[at];
+                if cell
+                    .flags
+                    .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
+                {
+                    continue;
+                }
+                chars.push(cell.c);
+                points.push(at);
+            }
+            line += 1;
+        }
+        let ix = points.iter().position(|at| *at == point)?;
+        let range = links::find_urls(&chars)
+            .into_iter()
+            .find(|range| range.contains(&ix))?;
+        Some(Link {
+            url: chars[range.clone()].iter().collect(),
+            cells: points[range]
+                .iter()
+                .filter_map(|at| on_screen(*at))
+                .collect(),
+        })
     }
 
     /// 画面の中身を写し取る。
