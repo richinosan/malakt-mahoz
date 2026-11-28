@@ -206,6 +206,45 @@
             },
             "description": "外す URL"
           },
+          "estimate": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "予想工数。月・日・時間・分を組み合わせて書く（「1日3時間」「90分」「1.5h」「2週間」「1か月」「P1DT3H」）。単位のない数は時間。null か空でなくす"
+          },
+          "time_basis": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "start": {
+                "type": "string",
+                "enum": [
+                  "created",
+                  "assigned",
+                  "in_process",
+                  "start_date"
+                ],
+                "description": "作った時 / 担当が付いた時 / 進行中にした時 / 開始日"
+              },
+              "end": {
+                "type": "string",
+                "enum": [
+                  "completed",
+                  "self_done"
+                ],
+                "description": "完了にした時 / 自分の分を完了にした時"
+              }
+            },
+            "required": [
+              "start",
+              "end"
+            ],
+            "additionalProperties": false,
+            "description": "このタスクの所要時間の基準。null でワークスペースか全体の標準に合わせる"
+          },
           "workspace_id": {
             "type": "string"
           }
@@ -339,6 +378,45 @@
               "type": "string"
             },
             "description": "外す URL"
+          },
+          "estimate": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "予想工数。月・日・時間・分を組み合わせて書く（「1日3時間」「90分」「1.5h」「2週間」「1か月」「P1DT3H」）。単位のない数は時間。null か空でなくす"
+          },
+          "time_basis": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "start": {
+                "type": "string",
+                "enum": [
+                  "created",
+                  "assigned",
+                  "in_process",
+                  "start_date"
+                ],
+                "description": "作った時 / 担当が付いた時 / 進行中にした時 / 開始日"
+              },
+              "end": {
+                "type": "string",
+                "enum": [
+                  "completed",
+                  "self_done"
+                ],
+                "description": "完了にした時 / 自分の分を完了にした時"
+              }
+            },
+            "required": [
+              "start",
+              "end"
+            ],
+            "additionalProperties": false,
+            "description": "このタスクの所要時間の基準。null でワークスペースか全体の標準に合わせる"
           },
           "id": {
             "type": "string"
@@ -1231,6 +1309,82 @@
       "writes": true
     },
     {
+      "name": "get_time_stats",
+      "group": "data",
+      "description": "予想工数と所要時間の統計を返す。workspace_id を渡すとそのワークスペース（サブワークスペースを含む）、省くと全体。period で、その期間に終わったタスクだけを数える。完了数・所要時間の合計／平均／中央値・予想工数に収まった割合・予想工数に対する所要時間の割合・未完了の予想工数の合計を、全体と担当者ごとに返す。所要時間は、タスクごとの基準（タスク → ワークスペース → 全体の標準）で数えた時計の経過（ポモドーロの作業時間とは別）。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "period": {
+            "type": "string",
+            "enum": [
+              "week",
+              "month",
+              "quarter",
+              "year",
+              "all"
+            ],
+            "description": "7 日 / 30 日 / 90 日 / 1 年 / すべて（標準は month）"
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "set_time_basis",
+      "group": "data",
+      "description": "所要時間の基準（どこから数え、どこまで数えるか）を変える。workspace_id を省くと全体の標準、渡すとそのワークスペース（サブワークスペースも従う）。ワークスペースで basis に null を渡すと、親のワークスペースか全体の標準に合わせる。タスクごとの基準は update_task の time_basis で変える。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "basis": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "start": {
+                "type": "string",
+                "enum": [
+                  "created",
+                  "assigned",
+                  "in_process",
+                  "start_date"
+                ],
+                "description": "作った時 / 担当が付いた時 / 進行中にした時 / 開始日"
+              },
+              "end": {
+                "type": "string",
+                "enum": [
+                  "completed",
+                  "self_done"
+                ],
+                "description": "完了にした時 / 自分の分を完了にした時"
+              }
+            },
+            "required": [
+              "start",
+              "end"
+            ],
+            "additionalProperties": false,
+            "description": "基準。null はワークスペースだけ"
+          }
+        },
+        "required": [
+          "basis"
+        ],
+        "additionalProperties": false
+      },
+      "writes": true
+    },
+    {
       "name": "set_repeat",
       "group": "data",
       "description": "タスクに繰り返しを付ける・変える・外す。繰り返しのあるタスクは、次の回の時刻になるとアプリがタスクを写して次の回を作り、繰り返しは新しい回へ移る（開始日と期限は回の日に合わせてずれる）。ai_instruction を付けると、回を作ったときにアプリの AI がその指示を実行して、結果をその回のタスクにコメントする（例: 週次の報告の下書き）。アプリが動いている間だけ動く。渡した項目だけが変わる。",
@@ -1565,6 +1719,45 @@
             },
             "description": "作るタスクのサブタスクのタイトル（100 件まで）。渡すとこの並びになる"
           },
+          "estimate": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "作るタスクの予想工数。月・日・時間・分を組み合わせて書く（「1日3時間」「90分」「1.5h」「2週間」「1か月」「P1DT3H」）。単位のない数は時間。null か空でなくす"
+          },
+          "time_basis": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "start": {
+                "type": "string",
+                "enum": [
+                  "created",
+                  "assigned",
+                  "in_process",
+                  "start_date"
+                ],
+                "description": "作った時 / 担当が付いた時 / 進行中にした時 / 開始日"
+              },
+              "end": {
+                "type": "string",
+                "enum": [
+                  "completed",
+                  "self_done"
+                ],
+                "description": "完了にした時 / 自分の分を完了にした時"
+              }
+            },
+            "required": [
+              "start",
+              "end"
+            ],
+            "additionalProperties": false,
+            "description": "作るタスクの所要時間の基準。null でワークスペースか全体の標準に合わせる"
+          },
           "workspace_id": {
             "type": "string"
           }
@@ -1829,6 +2022,45 @@
               "type": "string"
             },
             "description": "作るタスクのサブタスクのタイトル（100 件まで）。渡すとこの並びになる"
+          },
+          "estimate": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "作るタスクの予想工数。月・日・時間・分を組み合わせて書く（「1日3時間」「90分」「1.5h」「2週間」「1か月」「P1DT3H」）。単位のない数は時間。null か空でなくす"
+          },
+          "time_basis": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "start": {
+                "type": "string",
+                "enum": [
+                  "created",
+                  "assigned",
+                  "in_process",
+                  "start_date"
+                ],
+                "description": "作った時 / 担当が付いた時 / 進行中にした時 / 開始日"
+              },
+              "end": {
+                "type": "string",
+                "enum": [
+                  "completed",
+                  "self_done"
+                ],
+                "description": "完了にした時 / 自分の分を完了にした時"
+              }
+            },
+            "required": [
+              "start",
+              "end"
+            ],
+            "additionalProperties": false,
+            "description": "作るタスクの所要時間の基準。null でワークスペースか全体の標準に合わせる"
           },
           "id": {
             "type": "string"
@@ -2130,6 +2362,19 @@
               "null"
             ]
           },
+          "time": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "estimated",
+              "not_estimated",
+              "over",
+              null
+            ],
+            "description": "予想工数あり / 予想工数なし / 所要時間が予想工数を超えた。null で外す"
+          },
           "sort": {
             "type": "string",
             "enum": [
@@ -2140,9 +2385,11 @@
               "title",
               "status",
               "assignee",
+              "estimate",
+              "elapsed",
               "manual"
             ],
-            "description": "期限が近い順 / 優先度が高い順 / 更新が新しい順 / 作成が新しい順 / タイトル順 / 状態順 / 手動の順"
+            "description": "期限が近い順 / 優先度が高い順 / 更新が新しい順 / 作成が新しい順 / タイトル順 / 状態順 / 担当順 / 予想工数が短い順 / 所要時間が短い順 / 手動の順"
           },
           "descending": {
             "type": "boolean",
@@ -2180,7 +2427,9 @@
                     "priority",
                     "assignee",
                     "due",
-                    "updated"
+                    "updated",
+                    "estimate",
+                    "elapsed"
                   ]
                 },
                 "shown": {
@@ -2208,7 +2457,9 @@
                 "priority",
                 "assignee",
                 "due",
-                "updated"
+                "updated",
+                "estimate",
+                "elapsed"
               ]
             }
           }

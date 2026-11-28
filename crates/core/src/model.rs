@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::actor::Actor;
+use crate::estimate::Estimate;
+use crate::timing::Basis;
 
 /// 小文字の ULID。
 pub type Id = String;
@@ -48,6 +50,9 @@ pub struct Workspace {
     /// アイコンの色。[`WORKSPACE_COLORS`] のどれか。`None` なら文字と同じ色。
     #[serde(default)]
     pub color: Option<String>,
+    /// このワークスペースのタスクの所要時間の基準。`None` は全体の標準。
+    #[serde(default)]
+    pub time_basis: Option<Basis>,
     pub position: i64,
     pub created_at: i64,
     pub updated_at: i64,
@@ -357,6 +362,18 @@ pub struct Task {
     /// 最後に中身を変えた人。並べ替えだけでは変わらない。
     #[serde(default = "crate::actor::unknown")]
     pub updated_by: Actor,
+    /// 予想工数。
+    #[serde(default)]
+    pub estimate: Option<Estimate>,
+    /// このタスクの所要時間の基準。`None` はワークスペースか全体の標準。
+    #[serde(default)]
+    pub time_basis: Option<Basis>,
+    /// 進行中にした時刻（自動）。未着手に戻すと消える。
+    #[serde(default)]
+    pub started_at: Option<i64>,
+    /// 担当が付いた時刻（自動）。担当がいなくなると消える。
+    #[serde(default)]
+    pub assigned_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -539,6 +556,10 @@ pub struct TaskDraft {
     pub categories: Vec<String>,
     /// タスクに付けた URL。足した順。
     pub urls: Vec<String>,
+    /// 予想工数。
+    pub estimate: Option<Estimate>,
+    /// 所要時間の基準。`None` はワークスペースか全体の標準。
+    pub time_basis: Option<Basis>,
 }
 
 impl Default for TaskDraft {
@@ -555,6 +576,8 @@ impl Default for TaskDraft {
             assignee_ids: Vec::new(),
             categories: Vec::new(),
             urls: Vec::new(),
+            estimate: None,
+            time_basis: None,
         }
     }
 }
@@ -573,6 +596,8 @@ impl From<&Task> for TaskDraft {
             assignee_ids: t.assignee_ids.clone(),
             categories: t.categories.clone(),
             urls: t.urls.clone(),
+            estimate: t.estimate,
+            time_basis: t.time_basis,
         }
     }
 }

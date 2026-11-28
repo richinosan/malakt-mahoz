@@ -204,6 +204,7 @@ fn changed_labels(base: &Fields, local: &Fields, remote: &Fields) -> (Fields, Ve
     field!(status, "状態");
     field!(priority, "優先度");
     field!(percent, "進捗");
+    field!(estimate, "予想工数");
     field!(start, "開始日");
     field!(due, "期限");
     field!(categories, "カテゴリ");

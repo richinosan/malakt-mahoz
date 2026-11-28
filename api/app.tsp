@@ -16,6 +16,8 @@ union Sort {
   "title",
   "status",
   "assignee",
+  "estimate",
+  "elapsed",
   "manual",
 }
 
@@ -26,6 +28,8 @@ union Column {
   "assignee",
   "due",
   "updated",
+  "estimate",
+  "elapsed",
 }
 
 /** ライト / ダーク */
@@ -100,7 +104,10 @@ op set_list_view(
   priority?: "none" | "high" | "mid" | "low" | null,
   category?: string | null,
 
-  /** 期限が近い順 / 優先度が高い順 / 更新が新しい順 / 作成が新しい順 / タイトル順 / 状態順 / 手動の順 */
+  /** 予想工数あり / 予想工数なし / 所要時間が予想工数を超えた。null で外す */
+  time?: "estimated" | "not_estimated" | "over" | null,
+
+  /** 期限が近い順 / 優先度が高い順 / 更新が新しい順 / 作成が新しい順 / タイトル順 / 状態順 / 担当順 / 予想工数が短い順 / 所要時間が短い順 / 手動の順 */
   sort?: Sort,
 
   /** 並び順を逆にする */

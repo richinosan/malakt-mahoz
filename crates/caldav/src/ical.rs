@@ -50,6 +50,9 @@ pub struct Fields {
     /// 担当者。URI の順。
     #[serde(default)]
     pub attendees: Vec<Attendee>,
+    /// 予想工数（ESTIMATED-DURATION の行）。`P1DT3H` のような DURATION の形。
+    #[serde(default)]
+    pub estimate: Option<String>,
 }
 
 /// 担当者 1 人（ATTENDEE）。
@@ -535,6 +538,9 @@ pub fn parse(ics: &str, local: &TimeZone) -> Result<Option<Todo>, String> {
                 f.percent = line.value.trim().parse::<u8>().unwrap_or(0).min(100);
             }
             "DTSTART" => f.start = read_when(&line, local),
+            "ESTIMATED-DURATION" => {
+                f.estimate = Some(line.value.trim().to_ascii_uppercase()).filter(|v| !v.is_empty());
+            }
             "DUE" => f.due = read_when(&line, local),
             "CATEGORIES" => f.categories.extend(split_list(&line.value)),
             "RELATED-TO" => {
@@ -669,6 +675,12 @@ fn patch_lines(
         drop_named(&["PERCENT-COMPLETE"], &mut remove);
         if new.percent > 0 {
             add.push(Line::new("PERCENT-COMPLETE", new.percent.to_string()));
+        }
+    }
+    if old.estimate != new.estimate {
+        drop_named(&["ESTIMATED-DURATION"], &mut remove);
+        if let Some(d) = &new.estimate {
+            add.push(Line::new("ESTIMATED-DURATION", d.clone()));
         }
     }
     if old.start != new.start {
@@ -877,6 +889,7 @@ mod tests {
             status: "NEEDS-ACTION".into(),
             priority: 5,
             percent: 40,
+            estimate: Some("P1DT3H".into()),
             start: Some("2026-11-26 09:30".into()),
             due: Some("2026-12-02".into()),
             categories: vec!["a,b".into(), "c".into()],
@@ -903,6 +916,7 @@ mod tests {
             "役を変えた人の古い役の書き方は残さない"
         );
         assert!(out.contains("DTSTART:20261126T003000Z"));
+        assert!(out.contains("ESTIMATED-DURATION:P1DT3H"));
         let back = parse(&out, &tz).unwrap().unwrap().fields;
         assert_eq!(back, new);
         // 新しく作ったものも同じに読める

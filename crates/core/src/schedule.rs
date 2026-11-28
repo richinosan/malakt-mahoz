@@ -106,6 +106,10 @@ pub struct Template {
     pub alerts_date: Option<Vec<u32>>,
     /// サブタスクのタイトル。並びのとおりに作る。
     pub subtasks: Vec<String>,
+    /// 予想工数。
+    pub estimate: Option<crate::estimate::Estimate>,
+    /// 所要時間の基準。`None` ならワークスペースか全体の標準。
+    pub time_basis: Option<crate::timing::Basis>,
 }
 
 impl Default for Template {
@@ -125,6 +129,8 @@ impl Default for Template {
             alerts_timed: None,
             alerts_date: None,
             subtasks: Vec::new(),
+            estimate: None,
+            time_basis: None,
         }
     }
 }
@@ -434,6 +440,8 @@ pub fn clean_template(t: &Template, assignees: usize) -> Result<Template> {
             .map(alert::clean_date)
             .transpose()?,
         subtasks,
+        estimate: t.estimate.and_then(crate::estimate::Estimate::non_zero),
+        time_basis: t.time_basis,
     })
 }
 
@@ -805,6 +813,8 @@ impl Store {
         draft.percent = t.percent;
         draft.start = s.start_on(at);
         draft.urls = t.urls.clone();
+        draft.estimate = t.estimate;
+        draft.time_basis = t.time_basis;
         // 親タスクを消したあとなら、親なしで作る
         draft.parent_id = match &t.parent_id {
             Some(parent) if self.task(parent).is_ok() => Some(parent.clone()),
@@ -847,8 +857,11 @@ impl Store {
             assignee_ids,
             categories,
             urls,
+            estimate,
+            time_basis,
         } = draft;
         let done = status == Status::Completed;
+        let assignee_ids_empty = assignee_ids.is_empty();
         let task = Task {
             id: new_id(),
             workspace_id: s.workspace_id.clone(),
@@ -872,6 +885,10 @@ impl Store {
             completed_at: done.then_some(now),
             created_by: Actor::Schedule,
             updated_by: Actor::Schedule,
+            estimate,
+            time_basis,
+            started_at: (status == Status::InProcess).then_some(now),
+            assigned_at: (!assignee_ids_empty).then_some(now),
         };
         // サブタスクは、画面で足したときと同じく、タイトルだけで作る
         let subtasks: Vec<Task> = t
@@ -901,6 +918,10 @@ impl Store {
                 completed_at: None,
                 created_by: Actor::Schedule,
                 updated_by: Actor::Schedule,
+                estimate: None,
+                time_basis: None,
+                started_at: None,
+                assigned_at: None,
             })
             .collect();
         let alerts = alert::TaskAlerts {
@@ -1552,6 +1573,11 @@ mod tests {
             alerts_timed: None,
             alerts_date: Some(vec![1, 0]),
             subtasks: vec!["金額を確かめる".into(), "送る".into()],
+            estimate: Some(crate::estimate::Estimate::new(0, 1, 3, 0)),
+            time_basis: Some(crate::timing::Basis::new(
+                crate::timing::StartBasis::Created,
+                crate::timing::EndBasis::SelfDone,
+            )),
         };
         let made = s
             .update_schedule(
@@ -1590,6 +1616,14 @@ mod tests {
         assert_eq!(t.urls, ["https://epilysi.stargate65535.workers.dev/"]);
         assert_eq!(t.linked_workspace_ids, [other.id.clone()]);
         assert_eq!(t.created_by, Actor::Schedule);
+        assert_eq!(t.estimate.map(|e| e.label()).as_deref(), Some("1日3時間"));
+        assert_eq!(
+            t.time_basis.map(|b| b.code()).as_deref(),
+            Some("created>self_done")
+        );
+        // 進行中で作ったので、作った時刻から進行中
+        assert_eq!(t.started_at, Some(t.created_at));
+        assert_eq!(t.assigned_at, Some(t.created_at));
         let alerts = s.task_alerts(&t.id).unwrap();
         assert_eq!(alerts.timed, None);
         assert_eq!(alerts.date, Some(vec![0, 1]));

@@ -87,6 +87,16 @@ model ScheduleRule {
   time?: string;
 }
 
+/** 所要時間の基準。所要時間はこの始まりから終わりまでの時計の経過 */
+@closed
+model TimeBasis {
+  /** 作った時 / 担当が付いた時 / 進行中にした時 / 開始日 */
+  start: "created" | "assigned" | "in_process" | "start_date";
+
+  /** 完了にした時 / 自分の分を完了にした時 */
+  end: "completed" | "self_done";
+}
+
 /** 期限をいつ知らせるか */
 model DueAlerts {
   /** 時刻つきの期限の何分前か。[] で知らせない、null で標準 */
@@ -139,6 +149,17 @@ model TaskFields {
 
   /** 外す URL */
   remove_urls?: string[];
+
+  /**
+   * 予想工数。
+   * 月・日・時間・分を組み合わせて書く（「1日3時間」「90分」「1.5h」「2週間」「1か月」「P1DT3H」）。
+   * 単位のない数は時間。
+   * null か空でなくす
+   */
+  estimate?: string | null;
+
+  /** このタスクの所要時間の基準。null でワークスペースか全体の標準に合わせる */
+  time_basis?: TimeBasis | null;
 }
 
 /** 定時タスクの項目。作るときと書き換えるときで同じ */
@@ -213,6 +234,17 @@ model ScheduleFields {
 
   /** 作るタスクのサブタスクのタイトル（100 件まで）。渡すとこの並びになる */
   subtasks?: string[];
+
+  /**
+   * 作るタスクの予想工数。
+   * 月・日・時間・分を組み合わせて書く（「1日3時間」「90分」「1.5h」「2週間」「1か月」「P1DT3H」）。
+   * 単位のない数は時間。
+   * null か空でなくす
+   */
+  estimate?: string | null;
+
+  /** 作るタスクの所要時間の基準。null でワークスペースか全体の標準に合わせる */
+  time_basis?: TimeBasis | null;
 }
 
 /** ワークスペース（タスクをまとめる単位。入れ子にできる）の一覧を返す。 */
@@ -585,6 +617,34 @@ op set_due_alerts(
   timed_minutes?: AlertMinutes[] | null,
   date_days?: AlertDays[] | null,
   @minValue(0) @maxValue(23) hour?: int32,
+): void;
+
+/**
+ * 予想工数と所要時間の統計を返す。
+ * workspace_id を渡すとそのワークスペース（サブワークスペースを含む）、省くと全体。
+ * period で、その期間に終わったタスクだけを数える。
+ * 完了数・所要時間の合計／平均／中央値・予想工数に収まった割合・予想工数に対する所要時間の割合・未完了の予想工数の合計を、全体と担当者ごとに返す。
+ * 所要時間は、タスクごとの基準（タスク → ワークスペース → 全体の標準）で数えた時計の経過（ポモドーロの作業時間とは別）。
+ */
+op get_time_stats(
+  workspace_id?: string,
+
+  /** 7 日 / 30 日 / 90 日 / 1 年 / すべて（標準は month） */
+  period?: "week" | "month" | "quarter" | "year" | "all",
+): void;
+
+/**
+ * 所要時間の基準（どこから数え、どこまで数えるか）を変える。
+ * workspace_id を省くと全体の標準、渡すとそのワークスペース（サブワークスペースも従う）。
+ * ワークスペースで basis に null を渡すと、親のワークスペースか全体の標準に合わせる。
+ * タスクごとの基準は update_task の time_basis で変える。
+ */
+@writes
+op set_time_basis(
+  workspace_id?: string,
+
+  /** 基準。null はワークスペースだけ */
+  basis: TimeBasis | null,
 ): void;
 
 /**
