@@ -38,6 +38,7 @@ pub mod plugins;
 pub mod pomodoro;
 pub mod pr_times;
 mod press;
+pub mod print_preview;
 pub mod print_setup;
 pub mod reminders;
 mod render;

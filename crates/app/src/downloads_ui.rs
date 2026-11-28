@@ -195,7 +195,7 @@ fn list(cx: &mut App) -> Div {
         (d.items.clone(), d.error.clone())
     };
     let now = malakt_core::now_ms();
-    let mut list = col().gap_0p5();
+    let mut list = col().gap_1p5();
     for (ix, item) in items.iter().enumerate() {
         let id = item.id;
         let running = item.running();
@@ -223,6 +223,10 @@ fn list(cx: &mut App) -> Div {
                 .px_2()
                 .py_1p5()
                 .rounded(feel::md())
+                // 1 件ずつカードにして、一覧の地と分ける
+                .bg(theme.secondary)
+                .border_1()
+                .border_color(theme.border.opacity(0.6))
                 .when(open, |d| {
                     d.cursor_pointer()
                         .lit(theme.secondary_hover, cx)
@@ -236,7 +240,7 @@ fn list(cx: &mut App) -> Div {
                         .items_center()
                         .justify_center()
                         .rounded(feel::md())
-                        .bg(theme.muted)
+                        .bg(theme.popover)
                         .text_color(if gone {
                             theme.muted_foreground
                         } else {
@@ -445,8 +449,10 @@ impl Render for DownloadsBubble {
             .gap_2()
             .rounded(feel::lg())
             .border_1()
-            .border_color(theme.border)
-            .bg(theme.background)
+            // ほかの重なる面（日付の選択など）と同じ色と縁にして、後ろのページやツールバーと分ける
+            .border_color(feel::rim(cx))
+            .bg(theme.popover)
+            .text_color(theme.popover_foreground)
             .elevate(Elevation::High, cx)
             // 外（ほかのペインやアプリのどこか）を押したら閉じる
             .on_mouse_down_out(cx.listener(|this, _, _, cx| {

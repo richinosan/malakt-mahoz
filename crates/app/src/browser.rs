@@ -22,6 +22,7 @@ use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
 use gpui_kit::component::scroll::ScrollableElement;
+use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::{ActiveTheme, Disableable, Placement, Sizable};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
@@ -29,6 +30,7 @@ use serde_json::{json, Value};
 
 use crate::feel;
 use crate::render::{app_icon, col, row};
+use crate::shadow::{Elevate, Elevation};
 use crate::term::{self, Terms};
 
 /// 一度に開けるページの数。小さなウィンドウのページも数える。
@@ -52,6 +54,10 @@ const MAX_READ_CHARS: usize = 20_000;
 const SEARCH: &str = "https://www.google.com/search?q=";
 /// メニューを開いてから、ページの画像が撮れるのを待つ長さ。撮れなければ画像なしで隠す。
 const SHOT_WAIT: Duration = Duration::from_millis(300);
+/// ページの幅がこれより広ければ、印刷のプレビューと設定を左右に並べる（狭ければ上下）。
+const PREVIEW_SIDE_BY_SIDE: f32 = 760.;
+/// 印刷の設定を変えてから、プレビューを作り直すまで待つ時間（書いている途中で何度も作らない）。
+pub const PREVIEW_WAIT: Duration = Duration::from_millis(250);
 
 /// ページの画像を受け取る関数。OS の部品が撮り終わったら呼ぶ。
 pub type Shot = Box<dyn FnOnce(Result<Arc<RenderImage>, String>) + Send + 'static>;
@@ -150,9 +156,9 @@ pub enum Event {
     Found { turn: u64, found: bool },
     /// ファイルのダウンロードが始まった・進んだ・終わった。
     Download(crate::downloads::Note),
-    /// ページを PDF に保存し終わった。`item` はダウンロードの一覧の番号。
+    /// ページを PDF に保存し終わった。
     PdfSaved {
-        item: u64,
+        target: PdfFor,
         result: Result<(), String>,
         /// 保存した場所と、使った設定。仕上げ（ページを選ぶ・フォントを確かめる）に使う。
         path: std::path::PathBuf,
@@ -160,6 +166,39 @@ pub enum Event {
         /// ページの数を数えるための 1 回目か（ページを選んで 1 枚に何ページも並べるとき）。
         counting: bool,
     },
+}
+
+/// PDF を作る先。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PdfFor {
+    /// ダウンロードの一覧のこの番号の項目として保存する。
+    Download(u64),
+    /// 印刷のプレビュー。番号はプレビューを作った回（[`Terms::preview_pdf`]）。
+    Preview(u64),
+}
+
+/// 順番を待っている PDF の作成。OS の部品は 1 つのページで 1 度に 1 つしか印刷できないので、順に作る。
+pub(crate) struct PdfJob {
+    id: u64,
+    target: PdfFor,
+    path: PathBuf,
+    setup: crate::print_setup::PrintSetup,
+    /// ページの数を数えるための 1 回目か（ページを選んで 1 枚に何ページも並べるとき）。
+    counting: bool,
+    /// 作るページ（数えたあとの 2 回目）。
+    pages: Option<Vec<u32>>,
+}
+
+/// 印刷のプレビュー（PDF に保存したときと同じ作り方で作った、ページの画像）。
+#[derive(Default)]
+pub struct Preview {
+    /// 今出している回。
+    gen: u64,
+    /// 作り直している途中。前の回の画像は出したままにする。
+    pub making: bool,
+    pub pages: Vec<Arc<RenderImage>>,
+    /// 作れなかった。
+    pub error: Option<String>,
 }
 
 /// PDF に保存し終わったときに呼ぶ関数。
@@ -813,9 +852,10 @@ impl Terms {
         setup: &crate::print_setup::PrintSetup,
         cx: &mut Context<Self>,
     ) {
-        let Some((engine, url)) = self
+        let Some(url) = self
             .page(id)
-            .and_then(|p| Some((p.engine.clone()?, p.url.clone())))
+            .filter(|p| p.engine.is_some())
+            .map(|p| p.url.clone())
         else {
             return;
         };
@@ -833,31 +873,136 @@ impl Terms {
         // ページを選んで 1 枚に何ページも並べるときは、並べる前のページの数が要るので、先に 1 回数える。
         // それ以外は 1 回で作り、ページは保存したあとで選ぶ
         let counting = !setup.every_page() && setup.per_sheet() > 1;
-        if let Err(e) = self.pdf_pass(&engine, id, item, path, setup, counting, None) {
-            downloads.update(cx, |d, cx| d.pdf_done(item, Err(e), cx));
+        self.queue_pdf(
+            PdfJob {
+                id,
+                target: PdfFor::Download(item),
+                path,
+                setup: setup.clone(),
+                counting,
+                pages: None,
+            },
+            cx,
+        );
+    }
+
+    /// 印刷のプレビューを `setup` で作り直す。できるまでは前の画像を出したままにする。
+    pub fn preview_pdf(
+        &mut self,
+        id: u64,
+        setup: &crate::print_setup::PrintSetup,
+        cx: &mut Context<Self>,
+    ) {
+        if self.page(id).and_then(|p| p.engine.as_ref()).is_none() {
+            return;
+        }
+        self.preview_gen += 1;
+        let gen = self.preview_gen;
+        let preview = self.previews.entry(id).or_default();
+        preview.gen = gen;
+        preview.making = true;
+        // まだ始めていない古いプレビューは作らない
+        self.pdf_jobs
+            .retain(|job| !(job.id == id && matches!(job.target, PdfFor::Preview(_))));
+        self.queue_pdf(
+            PdfJob {
+                id,
+                target: PdfFor::Preview(gen),
+                path: crate::print_preview::temp_path(gen),
+                setup: setup.clone(),
+                counting: !setup.every_page() && setup.per_sheet() > 1,
+                pages: None,
+            },
+            cx,
+        );
+        cx.notify();
+    }
+
+    /// ページの印刷のプレビュー。
+    pub fn preview(&self, id: u64) -> Option<&Preview> {
+        self.previews.get(&id)
+    }
+
+    /// 印刷のダイアログを閉じた。作っている途中のプレビューは、できても捨てる。
+    pub fn end_preview(&mut self, id: u64) {
+        self.previews.remove(&id);
+        self.pdf_jobs
+            .retain(|job| !(job.id == id && matches!(job.target, PdfFor::Preview(_))));
+    }
+
+    fn preview_current(&self, id: u64, gen: u64) -> bool {
+        self.previews.get(&id).is_some_and(|p| p.gen == gen)
+    }
+
+    /// PDF の作成を順番に並べ、作れるものから始める。
+    fn queue_pdf(&mut self, job: PdfJob, cx: &mut Context<Self>) {
+        self.pdf_jobs.push_back(job);
+        self.next_pdf(cx);
+    }
+
+    /// 作っている途中でないページの、次の PDF を始める。
+    fn next_pdf(&mut self, cx: &mut Context<Self>) {
+        while let Some(at) = self
+            .pdf_jobs
+            .iter()
+            .position(|job| !self.pdf_running.contains(&job.id))
+        {
+            let Some(job) = self.pdf_jobs.remove(at) else {
+                return;
+            };
+            let started = match self.page(job.id).and_then(|p| p.engine.clone()) {
+                Some(engine) => self.pdf_pass(&engine, &job),
+                None => Err("PDF にするページが閉じられました".to_owned()),
+            };
+            match started {
+                Ok(()) => {
+                    self.pdf_running.insert(job.id);
+                }
+                Err(e) => self.pdf_failed(job.id, job.target, &job.path, job.counting, e, cx),
+            }
         }
     }
 
-    /// PDF を 1 回作る。終わると [`Event::PdfSaved`] が届く。
-    #[allow(clippy::too_many_arguments)]
-    fn pdf_pass(
-        &self,
-        engine: &Rc<dyn Engine>,
+    /// PDF を作れなかった。保存なら一覧に、プレビューならダイアログに出す。
+    fn pdf_failed(
+        &mut self,
         id: u64,
-        item: u64,
-        path: std::path::PathBuf,
-        setup: &crate::print_setup::PrintSetup,
+        target: PdfFor,
+        path: &std::path::Path,
         counting: bool,
-        pages: Option<&[u32]>,
-    ) -> Result<(), String> {
+        e: String,
+        cx: &mut Context<Self>,
+    ) {
+        match target {
+            PdfFor::Download(item) => {
+                if counting {
+                    crate::print_setup::discard(path);
+                }
+                crate::downloads::shared(cx).update(cx, |d, cx| d.pdf_done(item, Err(e), cx));
+            }
+            PdfFor::Preview(gen) => {
+                crate::print_setup::discard(path);
+                if let Some(preview) = self.previews.get_mut(&id).filter(|p| p.gen == gen) {
+                    preview.making = false;
+                    preview.pages.clear();
+                    preview.error = Some(e);
+                    cx.notify();
+                }
+            }
+        }
+    }
+
+    /// PDF を 1 回作り始める。終わると [`Event::PdfSaved`] が届く。
+    fn pdf_pass(&self, engine: &Rc<dyn Engine>, job: &PdfJob) -> Result<(), String> {
         let events = self.page_events.clone();
-        let (saved, kept) = (path.clone(), Box::new(setup.clone()));
+        let (id, target, counting) = (job.id, job.target, job.counting);
+        let (saved, kept) = (job.path.clone(), Box::new(job.setup.clone()));
         let done: PdfDone = Box::new(move |result| {
             // アプリを閉じている途中なら、受け取る先がない
             let _ = events.try_send((
                 id,
                 Event::PdfSaved {
-                    item,
+                    target,
                     result,
                     path: saved,
                     setup: kept,
@@ -865,11 +1010,111 @@ impl Terms {
                 },
             ));
         });
-        let mut pass = setup.clone();
+        let mut pass = job.setup.clone();
         if counting {
             pass.per_sheet = 1;
         }
-        engine.save_pdf(&path, &pass, pages, done)
+        engine.save_pdf(&job.path, &pass, job.pages.as_deref(), done)
+    }
+
+    /// PDF ができた（[`Event::PdfSaved`]）。数えた 1 回目なら作り直し、できたら仕上げる。
+    fn pdf_saved(&mut self, job: PdfJob, result: Result<(), String>, cx: &mut Context<Self>) {
+        let PdfJob {
+            id,
+            target,
+            path,
+            setup,
+            counting,
+            ..
+        } = job;
+        if let PdfFor::Preview(gen) = target {
+            if !self.preview_current(id, gen) {
+                crate::print_setup::discard(&path);
+                return;
+            }
+        }
+        if let Err(e) = result {
+            self.pdf_failed(id, target, &path, counting, e, cx);
+            return;
+        }
+        if counting {
+            // 数えたページの数から選んだページを決めて、もう 1 回作る
+            let counted = {
+                let (path, setup) = (path.clone(), setup.clone());
+                cx.background_spawn(async move {
+                    let count = crate::print_setup::page_count(&path);
+                    crate::print_setup::discard(&path);
+                    setup.selected(count?)
+                })
+            };
+            cx.spawn(async move |this, cx| {
+                let pages = counted.await;
+                // アプリを閉じている途中なら、作る先がない
+                let _ = this.update(cx, |this, cx| match pages {
+                    Ok(pages) => this.queue_pdf(
+                        PdfJob {
+                            id,
+                            target,
+                            path,
+                            setup,
+                            counting: false,
+                            pages: Some(pages),
+                        },
+                        cx,
+                    ),
+                    Err(e) => this.pdf_failed(id, target, &path, false, e, cx),
+                });
+            })
+            .detach();
+            return;
+        }
+        // ページを選び、フォントを埋め込んでいるかを確かめてから、できたことにする
+        let select = !setup.every_page() && setup.per_sheet() == 1;
+        match target {
+            PdfFor::Download(item) => {
+                let downloads = crate::downloads::shared(cx);
+                let finished = cx.background_spawn(async move {
+                    crate::print_setup::finish(&path, &setup, select)
+                });
+                cx.spawn(async move |_, cx| {
+                    let result = finished.await;
+                    downloads.update(cx, |d, cx| d.pdf_done(item, result, cx));
+                })
+                .detach();
+            }
+            PdfFor::Preview(gen) => {
+                // 保存するときと同じように仕上げてから、ページの画像にする。PDF は残さない
+                let made = cx.background_spawn(async move {
+                    let pages = crate::print_setup::finish(&path, &setup, select)
+                        .and_then(|()| crate::print_preview::render(&path));
+                    crate::print_setup::discard(&path);
+                    pages
+                });
+                cx.spawn(async move |this, cx| {
+                    let pages = made.await;
+                    // アプリを閉じている途中なら、出す先がない
+                    let _ = this.update(cx, |this, cx| {
+                        let Some(preview) = this.previews.get_mut(&id).filter(|p| p.gen == gen)
+                        else {
+                            return;
+                        };
+                        preview.making = false;
+                        match pages {
+                            Ok(pages) => {
+                                preview.pages = pages;
+                                preview.error = None;
+                            }
+                            Err(e) => {
+                                preview.pages.clear();
+                                preview.error = Some(e);
+                            }
+                        }
+                        cx.notify();
+                    });
+                })
+                .detach();
+            }
+        }
     }
 
     /// 印刷のダイアログやダウンロードの一覧を、ページの上に描く。描く前（prepaint）に、描くたびに呼ぶ。
@@ -889,6 +1134,23 @@ impl Terms {
         };
         // 部品を捨てると、ウィンドウからも消える
         let page = self.pages.remove(at);
+        // 待っている PDF は作れない。作っている途中のものは、部品と一緒に終わる
+        self.pdf_running.remove(&id);
+        self.previews.remove(&id);
+        let (waiting, rest) = std::mem::take(&mut self.pdf_jobs)
+            .into_iter()
+            .partition::<Vec<_>, _>(|job| job.id == id);
+        self.pdf_jobs = rest.into();
+        for job in waiting {
+            self.pdf_failed(
+                job.id,
+                job.target,
+                &job.path,
+                job.counting,
+                "PDF にするページが閉じられました".to_owned(),
+                cx,
+            );
+        }
         if is_web(&page.url) {
             self.closed_pages.push(page.url);
             let over = self.closed_pages.len().saturating_sub(MAX_CLOSED);
@@ -1001,59 +1263,23 @@ impl Terms {
                 return;
             }
             Event::PdfSaved {
-                item,
+                target,
                 result,
                 path,
                 setup,
                 counting,
             } => {
-                let downloads = crate::downloads::shared(cx);
-                if let Err(e) = result {
-                    if counting {
-                        crate::print_setup::discard(&path);
-                    }
-                    downloads.update(cx, |d, cx| d.pdf_done(item, Err(e), cx));
-                    return;
-                }
-                if counting {
-                    // 数えたページの数から選んだページを決めて、もう 1 回作る
-                    let counted = {
-                        let (path, setup) = (path.clone(), setup.clone());
-                        cx.background_spawn(async move {
-                            let count = crate::print_setup::page_count(&path);
-                            crate::print_setup::discard(&path);
-                            setup.selected(count?)
-                        })
-                    };
-                    cx.spawn(async move |this, cx| {
-                        let pages = counted.await;
-                        let again = this.update(cx, |this, _| {
-                            let engine = this
-                                .page(id)
-                                .and_then(|p| p.engine.clone())
-                                .ok_or_else(|| "PDF にするページが閉じられました".to_owned())?;
-                            this.pdf_pass(&engine, id, item, path, &setup, false, Some(&pages?))
-                        });
-                        let failed = match again {
-                            Ok(Ok(())) => return,
-                            Ok(Err(e)) => e,
-                            Err(_) => "PDF にするページが閉じられました".to_owned(),
-                        };
-                        downloads.update(cx, |d, cx| d.pdf_done(item, Err(failed), cx));
-                    })
-                    .detach();
-                    return;
-                }
-                // ページを選び、フォントを埋め込んでいるかを確かめてから、できたことにする
-                let select = !setup.every_page() && setup.per_sheet() == 1;
-                let finished = cx.background_spawn(async move {
-                    crate::print_setup::finish(&path, &setup, select)
-                });
-                cx.spawn(async move |_, cx| {
-                    let result = finished.await;
-                    downloads.update(cx, |d, cx| d.pdf_done(item, result, cx));
-                })
-                .detach();
+                self.pdf_running.remove(&id);
+                let job = PdfJob {
+                    id,
+                    target,
+                    path,
+                    setup: *setup,
+                    counting,
+                    pages: None,
+                };
+                self.pdf_saved(job, result, cx);
+                self.next_pdf(cx);
                 return;
             }
             _ => {}
@@ -1995,6 +2221,11 @@ pub(crate) struct PrintDialog {
     problem: Option<String>,
     /// 設定を覚えられなかった。
     error: Option<String>,
+    /// プレビューを作った設定。同じなら作り直さない。
+    previewed: Option<crate::print_setup::PrintSetup>,
+    /// 書いている間は待ってから、プレビューを作り直す。
+    preview_wait: Option<Task<()>>,
+    preview_scroll: ScrollHandle,
     focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
@@ -2050,6 +2281,9 @@ impl PrintDialog {
             margins,
             problem: None,
             error: None,
+            previewed: None,
+            preview_wait: None,
+            preview_scroll: ScrollHandle::new(),
             focus: cx.focus_handle(),
             _subscriptions: subscriptions,
         }
@@ -2097,7 +2331,37 @@ impl PrintDialog {
             }
         }
         self.problem = problem.or_else(|| self.setup.check().err());
+        self.refresh_preview(cx);
         cx.notify();
+    }
+
+    /// 設定が変わったら、少し待ってからプレビューを作り直す。おかしい所があれば前のままにする。
+    fn refresh_preview(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.open else {
+            return;
+        };
+        if !self.terms.read(cx).print_pdf || self.problem.is_some() {
+            self.preview_wait = None;
+            return;
+        }
+        // 詳細設定を開いたか閉じたかでは、できる PDF は変わらない
+        let mut setup = self.setup.clone();
+        setup.more = false;
+        if self.previewed.as_ref() == Some(&setup) {
+            return;
+        }
+        self.preview_wait = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(PREVIEW_WAIT).await;
+            // ダイアログを閉じたあとなら、作る先がない
+            let _ = this.update(cx, |this, cx| {
+                if this.open != Some(id) {
+                    return;
+                }
+                this.previewed = Some(setup.clone());
+                this.terms
+                    .update(cx, |terms, cx| terms.preview_pdf(id, &setup, cx));
+            });
+        }));
     }
 
     /// 設定を 1 つ変える（メニューやチェックから）。カスタムを選んだら、その欄に書けるようにする。
@@ -2149,6 +2413,8 @@ impl PrintDialog {
             .update(cx, |terms, cx| terms.release_page(id, cx));
         self.open = Some(id);
         self.error = None;
+        // ページが変わっているかもしれないので、プレビューは作り直す
+        self.previewed = None;
         self.name
             .update(cx, |name, cx| name.set_value(stem, window, cx));
         // 前に PDF に保存したときの設定で始める
@@ -2175,7 +2441,12 @@ impl PrintDialog {
         let Some(id) = self.open.take() else {
             return false;
         };
-        self.terms.update(cx, |terms, cx| terms.focus_page(id, cx));
+        self.preview_wait = None;
+        self.previewed = None;
+        self.terms.update(cx, |terms, cx| {
+            terms.end_preview(id);
+            terms.focus_page(id, cx);
+        });
         cx.notify();
         true
     }
@@ -2185,6 +2456,7 @@ impl PrintDialog {
             terms.print_pdf = pdf;
             cx.notify();
         });
+        self.refresh_preview(cx);
         self.focus_now(window, cx);
     }
 
@@ -2250,6 +2522,97 @@ impl PrintDialog {
                 terms.print_page(id, cx);
             }
         });
+    }
+
+    /// 印刷のプレビュー（左）。ページを上から並べ、作り直している間は前のページを薄く出す。
+    fn preview_view(&self, id: u64, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let preview = self.terms.read(cx).preview(id);
+        let making = preview.is_none_or(|p| p.making);
+        let error = preview.and_then(|p| p.error.clone());
+        let pages = preview.map(|p| p.pages.clone()).unwrap_or_default();
+        let empty = pages.is_empty();
+        div()
+            .id("browser-print-preview")
+            .relative()
+            .size_full()
+            .bg(theme.muted)
+            .child(
+                div()
+                    .id("browser-print-preview-pages")
+                    .size_full()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.preview_scroll)
+                    .child(
+                        col()
+                            .items_center()
+                            .gap_4()
+                            .p_6()
+                            .when(making, |d| d.opacity(0.5))
+                            .children(pages.into_iter().enumerate().map(|(ix, page)| {
+                                let size = page.size(0);
+                                // 紙の縦横の比のまま、ペインの幅に合わせる
+                                let ratio = size.width.0 as f32 / size.height.0.max(1) as f32;
+                                div()
+                                    .id(SharedString::from(format!("browser-print-page-{ix}")))
+                                    .relative()
+                                    .w_full()
+                                    .max_w(gpui_kit::px(if ratio > 1. { 620. } else { 440. }))
+                                    .aspect_ratio(ratio)
+                                    .flex_none()
+                                    .bg(gpui_kit::white())
+                                    .shadow_md()
+                                    .child(
+                                        img(page)
+                                            .absolute()
+                                            .inset_0()
+                                            .size_full()
+                                            .object_fit(ObjectFit::Fill),
+                                    )
+                                    .test_support()
+                            })),
+                    ),
+            )
+            .child(crate::scroll::bar("print-preview", &self.preview_scroll))
+            .when(making && empty && error.is_none(), |d| {
+                d.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(Spinner::new()),
+                )
+            })
+            .when(making && !empty, |d| {
+                d.child(
+                    div()
+                        .absolute()
+                        .top_3()
+                        .right_4()
+                        .child(Spinner::new().small()),
+                )
+            })
+            .children(error.filter(|_| !making).map(|e| {
+                div()
+                    .absolute()
+                    .inset_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .p_6()
+                    .child(
+                        div()
+                            .id("browser-print-preview-error")
+                            .text_sm()
+                            .text_color(theme.danger)
+                            .child(e)
+                            .test_support(),
+                    )
+            }))
+            .test_support()
+            .into_any_element()
     }
 
     /// PDF の設定。Chrome の印刷と同じ並び（ページ・レイアウト、詳細設定の中に用紙サイズ・
@@ -2530,34 +2893,44 @@ impl Render for PrintDialog {
                 b.ghost()
             }
         };
-        let card = col()
-            .id("browser-print")
-            .key_context(crate::shell_keys::PRINT)
-            .track_focus(&self.focus)
-            .on_action(
-                cx.listener(|this, _: &crate::shell_keys::ClosePrint, _, cx| {
-                    this.hide(cx);
-                }),
-            )
-            .on_action(
-                cx.listener(|this, _: &crate::shell_keys::SubmitPrint, window, cx| {
-                    this.submit(window, cx)
-                }),
-            )
-            .occlude()
-            .w(gpui_kit::px(440.))
-            .max_w(relative(0.94))
-            .max_h(relative(0.92))
+        let preview = pdf
+            .then(|| self.open.map(|id| self.preview_view(id, cx)))
+            .flatten();
+        let sheets = self
+            .open
+            .and_then(|id| self.terms.read(cx).preview(id))
+            .filter(|p| pdf && !p.making && p.error.is_none())
+            .map(|p| p.pages.len());
+        // ページの幅が狭ければ、プレビューを上、設定を下に並べる
+        let narrow = self
+            .open
+            .and_then(|id| self.terms.read(cx).page(id)?.bounds)
+            .is_some_and(|b| b.size.width < gpui_kit::px(PREVIEW_SIDE_BY_SIDE));
+        let stacked = pdf && narrow;
+        let panel = col()
+            .when(!stacked, |d| {
+                d.w(gpui_kit::px(if pdf { 400. } else { 440. }))
+            })
+            .when(stacked, |d| d.w_full().flex_1())
+            .max_w_full()
+            .when(!stacked, |d| d.flex_none())
+            .min_h_0()
+            .when(pdf && !stacked, |d| d.h_full())
             .p_4()
             .gap_3()
-            .rounded(feel::lg())
-            .border_1()
-            .border_color(theme.border)
-            .bg(theme.background)
-            .shadow_lg()
             .child(
                 row()
-                    .child(div().flex_1().text_lg().child("印刷"))
+                    .gap_2()
+                    .child(div().text_lg().child("印刷"))
+                    .child(
+                        div()
+                            .id("browser-print-sheets")
+                            .flex_1()
+                            .text_sm()
+                            .text_color(theme.muted_foreground)
+                            .children(sheets.map(|n| format!("{n} 枚")))
+                            .test_support(),
+                    )
                     .child(feel::gloss(
                         button("browser-print-close")
                             .icon(app_icon("x"))
@@ -2601,6 +2974,7 @@ impl Render for PrintDialog {
                 d.child(
                     div()
                         .id("browser-print-settings")
+                        .flex_1()
                         .flex_shrink(1.)
                         .min_h_0()
                         .overflow_y_scrollbar()
@@ -2638,7 +3012,41 @@ impl Render for PrintDialog {
                             .disabled(pdf && self.problem.is_some())
                             .on_click(cx.listener(|this, _, window, cx| this.submit(window, cx))),
                     )),
+            );
+        let card = div()
+            .id("browser-print")
+            .key_context(crate::shell_keys::PRINT)
+            .track_focus(&self.focus)
+            .on_action(
+                cx.listener(|this, _: &crate::shell_keys::ClosePrint, _, cx| {
+                    this.hide(cx);
+                }),
             )
+            .on_action(
+                cx.listener(|this, _: &crate::shell_keys::SubmitPrint, window, cx| {
+                    this.submit(window, cx)
+                }),
+            )
+            .occlude()
+            .flex()
+            .when(stacked, |d| d.flex_col())
+            .max_w(relative(0.96))
+            .max_h(relative(0.92))
+            .when(pdf, |d| d.w(gpui_kit::px(1080.)).h(relative(0.92)))
+            .overflow_hidden()
+            .rounded(feel::lg())
+            .border_1()
+            .border_color(feel::rim(cx))
+            .bg(theme.popover)
+            .text_color(theme.popover_foreground)
+            .elevate(Elevation::High, cx)
+            .children(preview.map(|p| {
+                div()
+                    .when(stacked, |d| d.w_full().h(relative(0.42)).flex_none())
+                    .when(!stacked, |d| d.flex_1().min_w_0().h_full())
+                    .child(p)
+            }))
+            .child(panel)
             .test_support()
             // ふわっと出す
             .with_animation(
