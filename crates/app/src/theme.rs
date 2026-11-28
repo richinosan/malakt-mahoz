@@ -587,7 +587,7 @@ pub struct Layout {
     pub overlay: bool,
     pub cards: bool,
     pub floating: bool,
-    /// AI チャットを右に並べるか。`None` は今のまま。
+    /// AI bot を右に並べるか。`None` は今のまま。
     pub chat: Option<bool>,
 }
 
@@ -620,7 +620,7 @@ impl Layout {
         }
     }
 
-    /// 今の画面がこのレイアウトか。`chat` は、今 AI チャットを右に並べているか。
+    /// 今の画面がこのレイアウトか。`chat` は、今 AI bot を右に並べているか。
     pub fn shown(&self, chat: bool, cx: &App) -> bool {
         (self.overlay, self.cards, self.floating) == (overlay(cx), cards(cx), floating(cx))
             && self.chat.is_none_or(|wanted| wanted == chat)
@@ -646,7 +646,7 @@ pub fn set_overlay(on: bool, cx: &mut App) -> malakt_core::Result<()> {
     Ok(())
 }
 
-/// レイアウトを使う（AI チャットの開け閉めは、呼んだ側がする）。
+/// レイアウトを使う（AI bot の開け閉めは、呼んだ側がする）。
 pub fn apply_layout(layout: &Layout, cx: &mut App) -> malakt_core::Result<()> {
     let flag = |on: bool| on.then_some("1");
     let values = [
