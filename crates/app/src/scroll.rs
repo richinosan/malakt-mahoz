@@ -85,7 +85,7 @@ pub trait Menus: Sized {
     {
         self.context_menu(move |menu, window, cx| {
             // ブラウザのページはメニューより手前に出るので、開いている間は隠す
-            crate::browser::note_menu(cx.weak_entity(), cx);
+            crate::browser::note_menu(cx);
             f(menu.scrollable(true), window, cx)
         })
     }
