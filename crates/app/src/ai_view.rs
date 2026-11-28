@@ -1859,10 +1859,17 @@ impl AiPane {
         let provider = session.provider;
         let model = session.model().to_owned();
         let effort = session.effort;
+        // ローカル AI は、サーバーに入っているモデルをそのまま並べる
+        let installed: &[SharedString] = if provider == Provider::Local {
+            &session.listed
+        } else {
+            &[]
+        };
         let models: Vec<SharedString> = provider
             .models()
             .iter()
             .map(|m| SharedString::from(*m))
+            .chain(installed.iter().cloned())
             .chain((!model.is_empty()).then(|| SharedString::from(model.clone())))
             .fold(Vec::new(), |mut all, m| {
                 if !all.contains(&m) {
@@ -2159,7 +2166,35 @@ impl AiPane {
                     .text_color(theme.muted_foreground)
                     .child(app_icon("sparkles").size_8()),
             );
-            if has_key {
+            // ローカル AI は、サーバーとモデルが見つかってから使える
+            let local = session.provider == malakt_ai::Provider::Local;
+            let local_ready = session.local_server.is_some();
+            if local && !local_ready && session.local_searching {
+                start = start.child(Spinner::new().small());
+            } else if local && !local_ready {
+                start = start
+                    .child(feel::gloss(
+                        button("ai-empty-server")
+                            .icon(app_icon("server"))
+                            .label("サーバーを設定")
+                            .outline()
+                            .small()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.settings_open = true;
+                                cx.notify();
+                            })),
+                    ))
+                    .when_some(session.local_error.clone(), |d, error| {
+                        d.child(
+                            div()
+                                .max_w(px(320.))
+                                .text_xs()
+                                .text_center()
+                                .text_color(theme.danger)
+                                .child(error),
+                        )
+                    });
+            } else if has_key {
                 // 押すと、そのまま送る
                 for (ix, text) in SUGGESTIONS.into_iter().enumerate() {
                     start = start.child(feel::gloss(

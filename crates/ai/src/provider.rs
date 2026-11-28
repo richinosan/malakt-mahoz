@@ -10,15 +10,18 @@ pub enum Provider {
     /// OpenCode Go（定額）
     OpenCodeGo,
     Cursor,
+    /// 手元で動かす AI のサーバー（Ollama、LM Studio、llama.cpp など。[`crate::local`]）
+    Local,
 }
 
 impl Provider {
-    pub const ALL: [Provider; 5] = [
+    pub const ALL: [Provider; 6] = [
         Provider::Claude,
         Provider::OpenAi,
         Provider::OpenCode,
         Provider::OpenCodeGo,
         Provider::Cursor,
+        Provider::Local,
     ];
 
     /// 設定やキーチェーンに使う名前。
@@ -29,6 +32,7 @@ impl Provider {
             Provider::OpenCode => "opencode",
             Provider::OpenCodeGo => "opencode-go",
             Provider::Cursor => "cursor",
+            Provider::Local => "local",
         }
     }
 
@@ -43,6 +47,7 @@ impl Provider {
             Provider::OpenCode => "OpenCode",
             Provider::OpenCodeGo => "OpenCode Go",
             Provider::Cursor => "Cursor",
+            Provider::Local => "ローカル AI",
         }
     }
 
@@ -53,7 +58,13 @@ impl Provider {
             Provider::OpenAi => "OPENAI_API_KEY",
             Provider::OpenCode | Provider::OpenCodeGo => "OPENCODE_API_KEY",
             Provider::Cursor => "CURSOR_API_KEY",
+            Provider::Local => "LOCAL_AI_API_KEY",
         }
+    }
+
+    /// API キーがなければ使えないか。ローカルの AI はキーなしで動くものが多い（Jan などはキーが要る）。
+    pub fn needs_key(self) -> bool {
+        self != Provider::Local
     }
 
     /// すぐ選べるモデル。ほかのモデルは ID を入力して使う。
@@ -86,8 +97,9 @@ impl Provider {
                 "claude-haiku-5-5",
                 "gpt-6-luna",
             ],
-            // Cursor のモデルはアカウントごとに違う（`agent models` で一覧が出る）
-            Provider::Cursor => &[],
+            // Cursor のモデルはアカウントごとに違う（`agent models` で一覧が出る）。
+            // ローカルの AI は、サーバーに入っているモデルを一覧から選ぶ
+            Provider::Cursor | Provider::Local => &[],
         }
     }
 
@@ -230,6 +242,12 @@ pub struct CatalogModel {
     pub api: Option<(Wire, String)>,
     /// 選べる effort。空なら effort を指定できない。
     pub efforts: Vec<String>,
+    /// ツールを呼べるか。`None` は一覧に書いていない（送ってみて、断られたら外す）。
+    pub tools: Option<bool>,
+    /// 画像を読めるか。`None` は一覧に書いていない。
+    pub vision: Option<bool>,
+    /// 一度に読める長さ（トークン）。
+    pub context: Option<u32>,
 }
 
 /// OpenCode のモデルの一覧を読む。チャット用のモデルだけを残す。
@@ -280,6 +298,9 @@ pub fn parse_catalog(response: &serde_json::Value) -> Result<Vec<CatalogModel>, 
             name,
             api,
             efforts,
+            tools: None,
+            vision: None,
+            context: None,
         });
     }
     Ok(models)
@@ -367,6 +388,7 @@ pub fn endpoint(provider: Provider, model: &str, key: &str) -> Result<Endpoint, 
             Err("OpenCode の送り先は、モデルの一覧から決めます".into())
         }
         Provider::Cursor => Err("Cursor は CLI（agent コマンド）で呼び出します".into()),
+        Provider::Local => Err("ローカル AI の送り先は、サーバーから決めます".into()),
     }
 }
 

@@ -51,9 +51,49 @@ struct World {
     routed: Arc<Mutex<Vec<Value>>>,
     /// チャットに添えたファイルを置く場所。
     files: tempfile::TempDir,
+    /// 手元のサーバーの代わり。URL ごとの状態コードと本文。ないものはつながらない。
+    local: Arc<Mutex<std::collections::HashMap<String, (u16, Value)>>>,
+    /// Ollama の `/api/show` の答え。モデルの名前ごと。
+    shows: Arc<Mutex<std::collections::HashMap<String, Value>>>,
+    /// 手元のサーバーに聞いた URL。
+    probed: Arc<Mutex<Vec<String>>>,
 }
 
 impl World {
+    /// 手元のサーバーが、この URL で答えるようにする。
+    fn serve(&self, url: &str, status: u16, body: Value) {
+        self.local
+            .lock()
+            .unwrap()
+            .insert(url.to_owned(), (status, body));
+    }
+
+    /// 11434 番で Ollama が動き、2 つのモデルが入っている。qwen3 はツールを使え、gemma3 は画像だけ読める。
+    fn ollama(&self) {
+        self.serve(
+            "http://127.0.0.1:11434/api/version",
+            200,
+            json!({"version": "0.13.0"}),
+        );
+        self.serve(
+            "http://127.0.0.1:11434/api/tags",
+            200,
+            json!({"models": [{"name": "qwen3:8b"}, {"name": "gemma3:4b"}]}),
+        );
+        let mut shows = self.shows.lock().unwrap();
+        shows.insert(
+            "qwen3:8b".into(),
+            json!({"capabilities": ["completion", "tools", "thinking"],
+                   "thinking": {"values": ["low", "medium", "high"]},
+                   "model_info": {"general.architecture": "qwen3", "qwen3.context_length": 40960}}),
+        );
+        shows.insert(
+            "gemma3:4b".into(),
+            json!({"capabilities": ["completion", "vision"],
+                   "model_info": {"general.architecture": "gemma3", "gemma3.context_length": 131072}}),
+        );
+    }
+
     fn reply(&self, value: Value) {
         self.replies.lock().unwrap().push_back(Ok(value));
     }
@@ -91,7 +131,15 @@ fn start_with(cx: &mut TestAppContext, store: Store) -> World {
         routes: Arc::default(),
         routed: Arc::default(),
         files: tempfile::tempdir().unwrap(),
+        local: Arc::default(),
+        shows: Arc::default(),
+        probed: Arc::default(),
     };
+    let (local, shows, probed) = (
+        world.local.clone(),
+        world.shows.clone(),
+        world.probed.clone(),
+    );
     let (routes, routed) = (world.routes.clone(), world.routed.clone());
     let (sent, replies, fetched) = (
         world.sent.clone(),
@@ -106,6 +154,16 @@ fn start_with(cx: &mut TestAppContext, store: Store) -> World {
         keys: world.keys.clone(),
         env: Arc::new(|_| None),
         post: Arc::new(move |url, headers, body| {
+            // Ollama のモデルの詳しい情報は、会話の返事とは別に答える
+            if url.ends_with("/api/show") {
+                let model = body["model"].as_str().unwrap_or_default().to_owned();
+                return shows
+                    .lock()
+                    .unwrap()
+                    .get(&model)
+                    .cloned()
+                    .ok_or_else(|| format!("{model} の情報がありません"));
+            }
             // 振り分け役への問い合わせは、会話の返事とは別に答える
             if body["system"].to_string().contains("振り分け役") {
                 routed.lock().unwrap().push(body.clone());
@@ -138,6 +196,15 @@ fn start_with(cx: &mut TestAppContext, store: Store) -> World {
                 .to_string());
             }
             Err(format!("テストでは {url} を読めません"))
+        }),
+        probe: Arc::new(move |url, _| {
+            probed.lock().unwrap().push(url.to_owned());
+            local
+                .lock()
+                .unwrap()
+                .get(url)
+                .map(|(status, body)| (*status, body.to_string()))
+                .ok_or_else(|| format!("{url} に接続できませんでした"))
         }),
         gh: Arc::new(move |link| {
             let state = github.lock().unwrap().clone();
@@ -4965,4 +5032,290 @@ fn files_are_attached_by_drop_and_paste(cx: &mut TestAppContext) {
     // 会話を消すと、置いた中身も消える
     cx.update(|cx| session.update(cx, |s, cx| s.delete_chat(&first, cx)));
     assert!(!stored.exists());
+}
+
+fn ollama_text(text: &str) -> Value {
+    json!({"done": true, "done_reason": "stop", "message": {"role": "assistant", "content": text}})
+}
+
+/// 「設定」でサービスを「ローカル AI」にする。
+fn choose_local(cx: &mut TestAppContext, window: AnyWindowHandle, pane: &Entity<AiPane>) {
+    open_settings(cx, window, pane);
+    let ix = Provider::ALL
+        .iter()
+        .position(|p| *p == Provider::Local)
+        .unwrap();
+    ui(cx, window, |window, cx| {
+        window.click(("ai-provider", ix), cx)
+    });
+    wait(cx, "サーバーを探し終える", |s| !s.local_searching);
+}
+
+/// ローカル AI を選ぶと手元の Ollama を見つけ、キーなしで最初のモデルを使う。
+/// Ollama の API に、ツールと、送る分が入る長さ（num_ctx）を付けて送る。
+#[gpui_kit::test]
+fn local_ai_finds_ollama_and_works_without_a_key(cx: &mut TestAppContext) {
+    let world = start(cx);
+    world.ollama();
+    let (window, view) = open(cx, wide());
+    let pane = open_chat(cx, window, &view);
+    choose_local(cx, window, &pane);
+
+    let (server, model, key) = read(cx, |s| {
+        (s.local_server.clone(), s.model().to_owned(), s.key.clone())
+    });
+    let server = server.expect("Ollama が見つかる");
+    assert_eq!(server.kind, malakt_ai::local::Kind::Ollama);
+    assert_eq!(server.base, "http://127.0.0.1:11434");
+    assert_eq!(model, "qwen3:8b");
+    assert!(matches!(
+        key,
+        KeyState::Present {
+            source: Source::None,
+            ..
+        }
+    ));
+    // 見つけたサーバーが出て、キーの入力欄は「任意」
+    ui(cx, window, |window, _| {
+        assert!(window.find(("ai-local-server", 0usize)).visible());
+        assert!(window.find("ai-key-input").visible());
+        assert!(window.try_find("ai-key-state").is_none());
+    });
+    // ツールを使えるモデルには印が付く
+    assert_eq!(
+        read(cx, |s| s.model_abilities("qwen3:8b")),
+        vec![("wrench", "ツール")]
+    );
+    assert_eq!(
+        read(cx, |s| s.model_abilities("gemma3:4b")),
+        vec![("image", "画像")]
+    );
+    // 考える深さは、モデルが選べるものだけ
+    assert!(read(cx, |s| s.effort_allowed(Effort::High)));
+    assert!(!read(cx, |s| s.effort_allowed(Effort::Max)));
+
+    world.reply(ollama_text("こんにちは"));
+    say(cx, window, &pane, "やあ");
+    wait(cx, "返事が届く", |s| !s.busy);
+    let (url, headers, body) = world.sent()[0].clone();
+    assert_eq!(url, "http://127.0.0.1:11434/api/chat");
+    assert!(headers.is_empty(), "キーなしで送る: {headers:?}");
+    assert_eq!(body["model"], "qwen3:8b");
+    assert_eq!(body["stream"], false);
+    assert!(body["tools"].as_array().is_some_and(|t| !t.is_empty()));
+    // ツールの説明が入る長さで、モデルの上限より短い
+    let num_ctx = body["options"]["num_ctx"].as_u64().unwrap();
+    assert!((16384..=40960).contains(&num_ctx), "{num_ctx}");
+    assert!(read(cx, |s| s
+        .items
+        .contains(&Item::Assistant("こんにちは".into()))));
+}
+
+/// ツールを使えないモデルでは、ツールなしで会話し、そのことをチャットに出す。
+/// 自動の処理（新しいタスクを整える）は、ツールが要るので失敗として残る。
+#[gpui_kit::test]
+fn local_models_without_tools_chat_without_them(cx: &mut TestAppContext) {
+    let world = start(cx);
+    world.ollama();
+    let (window, view) = open(cx, wide());
+    let pane = open_chat(cx, window, &view);
+    choose_local(cx, window, &pane);
+    let chat = session(cx);
+    cx.update(|cx| chat.update(cx, |s, cx| s.set_model("gemma3:4b", cx)));
+
+    world.reply(ollama_text("できません"));
+    say(cx, window, &pane, "タスクを作って");
+    wait(cx, "返事が届く", |s| !s.busy);
+    let body = world.sent()[0].2.clone();
+    assert!(body.get("tools").is_none());
+    let system = body["messages"][0]["content"].as_str().unwrap();
+    assert!(
+        system.contains("このモデルではツールを使えません"),
+        "{system}"
+    );
+    let notices: Vec<Item> = read(cx, |s| {
+        s.items
+            .iter()
+            .filter(|i| matches!(i, Item::Notice(_)))
+            .cloned()
+            .collect()
+    });
+    assert_eq!(
+        notices,
+        vec![Item::Notice(
+            "gemma3:4b はツールを使えないので、アプリを操作せずに答えます".into()
+        )]
+    );
+    // 同じ会話では、2 回目は知らせない
+    world.reply(ollama_text("はい"));
+    say(cx, window, &pane, "もう一度");
+    wait(cx, "返事が届く", |s| !s.busy);
+    assert_eq!(
+        read(cx, |s| s
+            .items
+            .iter()
+            .filter(|i| matches!(i, Item::Notice(_)))
+            .count()),
+        1
+    );
+
+    // 新しいタスクを整えるのは、送らずに失敗として残る
+    let sent = world.sent().len();
+    cx.update(|cx| {
+        db::shared(cx).update(cx, |db, cx| {
+            let draft = TaskDraft {
+                title: "牛乳".into(),
+                ..Default::default()
+            };
+            db.store.create_task(None, &draft).unwrap();
+            cx.notify();
+        })
+    });
+    wait(cx, "整える処理が終わる", |s| {
+        s.runs.iter().any(|r| r.kind == RunKind::Arrange)
+    });
+    let error = read(cx, |s| {
+        s.runs
+            .iter()
+            .find(|r| r.kind == RunKind::Arrange)
+            .and_then(|r| r.error.clone())
+    });
+    assert!(
+        error
+            .as_deref()
+            .is_some_and(|e| e.contains("ツールを使えないモデル")),
+        "{error:?}"
+    );
+    assert_eq!(world.sent().len(), sent);
+}
+
+/// 一覧にできることが書いていない OpenAI 互換のサーバー（vLLM など）は、まずツールを送り、
+/// 断られたらツールを外して送り直す。モデルごとに覚えて、次からは初めから外す。
+#[gpui_kit::test]
+fn tools_are_dropped_when_the_server_refuses_them(cx: &mut TestAppContext) {
+    let world = start(cx);
+    world.serve("http://127.0.0.1:8000/api/version", 404, json!({}));
+    world.serve(
+        "http://127.0.0.1:8000/v1/models",
+        200,
+        json!({"data": [{"id": "Qwen/Qwen3-8B", "owned_by": "vllm", "max_model_len": 32768}]}),
+    );
+    let (window, view) = open(cx, wide());
+    let pane = open_chat(cx, window, &view);
+    choose_local(cx, window, &pane);
+    let server = read(cx, |s| s.local_server.clone()).unwrap();
+    assert_eq!(server.kind, malakt_ai::local::Kind::Vllm);
+
+    world.fail("サーバーがエラーを返しました（400）。\"auto\" tool choice requires --enable-auto-tool-choice and --tool-call-parser to be set");
+    world.reply(json!({"choices": [{"finish_reason": "stop", "message": {"content": "はい"}}]}));
+    say(cx, window, &pane, "やあ");
+    wait(cx, "返事が届く", |s| !s.busy);
+    let sent = world.sent();
+    assert_eq!(sent.len(), 2);
+    assert_eq!(sent[0].0, "http://127.0.0.1:8000/v1/chat/completions");
+    assert!(sent[0].2.get("tools").is_some());
+    assert!(sent[1].2.get("tools").is_none());
+    assert!(read(cx, |s| s
+        .items
+        .contains(&Item::Assistant("はい".into()))));
+    assert!(read(cx, |s| s.items.iter().any(
+        |i| matches!(i, Item::Notice(n) if n.contains("ツールを使えない"))
+    )));
+
+    world.reply(json!({"choices": [{"finish_reason": "stop", "message": {"content": "また"}}]}));
+    say(cx, window, &pane, "もう一度");
+    wait(cx, "返事が届く", |s| !s.busy);
+    assert_eq!(world.sent().len(), 3);
+    assert!(world.sent()[2].2.get("tools").is_none());
+}
+
+/// サーバーが見つからなければ、チャットと設定に理由が出る。URL を入れると、そのサーバーを使う。
+/// キーが要るサーバー（Jan など）には、入れたキーを付けて送る。
+#[gpui_kit::test]
+fn a_local_server_can_be_given_by_url_with_a_key(cx: &mut TestAppContext) {
+    let world = start(cx);
+    let (window, view) = open(cx, wide());
+    let pane = open_chat(cx, window, &view);
+    choose_local(cx, window, &pane);
+    let error = read(cx, |s| s.local_error.clone()).expect("見つからない理由が出る");
+    assert!(error.contains("見つかりません"), "{error}");
+    ui(cx, window, |window, _| {
+        assert!(window.find("ai-local-error").visible());
+    });
+
+    world.serve("http://192.168.1.20:1337/api/version", 401, json!({}));
+    world.serve("http://192.168.1.20:1337/api/v1/models", 401, json!({}));
+    world.serve("http://192.168.1.20:1337/api/v0/models", 401, json!({}));
+    world.serve(
+        "http://192.168.1.20:1337/v1/models",
+        200,
+        json!({"data": [{"id": "llama3.2-3b"}]}),
+    );
+    ui(cx, window, |window, cx| {
+        window.click("ai-key-input", cx);
+        window.input("jan-secret", cx);
+        window.click("ai-key-save", cx);
+    });
+    assert_eq!(
+        world.keys.get(Provider::Local).unwrap().as_deref(),
+        Some("jan-secret")
+    );
+    ui(cx, window, |window, cx| {
+        window.click("ai-local-url", cx);
+        window.input("192.168.1.20:1337/v1", cx);
+        window.press("enter", cx);
+    });
+    wait(cx, "サーバーを探し終える", |s| !s.local_searching);
+    assert_eq!(
+        read(cx, |s| s.local_url.clone()),
+        "http://192.168.1.20:1337"
+    );
+    let server = read(cx, |s| s.local_server.clone()).expect("URL のサーバーを使う");
+    assert_eq!(server.base, "http://192.168.1.20:1337");
+    assert_eq!(read(cx, |s| s.local_error.clone()), None);
+    assert_eq!(read(cx, |s| s.model().to_owned()), "llama3.2-3b");
+    // URL は次の起動でも使う
+    let saved = cx.update(|cx| {
+        db::shared(cx)
+            .read(cx)
+            .store
+            .setting("ai.local.url")
+            .unwrap()
+    });
+    assert_eq!(saved.as_deref(), Some("http://192.168.1.20:1337"));
+
+    world.reply(json!({"choices": [{"finish_reason": "stop", "message": {"content": "はい"}}]}));
+    say(cx, window, &pane, "やあ");
+    wait(cx, "返事が届く", |s| !s.busy);
+    let (url, headers, _) = world.sent()[0].clone();
+    assert_eq!(url, "http://192.168.1.20:1337/v1/chat/completions");
+    assert!(headers.contains(&("authorization".into(), "Bearer jan-secret".into())));
+}
+
+/// AI のおすすめの「ローカル AI を使う」で、ローカル AI に切り替えてチャットを開く。
+#[gpui_kit::test]
+fn the_ai_promo_can_switch_to_local_ai(cx: &mut TestAppContext) {
+    let world = start(cx);
+    world.ollama();
+    let (window, view) = open(cx, wide());
+    offer_ai(cx, &view);
+    cx.update(|cx| assert_eq!(view.read(cx).modal, malakt_mahoz::Modal::AiPromo));
+    ui(cx, window, |window, cx| window.click("ai-promo-local", cx));
+    wait(cx, "サーバーを探し終える", |s| {
+        !s.local_searching && s.local_server.is_some()
+    });
+    cx.update(|cx| {
+        assert_eq!(view.read(cx).modal, malakt_mahoz::Modal::None);
+        assert!(view.read(cx).ai_open);
+    });
+    assert_eq!(read(cx, |s| s.provider), Provider::Local);
+    assert_eq!(read(cx, |s| s.model().to_owned()), "qwen3:8b");
+    // 手元のサーバーに聞くだけで、外には通信しない
+    assert!(world
+        .probed
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|u| u.starts_with("http://127.0.0.1:")));
+    assert!(world.fetched.lock().unwrap().is_empty());
 }

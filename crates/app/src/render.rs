@@ -9615,20 +9615,30 @@ impl MainView {
                             )),
                     )
                     .child(
+                        Checkbox::new("ai-promo-never")
+                            .py(px(4.))
+                            .my(px(-4.))
+                            .label("今後は表示しない")
+                            .checked(self.ai_promo_never)
+                            .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                                this.set_ai_promo_never(*checked, cx)
+                            })),
+                    )
+                    // ボタンが 3 つあるので、チェックとは別の行で右に寄せる
+                    .child(
                         row()
                             .gap_2()
-                            .child(
-                                Checkbox::new("ai-promo-never")
-                                    .py(px(4.))
-                                    .my(px(-4.))
-                                    .label("今後は表示しない")
-                                    .checked(self.ai_promo_never)
-                                    .on_click(cx.listener(|this, checked: &bool, _, cx| {
-                                        this.set_ai_promo_never(*checked, cx)
-                                    })),
-                            )
-                            .child(div().flex_1())
+                            .justify_end()
                             .child(cancel(cx))
+                            // 手元で動かす AI なら、API キーも通信もいらない
+                            .child(feel::gloss(
+                                button("ai-promo-local")
+                                    .icon(app_icon("server"))
+                                    .label("ローカル AI を使う")
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.use_local_ai_from_promo(window, cx)
+                                    })),
+                            ))
                             .child(feel::gloss(
                                 button("ai-promo-open")
                                     .icon(app_icon("sparkles"))
