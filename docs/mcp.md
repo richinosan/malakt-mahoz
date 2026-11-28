@@ -81,7 +81,8 @@ Windows のアプリは、起動のときに黒い窓を出さないように作
 | `get_due_alerts` / `set_due_alerts` | 期限をいつ知らせるか（全体の標準と、タスクごとの上書き） |
 | `get_done_notices` / `set_done_notices` | ほかの人が完了を報告したときに知らせるか（オン・オフ、知らせるとき、役、知らせない担当者・ワークスペース） |
 | `set_repeat` | タスクに繰り返し（毎日・毎週◯曜・毎月◯日・毎年、何日・何週間ごと、次の回を作る時刻）を付ける・変える・外す。`ai_instruction` で、回を作ったときにアプリの AI に頼むことを書く（[docs/repeat.md](repeat.md)）。今の繰り返しは `get_task` の `repeat` |
-| `list_schedules` / `create_schedule` / `update_schedule` / `delete_schedule` | 定時タスク（決まった時刻に雛形から新しいタスクを作る。ワークスペースごとと未所属）を読む、足す、変える、削除する。`ai_instruction` で、作ったタスクでアプリの AI に頼むことを書く（[docs/schedule.md](schedule.md)） |
+| `list_schedules` / `create_schedule` / `update_schedule` / `delete_schedule` | 定時タスク（決まった時刻に雛形から新しいタスクを作る。ワークスペースごとと未所属）を読む、足す、変える、削除する。雛形にはタスクと同じ項目（URL・状態・優先度・開始日・期限・通知・進捗・担当と役・カテゴリ・同期先・親タスク・説明・サブタスク）を入れられる。`ai_instruction` で、作ったタスクでアプリの AI に頼むことを書く（[docs/schedule.md](schedule.md)） |
+| `add_schedule_attachment` / `delete_schedule_attachment` | 定時タスクの雛形にファイルを添付する、外す。作ったタスクに同じファイルが添付される |
 | `undo` / `redo` | このサーバーからの変更を 1 つ元に戻す、やり直す |
 
 - 担当者は ID でも名前でも指定できます。登録されていない名前は、タスクのワークスペースの担当者としてその場で登録します（どこにも入っていないタスクでは、すべてのワークスペースの担当者）

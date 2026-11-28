@@ -327,6 +327,34 @@ pub(crate) const MIGRATIONS: &[&str] = &[
         used_at INTEGER
     ) STRICT;
     "#,
+    // 20: 定時タスクの雛形を、タスクと同じ項目にする。task はタイトル・担当・期限のほかの項目（JSON）。
+    //     schedule_files は雛形の添付。中身は添付と同じ blobs を使い、どちらからも指されなくなったら消す
+    r#"
+    ALTER TABLE schedules ADD COLUMN task TEXT NOT NULL DEFAULT '{}';
+    CREATE TABLE schedule_files (
+        id TEXT PRIMARY KEY NOT NULL,
+        schedule_id TEXT NOT NULL REFERENCES schedules(id) ON DELETE CASCADE,
+        name TEXT NOT NULL,
+        size INTEGER NOT NULL,
+        hash TEXT NOT NULL REFERENCES blobs(hash),
+        created_at INTEGER NOT NULL
+    ) STRICT;
+    CREATE INDEX schedule_files_schedule ON schedule_files(schedule_id, created_at);
+    CREATE INDEX schedule_files_hash ON schedule_files(hash);
+    DROP TRIGGER attachments_drop_blob;
+    CREATE TRIGGER attachments_drop_blob AFTER DELETE ON attachments
+    WHEN NOT EXISTS (SELECT 1 FROM attachments WHERE hash = OLD.hash)
+     AND NOT EXISTS (SELECT 1 FROM schedule_files WHERE hash = OLD.hash)
+    BEGIN
+        DELETE FROM blobs WHERE hash = OLD.hash;
+    END;
+    CREATE TRIGGER schedule_files_drop_blob AFTER DELETE ON schedule_files
+    WHEN NOT EXISTS (SELECT 1 FROM attachments WHERE hash = OLD.hash)
+     AND NOT EXISTS (SELECT 1 FROM schedule_files WHERE hash = OLD.hash)
+    BEGIN
+        DELETE FROM blobs WHERE hash = OLD.hash;
+    END;
+    "#,
 ];
 
 pub(crate) fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
