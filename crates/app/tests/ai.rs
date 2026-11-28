@@ -49,6 +49,8 @@ struct World {
     /// 振り分け役の答え（CONTINUE か NEW）と、振り分け役に送られた本文。
     routes: Arc<Mutex<VecDeque<String>>>,
     routed: Arc<Mutex<Vec<Value>>>,
+    /// チャットに添えたファイルを置く場所。
+    files: tempfile::TempDir,
 }
 
 impl World {
@@ -88,6 +90,7 @@ fn start_with(cx: &mut TestAppContext, store: Store) -> World {
         fetched: Arc::default(),
         routes: Arc::default(),
         routed: Arc::default(),
+        files: tempfile::tempdir().unwrap(),
     };
     let (routes, routed) = (world.routes.clone(), world.routed.clone());
     let (sent, replies, fetched) = (
@@ -198,6 +201,7 @@ fn start_with(cx: &mut TestAppContext, store: Store) -> World {
                 }
             }
         }),
+        files: world.files.path().to_path_buf(),
     };
     cx.update(|cx| malakt_mahoz::init_with(store, config, cx));
     world
@@ -4837,4 +4841,128 @@ fn a_schedule_template_takes_every_task_field_from_the_screen(cx: &mut TestAppCo
         assert_eq!(store.subtasks(&task.id).unwrap()[0].title, "金額を確かめる");
         assert_eq!(store.attachments(&task.id).unwrap()[0].name, "見積.txt");
     });
+}
+
+/// 小さな PNG。
+fn tiny_png() -> Vec<u8> {
+    let mut out = Vec::new();
+    image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(4, 3, image::Rgb([200, 30, 30])))
+        .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
+        .unwrap();
+    out
+}
+
+/// ファイルをチャットの入力欄の上に落とす。
+fn drop_files(cx: &mut TestAppContext, window: AnyWindowHandle, paths: Vec<std::path::PathBuf>) {
+    use gpui_kit::{ExternalPaths, FileDropEvent, PlatformInput};
+    ui(cx, window, |window, cx| {
+        let position = window.find("ai-input").bounds().center();
+        window.dispatch_event(
+            PlatformInput::FileDrop(FileDropEvent::Entered {
+                position,
+                paths: ExternalPaths(paths.into()),
+            }),
+            cx,
+        );
+        window.dispatch_event(
+            PlatformInput::FileDrop(FileDropEvent::Submit { position }),
+            cx,
+        );
+    });
+}
+
+/// 画像やファイルは、ドロップ・貼り付けで入力欄に添えられ、送ると AI にその形式で渡る。
+/// 会話を開き直しても、置いた中身から読み直して渡す。
+#[gpui_kit::test]
+fn files_are_attached_by_drop_and_paste(cx: &mut TestAppContext) {
+    let world = start(cx);
+    world.keys.set(Provider::Claude, "k").unwrap();
+    let session = session(cx);
+    cx.update(|cx| session.update(cx, |s, cx| s.set_arrange(false, cx)));
+    let (window, view) = open(cx, wide());
+    let pane = open_chat(cx, window, &view);
+    let dir = tempfile::tempdir().unwrap();
+    let photo = dir.path().join("写真.png");
+    std::fs::write(&photo, tiny_png()).unwrap();
+    let memo = dir.path().join("メモ.txt");
+    std::fs::write(&memo, "牛乳を買う").unwrap();
+    let song = dir.path().join("曲.mp3");
+    std::fs::write(&song, [0xFF, 0xFB, 0x90, 0, 1, 2, 3]).unwrap();
+
+    // ドロップで添える
+    drop_files(cx, window, vec![photo.clone(), memo.clone()]);
+    wait(cx, "読み込み終わる", |s| {
+        s.files.len() == 2 && !s.files_loading()
+    });
+    ui(cx, window, |window, _| {
+        assert!(window.find(("ai-file", 0usize)).visible());
+        assert!(window.find(("ai-file", 1usize)).visible());
+    });
+
+    // コピーした画像を貼り付けると、文字は入らずに添えられる
+    ui(cx, window, |window, cx| {
+        cx.write_to_clipboard(gpui_kit::ClipboardItem::new_image(
+            &gpui_kit::Image::from_bytes(gpui_kit::ImageFormat::Png, tiny_png()),
+        ));
+        pane.update(cx, |pane, cx| pane.focus_input(window, cx));
+        window.press("secondary-v", cx);
+    });
+    wait(cx, "貼った画像を読み込む", |s| {
+        s.files.len() == 3 && !s.files_loading()
+    });
+    assert_eq!(read(cx, |s| s.files[2].name.clone()), "貼り付けた画像.png");
+    // × で外せる
+    ui(cx, window, |window, cx| {
+        window.click(("ai-file-remove", 2usize), cx)
+    });
+    assert_eq!(read(cx, |s| s.files.len()), 2);
+    // 中身を渡せない形式も添えられる
+    drop_files(cx, window, vec![song.clone()]);
+    wait(cx, "読み込み終わる", |s| {
+        s.files.len() == 3 && !s.files_loading()
+    });
+
+    world.reply(text_reply("赤い画像です。"));
+    say(cx, window, &pane, "これは何？");
+    wait(cx, "返事が来る", |s| !s.busy && s.items.len() >= 3);
+    let items = read(cx, |s| s.items.clone());
+    let Item::Files(shown) = &items[0] else {
+        panic!("送ったファイルが会話に出ない: {items:?}");
+    };
+    let names: Vec<&str> = shown.iter().map(|f| f.name.as_ref()).collect();
+    assert_eq!(names, ["写真.png", "メモ.txt", "曲.mp3"]);
+    assert!(shown[0].image && !shown[1].image);
+    assert_eq!(items[1], Item::User("これは何？".into()));
+    assert!(read(cx, |s| s.files.is_empty()));
+    ui(cx, window, |window, _| {
+        assert!(window.find(("ai-sent-file", 0usize)).visible());
+    });
+
+    let content = world.sent()[0].2["messages"][0]["content"].clone();
+    assert_eq!(content[0]["type"], "image");
+    assert_eq!(content[0]["source"]["media_type"], "image/png");
+    assert_eq!(content[1]["type"], "document");
+    assert_eq!(content[1]["source"]["data"], "牛乳を買う");
+    let text = content[2]["text"].as_str().unwrap();
+    assert!(text.contains("「曲.mp3」（audio/mpeg"), "{text}");
+    assert!(text.contains("これは何？"), "{text}");
+    // 中身は決めた場所に写してある
+    let stored = shown[0].path.clone();
+    assert!(stored.starts_with(world.files.path()), "{stored:?}");
+    assert_eq!(std::fs::read(&stored).unwrap(), tiny_png());
+
+    // 新しい会話にしてから開き直しても、画像は置いた中身から渡る
+    let first = read(cx, |s| s.chats[0].id.clone());
+    cx.update(|cx| session.update(cx, |s, cx| s.clear(cx)));
+    cx.update(|cx| session.update(cx, |s, cx| s.open_chat(&first, cx)));
+    world.reply(text_reply("はい。"));
+    say(cx, window, &pane, "もう一度");
+    wait(cx, "返事が来る", |s| !s.busy && s.items.len() >= 5);
+    let content = world.sent()[1].2["messages"][0]["content"].clone();
+    assert_eq!(content[0]["type"], "image");
+    assert_eq!(content[1]["source"]["data"], "牛乳を買う");
+
+    // 会話を消すと、置いた中身も消える
+    cx.update(|cx| session.update(cx, |s, cx| s.delete_chat(&first, cx)));
+    assert!(!stored.exists());
 }
