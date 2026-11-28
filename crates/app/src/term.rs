@@ -905,6 +905,8 @@ pub struct TermPane {
     /// 画面の左上と、1 マスの大きさ。最後に描いたときのもの。
     origin: Point<Pixels>,
     cell: Size<Pixels>,
+    /// 画面（文字を描く所）。最後に描いたときのもの。
+    screen: Bounds<Pixels>,
     /// ドラッグで文字を選んでいる。
     selecting: bool,
     /// プログラムに知らせた、最後のマウスの場所。
@@ -913,11 +915,26 @@ pub struct TermPane {
     wheel: f32,
     /// さかのぼれる行を動かすスクロールバー。
     scroll: crate::scroll::TermScroll,
+    /// Ctrl（macOS は Cmd）を押しながらマウスを乗せているマス。そこのリンクに下線を引く。
+    hover: Option<(usize, usize)>,
+    /// `hover` のマスにあるリンク。最後に描いたときのもの。
+    link: Option<malakt_term::Link>,
+    /// リンクを開いたクリック。離したときもプログラムに知らせない。
+    opened: bool,
     _subscriptions: Vec<Subscription>,
 }
 
 /// ターミナルの中でも、プログラムに渡さずにアプリが受けるキー（Windows Terminal と同じ）。
 /// タブの切り替え（Ctrl+Tab、Ctrl+Alt+数字）と全画面（F11）。Ctrl+Shift+T / W は、コピーと同じ組み合わせで先に分ける。
+/// リンクを開くキー。Windows Terminal・ターミナル.app と同じく、macOS は Cmd、ほかは Ctrl。
+fn opens_links(mods: Modifiers) -> bool {
+    if cfg!(target_os = "macos") {
+        mods.platform && !mods.control && !mods.alt && !mods.shift
+    } else {
+        mods.control && !mods.platform && !mods.alt && !mods.shift
+    }
+}
+
 fn passes_to_app(keystroke: &Keystroke) -> bool {
     let mods = keystroke.modifiers;
     let name = keystroke.key.as_str();
@@ -959,10 +976,14 @@ impl TermPane {
             ime: None,
             origin: Point::default(),
             cell: size(px(8.), px(16.)),
+            screen: Bounds::default(),
             selecting: false,
             reported: None,
             wheel: 0.,
             scroll: Default::default(),
+            hover: None,
+            link: None,
+            opened: false,
             _subscriptions: subscriptions,
         }
     }
@@ -1117,6 +1138,16 @@ impl TermPane {
             return;
         };
         let (at, right) = self.cell_at(event.position, &terminal);
+        // Ctrl+クリック（macOS は Cmd+クリック）のリンクは、OS の標準のブラウザで開く
+        if event.button == MouseButton::Left && opens_links(event.modifiers) {
+            if let Some(link) = terminal.link_at(at) {
+                cx.open_url(&link.url);
+                self.opened = true;
+                // 開いたブラウザに移ると Ctrl を離したことが届かないので、下線はここで消す
+                self.hover_at(None, &terminal, cx);
+                return;
+            }
+        }
         let key = mods_key(event.modifiers);
         let button = match event.button {
             MouseButton::Left => MouseKey::Left,
@@ -1147,6 +1178,8 @@ impl TermPane {
             return;
         };
         let (at, right) = self.cell_at(event.position, &terminal);
+        let hover = (event.pressed_button.is_none() && opens_links(event.modifiers)).then_some(at);
+        self.hover_at(hover, &terminal, cx);
         if self.selecting {
             if event.pressed_button == Some(MouseButton::Left) {
                 terminal.select_to(at, right);
@@ -1174,6 +1207,9 @@ impl TermPane {
         let Some(terminal) = self.terminal(cx) else {
             return;
         };
+        if std::mem::take(&mut self.opened) && event.button == MouseButton::Left {
+            return;
+        }
         if self.selecting {
             self.selecting = false;
             cx.notify();
@@ -1205,6 +1241,35 @@ impl TermPane {
         let (at, _) = self.cell_at(event.position, &terminal);
         terminal.wheel(lines as i32, at, &mods_key(event.modifiers));
         cx.notify();
+    }
+
+    /// Ctrl（macOS は Cmd）を押しながら乗せているマスを変える。リンクの上なら下線を引き、指の形にする。
+    fn hover_at(
+        &mut self,
+        at: Option<(usize, usize)>,
+        terminal: &Terminal,
+        cx: &mut Context<Self>,
+    ) {
+        if self.hover == at {
+            return;
+        }
+        self.hover = at;
+        let link = at.and_then(|at| terminal.link_at(at));
+        if link != self.link {
+            self.link = link;
+            cx.notify();
+        }
+    }
+
+    /// Ctrl（macOS は Cmd）を押した・離した。マウスを動かさなくても、リンクの下線を出し入れする。
+    fn modifiers_changed(&mut self, mods: Modifiers, window: &Window, cx: &mut Context<Self>) {
+        let Some(terminal) = self.terminal(cx) else {
+            return;
+        };
+        let position = window.mouse_position();
+        let inside = self.screen.contains(&position);
+        let at = (inside && opens_links(mods)).then(|| self.cell_at(position, &terminal).0);
+        self.hover_at(at, &terminal, cx);
     }
 
     /// カーソルのマスの場所。IME の変換の窓を出す場所になる。
@@ -1348,9 +1413,20 @@ impl TermPane {
         );
         self.origin = origin;
         self.cell = cell;
+        self.screen = bounds;
         self.scroll.update(bounds, height);
+        let mut snapshot = terminal.snapshot();
+        // 画面が変わっても下線がリンクに合うように、描くたびに探し直す
+        self.link = self.hover.and_then(|at| terminal.link_at(at));
+        if let Some(link) = &self.link {
+            for &(col, row) in &link.cells {
+                if let Some(cell) = snapshot.cells.get_mut(row * snapshot.cols + col) {
+                    cell.style |= style::UNDERLINE;
+                }
+            }
+        }
         Frame {
-            snapshot: terminal.snapshot(),
+            snapshot,
             cell,
             origin,
             font,
@@ -1606,6 +1682,19 @@ impl Render for TermPane {
                 cx.listener(|this, event, _, cx| this.mouse_up(event, cx)),
             )
             .on_scroll(cx.listener(|this, event, _, cx| this.scroll(event, cx)))
+            .on_modifiers_changed(
+                cx.listener(|this, event: &ModifiersChangedEvent, window, cx| {
+                    this.modifiers_changed(event.modifiers, window, cx);
+                }),
+            )
+            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                if !*hovered {
+                    if let Some(terminal) = this.terminal(cx) {
+                        this.hover_at(None, &terminal, cx);
+                    }
+                }
+            }))
+            .when(self.link.is_some(), |d| d.cursor_pointer())
             .drag_over::<ExternalPaths>(|style, _, _, cx| {
                 style.border_2().border_color(cx.theme().primary)
             })

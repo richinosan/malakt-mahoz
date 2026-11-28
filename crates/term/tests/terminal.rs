@@ -136,6 +136,37 @@ mod unix {
     }
 
     #[test]
+    fn a_url_that_wraps_is_one_link() {
+        // 40 桁。「go https://」の 3 桁目から始まる URL が、次の行に折り返す
+        let url = "https://example.com/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/end";
+        let (terminal, _rx) = start(&shell(&format!("printf 'go {url}. ok'; sleep 5")));
+        wait(&terminal, "url", |s| s.line(1).ends_with(". ok"));
+        // 2 行目の URL の上でも、1 行目からの URL 全体
+        let link = terminal.link_at((2, 1)).expect("リンク");
+        assert_eq!(link.url, url);
+        assert_eq!(link.cells.first(), Some(&(3, 0)));
+        assert_eq!(link.cells.len(), url.len());
+        // URL の外（「go」と句点）はリンクではない
+        assert_eq!(terminal.link_at((0, 0)), None);
+        let dot = url.len() + 3 - 40;
+        assert_eq!(terminal.link_at((dot, 1)), None);
+    }
+
+    #[test]
+    fn a_hyperlink_opens_its_own_url() {
+        // OSC 8。見えている文字と開く URL が違う
+        let script = r"printf 'a \033]8;;https://example.com/x\033\\here\033]8;;\033\\ b \033]8;;file:///etc\033\\f\033]8;;\033\\'; sleep 5";
+        let (terminal, _rx) = start(&shell(script));
+        wait(&terminal, "here", |s| s.line(0) == "a here b f");
+        let link = terminal.link_at((3, 0)).expect("リンク");
+        assert_eq!(link.url, "https://example.com/x");
+        assert_eq!(link.cells, [(2, 0), (3, 0), (4, 0), (5, 0)]);
+        // Web でない URL は開かない
+        assert_eq!(terminal.link_at((9, 0)), None);
+        assert_eq!(terminal.link_at((7, 0)), None);
+    }
+
+    #[test]
     fn typed_keys_reach_the_program() {
         let (terminal, rx) = start(&shell("read line; echo \"got:$line\"; exit 0"));
         terminal.input("こんにちは");

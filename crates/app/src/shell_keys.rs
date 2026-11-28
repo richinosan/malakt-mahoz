@@ -317,6 +317,7 @@ pub fn terminal_help() -> Vec<(&'static str, &'static str)> {
             "その番号のタブ（9 は最後）",
         ),
         ("Shift+PageUp / PageDown", "出力をさかのぼる"),
+        (pick("Ctrl+クリック", "⌘クリック"), "リンクをブラウザで開く"),
         (pick("F11", "⌃⌘F"), "全画面"),
     ]
 }
