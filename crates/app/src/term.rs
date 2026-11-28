@@ -146,6 +146,8 @@ pub struct Terms {
     /// AI のタブで動かすシェル。`None` なら標準（[`Shell::standard`]）。
     pub ai_profile: Option<String>,
     pub(crate) next: u64,
+    /// ターミナルを出す場所の大きさ（桁、行）。描くたびに測る。まだ描いていなければ `None`。
+    pub place: Option<(usize, usize)>,
     pub error: Option<SharedString>,
     /// うまくいったことの知らせ。`NOTICE_LIFE` たつと閉じる。
     pub notice: Option<SharedString>,
@@ -255,6 +257,7 @@ impl Terms {
             profile,
             ai_profile,
             next: 1,
+            place: None,
             error: None,
             notice: None,
             notice_hovered: false,
@@ -497,6 +500,12 @@ impl Terms {
             .and_then(|task| task.dir.clone())
             .or_else(dirs::home_dir);
         let mut options = Options::of(&found, dir);
+        // 画面に出す場所の大きさで起こす。起きてから大きさを変えると、シェルが知らせを受け取る
+        // 用意をする前に届いて、80 桁のままと思い込むことがある（長い行が崩れる）
+        if let Some((cols, rows)) = self.place {
+            options.cols = cols;
+            options.rows = rows;
+        }
         // このアプリのコマンドとデータベースの場所。ターミナルで動く Claude Code などが見つけられる
         let mut wslenv: Vec<String> = Vec::new();
         for (name, value) in crate::mcp::shell_env() {
@@ -1399,29 +1408,21 @@ impl TermPane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Frame {
-        let theme = cx.theme();
         let chain = crate::fonts::mono(cx);
-        let mut font = font(chain.primary.clone());
-        font.fallbacks = chain.fallbacks.clone();
-        let font_size = theme.font_size * (13. / 16.);
-        let text = window.text_system();
-        let width = text
-            .ch_advance(text.resolve_font(&font), font_size)
-            .unwrap_or(font_size * 0.6);
-        let height = (font_size * 1.35).round();
-        let cell = size(width, height);
+        let (font, font_size, cell) = cell_of(&chain, window, cx);
         let origin = point(bounds.origin.x + PAD, bounds.origin.y + PAD);
-        let cols = (f32::from(bounds.size.width - PAD * 2.) / f32::from(width)).floor();
-        let rows = (f32::from(bounds.size.height - PAD * 2.) / f32::from(height)).floor();
+        let (cols, rows) = fit(bounds.size, cell);
         terminal.resize(
-            cols.max(2.) as usize,
-            rows.max(1.) as usize,
-            (f32::from(width) as u16, f32::from(height) as u16),
+            cols,
+            rows,
+            (f32::from(cell.width) as u16, f32::from(cell.height) as u16),
         );
+        self.terms
+            .update(cx, |terms, _| terms.place = Some((cols, rows)));
         self.origin = origin;
         self.cell = cell;
         self.screen = bounds;
-        self.scroll.update(bounds, height);
+        self.scroll.update(bounds, cell.height);
         let mut snapshot = terminal.snapshot();
         // 画面が変わっても下線がリンクに合うように、描くたびに探し直す
         self.link = self.hover.and_then(|at| terminal.link_at(at));
@@ -1443,6 +1444,39 @@ impl TermPane {
             ime: self.ime.clone(),
         }
     }
+}
+
+/// ターミナルの書体と文字の大きさと、1 マスの大きさ。
+fn cell_of(
+    chain: &crate::fonts::Chain,
+    window: &mut Window,
+    cx: &App,
+) -> (Font, Pixels, Size<Pixels>) {
+    let mut font = font(chain.primary.clone());
+    font.fallbacks = chain.fallbacks.clone();
+    let font_size = cx.theme().font_size * (13. / 16.);
+    let text = window.text_system();
+    let width = text
+        .ch_advance(text.resolve_font(&font), font_size)
+        .unwrap_or(font_size * 0.6);
+    let height = (font_size * 1.35).round();
+    (font, font_size, size(width, height))
+}
+
+/// `place` の大きさ（ピクセル）に入る桁と行。
+fn fit(place: Size<Pixels>, cell: Size<Pixels>) -> (usize, usize) {
+    let cols = (f32::from(place.width - PAD * 2.) / f32::from(cell.width)).floor();
+    let rows = (f32::from(place.height - PAD * 2.) / f32::from(cell.height)).floor();
+    (cols.max(2.) as usize, rows.max(1.) as usize)
+}
+
+/// ターミナルを出す場所の大きさを覚える。ほかのタブ（AI のタブなど）を見ている間も同じ場所を
+/// 測っておき、新しいシェルを初めからその大きさで起こす。
+pub(crate) fn measure_place(place: Size<Pixels>, window: &mut Window, cx: &mut App) {
+    let chain = crate::fonts::mono(cx);
+    let (_, _, cell) = cell_of(&chain, window, cx);
+    let fitted = fit(place, cell);
+    shared(cx).update(cx, |terms, _| terms.place = Some(fitted));
 }
 
 /// 罫線とブロックの文字を、マスいっぱいの四角で描く。Powerline の三角もマスいっぱいに描く。
