@@ -17,6 +17,9 @@ use crate::press::button;
 use crate::render::{app_icon, chip, col, px, row, Framed};
 use crate::state::{MainView, Modal};
 
+/// 時間がたつと変わる表示を描き直す間隔。
+const TIMING_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// 統計のダイアログに出す数字。開いたとき・期間を変えたとき・データが変わったときに数え直す。
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct StatsView {
@@ -286,6 +289,29 @@ impl MainView {
     pub(crate) fn set_stats_period(&mut self, period: Period, cx: &mut Context<Self>) {
         self.stats_period = period;
         self.refresh_stats(cx);
+        cx.notify();
+    }
+
+    /// 時間がたつと変わるもの（数えている所要時間、「予想工数を超えた」の絞り込み、所要時間の並べ替え、
+    /// 統計）を 1 分ごとに描き直す。ウィンドウを閉じると止まる。
+    pub(crate) fn start_timing_clock(cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| loop {
+            cx.background_executor().timer(TIMING_EVERY).await;
+            if this.update(cx, |v, cx| v.tick_timing(cx)).is_err() {
+                // ウィンドウを閉じた
+                break;
+            }
+        })
+        .detach();
+    }
+
+    fn tick_timing(&mut self, cx: &mut Context<Self>) {
+        if self.query.time.is_some() || self.query.sort == view::Sort::Elapsed {
+            self.refilter();
+        }
+        if matches!(self.modal, Modal::Stats(_)) {
+            self.refresh_stats(cx);
+        }
         cx.notify();
     }
 

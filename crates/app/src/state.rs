@@ -1156,6 +1156,7 @@ impl MainView {
             inputs,
             _subscriptions: subs,
         };
+        Self::start_timing_clock(cx);
         // ダイアログを閉じて入力欄がなくなっても、続けてキーで操作できるようにする
         this._subscriptions
             .push(cx.on_focus_lost(window, |this, window, cx| {

@@ -8036,3 +8036,47 @@ fn caldav_account_that_fails_is_not_added(cx: &mut TestAppContext) {
         assert!(window.find("caldav-url").visible());
     });
 }
+
+/// 「予想工数を超えた」の絞り込みは、時間がたって超えたタスクも 1 分のうちに出す。
+#[gpui_kit::test]
+fn the_over_estimate_filter_follows_the_clock(cx: &mut TestAppContext) {
+    use malakt_core::estimate::Estimate;
+    start(cx);
+    let (window, view) = open(cx, wide());
+    cx.update(|cx| {
+        db::shared(cx).update(cx, |db, cx| {
+            cx.notify();
+            let draft = malakt_core::TaskDraft {
+                title: "Lorem ipsum".into(),
+                status: Status::InProcess,
+                estimate: Some(Estimate::new(0, 0, 1, 0)),
+                ..Default::default()
+            };
+            db.store.create_task(None, &draft).unwrap();
+        })
+    });
+    ui(cx, window, |window, cx| window.click("nav-all", cx));
+    cx.run_until_parked();
+    let shown = |cx: &mut TestAppContext| cx.update(|cx| view.read(cx).visible.len());
+    cx.update(|cx| {
+        view.update(cx, |v, cx| {
+            v.query.time = Some(malakt_core::view::TimeFilter::Over);
+            v.refilter();
+            cx.notify();
+        })
+    });
+    assert_eq!(shown(cx), 0);
+    // 2 時間前に進行中にしたことにする（画面の中の値だけ。データベースは読み直さない）
+    cx.update(|cx| {
+        view.update(cx, |v, _| {
+            let mut tasks = (*v.tasks).clone();
+            tasks[0].started_at = Some(malakt_core::now_ms() - 2 * 3_600_000);
+            v.tasks = std::rc::Rc::new(tasks);
+        })
+    });
+    assert_eq!(shown(cx), 0);
+    cx.executor()
+        .advance_clock(std::time::Duration::from_secs(61));
+    cx.run_until_parked();
+    assert_eq!(shown(cx), 1);
+}

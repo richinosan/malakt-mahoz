@@ -549,12 +549,18 @@ impl Store {
         found(n, "担当者", id)
     }
 
-    /// 担当から外れるだけで、タスクは残る。
+    /// 担当から外れるだけで、タスクは残る。担当がいなくなったタスクは、担当が付いた時刻を消す。
     pub fn delete_person(&mut self, id: &str) -> Result<()> {
-        let n = self
-            .conn
-            .execute("DELETE FROM people WHERE id = ?1", params![id])?;
-        found(n, "担当者", id)
+        let tx = self.conn.transaction()?;
+        let n = tx.execute("DELETE FROM people WHERE id = ?1", params![id])?;
+        found(n, "担当者", id)?;
+        tx.execute(
+            "UPDATE tasks SET assigned_at = NULL WHERE assigned_at IS NOT NULL \
+             AND NOT EXISTS (SELECT 1 FROM task_assignees a WHERE a.task_id = tasks.id)",
+            [],
+        )?;
+        tx.commit()?;
+        Ok(())
     }
 
     // ---- タスク ----
@@ -853,16 +859,21 @@ impl Store {
             (Status::Completed, _) => old.completed_at,
             _ => Some(now),
         };
-        // 進行中にした時刻は、未着手に戻すと消す。担当が付いた時刻は、担当がいなくなると消す
+        // 進行中にした時刻は、進行中になったときに付け、未着手に戻すと消す。担当が付いた時刻は、
+        // 担当がいない状態から付いたときに付け、担当がいなくなると消す。わからない時刻（前の書き出しから
+        // 取り込んだものなど）は、ほかの項目を変えただけでは付けない
         let started_at = match draft.status {
             Status::NeedsAction => None,
+            Status::InProcess if old.status == Status::InProcess => old.started_at,
             Status::InProcess => old.started_at.or(Some(now)),
             Status::Completed | Status::Cancelled => old.started_at,
         };
         let assigned_at = if draft.assignee_ids.is_empty() {
             None
+        } else if old.assignee_ids.is_empty() {
+            Some(now)
         } else {
-            old.assigned_at.or(Some(now))
+            old.assigned_at
         };
         let actor = self.actor.clone();
         let tx = self.conn.transaction()?;
@@ -4224,6 +4235,50 @@ mod actor_tests {
             .unwrap();
         assert_eq!(made.started_at, Some(made.created_at));
         assert_eq!(made.assigned_at, Some(made.created_at));
+    }
+
+    #[test]
+    fn わからない時刻はほかの項目の変更で付けず_担当を消すと担当の時刻も消える() {
+        let mut s = Store::open_in_memory().unwrap();
+        let p = s.create_person("佐藤", false).unwrap();
+        let q = s.create_person("鈴木", false).unwrap();
+        let t = s
+            .create_task(
+                None,
+                &TaskDraft {
+                    title: "下見".into(),
+                    status: Status::InProcess,
+                    assignee_ids: vec![p.id.clone()],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        // 前の書き出しから取り込んだタスクのように、進行中にした時刻がわからない
+        s.conn
+            .execute(
+                "UPDATE tasks SET started_at = NULL, assigned_at = 1 WHERE id = ?1",
+                params![t.id],
+            )
+            .unwrap();
+        let mut d = TaskDraft::from(&s.task(&t.id).unwrap());
+        d.title = "下見に行く".into();
+        let t = s.update_task(&t.id, &d).unwrap();
+        assert_eq!(t.started_at, None);
+        // 担当がいるまま入れ替えても、担当が付いた時刻はそのまま
+        let mut d = TaskDraft::from(&t);
+        d.assignee_ids = vec![p.id.clone(), q.id.clone()];
+        let t = s.update_task(&t.id, &d).unwrap();
+        assert_eq!(t.assigned_at, Some(1));
+        // 担当者を消して担当がいなくなると消え、次に付けた時刻から数える
+        s.delete_person(&p.id).unwrap();
+        assert_eq!(s.task(&t.id).unwrap().assigned_at, Some(1));
+        s.delete_person(&q.id).unwrap();
+        assert_eq!(s.task(&t.id).unwrap().assigned_at, None);
+        let r = s.create_person("高橋", false).unwrap();
+        let mut d = TaskDraft::from(&s.task(&t.id).unwrap());
+        d.assignee_ids = vec![r.id.clone()];
+        let t = s.update_task(&t.id, &d).unwrap();
+        assert!(t.assigned_at.is_some_and(|at| at > 1));
     }
 
     #[test]
