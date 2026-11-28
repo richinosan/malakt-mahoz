@@ -374,6 +374,9 @@ pub struct Task {
     /// 担当が付いた時刻（自動）。担当がいなくなると消える。
     #[serde(default)]
     pub assigned_at: Option<i64>,
+    /// 付けた GitHub の PR の時刻（所要時間の基準に PR の時刻を選んだときだけ、アプリが読む）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr: Option<crate::timing::PrTimes>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

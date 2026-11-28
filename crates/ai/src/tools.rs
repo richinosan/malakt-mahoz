@@ -142,6 +142,12 @@ fn time_json(store: &Store, task: &Task) -> Result<Value, String> {
         "started_at": at(task.started_at),
         "assigned_at": at(task.assigned_at),
         "completed_at": at(task.completed_at),
+        "pr": timing::pr_of(task).map(|pr| json!({
+            "url": pr.url,
+            "opened_at": malakt_core::view::format_datetime(pr.opened),
+            "first_review_at": at(pr.reviewed),
+            "merged_at": at(pr.merged),
+        })),
         "elapsed": span.map(|s| json!({
             "from": malakt_core::view::format_datetime(s.start),
             "to": if s.running { Value::Null } else { json!(malakt_core::view::format_datetime(s.end)) },
@@ -149,6 +155,7 @@ fn time_json(store: &Store, task: &Task) -> Result<Value, String> {
             "minutes": s.ms() / 60_000,
             "text": malakt_core::estimate::elapsed_label(s.ms()),
             "counted_from": s.from.code(),
+            "counted_to": s.to.code(),
             "over_estimate": timing::over_estimate(task, Some(s)),
         })),
     }))

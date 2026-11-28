@@ -445,7 +445,11 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     ), created_at)
     WHERE EXISTS (SELECT 1 FROM task_assignees a WHERE a.task_id = tasks.id);
     "#,
-    // 25: タスクに付かない通知（タイマーとポモドーロの終わり）。task_id を空にでき、文は text に置く
+    // 25: タスクに付けた GitHub の PR の時刻（JSON、`timing::PrTimes`）。所要時間の基準に PR の時刻を選んだときに読む
+    r#"
+    ALTER TABLE tasks ADD COLUMN pr TEXT;
+    "#,
+    // 26: タスクに付かない通知（タイマーとポモドーロの終わり）。task_id を空にでき、文は text に置く
     r#"
     CREATE TABLE notices_new (
         id TEXT PRIMARY KEY NOT NULL,
@@ -639,10 +643,10 @@ mod tests {
     fn keeps_notices_and_allows_ones_without_a_task() {
         let mut conn = Connection::open_in_memory().unwrap();
         conn.pragma_update(None, "foreign_keys", true).unwrap();
-        for sql in &super::MIGRATIONS[..24] {
+        for sql in &super::MIGRATIONS[..25] {
             conn.execute_batch(sql).unwrap();
         }
-        conn.pragma_update(None, "user_version", 24).unwrap();
+        conn.pragma_update(None, "user_version", 25).unwrap();
         conn.execute_batch(
             r#"INSERT INTO tasks(id, title, description, status, priority, position, created_at, updated_at)
              VALUES ('t', '請求書', '', 'needs_action', 0, 0, 100, 0);

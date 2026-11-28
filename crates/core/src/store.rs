@@ -45,7 +45,7 @@ impl Drop for Store {
 
 const TASK_COLUMNS: &str = "t.id, t.workspace_id, t.title, t.description, t.status, t.priority, \
      t.due, t.position, t.created_at, t.updated_at, t.completed_at, t.start, t.percent, t.parent_id, \
-     t.created_by, t.updated_by, t.estimate, t.time_basis, t.started_at, t.assigned_at";
+     t.created_by, t.updated_by, t.estimate, t.time_basis, t.started_at, t.assigned_at, t.pr";
 
 /// 自動で作る「自分」の名前。あとから変えられる。
 const SELF_NAME: &str = "自分";
@@ -612,11 +612,28 @@ impl Store {
             time_basis: draft.time_basis,
             started_at: (draft.status == Status::InProcess).then_some(now),
             assigned_at,
+            pr: None,
         };
         insert_task(&tx, &task)?;
         record_created(&tx, &task, &self.actor)?;
         tx.commit()?;
         Ok(task)
+    }
+
+    /// タスクに付けた GitHub の PR の時刻を残す（`None` で消す）。GitHub から読んだ値なので、
+    /// 変更履歴にも元に戻すにも入れず、更新の時刻も変えない。
+    pub fn set_task_pr(&mut self, id: &str, pr: Option<&crate::timing::PrTimes>) -> Result<()> {
+        // 前の操作は前の段に入れ、この変更は元に戻す相手にしない
+        self.undo_mark()?;
+        let changed = self.conn.execute(
+            "UPDATE tasks SET pr = ?2 WHERE id = ?1",
+            params![id, pr_json(pr)],
+        )?;
+        self.undo_skip()?;
+        if changed == 0 {
+            return Err(Error::NotFound(format!("タスク {id}")));
+        }
+        Ok(())
     }
 
     pub fn task(&self, id: &str) -> Result<Task> {
@@ -1822,9 +1839,9 @@ pub(crate) fn insert_task(conn: &Connection, t: &Task) -> rusqlite::Result<()> {
     conn.prepare_cached(
         "INSERT INTO tasks(id, workspace_id, title, description, status, priority, due, \
          position, created_at, updated_at, completed_at, start, percent, parent_id, \
-         created_by, updated_by, estimate, time_basis, started_at, assigned_at) \
+         created_by, updated_by, estimate, time_basis, started_at, assigned_at, pr) \
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, \
-         ?17, ?18, ?19, ?20) \
+         ?17, ?18, ?19, ?20, ?21) \
          ON CONFLICT(id) DO UPDATE SET workspace_id = excluded.workspace_id, \
          title = excluded.title, description = excluded.description, status = excluded.status, \
          priority = excluded.priority, due = excluded.due, position = excluded.position, \
@@ -1832,7 +1849,7 @@ pub(crate) fn insert_task(conn: &Connection, t: &Task) -> rusqlite::Result<()> {
          start = excluded.start, percent = excluded.percent, parent_id = excluded.parent_id, \
          created_by = excluded.created_by, updated_by = excluded.updated_by, \
          estimate = excluded.estimate, time_basis = excluded.time_basis, \
-         started_at = excluded.started_at, assigned_at = excluded.assigned_at",
+         started_at = excluded.started_at, assigned_at = excluded.assigned_at, pr = excluded.pr",
     )?
     .execute(params![
         t.id,
@@ -1854,7 +1871,8 @@ pub(crate) fn insert_task(conn: &Connection, t: &Task) -> rusqlite::Result<()> {
         t.estimate.map(|e| e.to_iso()),
         t.time_basis.map(|b| b.code()),
         t.started_at,
-        t.assigned_at
+        t.assigned_at,
+        pr_json(t.pr.as_ref())
     ])?;
     insert_assignees(
         conn,
@@ -2118,7 +2136,17 @@ fn task_from_row(r: &Row<'_>) -> rusqlite::Result<Task> {
         time_basis: basis_at(r, 17)?,
         started_at: r.get(18)?,
         assigned_at: r.get(19)?,
+        // 読めない値は、読み直せばよいので捨てる
+        pr: r
+            .get_ref(20)?
+            .as_str_or_null()?
+            .and_then(|text| serde_json::from_str(text).ok()),
     })
+}
+
+/// PR の時刻を保存する形。
+fn pr_json(pr: Option<&crate::timing::PrTimes>) -> Option<String> {
+    pr.and_then(|pr| serde_json::to_string(pr).ok())
 }
 
 fn comment_from_row(r: &Row<'_>) -> rusqlite::Result<Comment> {
@@ -4185,6 +4213,49 @@ mod actor_tests {
         let ch = s.changes("t").unwrap();
         assert_eq!(ch[0].actor, Actor::Unknown);
         assert!(history::misses_older(&history::entries(&ch)));
+    }
+
+    #[test]
+    fn prの時刻は履歴と更新の時刻を変えずに残す() {
+        let mut s = Store::open_in_memory().unwrap();
+        let t = s
+            .create_task(
+                None,
+                &TaskDraft {
+                    title: "レビュー".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        // PR の基準をどこでも使っていなければ、読みに行かない
+        assert!(!s.uses_pr_basis().unwrap());
+        let mut d = TaskDraft::from(&t);
+        d.time_basis = crate::timing::Basis::parse("in_process>pr_merged");
+        let t = s.update_task(&t.id, &d).unwrap();
+        assert!(s.uses_pr_basis().unwrap());
+        let before = s.changes(&t.id).unwrap().len();
+        let pr = crate::timing::PrTimes {
+            url: "https://github.com/o/r/pull/1".into(),
+            opened: 10,
+            reviewed: Some(20),
+            merged: None,
+            checked: 30,
+        };
+        s.set_task_pr(&t.id, Some(&pr)).unwrap();
+        let got = s.task(&t.id).unwrap();
+        assert_eq!(got.pr.as_ref(), Some(&pr));
+        assert_eq!(got.updated_at, t.updated_at);
+        assert_eq!(s.changes(&t.id).unwrap().len(), before);
+        // 書き出して読み込んでも残る
+        let json = serde_json::to_value(&got).unwrap();
+        assert_eq!(json["pr"]["reviewed"], 20);
+        // ほかの項目を変えても消えない
+        let mut d = TaskDraft::from(&got);
+        d.title = "レビューを受ける".into();
+        assert_eq!(s.update_task(&t.id, &d).unwrap().pr, Some(pr));
+        s.set_task_pr(&t.id, None).unwrap();
+        assert_eq!(s.task(&t.id).unwrap().pr, None);
+        assert!(s.set_task_pr("none", None).is_err());
     }
 
     #[test]

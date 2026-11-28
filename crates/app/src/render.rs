@@ -331,7 +331,7 @@ pub(crate) fn window_menu(
 }
 
 /// タスクの画面の地。背景の画像の上では薄く塗って、文字を読めるようにする。
-fn page_fill(theme: &gpui_kit::component::Theme, cx: &App) -> Hsla {
+pub(crate) fn page_fill(theme: &gpui_kit::component::Theme, cx: &App) -> Hsla {
     match crate::theme::backdrop(cx) {
         Some(backdrop) => theme.background.opacity(backdrop.alpha * 0.45),
         None => theme.background,
@@ -417,6 +417,8 @@ enum SettingKey {
     NewWindow,
     Pomodoro,
     Timer,
+    Plugins,
+    PluginFolders,
 }
 
 impl Setting {
@@ -446,11 +448,11 @@ impl Setting {
 }
 
 /// 浮かせたパネルのすき間。
-const FLOAT_GAP: Pixels = px(8.);
+pub(crate) const FLOAT_GAP: Pixels = px(8.);
 
 /// 浮かせたパネルの地（角丸のカード）。パネルの最初の子にして、中身の後ろに敷く。
 /// `edges` は上・右・下・左のすき間。隣のパネルと接する辺は半分にして、すき間をそろえる。
-fn floating_card(fill: Hsla, edges: [Pixels; 4], cx: &App) -> Div {
+pub(crate) fn floating_card(fill: Hsla, edges: [Pixels; 4], cx: &App) -> Div {
     let [top, right, bottom, left] = edges;
     div()
         .absolute()
@@ -1546,6 +1548,7 @@ impl MainView {
         cx: &mut Context<Self>,
     ) -> impl Fn(PopupMenu) -> PopupMenu + Clone + 'static {
         let view = cx.entity().downgrade();
+        let plugin_commands = crate::plugins::get(cx).commands(malakt_plugins::Place::Workspace);
         move |menu: PopupMenu| {
             let item =
                 |label: &'static str,
@@ -1590,6 +1593,14 @@ impl MainView {
             .item(item("コピー", |this, id, _, cx| {
                 this.copy_workspace_link(&id, cx)
             }))
+            .map(|menu| {
+                crate::plugins::menu_items(
+                    menu,
+                    &plugin_commands,
+                    &view,
+                    &crate::plugins::Target::Workspace(id.clone()),
+                )
+            })
             .separator()
             .item(item("削除", |this, id, _, cx| {
                 this.modal = Modal::DeleteWorkspace(id);
@@ -4592,6 +4603,14 @@ impl MainView {
                 .separator()
                 .item(item("コピー", |this, id, _, cx| this.copy_task(&id, cx)))
                 .item(paste_item(&view, cx))
+                .map(|menu| {
+                    crate::plugins::menu_items(
+                        menu,
+                        &crate::plugins::get(cx).commands(malakt_plugins::Place::Task),
+                        &view,
+                        &crate::plugins::Target::Task(menu_id.clone()),
+                    )
+                })
                 .separator()
                 .item(item("削除", |this, id, _, cx| {
                     this.modal = Modal::DeleteTasks(vec![id]);
@@ -6977,6 +6996,16 @@ impl MainView {
                 px(400.),
                 self.done_picker(false, cx),
             ),
+            Some(SubModal::EnablePlugin) => {
+                let (title, approval) = self.plugin_approval(cx);
+                let over = self.dialog_as("dialog", px(440.), title, approval, cx);
+                let over = self.sub_motion(over);
+                return div()
+                    .absolute()
+                    .inset_0()
+                    .child(sized("dialog-under", body, cx))
+                    .child(over);
+            }
             Some(SubModal::ClearBrowser) => {
                 let body = col()
                     .gap_3()
@@ -7584,6 +7613,20 @@ impl MainView {
                 ]),
             ),
             Setting::new(
+                Section::Plugins,
+                SettingKey::Plugins,
+                "プラグイン",
+                None,
+                list(&["拡張", "拡張機能", "プラグイン", "WASM", "有効", "無効"]),
+            ),
+            Setting::new(
+                Section::Plugins,
+                SettingKey::PluginFolders,
+                "フォルダー",
+                None,
+                list(&["プラグイン", "フォルダー", "場所", malakt_plugins::ENV_DIRS]),
+            ),
+            Setting::new(
                 Section::Data,
                 SettingKey::Export,
                 "エクスポート",
@@ -7672,6 +7715,21 @@ impl MainView {
                     .child(self.access_keys_editor(cx))
                     .into_any_element();
             }
+            SettingKey::Plugins => {
+                return edge(div().py_3())
+                    .child(self.plugins_editor(cx))
+                    .into_any_element();
+            }
+            SettingKey::PluginFolders => {
+                return setting_line(
+                    item.name,
+                    item.note,
+                    self.plugin_folders_editor(cx).into_any_element(),
+                    true,
+                    first,
+                    &theme,
+                );
+            }
             _ => {}
         }
         use crate::state::PreviewPick as Pick;
@@ -7724,6 +7782,8 @@ impl MainView {
                 | SettingKey::People
                 | SettingKey::CalDav
                 | SettingKey::McpKeys
+                | SettingKey::Plugins
+                | SettingKey::PluginFolders
                 | SettingKey::Keys => unreachable!(),
                 SettingKey::LockNow => feel::gloss(
                     button("lock-now")
@@ -10379,10 +10439,11 @@ impl MainView {
             .map(|d| self.with_drags(d, cx))
             .size_full()
             .relative()
-            // ペインの後ろには、ウィンドウが敷いた画像が見えている
-            .when(crate::theme::backdrop(cx).is_none(), |d| {
-                d.bg(theme.background)
-            })
+            // ペインの後ろには、ウィンドウが敷いた画像か、浮かせたカードが見えている
+            .when(
+                crate::theme::backdrop(cx).is_none() && !crate::theme::floating(cx),
+                |d| d.bg(theme.background),
+            )
             .text_color(theme.foreground)
             .child(
                 div()
@@ -10633,15 +10694,19 @@ impl Render for MainView {
                                     .h_full()
                                     .relative()
                                     // 浮かせたカードはタスクの画面だけを包み、右に並べた AI チャットの
-                                    // 手前で角丸の端として閉じる
-                                    .when(crate::theme::floating(cx), |d| {
-                                        let half = FLOAT_GAP / 2.;
-                                        d.child(floating_card(
-                                            page_fill,
-                                            [half, FLOAT_GAP, FLOAT_GAP, half],
-                                            cx,
-                                        ))
-                                    })
+                                    // 手前で角丸の端として閉じる。分けているときは、ペインごとにカードを置く
+                                    .when(
+                                        crate::theme::floating(cx)
+                                            && self.layout.panes().len() == 1,
+                                        |d| {
+                                            let half = FLOAT_GAP / 2.;
+                                            d.child(floating_card(
+                                                page_fill,
+                                                [half, FLOAT_GAP, FLOAT_GAP, half],
+                                                cx,
+                                            ))
+                                        },
+                                    )
                                     .child({
                                         let own = div()
                                             .size_full()

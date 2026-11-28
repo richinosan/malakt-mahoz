@@ -9,9 +9,10 @@ use gpui_kit::{
 };
 use malakt_core::pomodoro::{Media, Op, Phase, Run, Settings};
 use malakt_core::{Store, TaskDraft};
+use malakt_mahoz::now_playing::{self, NowPlayingReader};
 use malakt_mahoz::pomodoro::{self, MediaSender};
 use malakt_mahoz::{db, MainView};
-use malakt_media::Command;
+use malakt_media::{Command, Failure, NowPlaying};
 
 fn start(cx: &mut TestAppContext) -> Arc<Mutex<Vec<Command>>> {
     let store = Store::open_in_memory().unwrap();
@@ -23,6 +24,8 @@ fn start(cx: &mut TestAppContext) -> Arc<Mutex<Vec<Command>>> {
             log.lock().unwrap().push(command);
             Ok(())
         })));
+        // OS の再生中の曲は読まない（何も開いていないことにする）
+        cx.set_global(NowPlayingReader(Arc::new(|| Ok(None))));
         malakt_mahoz::init(store, cx)
     });
     sent
@@ -357,4 +360,111 @@ fn follows_the_ai_tools(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert_eq!(timer(cx).run(), Run::Ready);
     let _ = Settings::default();
+}
+
+/// 1×1 の PNG。
+const PNG: [u8; 69] = [
+    137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 2, 0,
+    0, 0, 144, 119, 83, 222, 0, 0, 0, 12, 73, 68, 65, 84, 120, 156, 99, 56, 224, 160, 0, 0, 2, 228,
+    1, 33, 129, 37, 200, 200, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+];
+
+/// OS で再生中の曲を、ジャケット・曲名・アーティストと一緒に出す。曲が変わったら追いかけ、
+/// 読めなくなったら何が失敗したかを出し、何も開いていなければ出さない。
+#[gpui_kit::test]
+fn shows_the_song_playing_now(cx: &mut TestAppContext) {
+    let sent = start(cx);
+    let now: Arc<Mutex<Result<Option<NowPlaying>, Failure>>> =
+        Arc::new(Mutex::new(Ok(Some(NowPlaying {
+            title: "Blue in Green".into(),
+            artist: "Miles Davis".into(),
+            album: "Kind of Blue".into(),
+            playing: true,
+            artwork: Some(PNG.to_vec()),
+        }))));
+    let read = now.clone();
+    cx.update(|cx| {
+        cx.set_global(NowPlayingReader(Arc::new(move || {
+            read.lock().unwrap().clone()
+        })))
+    });
+    open(cx);
+    let window = cx.update(|cx| pomodoro::open(cx).unwrap());
+    cx.run_until_parked();
+    let label = |cx: &mut TestAppContext, id: &'static str| {
+        let mut text = None;
+        ui(cx, window, |window, _| {
+            text = window
+                .try_find(id)
+                .map(|e| e.label().unwrap_or_default().to_owned())
+        });
+        text
+    };
+    assert_eq!(
+        label(cx, "now-playing-title").as_deref(),
+        Some("Blue in Green")
+    );
+    assert_eq!(
+        label(cx, "now-playing-artist").as_deref(),
+        Some("Miles Davis · Kind of Blue")
+    );
+    assert_eq!(
+        label(cx, "media-toggle").as_deref(),
+        Some("再生中の音楽を一時停止")
+    );
+    assert!(cx.update(|cx| now_playing::shared(cx)
+        .read(cx)
+        .track
+        .as_ref()
+        .unwrap()
+        .artwork
+        .is_some()));
+
+    // 止めると、送ったあとで読み直して「再生」のボタンになる
+    now.lock()
+        .unwrap()
+        .as_mut()
+        .unwrap()
+        .as_mut()
+        .unwrap()
+        .playing = false;
+    ui(cx, window, |window, cx| window.click("media-toggle", cx));
+    assert_eq!(*sent.lock().unwrap(), [Command::Toggle]);
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(500));
+    cx.run_until_parked();
+    assert_eq!(
+        label(cx, "media-toggle").as_deref(),
+        Some("再生中の音楽を再生")
+    );
+
+    // 曲が変わると、2 秒ごとに読み直して追いかける
+    *now.lock().unwrap() = Ok(Some(NowPlaying {
+        title: "So What".into(),
+        ..Default::default()
+    }));
+    cx.executor().advance_clock(now_playing::EVERY);
+    cx.run_until_parked();
+    assert_eq!(label(cx, "now-playing-title").as_deref(), Some("So What"));
+    assert_eq!(label(cx, "now-playing-artist"), None);
+
+    // 読めなくなったら、失敗を出す
+    *now.lock().unwrap() = Err(Failure::Os("D-Bus が切れました".into()));
+    cx.executor().advance_clock(now_playing::EVERY);
+    cx.run_until_parked();
+    assert_eq!(label(cx, "now-playing"), None);
+    let error = label(cx, "now-playing-error").unwrap();
+    assert!(
+        error.contains(
+            "再生中の曲を読めませんでした: OS がメディアの操作を断りました: D-Bus が切れました"
+        ),
+        "{error}"
+    );
+
+    // 何も開いていなければ、曲も失敗も出さない
+    *now.lock().unwrap() = Ok(None);
+    cx.executor().advance_clock(now_playing::EVERY);
+    cx.run_until_parked();
+    assert_eq!(label(cx, "now-playing"), None);
+    assert_eq!(label(cx, "now-playing-error"), None);
 }

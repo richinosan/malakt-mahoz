@@ -90,11 +90,11 @@ model ScheduleRule {
 /** 所要時間の基準。所要時間はこの始まりから終わりまでの時計の経過 */
 @closed
 model TimeBasis {
-  /** 作った時 / 担当が付いた時 / 進行中にした時 / 開始日 */
-  start: "created" | "assigned" | "in_process" | "start_date";
+  /** 作った時 / 担当が付いた時 / 進行中にした時 / 開始日 / タスクに付けた GitHub の PR を作った時 */
+  start: "created" | "assigned" | "in_process" | "start_date" | "pr_opened";
 
-  /** 完了にした時 / 自分の分を完了にした時 */
-  end: "completed" | "self_done";
+  /** 完了にした時 / 自分の分を完了にした時 / PR に作った人以外が初めてレビューした時 / PR をマージした時。PR の時刻はアプリが gh で読む。PR の時刻がないまま完了にしたタスクは完了にした時まで */
+  end: "completed" | "self_done" | "pr_reviewed" | "pr_merged";
 }
 
 /** 期限をいつ知らせるか */
@@ -438,6 +438,7 @@ op reorder_tasks(ids: string[]): void;
 
 /** ユーザーの PC のファイルをタスクに添付する。path はファイルの絶対パス（先頭の ~ はホーム）。1 ファイル 10 MiB まで。 */
 @writes
+@localFiles
 op add_attachment(task_id: string, path: string): void;
 
 /** 添付を削除する。元に戻せないので、実行の前にユーザーに確認が出る。 */
@@ -733,6 +734,7 @@ op update_schedule(...ScheduleFields, id: string): void;
  * 1 ファイル 10 MiB まで。
  */
 @writes
+@localFiles
 op add_schedule_attachment(schedule_id: string, path: string): void;
 
 /** 定時タスクの雛形から添付を外す。作ったタスクの添付は残る。 */

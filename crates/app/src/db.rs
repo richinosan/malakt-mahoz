@@ -21,6 +21,8 @@ pub struct Db {
     pub next_alert: Option<i64>,
     /// 繰り返しの次の回を作れなかった理由。画面がエラーとして出す。
     pub repeat_error: Option<String>,
+    /// GitHub の PR の時刻を読めなかった理由と、その番号（出すたびに増える）。画面がエラーとして出す。
+    pub pr_error: Option<(u64, String)>,
 }
 
 /// 解除の印を書き直す間隔（秒）。[`lock::OPEN_FOR`] より十分短くする。
@@ -64,6 +66,7 @@ impl Db {
             last_input: unix_now(),
             next_alert: None,
             repeat_error: None,
+            pr_error: None,
         }
     }
 
@@ -273,14 +276,20 @@ pub fn watch(cx: &mut App) {
             let new_day = std::mem::replace(&mut day, today.clone()) != today;
             cx.update(|cx| {
                 lock_if_idle(unix_now(), cx);
-                shared(cx).update(cx, |db, cx| {
+                let outside = shared(cx).update(cx, |db, cx| {
                     db.sync_open_mark(unix_now());
                     let alert_due = db.next_alert.is_some_and(|at| unix_now() >= at);
                     let repeated = db.sweep_repeats(&malakt_core::view::now());
-                    if db.changed_outside() || new_day || alert_due || repeated {
+                    let outside = db.changed_outside();
+                    if outside || new_day || alert_due || repeated {
                         cx.notify();
                     }
-                })
+                    outside
+                });
+                if outside {
+                    crate::pr_times::nudge(cx);
+                }
+                crate::pr_times::tick(cx);
             });
         }
     })

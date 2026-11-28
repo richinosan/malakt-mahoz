@@ -653,6 +653,40 @@ fn the_scrollbar_moves_through_the_output(cx: &mut TestAppContext) {
     assert!(screen(cx).text().contains("row199"));
 }
 
+/// 新しいシェルは、初めから画面に出す場所の大きさで起きる。起きてから大きさを変えると、
+/// シェルが知らせを受け取る用意をする前に届いて、80 桁のままと思い込むことがある。
+#[gpui_kit::test]
+fn a_new_shell_starts_at_the_size_of_its_place(cx: &mut TestAppContext) {
+    let (window, _view) = start(cx);
+    // 起きたときの大きさ（行と桁）を書くシェル
+    let mut size = profile("size", "/bin/sh");
+    size.args = vec![
+        "-c".into(),
+        "echo \"size=$(stty size)\"; exec /bin/sh".into(),
+    ];
+    cx.update(|cx| {
+        term::shared(cx).update(cx, |terms, cx| {
+            terms.set_profiles(vec![profile("sh", "/bin/sh"), size], cx)
+        })
+    });
+    // AI のタブを見ている間も、ターミナルを出す場所を測っておく
+    ui(cx, window, |window, cx| window.click("ai-toggle", cx));
+    let (cols, rows) = terms(cx, |t| t.place).expect("場所を測っている");
+    assert_ne!(
+        (cols, rows),
+        (80, 24),
+        "このテストのウィンドウでは、標準の 80x24 と違う大きさになる"
+    );
+    // チャットを閉じて、ターミナルを描かないまま開く（描いて大きさを伝える前に、シェルが大きさを書く）
+    ui(cx, window, |window, cx| window.click("ai-toggle", cx));
+    cx.update(|cx| {
+        term::shared(cx).update(cx, |terms, cx| {
+            terms.open(Some("size"), None, cx);
+        })
+    });
+    wait_text(cx, &format!("size={rows} {cols}"));
+}
+
 /// ファイルをドロップすると、その場所が入力の行に入る。空白のある場所は 1 つの引数として届く。
 #[gpui_kit::test]
 fn dropped_files_are_typed_as_paths(cx: &mut TestAppContext) {

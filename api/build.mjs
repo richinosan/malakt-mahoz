@@ -195,7 +195,7 @@ for (const [namespace, group] of GROUPS) {
       description: description ?? "",
       input_schema: { type: "object", properties, required, additionalProperties: false },
     };
-    for (const mark of ["writes", "confirm", "inAppOnly", "view", "session"]) {
+    for (const mark of ["writes", "confirm", "inAppOnly", "view", "session", "localFiles"]) {
       if (has(program, mark, op)) tool[mark.replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`)] = true;
     }
     tools.push(tool);

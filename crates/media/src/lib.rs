@@ -4,6 +4,8 @@
 //! - macOS: 「再生中」（Now Playing）のアプリ。`MediaRemote.framework` の `MRMediaRemoteSendCommand`
 //! - Linux: MPRIS（D-Bus の `org.mpris.MediaPlayer2.*`）。鳴っているプレイヤー、なければ最後に止めたもの
 //!
+//! 再生中の曲の名前・アーティスト・アルバム・ジャケットも読める（[`now_playing`]）。
+//!
 //! どれも、待つ間は呼んだスレッドを止める。画面のスレッドからは呼ばない。
 
 use std::fmt;
@@ -80,6 +82,99 @@ pub fn send(command: Command) -> Result<(), Failure> {
         let _ = command;
         Err(Failure::Unsupported)
     }
+}
+
+/// ジャケットの画像の大きさの上限。これより大きいものは読まない。
+pub const MAX_ARTWORK: usize = 8 * 1024 * 1024;
+
+/// 再生中（または一時停止中）の曲。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NowPlaying {
+    pub title: String,
+    pub artist: String,
+    pub album: String,
+    /// 鳴っているか。止まっているときは false。
+    pub playing: bool,
+    /// ジャケットの画像（PNG・JPEG など、ファイルの中身そのまま）。
+    pub artwork: Option<Vec<u8>>,
+}
+
+/// 再生中の曲を読む。何も開いていなければ `Ok(None)`。
+pub fn now_playing() -> Result<Option<NowPlaying>, Failure> {
+    #[cfg(windows)]
+    return windows::now_playing();
+    #[cfg(target_os = "macos")]
+    return macos::now_playing();
+    #[cfg(target_os = "linux")]
+    return linux::now_playing();
+    #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
+    Err(Failure::Unsupported)
+}
+
+/// ジャケットの画像の形式を、中身の先頭から見分ける。
+pub fn artwork_format(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("png")
+    } else if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+        Some("jpeg")
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        Some("gif")
+    } else if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        Some("webp")
+    } else if bytes.starts_with(b"BM") {
+        Some("bmp")
+    } else {
+        None
+    }
+}
+
+/// `file://` の URL をファイルのパスにする（`%20` などを戻す）。ほかの URL は None。
+pub fn file_url_path(url: &str) -> Option<std::path::PathBuf> {
+    let rest = url.strip_prefix("file://")?;
+    // file://localhost/… と file:///… のどちらも受ける
+    let rest = rest.strip_prefix("localhost").unwrap_or(rest);
+    if !rest.starts_with('/') {
+        return None;
+    }
+    let bytes = rest.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let hex = |b: u8| (b as char).to_digit(16).map(|d| d as u8);
+        match (
+            bytes[i],
+            bytes.get(i + 1).copied().and_then(hex),
+            bytes.get(i + 2).copied().and_then(hex),
+        ) {
+            (b'%', Some(hi), Some(lo)) => {
+                out.push(hi * 16 + lo);
+                i += 3;
+            }
+            (b, _, _) => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt;
+        Some(std::ffi::OsString::from_vec(out).into())
+    }
+    #[cfg(not(unix))]
+    String::from_utf8(out).ok().map(Into::into)
+}
+
+/// プレイヤーが何人もいるとき、どれの曲を見せるか。鳴っているもの、なければ最後に止めたもの、
+/// なければ一時停止の最初のもの、なければ最初のもの。
+pub fn shown<'a>(players: &'a [(String, Status)], last: Option<&str>) -> Option<&'a str> {
+    players
+        .iter()
+        .find(|(_, s)| *s == Status::Playing)
+        .or_else(|| players.iter().find(|(n, _)| Some(n.as_str()) == last))
+        .or_else(|| players.iter().find(|(_, s)| *s == Status::Paused))
+        .or_else(|| players.first())
+        .map(|(n, _)| n.as_str())
 }
 
 /// MPRIS のプレイヤーの状態。
@@ -159,5 +254,34 @@ mod tests {
         );
         assert!(targets(Command::Pause, &list, None).is_empty());
         assert!(targets(Command::Play, &[], None).is_empty());
+    }
+
+    #[test]
+    fn 見せる曲は鳴っているものから選ぶ() {
+        use Status::*;
+        let list = players(&[("a", Paused), ("b", Stopped), ("c", Playing)]);
+        assert_eq!(shown(&list, Some("b")), Some("c"));
+        let list = players(&[("a", Stopped), ("b", Paused), ("c", Paused)]);
+        assert_eq!(shown(&list, Some("c")), Some("c"));
+        assert_eq!(shown(&list, None), Some("b"));
+        assert_eq!(shown(&players(&[("a", Stopped)]), None), Some("a"));
+        assert_eq!(shown(&[], None), None);
+    }
+
+    #[test]
+    fn ジャケットの形式とファイルの_url() {
+        assert_eq!(artwork_format(b"\x89PNG\r\n\x1a\n...."), Some("png"));
+        assert_eq!(artwork_format(&[0xff, 0xd8, 0xff, 0xe0]), Some("jpeg"));
+        assert_eq!(artwork_format(b"RIFF\0\0\0\0WEBPVP8 "), Some("webp"));
+        assert_eq!(artwork_format(b"<svg"), None);
+        assert_eq!(
+            file_url_path("file:///tmp/%E6%9B%B2%20a.png"),
+            Some("/tmp/曲 a.png".into())
+        );
+        assert_eq!(
+            file_url_path("file://localhost/a/b.jpg"),
+            Some("/a/b.jpg".into())
+        );
+        assert_eq!(file_url_path("https://example.com/a.jpg"), None);
     }
 }

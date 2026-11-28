@@ -45,6 +45,15 @@ description = "api/generated/tools.json が API の定義（api/*.tsp）と合�
 dir = "api"
 run = ["npm install --prefer-offline --no-audit --no-fund --silent", "node build.mjs --check"]
 
+[tasks.plugin-example]
+description = "見本のプラグイン（examples/plugins/task-markdown）を WASM にビルドして plugin.wasm を作り直す"
+dir = "examples/plugins/task-markdown"
+run = [
+  "rustup target add wasm32-unknown-unknown",
+  "cargo build --release --locked --target wasm32-unknown-unknown",
+  "node -e \"require('fs').copyFileSync('target/wasm32-unknown-unknown/release/task_markdown.wasm', 'plugin.wasm')\"",
+]
+
 [tasks.verify]
 description = "コミットの前の確認（書式、clippy、API の定義、テスト）。pre-commit フックが実行する"
 depends = ["lint", "api-check"]
