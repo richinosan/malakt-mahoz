@@ -26,7 +26,7 @@ use gpui_kit::*;
 use serde_json::{json, Value};
 
 use crate::feel;
-use crate::render::app_icon;
+use crate::render::{app_icon, col, row};
 use crate::term::{self, Terms};
 
 /// 一度に開けるページの数。小さなウィンドウのページも数える。
@@ -146,7 +146,17 @@ pub enum Event {
     Key(String),
     /// ページの中を探し終わった。`turn` は探し始めたときの [`Page`] の探した回。
     Found { turn: u64, found: bool },
+    /// ファイルのダウンロードが始まった・進んだ・終わった。
+    Download(crate::downloads::Note),
+    /// ページを PDF に保存し終わった。`item` はダウンロードの一覧の番号。
+    PdfSaved {
+        item: u64,
+        result: Result<(), String>,
+    },
 }
+
+/// PDF に保存し終わったときに呼ぶ関数。
+pub type PdfDone = Box<dyn FnOnce(Result<(), String>) + Send + 'static>;
 
 /// 開いているページを動かす口。本物は [`crate::webview`]、テストでは差し替える。
 pub trait Engine {
@@ -174,6 +184,8 @@ pub trait Engine {
     fn zoom(&self, factor: f64) -> Result<(), String>;
     /// 印刷のダイアログを出す。
     fn print(&self) -> Result<(), String>;
+    /// ページを PDF にして `path` に保存する。終わったら `done` を呼ぶ。
+    fn save_pdf(&self, path: &std::path::Path, done: PdfDone) -> Result<(), String>;
     /// ページの中で `query` を探して選ぶ。`again` なら今選んでいる所の次から、でなければ頭から。
     /// `done` には見つかったかが届く。
     fn find(
@@ -257,6 +269,8 @@ pub struct Page {
     pub(crate) find_turn: u64,
     /// 最後に探した言葉が、ページの中になかった。
     pub find_missing: bool,
+    /// 印刷のダイアログを出している。出している間は、ページを隠して画像を出す。
+    pub(crate) printing: bool,
 }
 
 impl Page {
@@ -290,6 +304,7 @@ impl Page {
             zoom_leaving: false,
             find_turn: 0,
             find_missing: false,
+            printing: false,
         }
     }
 
@@ -743,13 +758,51 @@ impl Terms {
         cx.notify();
     }
 
-    /// ページを印刷する。
+    /// ページを印刷する（OS の印刷のダイアログ）。
     pub fn print_page(&mut self, id: u64, cx: &mut Context<Self>) {
         let Some(engine) = self.page(id).and_then(|p| p.engine.clone()) else {
             return;
         };
         if let Err(e) = engine.print() {
             self.fail(format!("ページを印刷できませんでした: {e}"), cx);
+        }
+    }
+
+    /// ページを PDF にして、ダウンロードのフォルダに `name` で保存する。同じ名前があれば番号を付ける。
+    /// 保存したファイルは、ダウンロードの一覧に出る。
+    pub fn save_page_pdf(&mut self, id: u64, name: &str, cx: &mut Context<Self>) {
+        let Some((engine, url)) = self
+            .page(id)
+            .and_then(|p| Some((p.engine.clone()?, p.url.clone())))
+        else {
+            return;
+        };
+        let dir = crate::downloads::download_dir(cx);
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            self.fail(
+                format!("{} に PDF を保存できませんでした: {e}", dir.display()),
+                cx,
+            );
+            return;
+        }
+        let path = crate::downloads::unique_path(&dir, &crate::downloads::pdf_name(name));
+        let downloads = crate::downloads::shared(cx);
+        let item = downloads.update(cx, |d, cx| d.pdf_started(url, path.clone(), cx));
+        let events = self.page_events.clone();
+        let done: PdfDone = Box::new(move |result| {
+            // アプリを閉じている途中なら、受け取る先がない
+            let _ = events.try_send((id, Event::PdfSaved { item, result }));
+        });
+        if let Err(e) = engine.save_pdf(&path, done) {
+            downloads.update(cx, |d, cx| d.pdf_done(item, Err(e), cx));
+        }
+    }
+
+    /// 印刷のダイアログを出している間は、ページを隠して画像を出す。
+    pub(crate) fn set_printing(&mut self, id: u64, printing: bool, cx: &mut Context<Self>) {
+        if let Some(page) = self.page_mut(id) {
+            page.printing = printing;
+            cx.notify();
         }
     }
 
@@ -866,6 +919,15 @@ impl Terms {
                 }
                 return;
             }
+            // ページを閉じたあとに終わったものも、一覧には出す
+            Event::Download(note) => {
+                crate::downloads::shared(cx).update(cx, |d, cx| d.on_note(note, cx));
+                return;
+            }
+            Event::PdfSaved { item, result } => {
+                crate::downloads::shared(cx).update(cx, |d, cx| d.pdf_done(item, result, cx));
+                return;
+            }
             _ => {}
         }
         let events = self.page_events.clone();
@@ -940,6 +1002,8 @@ impl Terms {
             | Event::Lock
             | Event::Key(_)
             | Event::Found { .. }
+            | Event::Download(_)
+            | Event::PdfSaved { .. }
             | Event::Pointer(_)
             | Event::Snapshot { .. } => {}
         }
@@ -1091,6 +1155,8 @@ impl Terms {
                 continue;
             };
             let wanted = page.painted == Some((here, now));
+            // 印刷のダイアログは、そのページの上にだけ出る
+            let covered = covered || page.printing;
             let mut visible = wanted && !covered;
             if wanted && covered && page.shown && page.shot.is_none() && !page.shot_failed {
                 // 隠す前に画像を撮る。撮れるまで（長くても SHOT_WAIT）ページを見せておく
@@ -1370,6 +1436,8 @@ pub struct BrowserPane {
     bar: Entity<InputState>,
     /// ページの中を探す欄。
     find: Entity<FindBar>,
+    /// 印刷のダイアログ。
+    print: Entity<PrintDialog>,
     /// 場所の欄に出しているページと場所。
     shown: Option<(u64, String)>,
     /// URL の欄の外から押し始めた。離したときに、書いてある URL をすべて選ぶ（Chrome と同じ）。
@@ -1383,6 +1451,13 @@ impl BrowserPane {
         let bar = cx.new(|cx| InputState::new(window, cx).placeholder("URL を入力、または検索"));
         let find = cx.new(|cx| {
             FindBar::new(
+                |cx| term::shared(cx).read(cx).active_page().map(|p| p.id),
+                window,
+                cx,
+            )
+        });
+        let print = cx.new(|cx| {
+            PrintDialog::new(
                 |cx| term::shared(cx).read(cx).active_page().map(|p| p.id),
                 window,
                 cx,
@@ -1404,6 +1479,7 @@ impl BrowserPane {
             focus,
             bar,
             find,
+            print,
             shown: None,
             select_bar_on_up: false,
             _subscriptions: subscriptions,
@@ -1484,10 +1560,8 @@ impl BrowserPane {
             cx.listener(|this, _: &FindPrevious, window, cx| this.find_step(true, window, cx)),
         )
         .on_action(cx.listener(|this, _: &CloseFind, _, cx| this.close_find(cx)))
-        .on_action(cx.listener(|this, _: &PrintPage, _, cx| {
-            if let Some(id) = this.page_id(cx) {
-                this.terms.update(cx, |terms, cx| terms.print_page(id, cx));
-            }
+        .on_action(cx.listener(|this, _: &PrintPage, window, cx| {
+            this.print.update(cx, |print, cx| print.show(window, cx))
         }))
         .on_action(cx.listener(move |this, _: &BrowserZoomIn, _, cx| zoom(this, Zoom::In, cx)))
         .on_action(cx.listener(move |this, _: &BrowserZoomOut, _, cx| zoom(this, Zoom::Out, cx)))
@@ -1718,6 +1792,265 @@ impl Render for FindBar {
                 )),
             ))
             .test_support()
+            .into_any_element()
+    }
+}
+
+/// 印刷のダイアログ（Ctrl+P）。Chrome と同じく、送信先に「PDF に保存」と「プリンター」がある。
+/// PDF はダウンロードのフォルダに保存し、ダウンロードの一覧に出す。プリンターは OS の印刷のダイアログを出す。
+/// ブラウザのタブと小さなウィンドウで使う。出している間は、ページを隠してページの画像を後ろに出す。
+pub(crate) struct PrintDialog {
+    terms: Entity<Terms>,
+    /// 印刷するページ。タブの画面では、見ているページが変わる。
+    page: PageOf,
+    /// PDF のファイル名（`.pdf` の前まで）。
+    name: Entity<InputState>,
+    /// 出しているページ。
+    open: Option<u64>,
+    focus: FocusHandle,
+    _subscriptions: Vec<Subscription>,
+}
+
+impl PrintDialog {
+    pub(crate) fn new(
+        page: impl Fn(&App) -> Option<u64> + 'static,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let terms = term::shared(cx);
+        let name = cx.new(|cx| InputState::new(window, cx).placeholder("ファイル名"));
+        let subscriptions = vec![
+            cx.observe(&terms, |this, terms, cx| {
+                // 出しているページを閉じたら、ダイアログも閉じる
+                if this
+                    .open
+                    .is_some_and(|id| terms.read(cx).page(id).is_none())
+                {
+                    this.open = None;
+                }
+                cx.notify();
+            }),
+            cx.subscribe_in(&name, window, |this, _, event: &InputEvent, window, cx| {
+                if matches!(event, InputEvent::PressEnter { .. }) {
+                    this.submit(window, cx);
+                }
+            }),
+        ];
+        Self {
+            terms,
+            page: Box::new(page),
+            name,
+            open: None,
+            focus: cx.focus_handle(),
+            _subscriptions: subscriptions,
+        }
+    }
+
+    /// ダイアログを出す（Ctrl+P）。ファイル名はページの題名にする。
+    pub(crate) fn show(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = (self.page)(cx) else {
+            return;
+        };
+        let Some(page) = self.terms.read(cx).page(id) else {
+            return;
+        };
+        if page.engine.is_none() || page.error.is_some() {
+            return;
+        }
+        let file = crate::downloads::pdf_name(&page.label());
+        let stem = file
+            .get(..file.len() - ".pdf".len())
+            .unwrap_or(&file)
+            .to_owned();
+        self.terms.update(cx, |terms, cx| {
+            terms.release_page(id, cx);
+            terms.set_printing(id, true, cx);
+        });
+        self.open = Some(id);
+        self.name
+            .update(cx, |name, cx| name.set_value(stem, window, cx));
+        self.focus_now(window, cx);
+        cx.notify();
+    }
+
+    /// 送信先に合わせて、キーの入力先を移す。PDF ならファイル名の欄。
+    fn focus_now(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.terms.read(cx).print_pdf {
+            self.name.update(cx, |name, cx| {
+                name.focus(window, cx);
+                name.select_all(window, cx);
+            });
+        } else {
+            window.focus(&self.focus, cx);
+        }
+    }
+
+    /// 閉じてページに戻る（Esc）。出していなければ false。
+    pub(crate) fn hide(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(id) = self.open.take() else {
+            return false;
+        };
+        self.terms.update(cx, |terms, cx| {
+            terms.set_printing(id, false, cx);
+            terms.focus_page(id, cx);
+        });
+        cx.notify();
+        true
+    }
+
+    fn choose(&mut self, pdf: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.terms.update(cx, |terms, cx| {
+            terms.print_pdf = pdf;
+            cx.notify();
+        });
+        self.focus_now(window, cx);
+    }
+
+    /// 保存する・印刷する。
+    pub(crate) fn submit(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = self.open else {
+            return;
+        };
+        let pdf = self.terms.read(cx).print_pdf;
+        let name = self.name.read(cx).value().trim().to_string();
+        self.hide(cx);
+        self.terms.update(cx, |terms, cx| {
+            if pdf {
+                terms.save_page_pdf(id, &name, cx);
+            } else {
+                terms.print_page(id, cx);
+            }
+        });
+    }
+}
+
+impl Render for PrintDialog {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.open.is_none() {
+            return div().into_any_element();
+        }
+        let theme = cx.theme().clone();
+        let pdf = self.terms.read(cx).print_pdf;
+        let target = |id: &'static str, icon: &str, label: &'static str, on: bool| {
+            let b = button(id).icon(app_icon(icon)).label(label).small();
+            if on {
+                b.primary()
+            } else {
+                b.ghost()
+            }
+        };
+        let card = col()
+            .id("browser-print")
+            .key_context(crate::shell_keys::PRINT)
+            .track_focus(&self.focus)
+            .on_action(
+                cx.listener(|this, _: &crate::shell_keys::ClosePrint, _, cx| {
+                    this.hide(cx);
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &crate::shell_keys::SubmitPrint, window, cx| {
+                    this.submit(window, cx)
+                }),
+            )
+            .occlude()
+            .w(gpui_kit::px(380.))
+            .max_w(relative(0.94))
+            .p_4()
+            .gap_3()
+            .rounded(feel::lg())
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.background)
+            .shadow_lg()
+            .child(
+                row()
+                    .child(div().flex_1().text_lg().child("印刷"))
+                    .child(feel::gloss(
+                        button("browser-print-close")
+                            .icon(app_icon("x"))
+                            .tooltip("閉じる（Esc）")
+                            .ghost()
+                            .small()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.hide(cx);
+                            })),
+                    )),
+            )
+            .child(
+                row()
+                    .gap_1()
+                    .child(feel::gloss(
+                        target("browser-print-pdf", "file-down", "PDF に保存", pdf).on_click(
+                            cx.listener(|this, _, window, cx| this.choose(true, window, cx)),
+                        ),
+                    ))
+                    .child(feel::gloss(
+                        target("browser-print-printer", "printer", "プリンター", !pdf).on_click(
+                            cx.listener(|this, _, window, cx| this.choose(false, window, cx)),
+                        ),
+                    )),
+            )
+            .when(pdf, |d| {
+                d.child(
+                    div().id("browser-print-name").child(
+                        Input::new(&self.name)
+                            .suffix(
+                                div()
+                                    .text_sm()
+                                    .text_color(theme.muted_foreground)
+                                    .child(".pdf"),
+                            )
+                            .aria_label("ファイル名"),
+                    ),
+                )
+            })
+            .child(
+                row()
+                    .gap_2()
+                    .justify_end()
+                    .child(feel::gloss(
+                        button("browser-print-cancel")
+                            .label("キャンセル")
+                            .ghost()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.hide(cx);
+                            })),
+                    ))
+                    .child(feel::gloss(
+                        button("browser-print-submit")
+                            .label(if pdf { "保存" } else { "印刷" })
+                            .primary()
+                            .on_click(cx.listener(|this, _, window, cx| this.submit(window, cx))),
+                    )),
+            )
+            .test_support()
+            // ふわっと出す
+            .with_animation(
+                "browser-print-in",
+                Animation::new(Duration::from_millis(180)).with_easing(ease_out_quint()),
+                // 薄い所から出す（出た瞬間から押せる）
+                |d, t| d.opacity(0.3 + 0.7 * t).mt(gpui_kit::px(12. * (1. - t))),
+            );
+        div()
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(theme.overlay)
+            .occlude()
+            // 外を押したら閉じる
+            .child(
+                div()
+                    .id("browser-print-backdrop")
+                    .absolute()
+                    .inset_0()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.hide(cx);
+                    })),
+            )
+            .child(card)
             .into_any_element()
     }
 }
@@ -2085,7 +2418,15 @@ impl Render for BrowserPane {
                 ))
                 .into_any_element()
         } else {
-            page_view(id, shot, theme.background)
+            div()
+                .relative()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_h_0()
+                .child(page_view(id, shot, theme.background))
+                .child(self.print.clone())
+                .into_any_element()
         };
         let root = div()
             .id("browser")

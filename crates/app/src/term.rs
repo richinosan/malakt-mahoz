@@ -188,6 +188,8 @@ pub struct Terms {
     pub(crate) focus_page: Option<u64>,
     /// AI のタブの入力行に、キーの入力先を移す。
     pub focus_ai: bool,
+    /// 印刷のダイアログの送信先。`true` なら PDF に保存、`false` ならプリンター。
+    pub print_pdf: bool,
 }
 
 pub struct SharedTerms(pub Entity<Terms>);
@@ -275,6 +277,7 @@ impl Terms {
             browser_focus: Vec::new(),
             focus_page: None,
             focus_ai: false,
+            print_pdf: true,
         };
         terms.restore_pages(cx);
         terms

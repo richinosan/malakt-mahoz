@@ -9,6 +9,7 @@ pub mod browser_popup;
 mod caret;
 pub mod cli;
 pub mod db;
+pub mod downloads;
 pub mod drops;
 mod feel;
 mod history_view;
@@ -151,6 +152,7 @@ pub fn init_with(store: malakt_core::Store, ai: AiConfig, cx: &mut App) {
     passkey::init(cx);
     ai::init(ai, cx);
     term::init(cx);
+    downloads::init(cx);
     reminders::init(cx);
     update::init(cx);
     theme::init(cx);
@@ -195,6 +197,8 @@ pub fn init_with(store: malakt_core::Store, ai: AiConfig, cx: &mut App) {
         cx.quit()
     });
     cx.on_action(|_: &LockNow, cx| lock_now_or_settings(cx));
+    // メインのウィンドウの外（小さなウィンドウ、シェルのウィンドウ）では、メインのウィンドウに出す
+    cx.on_action(|_: &shell_keys::ShowDownloads, cx| show_downloads(cx));
     cx.set_menus([Menu {
         name: APP_NAME.into(),
         items: vec![
@@ -423,6 +427,34 @@ fn open_settings_now(
             if let Some(section) = section {
                 this.show_appearance_section(section, window, cx);
             }
+        });
+    });
+}
+
+/// ダウンロードの一覧を、今のウィンドウかメインのウィンドウに出して、手前に出す。
+pub(crate) fn show_downloads(cx: &mut App) {
+    // キーから呼ぶときは、そのウィンドウを更新している最中なので、終わってから開く
+    cx.defer(|cx| {
+        let mut windows = cx.windows();
+        for first in [session::main_window(cx), cx.active_window()]
+            .into_iter()
+            .flatten()
+        {
+            if let Some(ix) = windows.iter().position(|w| *w == first) {
+                let window = windows.remove(ix);
+                windows.insert(0, window);
+            }
+        }
+        let Some((handle, view)) = windows
+            .into_iter()
+            .find_map(|handle| Some((handle, main_view_in(handle, cx)?)))
+        else {
+            return;
+        };
+        // 探したあとに閉じたウィンドウなら、開く先がない
+        let _ = handle.update(cx, |_, window, cx| {
+            window.activate_window();
+            view.update(cx, |this, cx| this.open_downloads(window, cx));
         });
     });
 }

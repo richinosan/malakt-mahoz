@@ -32,7 +32,10 @@ actions!(
         NewTerminal,
         BrowserZoomIn,
         BrowserZoomOut,
-        BrowserZoomReset
+        BrowserZoomReset,
+        ClosePrint,
+        SubmitPrint,
+        ShowDownloads
     ]
 );
 
@@ -47,6 +50,8 @@ const MAC: bool = cfg!(target_os = "macos");
 pub const BROWSER: &str = "Browser";
 /// ページの中を探す欄の場所の名前。
 pub const FIND: &str = "BrowserFind";
+/// 印刷のダイアログの場所の名前。
+pub const PRINT: &str = "BrowserPrint";
 /// シェルの場所（タブの列の下すべて）の名前。
 pub const SHELL: &str = "AiShell";
 /// ターミナルの画面の場所の名前。
@@ -109,6 +114,9 @@ pub fn bind(cx: &mut App) {
         KeyBinding::new("ctrl-pageup", PreviousTab, browser),
         // ページの中を探す欄。Enter / Shift+Enter は、欄の Enter の知らせで受ける
         KeyBinding::new("escape", CloseFind, Some(FIND)),
+        // 印刷のダイアログ。ファイル名の欄の Enter は、欄の Enter の知らせで受ける
+        KeyBinding::new("escape", ClosePrint, Some(PRINT)),
+        KeyBinding::new("enter", SubmitPrint, Some(PRINT)),
     ];
     keys.extend(digits(if MAC { CMD_DIGITS } else { CTRL_DIGITS }, SHELL));
     if MAC {
@@ -121,6 +129,9 @@ pub fn bind(cx: &mut App) {
             KeyBinding::new("cmd-alt-left", PreviousTab, browser),
             KeyBinding::new("cmd-t", NewTerminal, terminal),
             KeyBinding::new("cmd-w", CloseTab, terminal),
+            // ダウンロードの一覧（Chrome の macOS と同じ）
+            KeyBinding::new("cmd-alt-l", ShowDownloads, browser),
+            KeyBinding::new("cmd-shift-j", ShowDownloads, browser),
         ]);
     } else {
         keys.extend([
@@ -135,6 +146,8 @@ pub fn bind(cx: &mut App) {
             KeyBinding::new("shift-f3", FindPrevious, browser),
             KeyBinding::new("ctrl-shift-t", NewTerminal, terminal),
             KeyBinding::new("ctrl-shift-w", CloseTab, terminal),
+            // ダウンロードの一覧（Chrome と同じ）。ブラウザの外の Ctrl+J は AI チャット
+            KeyBinding::new("ctrl-j", ShowDownloads, browser),
         ]);
         keys.extend(digits(CTRL_ALT_DIGITS, TERMINAL));
     }
@@ -165,6 +178,8 @@ pub fn page_keys() -> PageKeys {
             "cmd-alt-left",
             "ctrl-tab",
             "ctrl-shift-tab",
+            "cmd-alt-l",
+            "cmd-shift-j",
             // アプリのキー
             "ctrl-cmd-f",
             "cmd-j",
@@ -294,7 +309,8 @@ pub fn browser_help() -> Vec<(&'static str, &'static str)> {
             pick("Ctrl++ / Ctrl+- / Ctrl+0", "⌘+ / ⌘- / ⌘0"),
             "拡大 / 縮小 / 100%",
         ),
-        (pick("Ctrl+P", "⌘P"), "印刷"),
+        (pick("Ctrl+P", "⌘P"), "印刷・PDF に保存"),
+        (pick("Ctrl+J", "⌥⌘L"), "ダウンロード"),
         (pick("F11", "⌃⌘F"), "全画面"),
     ]
 }

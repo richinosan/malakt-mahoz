@@ -708,6 +708,28 @@ pub(crate) fn remove_x(
         })
 }
 
+/// ダウンロードの一覧に出す、ファイルの種類のアイコン。
+fn file_icon(name: &str) -> &'static str {
+    let ext = name
+        .rsplit_once('.')
+        .map(|(_, ext)| ext.to_ascii_lowercase())
+        .unwrap_or_default();
+    match ext.as_str() {
+        "zip" | "7z" | "rar" | "gz" | "tgz" | "xz" | "bz2" | "tar" | "dmg" | "msi" | "exe" => {
+            "file-archive"
+        }
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "bmp" | "heic" | "ico" => "file-image",
+        "mp3" | "wav" | "flac" | "m4a" | "aac" | "ogg" => "file-music",
+        "mp4" | "mov" | "mkv" | "webm" | "avi" => "file-video-camera",
+        "csv" | "xlsx" | "xls" | "ods" => "file-spreadsheet",
+        "pdf" | "txt" | "md" | "doc" | "docx" | "rtf" => "file-text",
+        "json" | "js" | "ts" | "rs" | "py" | "html" | "css" | "xml" | "yaml" | "yml" | "toml" => {
+            "file-code"
+        }
+        _ => "file",
+    }
+}
+
 fn status_color(status: Status, cx: &App) -> Hsla {
     let theme = cx.theme();
     match status {
@@ -2477,6 +2499,7 @@ impl MainView {
                             .on_click(cx.listener(|this, _, _, cx| this.update_now(cx))),
                     )
                 }))
+                .children(self.downloads_button(cx))
                 .child(
                     div()
                         .relative()
@@ -2511,6 +2534,319 @@ impl MainView {
                 ))
                 .children(controls),
         )
+    }
+
+    /// 上のバーの、ダウンロードのアイコン。一覧に何かあるときだけ出す。
+    /// まだ見ていない数を右上に出し、ダウンロード中は下に進み具合の線を出す。
+    fn downloads_button(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let downloads = crate::downloads::shared(cx);
+        let (empty, unseen, activity) = {
+            let d = downloads.read(cx);
+            (d.items.is_empty(), d.unseen(), d.activity())
+        };
+        if empty {
+            return None;
+        }
+        let theme = cx.theme().clone();
+        let bar = activity.map(|ratio| {
+            let track = div()
+                .absolute()
+                .left(px(6.))
+                .right(px(6.))
+                .bottom(px(3.))
+                .h(gpui_kit::px(2.))
+                .rounded_full()
+                .overflow_hidden()
+                .bg(theme.muted);
+            match ratio {
+                Some(ratio) => track.child(
+                    div()
+                        .h_full()
+                        .w(relative(ratio.max(0.04)))
+                        .rounded_full()
+                        .bg(theme.primary),
+                ),
+                None => track.child(crate::browser::loading_line(theme.primary)),
+            }
+        });
+        Some(
+            div()
+                .relative()
+                .child(feel::gloss(
+                    button("open-downloads")
+                        .icon(app_icon("download"))
+                        .ghost()
+                        .small()
+                        .tooltip("ダウンロード")
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.open_downloads(window, cx)),
+                        ),
+                ))
+                .children(bar)
+                .children(count_bubble(
+                    "open-downloads-count",
+                    unseen,
+                    Bubble::Bell,
+                    Some((px(-4.), px(-4.))),
+                    cx,
+                ))
+                // 新しいものが増えるたびに、アイコンを少し弾ませる
+                .with_animation(
+                    ("open-downloads-bump", unseen as usize),
+                    Animation::new(std::time::Duration::from_millis(if self.motion {
+                        360
+                    } else {
+                        1
+                    }))
+                    .with_easing(ease_in_out),
+                    move |d, t| {
+                        if unseen == 0 {
+                            return d;
+                        }
+                        d.top(px(-3. * (t * std::f32::consts::PI).sin()))
+                    },
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// ダウンロードの一覧。項目を押すと、OS のファイルマネージャーでそのファイルを選んで開く。
+    fn render_downloads(&self, cx: &mut Context<Self>) -> Div {
+        let theme = cx.theme().clone();
+        let downloads = crate::downloads::shared(cx);
+        let (items, error) = {
+            let d = downloads.read(cx);
+            (d.items.clone(), d.error.clone())
+        };
+        let now = malakt_core::now_ms();
+        let mut list = col().gap_0p5();
+        for (ix, item) in items.iter().enumerate() {
+            let id = item.id;
+            let running = item.running();
+            let failed = matches!(item.state, crate::downloads::State::Failed { .. });
+            let gone = item.missing || failed;
+            let group = SharedString::from(format!("download-{ix}"));
+            let icon = match item.kind {
+                crate::downloads::Kind::Pdf => "file-text",
+                crate::downloads::Kind::File => file_icon(&item.name()),
+            };
+            let menu_downloads = downloads.clone();
+            let open = !running && !gone;
+            let url = item.url.clone();
+            let detail_color = if failed {
+                theme.danger
+            } else {
+                theme.muted_foreground
+            };
+            list = list.child(
+                row()
+                    .id(("download", ix))
+                    .test_support()
+                    .group(group.clone())
+                    .gap_3()
+                    .px_2()
+                    .py_1p5()
+                    .rounded(feel::md())
+                    .when(open, |d| {
+                        d.cursor_pointer()
+                            .lit(theme.secondary_hover, cx)
+                            .sunk(theme.accent, cx)
+                    })
+                    .child(
+                        div()
+                            .flex_none()
+                            .size_8()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(feel::md())
+                            .bg(theme.muted)
+                            .text_color(if gone {
+                                theme.muted_foreground
+                            } else {
+                                theme.foreground
+                            })
+                            .child(app_icon(if gone { "file-x" } else { icon }).size_4()),
+                    )
+                    .child(
+                        col()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_0p5()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .truncate()
+                                    .when(gone, |d| {
+                                        d.line_through().text_color(theme.muted_foreground)
+                                    })
+                                    .child(item.name()),
+                            )
+                            .when(running, |d| {
+                                let track = div()
+                                    .h(gpui_kit::px(3.))
+                                    .w_full()
+                                    .rounded_full()
+                                    .overflow_hidden()
+                                    .bg(theme.muted);
+                                d.child(match item.ratio() {
+                                    Some(ratio) => track.child(
+                                        div()
+                                            .h_full()
+                                            .w(relative(ratio.max(0.02)))
+                                            .rounded_full()
+                                            .bg(theme.primary),
+                                    ),
+                                    None => {
+                                        track.child(crate::browser::loading_line(theme.primary))
+                                    }
+                                })
+                            })
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .truncate()
+                                    .text_color(detail_color)
+                                    .child(item.detail(now)),
+                            ),
+                    )
+                    // フォルダで表示するものは、乗せたときにフォルダの印を出す
+                    .when(open, |d| {
+                        d.child(
+                            div()
+                                .flex_none()
+                                .text_color(theme.muted_foreground)
+                                .opacity(0.)
+                                .group_hover(group.clone(), |s| s.opacity(1.))
+                                .child(app_icon("folder-open").size_4()),
+                        )
+                    })
+                    .when(!running, |d| {
+                        let downloads = downloads.clone();
+                        d.child(
+                            div()
+                                .opacity(0.)
+                                .group_hover(group.clone(), |s| s.opacity(1.))
+                                .child(
+                                    remove_x(
+                                        ("download-remove", ix),
+                                        "一覧から削除",
+                                        move |_, _, cx| {
+                                            downloads.update(cx, |d, cx| d.remove(id, cx))
+                                        },
+                                        cx,
+                                    )
+                                    .test_support(),
+                                ),
+                        )
+                    })
+                    .when(open, |d| {
+                        let downloads = downloads.clone();
+                        d.on_click(move |_, _, cx| downloads.update(cx, |d, cx| d.reveal(id, cx)))
+                    })
+                    .right_menu(move |menu, _, _| {
+                        let (reveal, opener, remover) = (
+                            menu_downloads.clone(),
+                            menu_downloads.clone(),
+                            menu_downloads.clone(),
+                        );
+                        let url = url.clone();
+                        menu.item(
+                            PopupMenuItem::new("フォルダで表示")
+                                .icon(app_icon("folder-open"))
+                                .disabled(!open)
+                                .on_click(move |_, _, cx| {
+                                    reveal.update(cx, |d, cx| d.reveal(id, cx))
+                                }),
+                        )
+                        .item(
+                            PopupMenuItem::new("開く")
+                                .icon(app_icon("external-link"))
+                                .disabled(!open)
+                                .on_click(move |_, _, cx| {
+                                    opener.update(cx, |d, cx| d.open_file(id, cx))
+                                }),
+                        )
+                        .item(
+                            PopupMenuItem::new("リンクをコピー")
+                                .icon(app_icon("link"))
+                                .disabled(!crate::browser::is_web(&url))
+                                .on_click(move |_, _, cx| {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(url.clone()))
+                                }),
+                        )
+                        .separator()
+                        .item(
+                            PopupMenuItem::new("一覧から削除")
+                                .icon(app_icon("x"))
+                                .disabled(running)
+                                .on_click(move |_, _, cx| {
+                                    remover.update(cx, |d, cx| d.remove(id, cx))
+                                }),
+                        )
+                    }),
+            );
+        }
+        let any_done = items.iter().any(|i| !i.running());
+        let body = col()
+            .gap_3()
+            .min_h_0()
+            .when_some(error, |d, error| {
+                d.child(
+                    div()
+                        .id("downloads-error")
+                        .text_sm()
+                        .text_color(theme.danger)
+                        .child(error)
+                        .test_support(),
+                )
+            })
+            .when(items.is_empty(), |d| {
+                d.child(
+                    div()
+                        .text_sm()
+                        .text_color(theme.muted_foreground)
+                        .child("ダウンロードはまだありません。"),
+                )
+            })
+            .child(
+                div()
+                    .id("downloads-scroll")
+                    .flex_1()
+                    .min_h_0()
+                    .max_h(px(420.))
+                    .overflow_y_scrollbar()
+                    .child(list),
+            )
+            .child(
+                row()
+                    .gap_1()
+                    .justify_end()
+                    .child(feel::gloss(
+                        button("downloads-folder")
+                            .icon(app_icon("folder-open"))
+                            .ghost()
+                            .small()
+                            .tooltip("ダウンロードのフォルダを開く")
+                            .on_click(|_, _, cx| {
+                                cx.open_with_system(&crate::downloads::download_dir(cx))
+                            }),
+                    ))
+                    .when(any_done, |d| {
+                        let downloads = downloads.clone();
+                        d.child(feel::gloss(
+                            button("downloads-clear")
+                                .icon(app_icon("list-x"))
+                                .ghost()
+                                .small()
+                                .tooltip("一覧を消去")
+                                .on_click(move |_, _, cx| {
+                                    downloads.update(cx, |d, cx| d.clear(cx))
+                                }),
+                        ))
+                    }),
+            );
+        self.dialog("ダウンロード", body, cx)
     }
 
     // ---- ホーム ----
@@ -9024,6 +9360,7 @@ impl MainView {
                         });
                 self.dialog("通知", body, cx)
             }
+            Modal::Downloads => self.render_downloads(cx),
             Modal::BulkDue => {
                 let body = col()
                     .gap_3()
@@ -9898,6 +10235,11 @@ impl Render for MainView {
                 }),
             )
             .on_action(cx.listener(|this, _: &ToggleAi, window, cx| this.toggle_ai(window, cx)))
+            .on_action(
+                cx.listener(|this, _: &crate::shell_keys::ShowDownloads, window, cx| {
+                    this.open_downloads(window, cx)
+                }),
+            )
             .on_action(cx.listener(|this, _: &PanePrefix, _, cx| {
                 this.pane_prefix = true;
                 cx.notify();
