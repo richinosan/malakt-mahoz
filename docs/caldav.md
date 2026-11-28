@@ -1,6 +1,6 @@
 # CalDAV との同期
 
-右上の歯車で開く「設定」の「同期」（macOS では「CalDAV・リマインダー同期」、ほかは「CalDAV 同期」）でアカウントを足し、サーバーのカレンダーをワークスペースにつないだときだけ動きます。標準ではどこにもつながりません。macOS の「リマインダー」アプリとの同期も、同じ「アカウントを追加」から選びます（[reminders.md](reminders.md)）。
+右上の歯車で開く「設定」の「連携と同期」（macOS では「CalDAV・リマインダー同期」、ほかは「CalDAV 同期」）でアカウントを足し、サーバーのカレンダーをワークスペースにつないだときだけ動きます。標準ではどこにもつながりません。macOS の「リマインダー」アプリとの同期も、同じ「アカウントを追加」から選びます（[reminders.md](reminders.md)）。
 
 CalDAV のタスク（VTODO）を扱えるサーバーなら、どれとも同期できます（Nextcloud、Radicale、Baïkal、Synology Calendar、Fastmail など）。Google Tasks・Microsoft To Do・iCloud の新しい形式のリマインダーは CalDAV のタスクを出さないので、つなげません。そのため「アカウントを追加」の一覧にもありません。
 

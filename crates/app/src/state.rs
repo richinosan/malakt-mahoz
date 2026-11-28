@@ -120,7 +120,70 @@ impl LimitField {
     }
 }
 
-/// 「設定」の左に並ぶカテゴリ。
+/// 「設定」の左に並ぶページ。1 つのページに、見出し（[`CustomizeSection`]）を 1 つ以上並べる。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingsPage {
+    Appearance,
+    General,
+    Ai,
+    Notices,
+    People,
+    Sync,
+    Security,
+    Keys,
+    Plugins,
+}
+
+impl SettingsPage {
+    pub const ALL: [SettingsPage; 9] = [
+        SettingsPage::Appearance,
+        SettingsPage::General,
+        SettingsPage::Ai,
+        SettingsPage::Notices,
+        SettingsPage::People,
+        SettingsPage::Sync,
+        SettingsPage::Security,
+        SettingsPage::Keys,
+        SettingsPage::Plugins,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SettingsPage::General => "一般",
+            SettingsPage::Appearance => "見た目",
+            SettingsPage::Ai => "AI",
+            SettingsPage::Notices => "通知",
+            SettingsPage::People => "担当者",
+            SettingsPage::Sync => "連携と同期",
+            SettingsPage::Security => "セキュリティ",
+            SettingsPage::Keys => "キー操作",
+            SettingsPage::Plugins => "プラグイン",
+        }
+    }
+
+    pub fn icon(self) -> &'static str {
+        match self {
+            SettingsPage::General => "settings",
+            SettingsPage::Appearance => "palette",
+            SettingsPage::Ai => "sparkles",
+            SettingsPage::Notices => "bell",
+            SettingsPage::People => "users",
+            SettingsPage::Sync => "calendar-sync",
+            SettingsPage::Security => "shield",
+            SettingsPage::Keys => "keyboard",
+            SettingsPage::Plugins => "puzzle",
+        }
+    }
+
+    /// このページに並ぶ見出し。並ぶ順に。
+    pub fn sections(self) -> impl Iterator<Item = CustomizeSection> {
+        CustomizeSection::ALL
+            .into_iter()
+            .filter(move |section| section.page() == self)
+    }
+}
+
+/// 「設定」の見出し。どれも、どこかのページ（[`SettingsPage`]）に入る。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CustomizeSection {
     Theme,
@@ -128,51 +191,56 @@ pub enum CustomizeSection {
     Backdrop,
     Look,
     Display,
+    Startup,
+    Update,
+    Window,
+    Browser,
+    Data,
     AiBots,
     AiModel,
     AiBehavior,
     AiRules,
     AiSchedules,
     AiGithub,
+    Notices,
+    DoneNotices,
+    People,
+    Sync,
     Lock,
     AccessKeys,
     McpConnection,
-    Notices,
-    Startup,
-    Update,
-    People,
-    Sync,
     Keys,
-    Window,
     Plugins,
-    Data,
 }
 
 impl CustomizeSection {
-    pub const ALL: [CustomizeSection; 23] = [
+    /// ページの順に並べた、すべての見出し。
+    pub const ALL: [CustomizeSection; 25] = [
         CustomizeSection::Theme,
         CustomizeSection::Layout,
         CustomizeSection::Backdrop,
         CustomizeSection::Look,
         CustomizeSection::Display,
+        CustomizeSection::Startup,
+        CustomizeSection::Update,
+        CustomizeSection::Window,
+        CustomizeSection::Browser,
+        CustomizeSection::Data,
         CustomizeSection::AiBots,
         CustomizeSection::AiModel,
         CustomizeSection::AiBehavior,
         CustomizeSection::AiRules,
         CustomizeSection::AiSchedules,
         CustomizeSection::AiGithub,
+        CustomizeSection::Notices,
+        CustomizeSection::DoneNotices,
+        CustomizeSection::People,
+        CustomizeSection::Sync,
         CustomizeSection::Lock,
         CustomizeSection::AccessKeys,
         CustomizeSection::McpConnection,
-        CustomizeSection::Notices,
-        CustomizeSection::Startup,
-        CustomizeSection::Update,
-        CustomizeSection::People,
-        CustomizeSection::Sync,
         CustomizeSection::Keys,
-        CustomizeSection::Window,
         CustomizeSection::Plugins,
-        CustomizeSection::Data,
     ];
 
     pub fn label(self) -> &'static str {
@@ -191,13 +259,15 @@ impl CustomizeSection {
             CustomizeSection::Lock => "ロック",
             CustomizeSection::AccessKeys => "アクセスキー",
             CustomizeSection::McpConnection => "MCP の接続",
-            CustomizeSection::Notices => "通知",
+            CustomizeSection::Notices => "期限",
+            CustomizeSection::DoneNotices => "ほかの人の完了",
             CustomizeSection::Startup => "スタートアップ",
             CustomizeSection::Update => "アップデート",
             CustomizeSection::People => "担当者",
             CustomizeSection::Sync => "同期",
             CustomizeSection::Keys => "キー操作",
             CustomizeSection::Window => "ウィンドウ",
+            CustomizeSection::Browser => "ブラウザ",
             CustomizeSection::Plugins => "プラグイン",
             CustomizeSection::Data => "データ",
         }
@@ -220,39 +290,46 @@ impl CustomizeSection {
             CustomizeSection::AccessKeys => "key-round",
             CustomizeSection::McpConnection => "plug",
             CustomizeSection::Notices => "bell",
+            CustomizeSection::DoneNotices => "check-check",
             CustomizeSection::Startup => "power",
             CustomizeSection::Update => "refresh-cw",
             CustomizeSection::People => "users",
             CustomizeSection::Sync => "calendar-sync",
             CustomizeSection::Keys => "keyboard",
             CustomizeSection::Window => "app-window",
+            CustomizeSection::Browser => "globe",
             CustomizeSection::Plugins => "puzzle",
             CustomizeSection::Data => "database",
         }
     }
 
-    /// 左に並べるときの見出し。
-    pub fn group(self) -> &'static str {
+    /// この見出しが入るページ。
+    pub fn page(self) -> SettingsPage {
         match self {
+            CustomizeSection::Startup
+            | CustomizeSection::Update
+            | CustomizeSection::Window
+            | CustomizeSection::Browser
+            | CustomizeSection::Data => SettingsPage::General,
+            CustomizeSection::Theme
+            | CustomizeSection::Layout
+            | CustomizeSection::Backdrop
+            | CustomizeSection::Look
+            | CustomizeSection::Display => SettingsPage::Appearance,
             CustomizeSection::AiBots
             | CustomizeSection::AiModel
             | CustomizeSection::AiBehavior
             | CustomizeSection::AiRules
             | CustomizeSection::AiSchedules
-            | CustomizeSection::AiGithub => "AI",
+            | CustomizeSection::AiGithub => SettingsPage::Ai,
+            CustomizeSection::Notices | CustomizeSection::DoneNotices => SettingsPage::Notices,
+            CustomizeSection::People => SettingsPage::People,
+            CustomizeSection::Sync => SettingsPage::Sync,
             CustomizeSection::Lock
             | CustomizeSection::AccessKeys
-            | CustomizeSection::McpConnection => "セキュリティ",
-            CustomizeSection::Notices
-            | CustomizeSection::Startup
-            | CustomizeSection::Update
-            | CustomizeSection::People
-            | CustomizeSection::Sync
-            | CustomizeSection::Keys
-            | CustomizeSection::Window
-            | CustomizeSection::Plugins
-            | CustomizeSection::Data => "アプリ",
-            _ => "見た目",
+            | CustomizeSection::McpConnection => SettingsPage::Security,
+            CustomizeSection::Keys => SettingsPage::Keys,
+            CustomizeSection::Plugins => SettingsPage::Plugins,
         }
     }
 
@@ -661,6 +738,8 @@ pub struct MainView {
     pub blur_slider: Entity<SliderState>,
     /// 出入りの動きを付ける。テストでは止めて、すぐ最後の位置に出す
     pub motion: bool,
+    /// 前に描いたときのウィンドウの幅。狭いウィンドウでは「設定」の並べ方を変える
+    pub viewport_width: Pixels,
     /// ダイアログが出た時刻。出てくる動きに使う。
     pub modal_opened: Option<std::time::Instant>,
     /// 閉じたばかりのダイアログと、閉じた時刻。消える動きの間だけ描く。
@@ -1176,7 +1255,7 @@ impl MainView {
             keys_help: None,
             sub_modal: None,
             open_after_unlock: None,
-            appearance_section: CustomizeSection::Theme,
+            appearance_section: CustomizeSection::ALL[0],
             appearance_pinned: false,
             preview_pick: None,
             ai_settings,
@@ -1196,6 +1275,7 @@ impl MainView {
             window_place: None,
             on_top: false,
             motion: true,
+            viewport_width: Pixels::MAX,
             modal_opened: None,
             modal_closing: None,
             panel_closing: None,
@@ -3100,7 +3180,8 @@ impl MainView {
         self.plugin_approving = None;
         // プラグインのフォルダーは、開くたびに読み直す
         crate::plugins::refresh(cx);
-        self.appearance_section = CustomizeSection::Theme;
+        // 開くたびに、最初のページ（見た目）のいちばん上から出す
+        self.appearance_section = CustomizeSection::ALL[0];
         self.appearance_pinned = false;
         self.preview_pick = None;
         self.ai_settings.update(cx, |s, cx| s.show_rules(None, cx));
@@ -3160,24 +3241,48 @@ impl MainView {
         cx.notify();
     }
 
-    /// 「設定」の左で、カテゴリを選ぶ。検索していたら検索をやめ、そのカテゴリの見出しまでスクロールする。
+    /// 「設定」の左で、ページを選ぶ。検索していたら検索をやめ、そのページをいちばん上から出す。
+    pub fn show_settings_page(
+        &mut self,
+        page: SettingsPage,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let first = self
+            .customize_sections(cx)
+            .into_iter()
+            .find(|section| section.page() == page)
+            .unwrap_or_else(|| page.sections().next().unwrap());
+        self.show_appearance_section(first, window, cx);
+    }
+
+    /// 「設定」で、見出しを選ぶ。検索していたら検索をやめ、見出しのページを開いて、その見出しまでスクロールする。
     pub fn show_appearance_section(
         &mut self,
         section: CustomizeSection,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let page_changed = self.appearance_section.page() != section.page();
+        let searching = !self.inputs.customize_search.read(cx).value().is_empty();
         self.appearance_section = section;
         self.appearance_pinned = true;
-        if !self.inputs.customize_search.read(cx).value().is_empty() {
+        if searching {
             self.inputs
                 .customize_search
                 .update(cx, |s, cx| s.set_value("", window, cx));
         }
+        if page_changed || searching {
+            self.appearance_scroll
+                .set_offset(gpui_kit::Point::default());
+            self.preview_pick = None;
+        }
+        // ページの中で何番目の見出しか。スクロールする所の子 1 つが、見出し 1 つ
         if let Some(ix) = self
             .customize_sections(cx)
-            .iter()
-            .position(|shown| *shown == section)
+            .into_iter()
+            .filter(|shown| shown.page() == section.page())
+            .position(|shown| shown == section)
         {
             self.appearance_scroll.scroll_to_top_of_item(ix);
         }
@@ -5744,6 +5849,7 @@ bundled_icons! {
         "zoom-out",
         "chevron-up",
         "calendar-sync",
+        "shield",
         "server",
         "cloud-alert",
         "cloud",

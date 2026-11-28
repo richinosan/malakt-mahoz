@@ -843,13 +843,15 @@ impl MainView {
                                 .test_support(),
                         )
                     })
-                    .child(
+                    .child(crate::render::on_off(
+                        state == State::On,
                         Switch::new(("plugin-switch", ix))
                             .checked(state == State::On)
                             .on_click(cx.listener(move |this, _: &bool, _, cx| {
                                 this.toggle_plugin(&id, cx)
                             })),
-                    )
+                        cx,
+                    ))
                     .test_support(),
             );
         }
@@ -859,7 +861,7 @@ impl MainView {
                     .px_2()
                     .text_sm()
                     .text_color(theme.muted_foreground)
-                    .child("見つかりません。"),
+                    .child("プラグインはありません。"),
             );
         }
         let problems = plugins
@@ -902,7 +904,7 @@ impl MainView {
                     button("plugins-reload")
                         .icon(app_icon("refresh-cw"))
                         .framed(cx)
-                        .tooltip("読み直す")
+                        .label("読み直す")
                         .on_click(cx.listener(|this, _, _, cx| this.plugins_changed(cx))),
                 )),
             )
@@ -970,13 +972,15 @@ impl MainView {
                             })),
                     ))
                     .map(|d| match folder.from {
-                        Source::Default => d.child(
+                        Source::Default => d.child(crate::render::on_off(
+                            use_default,
                             Switch::new("plugin-default-switch")
                                 .checked(use_default)
                                 .on_click(cx.listener(move |this, _: &bool, _, cx| {
                                     this.set_default_plugin_folder(!use_default, cx);
                                 })),
-                        ),
+                            cx,
+                        )),
                         Source::Setting => {
                             let view = cx.entity().downgrade();
                             d.child(remove_x(
@@ -1000,7 +1004,7 @@ impl MainView {
                 button("plugin-folder-add")
                     .icon(app_icon("plus"))
                     .framed(cx)
-                    .tooltip("フォルダーを足す")
+                    .label("フォルダーを追加")
                     .on_click(
                         cx.listener(|this, _, window, cx| this.pick_plugin_folders(window, cx)),
                     ),
