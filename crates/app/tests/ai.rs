@@ -5636,6 +5636,18 @@ fn bots_check_in_every_day_and_the_notice_opens_the_chat(cx: &mut TestAppContext
         |i| matches!(i, Item::Assistant(t) if t.contains("来週の準備"))
     )));
     assert!(notices(cx)[0].read_at.is_some());
+    // 送った指示は会話に出さず、「毎日の声かけ」と出す
+    assert_eq!(
+        read(cx, |s| s.items.first().cloned()),
+        Some(Item::Notice(malakt_mahoz::ai::CHECK_IN_TITLE.into()))
+    );
+    let title = read(cx, |s| {
+        s.chats
+            .iter()
+            .find(|c| c.id == chat)
+            .map(|c| c.title.clone())
+    });
+    assert_eq!(title.as_deref(), Some("秘書: 毎日の声かけ"));
 
     world.reply(text_reply("おはようございます。"));
     let started = session(cx).update(cx, |s, cx| s.check_in_at("2099-01-06", "09:30", cx));

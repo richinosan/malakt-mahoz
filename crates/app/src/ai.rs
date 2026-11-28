@@ -147,6 +147,9 @@ pub const CHECK_IN_PROMPT: &str = "毎日の声かけの時間です。今日と
 進んでいないタスクをツールで読み、ユーザーに今日伝えたいことを 3 文までで書いてください。\
 タスクは変えず、したほうがよいことは「〜しましょうか」と提案してください。ユーザーが答えたら、この会話で実行します。";
 
+/// bot の毎日の声かけの会話の題。会話の中にも、送った指示の代わりにこれを出す。
+pub const CHECK_IN_TITLE: &str = "毎日の声かけ";
+
 /// bot の声かけを最後にした日（`YYYY-MM-DD`）を覚える設定の鍵。
 fn check_in_key(bot: &str) -> String {
     format!("ai.bot.check_in.{bot}")
@@ -1736,13 +1739,27 @@ impl Session {
             );
             return;
         }
+        if check_in {
+            // 声かけの指示は、ユーザーが書いたものではないので、会話には「毎日の声かけ」とだけ出す
+            worker.update(cx, |w, _| {
+                for item in &mut w.items {
+                    if matches!(item, Item::User(text) if text.as_ref() == queued.text) {
+                        *item = Item::Notice(CHECK_IN_TITLE.into());
+                    }
+                }
+            });
+        }
         let watch = cx.observe(&worker, |this, worker, cx| {
             this.parallel_changed(&worker, cx)
         });
-        let title = clip_chars(
-            queued.text.lines().next().unwrap_or_default(),
-            MAX_TITLE_CHARS,
-        );
+        let title = if check_in {
+            CHECK_IN_TITLE.to_owned()
+        } else {
+            clip_chars(
+                queued.text.lines().next().unwrap_or_default(),
+                MAX_TITLE_CHARS,
+            )
+        };
         self.parallel.push(Parallel {
             session: worker,
             title: match label {
