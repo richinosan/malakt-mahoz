@@ -1153,11 +1153,7 @@ impl MainView {
                 self.modal = Modal::Notices;
                 self.focus.focus(window, cx);
             }
-            "keys" => {
-                if self.pane_overlay != Some(crate::panes::PaneOverlay::Help) {
-                    self.toggle_keys(cx);
-                }
-            }
+            "keys" => self.open_keys(window, cx),
             "workspace_settings" | "workspace_icon" => {
                 let id = workspace()?;
                 self.db

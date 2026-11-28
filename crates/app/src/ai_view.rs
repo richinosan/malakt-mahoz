@@ -34,6 +34,25 @@ use crate::state::{DropTarget, MainView};
 use crate::term::{self, TermPane};
 use crate::{ClearShell, StopAi};
 
+/// キーの一覧に出す、AI チャットのキー。
+pub fn chat_help() -> Vec<(&'static str, &'static str)> {
+    vec![
+        ("Enter", "送信"),
+        ("Shift+Enter", "改行"),
+        ("Ctrl+C", "止める（文字を選んでいればコピー）"),
+    ]
+}
+
+/// キーの一覧に出す、AI のタブ（シェルの入力行）のキー。
+pub fn shell_help() -> Vec<(&'static str, &'static str)> {
+    vec![
+        ("Enter", "実行"),
+        ("↑ ↓", "前に入力したコマンド"),
+        ("Ctrl+C", "止める（文字を選んでいればコピー）"),
+        ("Ctrl+L", "画面を消す"),
+    ]
+}
+
 /// 参照する寸法を、画面全体の拡大率に合わせる。
 const fn px(value: f32) -> Pixels {
     gpui_kit::px(value * crate::UI_SCALE)
@@ -3435,15 +3454,21 @@ impl Render for AiPane {
             // 別のウィンドウでは、ここでもマウスの操作を見張る（自動でロックするまでの時間）
             .when(self.mode != PaneMode::Docked, |d| {
                 d.child(crate::db::input_watcher())
+                    // 別のウィンドウでは、キー操作の一覧もここで開く（タスクの画面の中ではタスクの画面が開く）
+                    .on_action(|_: &crate::shortcuts::ShowKeys, window, cx| {
+                        crate::keys_help::toggle(window, cx)
+                    })
             });
+        let keys_open = self.mode != PaneMode::Docked && crate::keys_help::is_open(window, cx);
         match self.mode {
             PaneMode::ShellWindow => base
                 .size_full()
                 .flex_col()
                 .children(title_bar)
                 .child(self.render_shell(cx))
+                .children(crate::keys_help::overlay(window, cx))
                 // ブラウザのページを見せるかは、いちばん最後に決める
-                .child(crate::browser::frame_end(false, window, cx))
+                .child(crate::browser::frame_end(keys_open, window, cx))
                 .into_any_element(),
             PaneMode::ChatWindow => {
                 // ウィンドウが狭ければ、シェルはチャットの下に置く
@@ -3477,7 +3502,8 @@ impl Render for AiPane {
                     .flex_col()
                     .children(title_bar)
                     .child(body)
-                    .child(crate::browser::frame_end(false, window, cx))
+                    .children(crate::keys_help::overlay(window, cx))
+                    .child(crate::browser::frame_end(keys_open, window, cx))
                     .into_any_element()
             }
             PaneMode::Docked => {

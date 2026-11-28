@@ -25,6 +25,14 @@ use crate::scroll::Menus;
 
 actions!(timer, [OpenTimer, ToggleTimer, CloseTimerEdit]);
 
+/// キーの一覧に出す、タイマーのキー。
+pub fn help() -> Vec<(&'static str, &'static str)> {
+    vec![
+        ("Space", "開始 / 一時停止"),
+        ("Esc", "時間の編集をキャンセル"),
+    ]
+}
+
 /// 開いたときの大きさ。
 const SIZE: Size<Pixels> = Size {
     width: px(320.),
@@ -604,6 +612,9 @@ impl Render for TimerView {
             .on_action(|_: &crate::shortcuts::ToggleFullscreen, window, _| {
                 window.toggle_fullscreen()
             })
+            .on_action(|_: &crate::shortcuts::ShowKeys, window, cx| {
+                crate::keys_help::toggle(window, cx)
+            })
             // ここでもマウスの操作を見張る（自動でロックするまでの時間）
             .child(db::input_watcher())
             .child(bar)
@@ -616,6 +627,7 @@ impl Render for TimerView {
                 })
             }))
             .child(body)
+            .children(crate::keys_help::overlay(window, cx))
             .test_support()
     }
 }

@@ -22,6 +22,7 @@ mod feel;
 pub mod fonts;
 mod history_view;
 pub mod icons;
+pub mod keys_help;
 pub mod mcp;
 pub mod mcp_http;
 mod mcp_keys;
@@ -212,6 +213,7 @@ pub fn init_with(store: malakt_core::Store, ai: AiConfig, cx: &mut App) {
         KeyBinding::new("ctrl-b", PanePrefix, Some("MainView")),
     ]);
     shortcuts::bind(cx);
+    keys_help::bind(cx);
     // カレンダーの中の矢印などは、一覧のキーより後に割り当てる
     date_pick::bind(cx);
     // 場所を決めていない割り当て（ロックなど）より後に割り当てる

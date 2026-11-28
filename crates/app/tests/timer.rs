@@ -347,3 +347,40 @@ fn the_stopwatch_and_the_ai_tools(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert_eq!(state(cx).run(), Run::Ready);
 }
+
+/// タイマーのウィンドウでも Ctrl+?（⌘?）でキー操作の一覧が開き、タイマーのキーが先頭に出る。
+/// 開いている間の Space は検索の欄の文字で、Esc で一覧を閉じると、Space はまたタイマーを動かす。
+#[gpui_kit::test]
+fn keys_help_opens_in_the_timer_window(cx: &mut TestAppContext) {
+    start(cx);
+    let _ = open(cx);
+    let window = cx.update(|cx| timer::open(cx).unwrap());
+    cx.run_until_parked();
+    let titles = |cx: &mut TestAppContext| -> Vec<&'static str> {
+        cx.update_window(window, |_, window, cx| {
+            malakt_mahoz::keys_help::opened(window, cx)
+                .map(|help| help.read(cx).shown(cx).iter().map(|g| g.title).collect())
+                .unwrap_or_default()
+        })
+        .unwrap()
+    };
+    ui(cx, window, |window, cx| window.click("timer-time", cx));
+    ui(cx, window, |window, cx| window.press("escape", cx));
+    let before = state(cx).run();
+    ui(cx, window, |window, cx| {
+        window.press("secondary-shift-/", cx)
+    });
+    assert_eq!(&titles(cx)[..2], ["タイマー", "どのウィンドウでも"]);
+    ui(cx, window, |window, cx| {
+        assert!(window.try_find("keys-search").is_some());
+        window.press("space", cx);
+    });
+    assert_eq!(state(cx).run(), before);
+    ui(cx, window, |window, cx| window.press("escape", cx));
+    assert!(titles(cx).is_empty());
+    ui(cx, window, |window, _| {
+        assert!(window.try_find("keys-search").is_none())
+    });
+    ui(cx, window, |window, cx| window.press("space", cx));
+    assert_ne!(state(cx).run(), before);
+}

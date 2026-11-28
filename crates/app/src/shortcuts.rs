@@ -86,8 +86,12 @@ pub fn bind(cx: &mut App) {
         KeyBinding::new(secondary!("z"), Undo, at),
         KeyBinding::new(secondary!("shift-z"), Redo, at),
         KeyBinding::new(secondary!(","), OpenSettings, at),
-        KeyBinding::new("f1", ShowKeys, at),
-        KeyBinding::new(secondary!("/"), ShowKeys, at),
+        // キー操作の一覧は、どのウィンドウ・どの場所でも開く
+        KeyBinding::new("f1", ShowKeys, None),
+        KeyBinding::new(secondary!("/"), ShowKeys, None),
+        KeyBinding::new(secondary!("shift-/"), ShowKeys, None),
+        // メニューには最後に割り当てたキー（Ctrl+? / ⌘?）が出る
+        KeyBinding::new(secondary!("?"), ShowKeys, None),
         KeyBinding::new("f5", Reload, at),
         KeyBinding::new(secondary!("r"), Reload, at),
     ];
@@ -113,15 +117,25 @@ pub const LOCK_KEY: &str = if MAC { "⇧⌘L" } else { "Ctrl+Shift+L" };
 /// 「新しいウィンドウ」のキー。
 pub const NEW_WINDOW_KEY: &str = if MAC { "⇧⌘N" } else { "Ctrl+Shift+N" };
 
-/// キーの一覧に出す、キーと説明。
-pub fn help() -> Vec<(&'static str, &'static str)> {
-    let pick = |windows: &'static str, mac: &'static str| if MAC { mac } else { windows };
+/// 「キー操作」の一覧を開くキー。
+pub const KEYS_KEY: &str = if MAC { "⌘?" } else { "Ctrl+?" };
+
+fn pick(windows: &'static str, mac: &'static str) -> &'static str {
+    if MAC {
+        mac
+    } else {
+        windows
+    }
+}
+
+/// キーの一覧に出す、タスクの画面のキー。
+pub fn list_help() -> Vec<(&'static str, &'static str)> {
     vec![
         (pick("Ctrl+N", "⌘N"), "新しいタスク"),
-        (NEW_WINDOW_KEY, "新しいウィンドウ"),
         (pick("Ctrl+F", "⌘F"), "検索"),
         ("↑ ↓", "タスクを選ぶ"),
         ("Home / End", "最初 / 最後のタスク"),
+        ("PageUp / PageDown", "10 行ずつ動く"),
         ("Enter", "タスクを開く"),
         ("F2", "名前を変更"),
         (pick("Delete", "⌘⌫ / Delete"), "削除"),
@@ -136,10 +150,18 @@ pub fn help() -> Vec<(&'static str, &'static str)> {
         ("Esc", "閉じる"),
         (pick("Ctrl+J", "⌘J"), "AI チャット"),
         (pick("Ctrl+,", "⌘,"), "設定"),
+        (pick("F5 / Ctrl+R", "⌘R"), "読み込み直す"),
+        ("Ctrl+B", "ペインの操作"),
+    ]
+}
+
+/// キーの一覧に出す、どのウィンドウでも使えるキー。
+pub fn app_help() -> Vec<(&'static str, &'static str)> {
+    vec![
+        (pick("Ctrl+? / Ctrl+/ / F1", "⌘? / ⌘/ / F1"), "キー操作"),
+        (NEW_WINDOW_KEY, "新しいウィンドウ"),
         (LOCK_KEY, "今すぐロック"),
         (pick("F11", "⌃⌘F"), "全画面"),
-        (pick("F5", "⌘R"), "読み込み直す"),
-        (pick("F1", "F1 / ⌘/"), "キー操作"),
         (pick("Ctrl+Q", "⌘Q"), "終了"),
     ]
 }
@@ -227,16 +249,54 @@ impl MainView {
             }
             this.open_appearance(window, cx)
         }))
-        .on_action(cx.listener(|this, _: &ShowKeys, _, cx| this.toggle_keys(cx)))
+        .on_action(cx.listener(|this, _: &ShowKeys, window, cx| this.toggle_keys(window, cx)))
         // 押したウィンドウを全画面にする（ブラウザのページの中で押したときも、そのウィンドウ）
         .on_action(|_: &ToggleFullscreen, window, _| window.toggle_fullscreen())
     }
 
     /// キーの一覧を出す。出ていれば閉じる。
-    pub fn toggle_keys(&mut self, cx: &mut Context<Self>) {
-        self.pane_overlay =
-            (self.pane_overlay != Some(PaneOverlay::Help)).then_some(PaneOverlay::Help);
+    pub fn toggle_keys(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.pane_overlay == Some(PaneOverlay::Help) {
+            self.pane_overlay = None;
+            cx.notify();
+        } else {
+            self.open_keys(window, cx);
+        }
+    }
+
+    /// キーの一覧を出す。今のキーの入力先の場所のキーを先頭にする。
+    pub fn open_keys(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.pane_overlay == Some(PaneOverlay::Help) {
+            return;
+        }
+        let panes = self.pane_keys;
+        let help = cx.new(|cx| crate::keys_help::KeysHelp::new(Some(panes), window, cx));
+        cx.subscribe_in(&help, window, |this, _, _: &DismissEvent, _, cx| {
+            if this.pane_overlay == Some(PaneOverlay::Help) {
+                this.pane_overlay = None;
+                cx.notify();
+            }
+        })
+        .detach();
+        self.keys_help = Some(help);
+        self.pane_overlay = Some(PaneOverlay::Help);
         cx.notify();
+    }
+
+    /// キーの一覧を閉じたあと、開く前のキーの入力先に戻す。描くたびに呼ぶ。
+    pub(crate) fn return_from_keys(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.pane_overlay == Some(PaneOverlay::Help) {
+            return;
+        }
+        let Some(help) = &self.keys_help else {
+            return;
+        };
+        if let Some(back) = help.update(cx, |help, _| help.take_back()) {
+            match back {
+                Some(back) => window.focus(&back, cx),
+                None => self.focus.focus(window, cx),
+            }
+        }
     }
 
     /// ダイアログや、ペインのキーの待ちが上に出ている。

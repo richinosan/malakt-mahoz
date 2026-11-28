@@ -598,6 +598,8 @@ pub struct MainView {
     pub pane_resize: bool,
     pub pane_keys: malakt_core::panes::Keys,
     pub pane_overlay: Option<crate::panes::PaneOverlay>,
+    /// 最後に開いたキー操作の一覧。閉じたあとも、消える動きの間は描く
+    pub keys_help: Option<Entity<crate::keys_help::KeysHelp>>,
     /// 自分で保存した配置（名前、配置）
     pub pane_presets: Vec<(String, String)>,
     pub border_drag: Option<crate::panes::BorderDrag>,
@@ -1161,6 +1163,7 @@ impl MainView {
             pane_resize: false,
             pane_keys: Default::default(),
             pane_overlay: None,
+            keys_help: None,
             sub_modal: None,
             open_after_unlock: None,
             appearance_section: CustomizeSection::Theme,

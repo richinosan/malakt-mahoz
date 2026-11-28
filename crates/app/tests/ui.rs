@@ -2473,7 +2473,7 @@ fn the_gear_opens_settings_with_everything_inside(cx: &mut TestAppContext) {
         window.click(nav(Section::Keys), cx)
     });
     ui(cx, window, |window, _| {
-        assert!(window.find("app-keys").visible())
+        assert!(window.find("keys-open").visible())
     });
 
     // 新しいウィンドウ。目次の下のほうは、目次をスクロールして出す
@@ -5239,7 +5239,7 @@ fn pane_presets_are_saved_applied_and_deleted(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn panes_split_move_resize_close_and_come_back(cx: &mut TestAppContext) {
     use gpui_kit::Keystroke;
-    use malakt_core::panes::{Action, Dir, Keys};
+    use malakt_core::panes::{Action, Dir};
     use malakt_mahoz::panes::PaneOverlay;
     start(cx);
     let ws = cx.update(|cx| {
@@ -5350,15 +5350,6 @@ fn panes_split_move_resize_close_and_come_back(cx: &mut TestAppContext) {
     // ? でキーの一覧、b でプリセット。Esc で閉じる
     keys(cx, &["shift-/"]);
     cx.update(|cx| assert_eq!(view.read(cx).pane_overlay, Some(PaneOverlay::Help)));
-    ui(cx, window, |window, cx| {
-        window.click(("pane-keys", 1usize), cx)
-    });
-    cx.update(|cx| assert_eq!(view.read(cx).pane_keys, Keys::Tmux));
-    assert_eq!(
-        store(cx, |s| s.setting("panes.keys").unwrap()).as_deref(),
-        Some("tmux")
-    );
-    cx.update(|cx| view.update(cx, |v, cx| v.set_pane_keys(Keys::Herdr, cx)));
     cx.update(|cx| view.update(cx, |v, cx| v.dismiss(cx)));
     keys(cx, &["b"]);
     cx.update(|cx| assert_eq!(view.read(cx).pane_overlay, Some(PaneOverlay::Presets)));
@@ -6483,12 +6474,106 @@ fn standard_keys_work_on_the_list(cx: &mut TestAppContext) {
         )
     });
     ui(cx, window, |window, _| {
-        assert!(window.try_find("app-keys").is_some())
+        assert!(window.try_find("keys-search").is_some())
     });
     key(cx, "f1");
     cx.update(|cx| assert_eq!(view.read(cx).pane_overlay, None));
     key(cx, "secondary-,");
     cx.update(|cx| assert_eq!(view.read(cx).modal, Modal::Appearance));
+}
+
+/// 一覧の中のまとまりの名前（上から順）。
+fn keys_shown(cx: &mut TestAppContext, view: &Entity<MainView>) -> Vec<&'static str> {
+    cx.update(|cx| {
+        let help = view.read(cx).keys_help.clone().expect("キー操作の一覧");
+        help.read(cx).shown(cx).iter().map(|g| g.title).collect()
+    })
+}
+
+/// Ctrl+?（⌘?）でキー操作の一覧が開く。今いる場所のキーが先頭で、書いた言葉で絞れる。Esc で一覧だけが閉じ、
+/// 開く前の場所に戻る。設定の「キー操作の一覧」からも、設定の上に開く。
+#[gpui_kit::test]
+fn keys_help_opens_with_ctrl_question(cx: &mut TestAppContext) {
+    use malakt_core::panes::Keys;
+    use malakt_mahoz::panes::PaneOverlay;
+    start(cx);
+    let (window, view) = open(cx, wide());
+    let key =
+        |cx: &mut TestAppContext, key: &str| ui(cx, window, |window, cx| window.press(key, cx));
+    ui(cx, window, |window, cx| {
+        view.read(cx).focus.clone().focus(window, cx)
+    });
+
+    // タスクの画面で開くと、タスクの画面のキーが先頭
+    key(cx, "secondary-shift-/");
+    cx.update(|cx| assert_eq!(view.read(cx).pane_overlay, Some(PaneOverlay::Help)));
+    assert_eq!(
+        &keys_shown(cx, &view)[..3],
+        &[
+            "タスクの画面",
+            "どのウィンドウでも",
+            "ペイン（Ctrl+B のあとに押すキー）"
+        ]
+    );
+    // 書いた言葉で絞る。一覧のキー（↓ や Space）は検索の欄の文字のまま
+    ui(cx, window, |window, cx| window.input("新しいタブ", cx));
+    assert_eq!(keys_shown(cx, &view), ["ブラウザのタブ"]);
+    key(cx, "down");
+    cx.update(|cx| assert_eq!(view.read(cx).cursor, None));
+    ui(cx, window, |window, cx| {
+        window.press("secondary-a", cx);
+        window.input("存在しない", cx);
+    });
+    assert!(keys_shown(cx, &view).is_empty());
+    ui(cx, window, |window, _| {
+        assert!(window.try_find(("keys-group", 0usize)).is_none())
+    });
+
+    // Esc で一覧だけが閉じ、元の場所でキーが効く
+    key(cx, "escape");
+    cx.update(|cx| assert_eq!(view.read(cx).pane_overlay, None));
+    ui(cx, window, |window, cx| {
+        assert!(view.read(cx).focus.is_focused(window))
+    });
+
+    // Ctrl+/ でも開き、もう一度押すと閉じる。開き直すと検索の欄は空
+    key(cx, "secondary-/");
+    cx.update(|cx| assert_eq!(view.read(cx).pane_overlay, Some(PaneOverlay::Help)));
+    assert_eq!(keys_shown(cx, &view)[0], "タスクの画面");
+    key(cx, "secondary-/");
+    cx.update(|cx| assert_eq!(view.read(cx).pane_overlay, None));
+
+    // 設定の「キー操作の一覧」から、設定の上に開く。Esc で閉じても設定は開いたまま
+    key(cx, "secondary-,");
+    cx.update(|cx| assert_eq!(view.read(cx).modal, Modal::Appearance));
+    ui(cx, window, |window, cx| {
+        window.click("customize-search", cx);
+        window.input("キー操作", cx);
+    });
+    ui(cx, window, |window, cx| window.click("keys-open", cx));
+    cx.update(|cx| {
+        let v = view.read(cx);
+        assert_eq!(v.pane_overlay, Some(PaneOverlay::Help));
+        assert_eq!(v.modal, Modal::Appearance);
+    });
+    ui(cx, window, |window, _| {
+        assert!(window.try_find("keys-search").is_some())
+    });
+    key(cx, "escape");
+    cx.update(|cx| {
+        let v = view.read(cx);
+        assert_eq!(v.pane_overlay, None);
+        assert_eq!(v.modal, Modal::Appearance);
+    });
+    // ペインのキーの割り当ては設定で選ぶ
+    ui(cx, window, |window, cx| {
+        window.click(("pane-keys", 1usize), cx)
+    });
+    cx.update(|cx| assert_eq!(view.read(cx).pane_keys, Keys::Tmux));
+    assert_eq!(
+        store(cx, |s| s.setting("panes.keys").unwrap()).as_deref(),
+        Some("tmux")
+    );
 }
 
 /// Ctrl+Z で元に戻し、Ctrl+Y でやり直す。編集、削除、画面の外からの変更（AI など）、貼り付けのどれも戻せる。

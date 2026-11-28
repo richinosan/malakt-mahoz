@@ -30,6 +30,14 @@ use crate::scroll::Menus;
 
 actions!(pomodoro, [OpenPomodoro, TogglePomodoro, ClosePomodoroPage]);
 
+/// キーの一覧に出す、ポモドーロのキー。
+pub fn help() -> Vec<(&'static str, &'static str)> {
+    vec![
+        ("Space", "開始 / 一時停止"),
+        ("Esc", "タイマーの画面に戻る"),
+    ]
+}
+
 /// 開いたときの大きさ。
 const SIZE: Size<Pixels> = Size {
     width: px(340.),
@@ -1067,6 +1075,9 @@ impl Render for PomodoroView {
             .on_action(|_: &crate::shortcuts::ToggleFullscreen, window, _| {
                 window.toggle_fullscreen()
             })
+            .on_action(|_: &crate::shortcuts::ShowKeys, window, cx| {
+                crate::keys_help::toggle(window, cx)
+            })
             // ここでもマウスの操作を見張る（自動でロックするまでの時間）
             .child(db::input_watcher())
             .child(bar)
@@ -1079,6 +1090,7 @@ impl Render for PomodoroView {
                 })
             }))
             .child(body)
+            .children(crate::keys_help::overlay(window, cx))
             .test_support()
     }
 }
