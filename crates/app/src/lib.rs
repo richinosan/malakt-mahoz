@@ -484,6 +484,10 @@ fn load_fonts(cx: &mut App) {
         include_bytes!("../assets/fonts/LINESeedJP-Bold.ttf")
             .as_slice()
             .into(),
+        // ターミナルのプロンプト（oh-my-posh など）が使う Nerd Font のアイコン
+        include_bytes!("../assets/fonts/JetBrainsMonoNerdFontMono-Regular.ttf")
+            .as_slice()
+            .into(),
     ];
     // 書体の名前は配色の設定（theme.rs）に書いてある
     let _ = cx.text_system().add_fonts(fonts);

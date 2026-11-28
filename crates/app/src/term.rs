@@ -1437,7 +1437,8 @@ impl TermPane {
     }
 }
 
-/// 罫線とブロックの文字を、マスいっぱいの四角で描く。となりのマスとすき間なくつながる。
+/// 罫線とブロックの文字を、マスいっぱいの四角で描く。Powerline の三角もマスいっぱいに描く。
+/// となりのマスとすき間なくつながる。
 /// その文字でなければ `false`。
 fn paint_lines(c: char, cell: Bounds<Pixels>, color: Hsla, window: &mut Window) -> bool {
     let (x, y) = (cell.origin.x, cell.origin.y);
@@ -1451,10 +1452,47 @@ fn paint_lines(c: char, cell: Bounds<Pixels>, color: Hsla, window: &mut Window) 
         }
         return true;
     }
+    let light = (f32::from(w) / 8.).round().max(1.);
+    if let Some(right) = malakt_term::powerline_round(c) {
+        // 平らな辺をマスの端に置き、反対の端までふくらむ半円。平らな辺は となりの色と
+        // 縁がぼけて筋が見えるので、となりのマスへ 1 px 重ねる
+        let over = gpui_kit::px(1.);
+        let edge = if right { x - over } else { x + w + over };
+        let radii = point(w + over, h / 2.);
+        let mut path = PathBuilder::fill();
+        path.move_to(point(edge, y));
+        path.arc_to(radii, gpui_kit::px(0.), false, right, point(edge, y + h));
+        path.close();
+        let Ok(path) = path.build() else {
+            return false;
+        };
+        window.paint_path(path, color);
+        return true;
+    }
+    if let Some((corners, filled)) = malakt_term::powerline_shape(c) {
+        let mut path = if filled {
+            PathBuilder::fill()
+        } else {
+            PathBuilder::stroke(gpui_kit::px(light))
+        };
+        let [first, rest @ ..] = corners.map(|[px, py]| point(x + w * px, y + h * py));
+        path.move_to(first);
+        for corner in rest {
+            path.line_to(corner);
+        }
+        if filled {
+            path.close();
+        }
+        // 形が作れないことはない（3 点の決まった形）。作れなければ書体の字形で描く
+        let Ok(path) = path.build() else {
+            return false;
+        };
+        window.paint_path(path, color);
+        return true;
+    }
     let Some([left, right, up, down]) = malakt_term::box_arms(c) else {
         return false;
     };
-    let light = (f32::from(w) / 8.).round().max(1.);
     let thick = |weight: u8| gpui_kit::px(light * f32::from(weight));
     let (cx, cy) = ((x + w / 2.).round(), (y + h / 2.).round());
     // 角で線が欠けないよう、交わる線の太さの半分だけ中心を越えて引く
@@ -1497,11 +1535,18 @@ fn paint(frame: &Frame, window: &mut Window, cx: &mut App) {
     };
     let draw =
         |text: &str, fg: u32, look: u8, to: Point<Pixels>, window: &mut Window, cx: &mut App| {
-            let mut font = frame.font.clone();
-            if look & style::BOLD != 0 {
+            // Nerd Font のアイコンは、同梱のアイコンの書体で描く。ターミナルの書体が
+            // Nerd Font でなくても、Windows Terminal と同じようにプロンプトの記号が出る
+            let symbol = text.chars().next().is_some_and(malakt_term::nerd_symbol);
+            let mut font = if symbol {
+                font(crate::theme::SYMBOL_FONT)
+            } else {
+                frame.font.clone()
+            };
+            if look & style::BOLD != 0 && !symbol {
                 font = font.bold();
             }
-            if look & style::ITALIC != 0 {
+            if look & style::ITALIC != 0 && !symbol {
                 font = font.italic();
             }
             let color = hsla(fg);
