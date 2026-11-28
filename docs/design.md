@@ -8,7 +8,7 @@
 | `crates/ai`（`malakt-ai`） | AI とのやり取り。各サービスへのリクエスト、キーの保存、AI に渡すタスク操作、GitHub と Slack の取得、コマンドの実行。画面に依存しません |
 | `crates/term`（`malakt-term`） | ターミナル。開けるシェルの一覧、PTY（Windows は ConPTY）、端末エミュレーション、キーとマウスの変換。画面に依存しません |
 | `crates/update`（`malakt-update`） | 自動アップデート。GitHub Releases の確認、ダウンロードと検証、実行ファイルの入れ替え。画面に依存しません |
-| `crates/app`（`malakt-mahoz`） | gpui の画面。状態は `state.rs`、描画は `render.rs`、コマンドは `cli.rs`、AI チャットは `ai.rs` と `ai_view.rs`、ターミナルは `term.rs` |
+| `crates/app`（`malakt-mahoz`） | gpui の画面。状態は `state.rs`、描画は `render.rs`、コマンドは `cli.rs`、AI bot は `ai.rs` と `ai_view.rs`、ターミナルは `term.rs` |
 
 ツールの名前・説明・引数は `api/`（TypeSpec）に 1 か所で書き、`api/generated/tools.json` を `ai` が実行ファイルに埋め込んで読みます（[docs/api.md](api.md)）。
 

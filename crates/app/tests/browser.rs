@@ -260,6 +260,7 @@ fn start(cx: &mut TestAppContext, store: Store) -> World {
         }),
         get: Arc::new(|url, _| Err(format!("テストでは {url} を読めません"))),
         probe: Arc::new(|url, _| Err(format!("テストでは {url} に接続しません"))),
+        form: Arc::new(|url, _| Err(format!("テストでは {url} に送れません"))),
         gh: Arc::new(|_| Spec::shell("exit 1")),
         slack: Arc::new(|_| Vec::new()),
         whoami: Arc::new(|_| vec![Spec::shell("exit 1")]),
@@ -1206,7 +1207,7 @@ fn ctrl_f_finds_in_the_page(cx: &mut TestAppContext) {
     });
 }
 
-/// ページの中で押したアプリのキー（全画面、AI チャット）も、いつもどおりに働く。
+/// ページの中で押したアプリのキー（全画面、AI bot）も、いつもどおりに働く。
 #[gpui_kit::test]
 fn app_keys_work_inside_the_page(cx: &mut TestAppContext) {
     let world = start(cx, Store::open_in_memory().unwrap());
@@ -1234,14 +1235,11 @@ fn app_keys_work_inside_the_page(cx: &mut TestAppContext) {
     ui(cx, window, |window, _| {
         assert!(window.try_find("downloads").is_none())
     });
-    // AI チャットのキー（macOS の ⌘J）。AI チャットを閉じるとページも隠れるので、最後に確かめる
+    // AI bot のキー（macOS の ⌘J）。AI bot を閉じるとページも隠れるので、最後に確かめる
     #[cfg(target_os = "macos")]
     press_in_page(cx, &world, window, tab, "cmd-j");
     #[cfg(target_os = "macos")]
-    assert!(
-        !cx.update(|cx| view.read(cx).ai_open),
-        "AI チャットを閉じる"
-    );
+    assert!(!cx.update(|cx| view.read(cx).ai_open), "AI bot を閉じる");
 }
 
 /// 小さなウィンドウのバーを右クリックすると、ほかのウィンドウと同じメニューが出る。

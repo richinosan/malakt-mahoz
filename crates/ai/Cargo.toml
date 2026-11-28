@@ -1,6 +1,6 @@
 [package]
 name = "malakt-ai"
-description = "malakt-mahoz の AI チャット（UI 非依存）。API の呼び出し、タスクを操作するツール、シェル"
+description = "malakt-mahoz の AI bot（UI 非依存）。API の呼び出し、タスクを操作するツール、シェル"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -13,10 +13,12 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 roxmltree = "0.20"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 dirs = "5"
+getrandom = "0.3"
 keyring = "4"
 malakt-core.workspace = true
 malakt-term.workspace = true
 serde_json.workspace = true
+sha2 = "0.10"
 ureq = { version = "3", features = ["json", "platform-verifier"] }
 
 [dev-dependencies]
