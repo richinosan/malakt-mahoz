@@ -823,7 +823,8 @@
         ],
         "additionalProperties": false
       },
-      "writes": true
+      "writes": true,
+      "local_files": true
     },
     {
       "name": "delete_attachment",
@@ -2093,7 +2094,8 @@
         ],
         "additionalProperties": false
       },
-      "writes": true
+      "writes": true,
+      "local_files": true
     },
     {
       "name": "delete_schedule_attachment",
@@ -3189,6 +3191,111 @@
         "additionalProperties": false
       },
       "session": true
+    },
+    {
+      "name": "list_plugins",
+      "group": "app",
+      "description": "プラグインの一覧を返す（フォルダーを読み直す）。state は on（有効）、off（無効）、changed（有効にしたあとでファイルが変わった。もう一度有効にするまで動かない）。folders は読むフォルダー（from は default・setting・env。前にあるものほど優先する）、problems は読めなかったプラグインとフォルダー。",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      },
+      "view": true
+    },
+    {
+      "name": "run_plugin_command",
+      "group": "app",
+      "description": "有効なプラグインのコマンドを実行する。on が task のコマンドには task_id、workspace のコマンドには workspace_id を渡す。返すのはプラグインの結果（notice と、クリップボードに入れた文字 copied）。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "plugin_id": {
+            "type": "string"
+          },
+          "command_id": {
+            "type": "string"
+          },
+          "task_id": {
+            "type": "string"
+          },
+          "workspace_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "plugin_id",
+          "command_id"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "set_plugin_enabled",
+      "group": "app",
+      "description": "プラグインを有効・無効にする。有効にするときは、設定の「プラグイン」に承認の画面を出す。ユーザーが「有効にする」を押すと有効になる。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "plugin_id": {
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "plugin_id",
+          "enabled"
+        ],
+        "additionalProperties": false
+      },
+      "view": true
+    },
+    {
+      "name": "plugin_folder",
+      "group": "app",
+      "description": "プラグインを読むフォルダーを足す（add）・外す（remove）。path はフォルダーの絶対パス（先頭の ~ はホーム）。外せるのは足したフォルダーだけ。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "add",
+              "remove"
+            ]
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "action",
+          "path"
+        ],
+        "additionalProperties": false
+      },
+      "view": true
+    },
+    {
+      "name": "set_plugin_default_folder",
+      "group": "app",
+      "description": "標準のフォルダー（~/.malakt-mahoz/plugins）を読むかどうかを決める。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "enabled"
+        ],
+        "additionalProperties": false
+      },
+      "view": true
     },
     {
       "name": "get_autostart",

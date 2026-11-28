@@ -435,3 +435,40 @@ op set_ai_settings(
 /** GitHub の定期チェックを今すぐ 1 回行う。 */
 @session
 op check_github(): void;
+
+/**
+ * プラグインの一覧を返す（フォルダーを読み直す）。
+ * state は on（有効）、off（無効）、changed（有効にしたあとでファイルが変わった。
+ * もう一度有効にするまで動かない）。
+ * folders は読むフォルダー（from は default・setting・env。
+ * 前にあるものほど優先する）、problems は読めなかったプラグインとフォルダー。
+ */
+@view
+op list_plugins(): void;
+
+/**
+ * 有効なプラグインのコマンドを実行する。
+ * on が task のコマンドには task_id、workspace のコマンドには workspace_id を渡す。
+ * 返すのはプラグインの結果（notice と、クリップボードに入れた文字 copied）。
+ */
+op run_plugin_command(plugin_id: string, command_id: string, task_id?: string, workspace_id?: string): void;
+
+/**
+ * プラグインを有効・無効にする。
+ * 有効にするときは、設定の「プラグイン」に承認の画面を出す。
+ * ユーザーが「有効にする」を押すと有効になる。
+ */
+@view
+op set_plugin_enabled(plugin_id: string, enabled: boolean): void;
+
+/**
+ * プラグインを読むフォルダーを足す（add）・外す（remove）。
+ * path はフォルダーの絶対パス（先頭の ~ はホーム）。
+ * 外せるのは足したフォルダーだけ。
+ */
+@view
+op plugin_folder(action: "add" | "remove", path: string): void;
+
+/** 標準のフォルダー（~/.malakt-mahoz/plugins）を読むかどうかを決める。 */
+@view
+op set_plugin_default_folder(enabled: boolean): void;

@@ -11,6 +11,7 @@ const marks = {
   inAppOnly: state("inAppOnly"),
   view: state("view"),
   session: state("session"),
+  localFiles: state("localFiles"),
   closed: state("closed"),
 };
 
@@ -37,6 +38,11 @@ export function $view(context, target) {
 /** AI の設定を変えるツール。チャットで実行する。 */
 export function $session(context, target) {
   context.program.stateSet(marks.session).add(target);
+}
+
+/** ユーザーの PC のファイルを読むツール。プラグインからは呼べない。 */
+export function $localFiles(context, target) {
+  context.program.stateSet(marks.localFiles).add(target);
 }
 
 /** 書いていない項目を受け付けないオブジェクト（additionalProperties: false）。 */

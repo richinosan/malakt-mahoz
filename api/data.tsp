@@ -438,6 +438,7 @@ op reorder_tasks(ids: string[]): void;
 
 /** ユーザーの PC のファイルをタスクに添付する。path はファイルの絶対パス（先頭の ~ はホーム）。1 ファイル 10 MiB まで。 */
 @writes
+@localFiles
 op add_attachment(task_id: string, path: string): void;
 
 /** 添付を削除する。元に戻せないので、実行の前にユーザーに確認が出る。 */
@@ -707,6 +708,7 @@ op update_schedule(...ScheduleFields, id: string): void;
  * 1 ファイル 10 MiB まで。
  */
 @writes
+@localFiles
 op add_schedule_attachment(schedule_id: string, path: string): void;
 
 /** 定時タスクの雛形から添付を外す。作ったタスクの添付は残る。 */

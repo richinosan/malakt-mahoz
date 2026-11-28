@@ -34,6 +34,8 @@ pub enum Actor {
     Schedule,
     /// CalDAV のサーバーから受け取った変更。名前はサーバー（`ホスト名`）。
     Sync(String),
+    /// プラグイン。名前はマニフェストの `name`。
+    Plugin(String),
 }
 
 /// 名前から、改行などの制御文字を除き、長すぎる分を切る。
@@ -59,6 +61,11 @@ impl Actor {
         Actor::Sync(clean(name))
     }
 
+    /// プラグイン。
+    pub fn plugin(name: &str) -> Self {
+        Actor::Plugin(clean(name))
+    }
+
     /// 外のエージェント。名乗らなかったら「外部エージェント」と出す。
     pub fn agent(name: &str) -> Self {
         Actor::Agent(clean(name))
@@ -80,6 +87,7 @@ impl Actor {
             Actor::Repeat => "repeat".into(),
             Actor::Schedule => "schedule".into(),
             Actor::Sync(name) => format!("sync:{name}"),
+            Actor::Plugin(name) => format!("plugin:{name}"),
         }
     }
 
@@ -103,6 +111,7 @@ impl Actor {
             },
             Some(("mcp", name)) => Actor::agent(name),
             Some(("sync", name)) => Actor::sync(name),
+            Some(("plugin", name)) => Actor::plugin(name),
             _ => Actor::Unknown,
         }
     }
@@ -126,6 +135,7 @@ impl Actor {
                 | Actor::Repeat
                 | Actor::Schedule
                 | Actor::Sync(_)
+                | Actor::Plugin(_)
         )
     }
 
@@ -150,6 +160,8 @@ impl Actor {
             Actor::Schedule => Some("定時タスク".into()),
             Actor::Sync(name) if name.is_empty() => Some("CalDAV".into()),
             Actor::Sync(name) => Some(name.clone()),
+            Actor::Plugin(name) if name.is_empty() => Some("プラグイン".into()),
+            Actor::Plugin(name) => Some(name.clone()),
             _ => None,
         }
     }
@@ -163,6 +175,7 @@ impl Actor {
             Actor::Agent(_) => Some("外部エージェント".into()),
             Actor::Reminders => Some("リマインダー".into()),
             Actor::Sync(_) => Some("CalDAV".into()),
+            Actor::Plugin(_) => Some("プラグイン".into()),
             _ => None,
         }
     }
@@ -175,6 +188,7 @@ impl Actor {
             Actor::Repeat => "repeat",
             Actor::Schedule => "alarm-clock",
             Actor::Sync(_) => "refresh-cw",
+            Actor::Plugin(_) => "puzzle",
             _ => "terminal",
         }
     }
@@ -229,6 +243,7 @@ mod tests {
             Actor::Repeat,
             Actor::Schedule,
             Actor::sync("dav.example.com"),
+            Actor::plugin("Markdown でコピー"),
         ];
         for actor in all {
             assert_eq!(Actor::parse(&actor.as_string()), actor, "{actor:?}");
