@@ -37,6 +37,8 @@ pub struct Tool {
     pub view: bool,
     /// AI の設定を変える（チャットで実行する）
     pub session: bool,
+    /// ユーザーの PC のファイルを読む（プラグインからは呼べない）
+    pub local_files: bool,
 }
 
 /// ツールの一覧（`malakt-mahoz api` が出す JSON）。
@@ -97,6 +99,7 @@ fn parse(text: &str) -> Result<Vec<Tool>, String> {
                 in_app_only: mark("in_app_only"),
                 view: mark("view"),
                 session: mark("session"),
+                local_files: mark("local_files"),
             })
         })
         .collect()

@@ -20,5 +20,8 @@ extern dec view(target: Operation);
 /** AI の設定を変えるツール。チャットで実行する。 */
 extern dec session(target: Operation);
 
+/** ユーザーの PC のファイルを読むツール。プラグインからは呼べない。 */
+extern dec localFiles(target: Operation);
+
 /** 書いていない項目を受け付けないオブジェクト（additionalProperties: false）。 */
 extern dec closed(target: Model);

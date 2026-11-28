@@ -1,0 +1,19 @@
+[package]
+name = "malakt-plugins"
+description = "malakt-mahoz のプラグイン（UI 非依存）。フォルダーからの読み込み、マニフェスト、WASM（Extism）の実行"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# 標準の機能（HTTP・ファイル）は外す。プラグインはアプリのツールだけを呼べる
+extism = { version = "1.41.0", default-features = false }
+dirs = "5"
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.10"
+toml = { version = "0.8", default-features = false, features = ["parse"] }
+
+[dev-dependencies]
+tempfile = "3"

@@ -404,6 +404,217 @@ pub fn stats_by_person(
     out
 }
 
+/// グラフの 1 本。終わったタスクの数を、予想工数に収まったもの・超えたもの・予想工数のないものに分ける。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Bar {
+    pub label: String,
+    pub within: usize,
+    pub over: usize,
+    pub unestimated: usize,
+}
+
+impl Bar {
+    pub fn total(&self) -> usize {
+        self.within + self.over + self.unestimated
+    }
+}
+
+/// 統計のグラフ。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Charts {
+    /// 完了数の推移（古い順）。期間が 7 日・30 日なら日ごと、90 日なら週ごと、1 年なら月ごと、
+    /// すべてなら月ごと（2 年を超えたら年ごと）
+    pub trend: Vec<Bar>,
+    /// 所要時間の分布（短い順）
+    pub spread: Vec<Bar>,
+    /// 所要時間が予想工数の何 % だったかの分布（予想工数のあるものだけ。小さい順）
+    pub ratio: Vec<Bar>,
+}
+
+/// 所要時間の分布の区切り（この長さ未満）と名前。最後は上限なし。
+const SPREAD: [(i64, &str); 7] = [
+    (HOUR, "〜1時間"),
+    (4 * HOUR, "〜4時間"),
+    (DAY, "〜1日"),
+    (3 * DAY, "〜3日"),
+    (7 * DAY, "〜1週間"),
+    (30 * DAY, "〜1か月"),
+    (i64::MAX, "1か月〜"),
+];
+
+/// 予想工数との比の区切り（この % 以下）と名前。100 % までが収まったもの。
+const RATIO: [(i64, &str); 7] = [
+    (50, "〜50%"),
+    (80, "〜80%"),
+    (100, "〜100%"),
+    (125, "〜125%"),
+    (150, "〜150%"),
+    (200, "〜200%"),
+    (i64::MAX, "200%〜"),
+];
+
+const HOUR: i64 = 60 * 60 * 1000;
+const DAY: i64 = 24 * HOUR;
+
+/// 推移の区切り方。
+enum Step {
+    Day(usize),
+    Week(usize),
+    Month(usize),
+    Year(usize),
+}
+
+fn local_date(ms: i64) -> Option<chrono::NaiveDate> {
+    use chrono::TimeZone;
+    chrono::Local
+        .timestamp_millis_opt(ms)
+        .single()
+        .map(|t| t.date_naive())
+}
+
+fn months_between(a: chrono::NaiveDate, b: chrono::NaiveDate) -> i64 {
+    use chrono::Datelike;
+    (b.year() as i64 - a.year() as i64) * 12 + b.month() as i64 - a.month() as i64
+}
+
+/// グラフを出す。数えるタスクは [`stats`] と同じ（`period` の期間に終わったもの）。
+pub fn charts(items: &[Item<'_>], self_id: Option<&str>, now: i64, period: Period) -> Charts {
+    use chrono::Datelike;
+    let since = period.since(now);
+    let mut done: Vec<(&Task, Span)> = Vec::new();
+    for item in items {
+        if item.task.status == Status::Cancelled {
+            continue;
+        }
+        if let Some(s) = span(item.task, item.basis, self_id, now).filter(|s| !s.running) {
+            if since.is_none_or(|since| s.end >= since) {
+                done.push((item.task, s));
+            }
+        }
+    }
+    let Some(today) = local_date(now) else {
+        return Charts::default();
+    };
+    // 予想工数に収まったか（予想工数がなければ None）
+    let fits = |task: &Task, s: &Span| task.estimate.map(|e| s.ms() <= e.total_ms());
+    let add = |bar: &mut Bar, fit: Option<bool>| match fit {
+        Some(true) => bar.within += 1,
+        Some(false) => bar.over += 1,
+        None => bar.unestimated += 1,
+    };
+
+    let first = done
+        .iter()
+        .filter_map(|(_, s)| local_date(s.end))
+        .min()
+        .unwrap_or(today);
+    let step = match period {
+        Period::Week => Step::Day(7),
+        Period::Month => Step::Day(30),
+        Period::Quarter => Step::Week(13),
+        Period::Year => Step::Month(12),
+        Period::All => {
+            let months = months_between(first, today) + 1;
+            if months > 24 {
+                Step::Year((today.year() - first.year()) as usize + 1)
+            } else {
+                Step::Month(months.max(1) as usize)
+            }
+        }
+    };
+    let (count, label): (usize, Box<dyn Fn(usize) -> String>) = match step {
+        Step::Day(n) => (
+            n,
+            Box::new(move |i| {
+                let d = today - chrono::Days::new((n - 1 - i) as u64);
+                format!("{}/{}", d.month(), d.day())
+            }),
+        ),
+        Step::Week(n) => (
+            n,
+            Box::new(move |i| {
+                let d = today - chrono::Days::new(((n - 1 - i) * 7 + 6) as u64);
+                format!("{}/{}〜", d.month(), d.day())
+            }),
+        ),
+        Step::Month(n) => (
+            n,
+            Box::new(move |i| {
+                let d = today
+                    .with_day(1)
+                    .and_then(|d| d.checked_sub_months(chrono::Months::new((n - 1 - i) as u32)))
+                    .unwrap_or(today);
+                if d.month() == 1 || i == 0 {
+                    format!("{}/{}", d.year(), d.month())
+                } else {
+                    format!("{}月", d.month())
+                }
+            }),
+        ),
+        Step::Year(n) => (
+            n,
+            Box::new(move |i| format!("{}", today.year() - (n - 1 - i) as i32)),
+        ),
+    };
+    let mut trend: Vec<Bar> = (0..count)
+        .map(|i| Bar {
+            label: label(i),
+            ..Bar::default()
+        })
+        .collect();
+    for (task, s) in &done {
+        let Some(date) = local_date(s.end) else {
+            continue;
+        };
+        // 今から数えて何個前の区切りか
+        let back = match step {
+            Step::Day(_) => (today - date).num_days(),
+            Step::Week(_) => (today - date).num_days() / 7,
+            Step::Month(_) => months_between(date, today),
+            Step::Year(_) => (today.year() - date.year()) as i64,
+        };
+        if back < 0 || back as usize >= count {
+            continue;
+        }
+        add(&mut trend[count - 1 - back as usize], fits(task, s));
+    }
+
+    let mut spread: Vec<Bar> = SPREAD
+        .iter()
+        .map(|(_, l)| Bar {
+            label: (*l).into(),
+            ..Bar::default()
+        })
+        .collect();
+    let mut ratio: Vec<Bar> = RATIO
+        .iter()
+        .map(|(_, l)| Bar {
+            label: (*l).into(),
+            ..Bar::default()
+        })
+        .collect();
+    for (task, s) in &done {
+        let ix = SPREAD
+            .iter()
+            .position(|(max, _)| s.ms() < *max)
+            .unwrap_or(0);
+        add(&mut spread[ix], fits(task, s));
+        if let Some(est) = task.estimate.filter(|e| e.total_ms() > 0) {
+            let percent = (s.ms() as i128 * 100 / est.total_ms() as i128) as i64;
+            let ix = RATIO
+                .iter()
+                .position(|(max, _)| percent <= *max)
+                .unwrap_or(0);
+            add(&mut ratio[ix], Some(percent <= 100));
+        }
+    }
+    Charts {
+        trend,
+        spread,
+        ratio,
+    }
+}
+
 /// 統計の期間。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Period {
@@ -714,6 +925,63 @@ mod tests {
             summary,
             vec![(Some("p1"), 1, 2 * H), (Some("p2"), 2, 6 * H), (None, 1, H)]
         );
+    }
+
+    #[test]
+    fn グラフ() {
+        const D: i64 = 24 * H;
+        // 今日の正午を今にして、日付の変わり目にかからないようにする
+        let now = {
+            use chrono::TimeZone;
+            let noon = chrono::Local::now()
+                .date_naive()
+                .and_hms_opt(12, 0, 0)
+                .unwrap();
+            chrono::Local
+                .from_local_datetime(&noon)
+                .earliest()
+                .unwrap()
+                .timestamp_millis()
+        };
+        // 今日 2 件（30 分で予想 1 時間、5 時間で予想 2 時間）、2 日前に 1 件（2 日、予想なし）、40 日前に 1 件
+        let mut a = done(Some(now - H), now - H / 2);
+        a.estimate = Some(Estimate::new(0, 0, 1, 0));
+        let mut b = done(Some(now - 5 * H), now);
+        b.estimate = Some(Estimate::new(0, 0, 2, 0));
+        let c = done(Some(now - 4 * D), now - 2 * D);
+        let old = done(Some(now - 41 * D), now - 40 * D);
+        let tasks = [a, b, c, old];
+        let items: Vec<Item> = tasks
+            .iter()
+            .map(|task| Item {
+                task,
+                basis: Basis::default(),
+            })
+            .collect();
+        let g = charts(&items, None, now, Period::Week);
+        assert_eq!(g.trend.len(), 7);
+        let last = g.trend.last().unwrap();
+        assert_eq!((last.within, last.over, last.unestimated), (1, 1, 0));
+        assert_eq!(g.trend[4].unestimated, 1);
+        assert_eq!(g.trend.iter().map(Bar::total).sum::<usize>(), 3);
+        // 分布: 30 分 → 〜1時間、5 時間 → 〜1日、2 日 → 〜3日
+        let spread: Vec<usize> = g.spread.iter().map(Bar::total).collect();
+        assert_eq!(spread, [1, 0, 1, 1, 0, 0, 0]);
+        // 予想工数との比: 50 % → 〜50%、250 % → 200%〜
+        let ratio: Vec<(usize, usize)> = g.ratio.iter().map(|b| (b.within, b.over)).collect();
+        assert_eq!(
+            ratio,
+            [(1, 0), (0, 0), (0, 0), (0, 0), (0, 0), (0, 0), (0, 1)]
+        );
+        // 90 日は週ごと、1 年は月ごと。すべては一番古いものからの月ごと
+        let q = charts(&items, None, now, Period::Quarter);
+        assert_eq!(q.trend.len(), 13);
+        assert_eq!(q.trend.iter().map(Bar::total).sum::<usize>(), 4);
+        assert_eq!(charts(&items, None, now, Period::Year).trend.len(), 12);
+        let all = charts(&items, None, now, Period::All);
+        assert!((2..=3).contains(&all.trend.len()));
+        assert_eq!(all.trend.iter().map(Bar::total).sum::<usize>(), 4);
+        assert!(charts(&[], None, now, Period::All).trend.len() == 1);
     }
 
     #[test]
