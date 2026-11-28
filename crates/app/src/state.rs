@@ -569,6 +569,8 @@ pub struct MainView {
     pub column_drag: Option<ColumnDrag>,
     /// ウィンドウの位置と大きさ（x, y, 幅, 高さ）と、最大化しているか。
     pub window_place: Option<([f32; 4], bool)>,
+    /// ウィンドウを常に最前面に表示しているか（`crate::on_top`）。
+    pub on_top: bool,
     /// ペインの配置と、今のペイン。
     pub layout: malakt_core::panes::Layout,
     /// このウィンドウが中身を兼ねているペイン。
@@ -655,6 +657,8 @@ pub struct MainView {
     pub modal_seen: Option<(Modal, Option<crate::panes::PaneOverlay>)>,
     /// 今描いているダイアログの出方。0 で消えていて、1 で出きっている。
     pub dialog_t: std::cell::Cell<f32>,
+    /// 上のバーのダウンロードのボタンの場所。一覧はこの下に出す
+    pub downloads_anchor: Rc<std::cell::Cell<Bounds<Pixels>>>,
     pub today: String,
     pub inputs: Inputs,
     _subscriptions: Vec<Subscription>,
@@ -1157,6 +1161,7 @@ impl MainView {
             pane_presets: Vec::new(),
             border_drag: None,
             window_place: None,
+            on_top: false,
             motion: true,
             modal_opened: None,
             modal_closing: None,
@@ -1165,6 +1170,7 @@ impl MainView {
             sub_seen: None,
             modal_seen: None,
             dialog_t: std::cell::Cell::new(1.),
+            downloads_anchor: Rc::default(),
             today: view::today(),
             inputs,
             _subscriptions: subs,

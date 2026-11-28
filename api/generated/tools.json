@@ -2316,7 +2316,7 @@
     {
       "name": "get_screen",
       "group": "app",
-      "description": "今の画面の状態を返す。開いている場所、開いているタスク、一覧の絞り込みと並び順、表の列、左のメニューと詳細の幅、AI チャットとシェル、ペイン、ロック・リマインダー・自動アップデートの設定、開けるシェル。",
+      "description": "今の画面の状態を返す。開いている場所、開いているタスク、一覧の絞り込みと並び順、表の列、左のメニューと詳細の幅、AI チャットとシェル、ペイン、ロック・リマインダー・自動アップデートの設定、開けるシェル、最前面に表示しているウィンドウ（on_top）。",
       "input_schema": {
         "type": "object",
         "properties": {},
@@ -2674,6 +2674,34 @@
           }
         },
         "required": [],
+        "additionalProperties": false
+      },
+      "view": true
+    },
+    {
+      "name": "set_on_top",
+      "group": "app",
+      "description": "ウィンドウを常に最前面に表示する（on が true）、または元に戻す（false）。window は task（操作しているタスクのウィンドウ。標準）、pomodoro（ポモドーロ）、timer（タイマー）、chat（AI チャットだけのウィンドウ）、shell（シェルだけのウィンドウ）。開いていないウィンドウは、次に開いたときに最前面に出す。今の状態は get_screen の on_top にある。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "on": {
+            "type": "boolean"
+          },
+          "window": {
+            "type": "string",
+            "enum": [
+              "task",
+              "pomodoro",
+              "timer",
+              "chat",
+              "shell"
+            ]
+          }
+        },
+        "required": [
+          "on"
+        ],
         "additionalProperties": false
       },
       "view": true
@@ -3389,6 +3417,44 @@
         },
         "required": [
           "enabled"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "get_on_top",
+      "group": "mcp",
+      "description": "アプリのウィンドウを常に最前面に表示しているかを読む。task はメインのウィンドウ（最初に開いた 1 枚）、pomodoro はポモドーロ、timer はタイマー、chat は AI チャットだけのウィンドウ、shell はシェルだけのウィンドウ。開いていないウィンドウは、次に開いたときの状態。",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "set_on_top",
+      "group": "mcp",
+      "description": "アプリのウィンドウを常に最前面に表示する（on が true）、または元に戻す（false）。window は get_on_top と同じ（標準は task）。アプリが 2 秒以内に切り替える。開いていないウィンドウは、次に開いたときに最前面に出す。undo では戻らないので、戻すときはもう一度呼ぶ。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "on": {
+            "type": "boolean"
+          },
+          "window": {
+            "type": "string",
+            "enum": [
+              "task",
+              "pomodoro",
+              "timer",
+              "chat",
+              "shell"
+            ]
+          }
+        },
+        "required": [
+          "on"
         ],
         "additionalProperties": false
       }

@@ -527,6 +527,86 @@ fn header_menu_locks_the_app(cx: &mut TestAppContext) {
     cx.update(|cx| assert_eq!(view.read(cx).modal, Modal::None));
 }
 
+/// 上のバーの右クリックの「常に最前面に表示」で、ウィンドウを最前面に出す。ヘッダーにピンが出て、
+/// ピンを押すと元に戻る。状態はウィンドウごとに保存し、次の起動で開き直したウィンドウも最前面に出る。
+#[gpui_kit::test]
+fn header_menu_keeps_the_window_on_top(cx: &mut TestAppContext) {
+    use malakt_mahoz::{on_top, session};
+    start(cx);
+    let (window, view) = cx.update(|cx| malakt_mahoz::open_main_window(cx).unwrap());
+    let (second, _) = cx.update(|cx| malakt_mahoz::open_main_window(cx).unwrap());
+    cx.run_until_parked();
+    let mut at = None;
+    ui(cx, window, |window, _| {
+        assert!(window.try_find("window-on-top").is_none());
+        let menu = window.find("toggle-sidebar").bounds();
+        at = Some(menu.center() + gpui_kit::point(px(300.), px(0.)));
+    });
+    let at = at.unwrap();
+    let right_click_header = |cx: &mut TestAppContext| {
+        let mut v = gpui_kit::VisualTestContext::from_window(window, cx);
+        v.simulate_mouse_down(at, MouseButton::Right, Modifiers::default());
+        v.simulate_mouse_up(at, MouseButton::Right, Modifiers::default());
+        v.run_until_parked();
+    };
+    right_click_header(cx);
+    pick(cx, window, "常に最前面に表示");
+    assert!(cx.update(|cx| view.read(cx).on_top));
+    ui(cx, window, |window, _| {
+        assert!(window.try_find("window-on-top").is_some(), "ピンが出る");
+    });
+    // ほかのウィンドウは変わらない
+    ui(cx, second, |window, _| {
+        assert!(window.try_find("window-on-top").is_none());
+    });
+    let saved = cx.update(|cx| session::saved(cx));
+    assert!(saved[0].on_top);
+    assert!(!saved[1].on_top);
+
+    // メニューの項目は「解除」に変わる
+    right_click_header(cx);
+    ui(cx, window, |window, _| {
+        assert!(window.try_find_by_label("最前面の表示を解除").is_some());
+        assert!(window.try_find_by_label("常に最前面に表示").is_none());
+    });
+    ui(cx, window, |window, cx| window.press("escape", cx));
+
+    // ピンを押すと解除する
+    ui(cx, window, |window, cx| window.click("window-on-top", cx));
+    assert!(!cx.update(|cx| view.read(cx).on_top));
+    ui(cx, window, |window, _| {
+        assert!(window.try_find("window-on-top").is_none());
+    });
+    assert!(!cx.update(|cx| session::saved(cx))[0].on_top);
+
+    // 2 枚目を最前面にして閉じ直すと、開き直したときも最前面に出る
+    cx.update_window(second, |_, window, cx| on_top::set(window, true, cx))
+        .unwrap()
+        .unwrap();
+    cx.run_until_parked();
+    let saved = cx.update(|cx| session::saved(cx));
+    assert!(!saved[0].on_top);
+    assert!(saved[1].on_top);
+    cx.update(session::quitting);
+    for w in [second, window] {
+        cx.update_window(w, |_, window, _| window.remove_window())
+            .unwrap();
+    }
+    cx.run_until_parked();
+    cx.update(|cx| malakt_mahoz::open_saved_windows(cx).unwrap());
+    cx.run_until_parked();
+    let windows = cx.update(|cx| cx.windows());
+    assert_eq!(windows.len(), 2);
+    let pinned = windows
+        .iter()
+        .filter(|w| {
+            cx.update_window(**w, |_, window, cx| on_top::is_on(window, cx))
+                .unwrap()
+        })
+        .count();
+    assert_eq!(pinned, 1, "2 枚目だけが最前面に出る");
+}
+
 /// ロックのキー（Ctrl+Shift+L / ⇧⌘L）は、ロックが無効ならロックの設定を開き、有効ならロックする。
 /// Ctrl+L だけではロックしない（シェルやターミナルの「画面を消す」）。
 #[gpui_kit::test]
@@ -7069,7 +7149,7 @@ fn windows_minimized_with_the_main_window_come_back_together(cx: &mut TestAppCon
     let (second, _) = cx.update(|cx| malakt_mahoz::open_main_window(cx).unwrap());
     let (third, _) = cx.update(|cx| malakt_mahoz::open_main_window(cx).unwrap());
     cx.run_until_parked();
-    assert_eq!(cx.update(session::main_window), Some(main));
+    assert_eq!(cx.update(|cx| session::main_window(cx)), Some(main));
 
     // メインを最小化したときに開いていた 2 枚を覚える。もう 1 度呼んでも、覚えは変わらない
     let tucked = cx.update(|cx| session::tuck(vec![second, third], cx));

@@ -117,6 +117,12 @@ pub(crate) fn bar<V: BarHold>(
                 .occlude()
                 .gap_0p5()
                 .children(right)
+                // 常に最前面に出している間のピン
+                .children(crate::on_top::pin(
+                    gpui_kit::component::Size::XSmall,
+                    window,
+                    cx,
+                ))
                 .when(own_bar, |d| {
                     d.children(window_controls(BAR_HEIGHT, false, window, cx))
                 }),

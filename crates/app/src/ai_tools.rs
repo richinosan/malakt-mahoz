@@ -180,6 +180,10 @@ pub fn summary(name: &str, args: &Value) -> Option<String> {
             "timer" => "タイマーのウィンドウを開く".into(),
             _ => "新しいウィンドウを開く".into(),
         },
+        "set_on_top" => match args.get("on").and_then(Value::as_bool) {
+            Some(false) => "最前面の表示を解除".into(),
+            _ => "常に最前面に表示".into(),
+        },
         "open_terminal" => "ターミナルを開く".into(),
         "browser" => match arg("action") {
             "open" => format!("ブラウザで開く: {}", arg("url")),
@@ -439,6 +443,17 @@ impl MainView {
                     ))
                 }
             },
+            "set_on_top" => {
+                let on = bool_arg(args, "on")?.ok_or("on（true か false）が必要です")?;
+                let kind = crate::on_top::Kind::parse(str_arg(args, "window").unwrap_or("task"))?;
+                // タスクのウィンドウは、このウィンドウ（ほかのウィンドウを更新している間は触れない）
+                if kind == crate::on_top::Kind::Task {
+                    crate::on_top::set(window, on, cx)?;
+                } else {
+                    crate::on_top::set_kind(kind, None, on, cx)?;
+                }
+                json!({"window": kind.key(), "on_top": on})
+            }
             "open_terminal" => self.ai_open_terminal(args, window, cx)?,
             "browser" => {
                 let mut reveal = false;
@@ -811,6 +826,7 @@ impl MainView {
             "update_ready": crate::update::ready_version(cx).map(|v| v.to_string()),
             "terminal_shells": shells,
             "dialog_open": self.modal != Modal::None,
+            "on_top": crate::on_top::states(self.on_top, cx),
         })
     }
 
@@ -1756,6 +1772,11 @@ mod tests {
         assert_eq!(list(&look["density"]), owned(super::names(&DENSITIES)));
         assert_eq!(list(&look["feel"]), owned(super::names(&FEELS)));
         assert_eq!(list(&look["due_format"]), owned(super::names(&DUE_FORMATS)));
+        let on_top = schema("set_on_top");
+        assert_eq!(
+            list(&on_top["window"]),
+            owned(crate::on_top::Kind::ALL.iter().map(|k| k.key()).collect())
+        );
         let clear = &look["clear"];
         assert_eq!(clear["maximum"], json!(crate::theme::MAX_CLEAR));
     }

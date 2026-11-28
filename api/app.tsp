@@ -60,6 +60,15 @@ union DueFormat {
   "relative",
 }
 
+/** 最前面に表示できるウィンドウ。下の候補は on_top.rs の Kind と同じ並び */
+union OnTopWindow {
+  "task",
+  "pomodoro",
+  "timer",
+  "chat",
+  "shell",
+}
+
 /** 表の列 1 つの設定 */
 @closed
 model ColumnSetting {
@@ -70,7 +79,7 @@ model ColumnSetting {
 
 /**
  * 今の画面の状態を返す。
- * 開いている場所、開いているタスク、一覧の絞り込みと並び順、表の列、左のメニューと詳細の幅、AI チャットとシェル、ペイン、ロック・リマインダー・自動アップデートの設定、開けるシェル。
+ * 開いている場所、開いているタスク、一覧の絞り込みと並び順、表の列、左のメニューと詳細の幅、AI チャットとシェル、ペイン、ロック・リマインダー・自動アップデートの設定、開けるシェル、最前面に表示しているウィンドウ（on_top）。
  */
 @view
 op get_screen(): void;
@@ -209,6 +218,15 @@ op open_dialog(
  */
 @view
 op open_window(kind?: "main" | "pomodoro" | "timer"): void;
+
+/**
+ * ウィンドウを常に最前面に表示する（on が true）、または元に戻す（false）。
+ * window は task（操作しているタスクのウィンドウ。標準）、pomodoro（ポモドーロ）、timer（タイマー）、chat（AI チャットだけのウィンドウ）、shell（シェルだけのウィンドウ）。
+ * 開いていないウィンドウは、次に開いたときに最前面に出す。
+ * 今の状態は get_screen の on_top にある。
+ */
+@view
+op set_on_top(on: boolean, window?: OnTopWindow): void;
 
 /**
  * ターミナルを開く。

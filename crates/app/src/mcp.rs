@@ -34,6 +34,11 @@ pub const GET_AUTOSTART: &str = "get_autostart";
 /// スタートアップに登録する・外すツール。
 pub const SET_AUTOSTART: &str = "set_autostart";
 
+/// ウィンドウを最前面に表示しているかを読むツール。
+pub const GET_ON_TOP: &str = "get_on_top";
+/// ウィンドウを最前面に表示する・戻すツール。アプリが外からの変更として読んで当てる。
+pub const SET_ON_TOP: &str = "set_on_top";
+
 /// 対応している MCP の版。新しい順。
 const PROTOCOLS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
 
@@ -170,6 +175,7 @@ fn run_tool(store: &mut Store, name: &str, args: &Value) -> Result<String, Strin
         }
         _ if tools::in_app_only(name) => Err(format!("{name} というツールはありません")),
         GET_AUTOSTART | SET_AUTOSTART => autostart(&crate::autostart::process(), name, args),
+        GET_ON_TOP | SET_ON_TOP => on_top(store, name, args),
         _ => {
             // 自分が登録されていれば、コメントの書き手にする（AI チャットと同じ）
             let author = store
@@ -189,6 +195,23 @@ fn run_tool(store: &mut Store, name: &str, args: &Value) -> Result<String, Strin
             result
         }
     }
+}
+
+/// 最前面の表示のツール。切り替えはデータベースに頼みを書き、動いているアプリが当てる。
+fn on_top(store: &mut Store, name: &str, args: &Value) -> Result<String, String> {
+    use crate::on_top::{self, Kind};
+    if name == SET_ON_TOP {
+        let on = args
+            .get("on")
+            .and_then(Value::as_bool)
+            .ok_or("on（true か false）が必要です")?;
+        let kind = Kind::parse(args.get("window").and_then(Value::as_str).unwrap_or("task"))?;
+        on_top::ask(store, kind, on)?;
+        return Ok(
+            json!({"window": kind.key(), "on_top": on, "applies_within_seconds": 2}).to_string(),
+        );
+    }
+    Ok(Value::Object(on_top::stored(store)?).to_string())
 }
 
 /// スタートアップのツール。データベースではなく OS の登録を読み書きする。
@@ -802,6 +825,36 @@ mod tests {
         // アプリが落ちて印が残っても、古い印では読めない
         lock::mark_open(&mut app, 1_000 - lock::OPEN_FOR - 1).unwrap();
         assert_eq!(failure(&mut s, "list_tasks", json!({})), LOCKED);
+    }
+
+    /// 最前面の表示は、読むとデータベースに残した状態、変えると頼みを書く（動いているアプリが当てる）。
+    #[test]
+    fn on_top_is_read_and_asked() {
+        let mut store = Store::open_in_memory().unwrap();
+        let call = |store: &mut Store, name, args| -> Value {
+            serde_json::from_str(&on_top(store, name, &args).unwrap()).unwrap()
+        };
+        assert_eq!(
+            call(&mut store, GET_ON_TOP, json!({})),
+            json!({"task": false, "pomodoro": false, "timer": false, "chat": false, "shell": false})
+        );
+        let reply = call(&mut store, SET_ON_TOP, json!({"on": true}));
+        assert_eq!(reply["window"], "task");
+        assert_eq!(
+            store.setting("window.on_top.ask.task").unwrap().as_deref(),
+            Some("1")
+        );
+        call(
+            &mut store,
+            SET_ON_TOP,
+            json!({"on": false, "window": "shell"}),
+        );
+        assert_eq!(
+            store.setting("window.on_top.ask.shell").unwrap().as_deref(),
+            Some("0")
+        );
+        assert!(on_top(&mut store, SET_ON_TOP, &json!({"window": "task"})).is_err());
+        assert!(on_top(&mut store, SET_ON_TOP, &json!({"on": true, "window": "x"})).is_err());
     }
 
     /// スタートアップのツールは、OS の登録を読み書きし、変えたあとの状態を返す。

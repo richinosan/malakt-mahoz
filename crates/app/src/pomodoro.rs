@@ -323,6 +323,7 @@ pub fn open(cx: &mut App) -> Result<AnyWindowHandle> {
         cx.new(|cx| PomodoroView::new(window, cx))
     })?;
     shared(cx).update(cx, |this, _| this.window = Some(handle));
+    crate::on_top::opened(handle, crate::on_top::Kind::Pomodoro, None, cx);
     clock::mark_open(OPEN_KEY, cx)?;
     Ok(handle)
 }
