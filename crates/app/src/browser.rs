@@ -18,8 +18,10 @@ use std::time::{Duration, Instant};
 use crate::press::button;
 use gpui_kit::base::TestSupportExt;
 use gpui_kit::component::button::ButtonVariants;
+use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
+use gpui_kit::component::scroll::ScrollableElement;
 use gpui_kit::component::{ActiveTheme, Disableable, Placement, Sizable};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
@@ -152,6 +154,11 @@ pub enum Event {
     PdfSaved {
         item: u64,
         result: Result<(), String>,
+        /// 保存した場所と、使った設定。仕上げ（ページを選ぶ・フォントを確かめる）に使う。
+        path: std::path::PathBuf,
+        setup: Box<crate::print_setup::PrintSetup>,
+        /// ページの数を数えるための 1 回目か（ページを選んで 1 枚に何ページも並べるとき）。
+        counting: bool,
     },
 }
 
@@ -184,8 +191,16 @@ pub trait Engine {
     fn zoom(&self, factor: f64) -> Result<(), String>;
     /// 印刷のダイアログを出す。
     fn print(&self) -> Result<(), String>;
-    /// ページを PDF にして `path` に保存する。終わったら `done` を呼ぶ。
-    fn save_pdf(&self, path: &std::path::Path, done: PdfDone) -> Result<(), String>;
+    /// ページを `setup` の設定で PDF にして `path` に保存する。終わったら `done` を呼ぶ。
+    /// `pages` があればそのページ（1 から数える）だけ、なければすべてのページを出す。
+    /// `setup` のページの選び方は見ない（呼ぶ側が `pages` にする）。
+    fn save_pdf(
+        &self,
+        path: &std::path::Path,
+        setup: &crate::print_setup::PrintSetup,
+        pages: Option<&[u32]>,
+        done: PdfDone,
+    ) -> Result<(), String>;
     /// ページの中で `query` を探して選ぶ。`again` なら今選んでいる所の次から、でなければ頭から。
     /// `done` には見つかったかが届く。
     fn find(
@@ -269,8 +284,8 @@ pub struct Page {
     pub(crate) find_turn: u64,
     /// 最後に探した言葉が、ページの中になかった。
     pub find_missing: bool,
-    /// 印刷のダイアログを出している。出している間は、ページを隠して画像を出す。
-    pub(crate) printing: bool,
+    /// 印刷のダイアログやダウンロードの一覧を、ページの上に出している。出している間は、ページを隠して画像を出す。
+    pub(crate) covered: bool,
 }
 
 impl Page {
@@ -304,7 +319,7 @@ impl Page {
             zoom_leaving: false,
             find_turn: 0,
             find_missing: false,
-            printing: false,
+            covered: false,
         }
     }
 
@@ -770,7 +785,13 @@ impl Terms {
 
     /// ページを PDF にして、ダウンロードのフォルダに `name` で保存する。同じ名前があれば番号を付ける。
     /// 保存したファイルは、ダウンロードの一覧に出る。
-    pub fn save_page_pdf(&mut self, id: u64, name: &str, cx: &mut Context<Self>) {
+    pub fn save_page_pdf(
+        &mut self,
+        id: u64,
+        name: &str,
+        setup: &crate::print_setup::PrintSetup,
+        cx: &mut Context<Self>,
+    ) {
         let Some((engine, url)) = self
             .page(id)
             .and_then(|p| Some((p.engine.clone()?, p.url.clone())))
@@ -788,20 +809,52 @@ impl Terms {
         let path = crate::downloads::unique_path(&dir, &crate::downloads::pdf_name(name));
         let downloads = crate::downloads::shared(cx);
         let item = downloads.update(cx, |d, cx| d.pdf_started(url, path.clone(), cx));
-        let events = self.page_events.clone();
-        let done: PdfDone = Box::new(move |result| {
-            // アプリを閉じている途中なら、受け取る先がない
-            let _ = events.try_send((id, Event::PdfSaved { item, result }));
-        });
-        if let Err(e) = engine.save_pdf(&path, done) {
+        // ページを選んで 1 枚に何ページも並べるときは、並べる前のページの数が要るので、先に 1 回数える。
+        // それ以外は 1 回で作り、ページは保存したあとで選ぶ
+        let counting = !setup.every_page() && setup.per_sheet() > 1;
+        if let Err(e) = self.pdf_pass(&engine, id, item, path, setup, counting, None) {
             downloads.update(cx, |d, cx| d.pdf_done(item, Err(e), cx));
         }
     }
 
-    /// 印刷のダイアログを出している間は、ページを隠して画像を出す。
-    pub(crate) fn set_printing(&mut self, id: u64, printing: bool, cx: &mut Context<Self>) {
+    /// PDF を 1 回作る。終わると [`Event::PdfSaved`] が届く。
+    #[allow(clippy::too_many_arguments)]
+    fn pdf_pass(
+        &self,
+        engine: &Rc<dyn Engine>,
+        id: u64,
+        item: u64,
+        path: std::path::PathBuf,
+        setup: &crate::print_setup::PrintSetup,
+        counting: bool,
+        pages: Option<&[u32]>,
+    ) -> Result<(), String> {
+        let events = self.page_events.clone();
+        let (saved, kept) = (path.clone(), Box::new(setup.clone()));
+        let done: PdfDone = Box::new(move |result| {
+            // アプリを閉じている途中なら、受け取る先がない
+            let _ = events.try_send((
+                id,
+                Event::PdfSaved {
+                    item,
+                    result,
+                    path: saved,
+                    setup: kept,
+                    counting,
+                },
+            ));
+        });
+        let mut pass = setup.clone();
+        if counting {
+            pass.per_sheet = 1;
+        }
+        engine.save_pdf(&path, &pass, pages, done)
+    }
+
+    /// 印刷のダイアログやダウンロードの一覧を出している間は、ページを隠して画像を出す。
+    pub(crate) fn set_covered(&mut self, id: u64, covered: bool, cx: &mut Context<Self>) {
         if let Some(page) = self.page_mut(id) {
-            page.printing = printing;
+            page.covered = covered;
             cx.notify();
         }
     }
@@ -924,8 +977,60 @@ impl Terms {
                 crate::downloads::shared(cx).update(cx, |d, cx| d.on_note(note, cx));
                 return;
             }
-            Event::PdfSaved { item, result } => {
-                crate::downloads::shared(cx).update(cx, |d, cx| d.pdf_done(item, result, cx));
+            Event::PdfSaved {
+                item,
+                result,
+                path,
+                setup,
+                counting,
+            } => {
+                let downloads = crate::downloads::shared(cx);
+                if let Err(e) = result {
+                    if counting {
+                        crate::print_setup::discard(&path);
+                    }
+                    downloads.update(cx, |d, cx| d.pdf_done(item, Err(e), cx));
+                    return;
+                }
+                if counting {
+                    // 数えたページの数から選んだページを決めて、もう 1 回作る
+                    let counted = {
+                        let (path, setup) = (path.clone(), setup.clone());
+                        cx.background_spawn(async move {
+                            let count = crate::print_setup::page_count(&path);
+                            crate::print_setup::discard(&path);
+                            setup.selected(count?)
+                        })
+                    };
+                    cx.spawn(async move |this, cx| {
+                        let pages = counted.await;
+                        let again = this.update(cx, |this, _| {
+                            let engine = this
+                                .page(id)
+                                .and_then(|p| p.engine.clone())
+                                .ok_or_else(|| "PDF にするページが閉じられました".to_owned())?;
+                            this.pdf_pass(&engine, id, item, path, &setup, false, Some(&pages?))
+                        });
+                        let failed = match again {
+                            Ok(Ok(())) => return,
+                            Ok(Err(e)) => e,
+                            Err(_) => "PDF にするページが閉じられました".to_owned(),
+                        };
+                        downloads.update(cx, |d, cx| d.pdf_done(item, Err(failed), cx));
+                    })
+                    .detach();
+                    return;
+                }
+                // ページを選び、フォントを埋め込んでいるかを確かめてから、できたことにする
+                let select = !setup.every_page() && setup.per_sheet() == 1;
+                let finished = cx.background_spawn(async move {
+                    crate::print_setup::finish(&path, &setup, select)
+                });
+                cx.spawn(async move |_, cx| {
+                    let result = finished.await;
+                    downloads.update(cx, |d, cx| d.pdf_done(item, result, cx));
+                })
+                .detach();
                 return;
             }
             _ => {}
@@ -1156,7 +1261,7 @@ impl Terms {
             };
             let wanted = page.painted == Some((here, now));
             // 印刷のダイアログは、そのページの上にだけ出る
-            let covered = covered || page.printing;
+            let covered = covered || page.covered;
             let mut visible = wanted && !covered;
             if wanted && covered && page.shown && page.shot.is_none() && !page.shot_failed {
                 // 隠す前に画像を撮る。撮れるまで（長くても SHOT_WAIT）ページを見せておく
@@ -1438,6 +1543,8 @@ pub struct BrowserPane {
     find: Entity<FindBar>,
     /// 印刷のダイアログ。
     print: Entity<PrintDialog>,
+    /// ダウンロードの一覧。ツールバーの右のボタンの下に出す。
+    downloads: Entity<crate::downloads_ui::DownloadsBubble>,
     /// 場所の欄に出しているページと場所。
     shown: Option<(u64, String)>,
     /// URL の欄の外から押し始めた。離したときに、書いてある URL をすべて選ぶ（Chrome と同じ）。
@@ -1463,6 +1570,12 @@ impl BrowserPane {
                 cx,
             )
         });
+        let downloads = cx.new(|cx| {
+            crate::downloads_ui::DownloadsBubble::new(
+                |cx| term::shared(cx).read(cx).active_page().map(|p| p.id),
+                cx,
+            )
+        });
         let focus = cx.focus_handle();
         let here = window.window_handle().window_id();
         terms.update(cx, |terms, _| terms.note_browser_focus(here, &focus));
@@ -1480,6 +1593,7 @@ impl BrowserPane {
             bar,
             find,
             print,
+            downloads,
             shown: None,
             select_bar_on_up: false,
             _subscriptions: subscriptions,
@@ -1563,6 +1677,12 @@ impl BrowserPane {
         .on_action(cx.listener(|this, _: &PrintPage, window, cx| {
             this.print.update(cx, |print, cx| print.show(window, cx))
         }))
+        .on_action(
+            cx.listener(|this, _: &crate::shell_keys::ShowDownloads, window, cx| {
+                this.downloads
+                    .update(cx, |downloads, cx| downloads.toggle(window, cx))
+            }),
+        )
         .on_action(cx.listener(move |this, _: &BrowserZoomIn, _, cx| zoom(this, Zoom::In, cx)))
         .on_action(cx.listener(move |this, _: &BrowserZoomOut, _, cx| zoom(this, Zoom::Out, cx)))
         .on_action(
@@ -1622,7 +1742,7 @@ fn bar_text(url: &str) -> String {
 }
 
 /// 探すページを返す。
-type PageOf = Box<dyn Fn(&App) -> Option<u64>>;
+pub(crate) type PageOf = Box<dyn Fn(&App) -> Option<u64>>;
 
 /// ページの中を探す欄（Ctrl+F）。ブラウザのタブと小さなウィンドウで使う。
 pub(crate) struct FindBar {
@@ -1796,6 +1916,13 @@ impl Render for FindBar {
     }
 }
 
+/// 印刷の設定のメニューの項目: 名前、選んでいるか、選んだときに設定をどう変えるか。
+type SetupChoice = (
+    String,
+    bool,
+    Box<dyn Fn(&mut crate::print_setup::PrintSetup)>,
+);
+
 /// 印刷のダイアログ（Ctrl+P）。Chrome と同じく、送信先に「PDF に保存」と「プリンター」がある。
 /// PDF はダウンロードのフォルダに保存し、ダウンロードの一覧に出す。プリンターは OS の印刷のダイアログを出す。
 /// ブラウザのタブと小さなウィンドウで使う。出している間は、ページを隠してページの画像を後ろに出す。
@@ -1807,6 +1934,16 @@ pub(crate) struct PrintDialog {
     name: Entity<InputState>,
     /// 出しているページ。
     open: Option<u64>,
+    /// 選んでいる設定。PDF に保存したときに覚える。
+    setup: crate::print_setup::PrintSetup,
+    /// ページの範囲（カスタム）、倍率（%）、余白（mm、上右下左）の欄。
+    ranges: Entity<InputState>,
+    scale: Entity<InputState>,
+    margins: [Entity<InputState>; 4],
+    /// 設定の中のおかしい所。あれば保存できない。
+    problem: Option<String>,
+    /// 設定を覚えられなかった。
+    error: Option<String>,
     focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
@@ -1819,7 +1956,10 @@ impl PrintDialog {
     ) -> Self {
         let terms = term::shared(cx);
         let name = cx.new(|cx| InputState::new(window, cx).placeholder("ファイル名"));
-        let subscriptions = vec![
+        let ranges = cx.new(|cx| InputState::new(window, cx).placeholder("例: 1-5, 8, 11-13"));
+        let scale = cx.new(|cx| InputState::new(window, cx));
+        let margins = [(); 4].map(|_| cx.new(|cx| InputState::new(window, cx)));
+        let mut subscriptions = vec![
             cx.observe(&terms, |this, terms, cx| {
                 // 出しているページを閉じたら、ダイアログも閉じる
                 if this
@@ -1836,14 +1976,106 @@ impl PrintDialog {
                 }
             }),
         ];
+        // 設定の欄は、書くたびに読み直す。Enter で保存する
+        for input in [&ranges, &scale].into_iter().chain(margins.iter()) {
+            subscriptions.push(cx.subscribe_in(
+                input,
+                window,
+                |this, _, event: &InputEvent, window, cx| match event {
+                    InputEvent::Change => this.read_inputs(cx),
+                    InputEvent::PressEnter { .. } => this.submit(window, cx),
+                    _ => {}
+                },
+            ));
+        }
         Self {
             terms,
             page: Box::new(page),
             name,
             open: None,
+            setup: Default::default(),
+            ranges,
+            scale,
+            margins,
+            problem: None,
+            error: None,
             focus: cx.focus_handle(),
             _subscriptions: subscriptions,
         }
+    }
+
+    /// 設定を欄に書き出す。
+    fn write_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let setup = self.setup.clone();
+        self.ranges.update(cx, |input, cx| {
+            input.set_value(setup.ranges.clone(), window, cx)
+        });
+        self.scale.update(cx, |input, cx| {
+            input.set_value(setup.scale.unwrap_or(100).to_string(), window, cx)
+        });
+        for (input, side) in self.margins.iter().zip(crate::print_setup::Side::ALL) {
+            let mm = setup.custom_margins.get(side);
+            input.update(cx, |input, cx| input.set_value(mm_text(mm), window, cx));
+        }
+        self.read_inputs(cx);
+    }
+
+    /// 欄に書いたものを設定に読み込み、おかしい所を探す。
+    fn read_inputs(&mut self, cx: &mut Context<Self>) {
+        use crate::print_setup::{Margins, Side};
+        self.setup.ranges = self.ranges.read(cx).value().trim().to_string();
+        let mut problem = None;
+        if self.setup.scale.is_some() {
+            let text = to_ascii_digits(self.scale.read(cx).value().trim());
+            match text.trim_end_matches('%').trim().parse::<u16>() {
+                Ok(n) => self.setup.scale = Some(n),
+                Err(_) => problem = Some(format!("倍率「{text}」を読めません")),
+            }
+        }
+        if self.setup.margins == Margins::Custom {
+            for (input, side) in self.margins.iter().zip(Side::ALL) {
+                let text = to_ascii_digits(input.read(cx).value().trim());
+                match text.parse::<f32>() {
+                    Ok(mm) => self.setup.custom_margins.set(side, mm),
+                    Err(_) => {
+                        problem.get_or_insert_with(|| {
+                            format!("{}の余白「{text}」を読めません", side.label())
+                        });
+                    }
+                }
+            }
+        }
+        self.problem = problem.or_else(|| self.setup.check().err());
+        cx.notify();
+    }
+
+    /// 設定を 1 つ変える（メニューやチェックから）。カスタムを選んだら、その欄に書けるようにする。
+    fn change(
+        &mut self,
+        apply: impl FnOnce(&mut crate::print_setup::PrintSetup),
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::print_setup::{Margins, Pages};
+        let before = self.setup.clone();
+        apply(&mut self.setup);
+        let after = &self.setup;
+        let input = if after.pages == Pages::Custom && before.pages != Pages::Custom {
+            Some(self.ranges.clone())
+        } else if after.margins == Margins::Custom && before.margins != Margins::Custom {
+            Some(self.margins[0].clone())
+        } else if after.scale.is_some() && before.scale.is_none() {
+            Some(self.scale.clone())
+        } else {
+            None
+        };
+        if let Some(input) = input {
+            input.update(cx, |input, cx| {
+                input.focus(window, cx);
+                input.select_all(window, cx);
+            });
+        }
+        self.read_inputs(cx);
     }
 
     /// ダイアログを出す（Ctrl+P）。ファイル名はページの題名にする。
@@ -1864,11 +2096,15 @@ impl PrintDialog {
             .to_owned();
         self.terms.update(cx, |terms, cx| {
             terms.release_page(id, cx);
-            terms.set_printing(id, true, cx);
+            terms.set_covered(id, true, cx);
         });
         self.open = Some(id);
+        self.error = None;
         self.name
             .update(cx, |name, cx| name.set_value(stem, window, cx));
+        // 前に PDF に保存したときの設定で始める
+        self.setup = self.terms.read(cx).print_setup.clone();
+        self.write_inputs(window, cx);
         self.focus_now(window, cx);
         cx.notify();
     }
@@ -1891,7 +2127,7 @@ impl PrintDialog {
             return false;
         };
         self.terms.update(cx, |terms, cx| {
-            terms.set_printing(id, false, cx);
+            terms.set_covered(id, false, cx);
             terms.focus_page(id, cx);
         });
         cx.notify();
@@ -1912,15 +2148,289 @@ impl PrintDialog {
             return;
         };
         let pdf = self.terms.read(cx).print_pdf;
+        if pdf {
+            self.read_inputs(cx);
+            if self.problem.is_some() {
+                return;
+            }
+            // 覚えられなければ、保存しないでダイアログに失敗を出す
+            let setup = self.setup.clone();
+            if let Err(e) = self
+                .terms
+                .update(cx, |terms, cx| terms.set_print_setup(setup, cx))
+            {
+                self.error = Some(e);
+                cx.notify();
+                return;
+            }
+        }
         let name = self.name.read(cx).value().trim().to_string();
+        let setup = self.setup.clone();
         self.hide(cx);
         self.terms.update(cx, |terms, cx| {
             if pdf {
-                terms.save_page_pdf(id, &name, cx);
+                terms.save_page_pdf(id, &name, &setup, cx);
             } else {
                 terms.print_page(id, cx);
             }
         });
+    }
+
+    /// PDF の設定。Chrome の印刷と同じ並び（ページ・レイアウト、詳細設定の中に用紙サイズ・
+    /// 1 枚あたりのページ数・余白・倍率・オプション）。
+    fn settings(&self, cx: &mut Context<Self>) -> Div {
+        use crate::print_setup::{Margins, Pages, Paper, Side, HEADER_FOOTER, N_UP, PER_SHEET};
+        let theme = cx.theme().clone();
+        let setup = &self.setup;
+        let this = cx.entity().downgrade();
+        let pick =
+            move |id: &'static str, shown: String, options: Vec<SetupChoice>, muted: Hsla| {
+                let this = this.clone();
+                let options = Rc::new(options);
+                button(id)
+                    .outline()
+                    .small()
+                    .w_full()
+                    .child(
+                        row()
+                            .w_full()
+                            .min_w_0()
+                            .gap_2()
+                            .child(div().flex_1().min_w_0().truncate().child(shown))
+                            .child(app_icon("chevron-down").small().text_color(muted)),
+                    )
+                    .pop_menu(move |mut menu, _, _| {
+                        for ix in 0..options.len() {
+                            let (this, options) = (this.clone(), options.clone());
+                            let (label, checked) = (options[ix].0.clone(), options[ix].1);
+                            menu = menu.item(PopupMenuItem::new(label).checked(checked).on_click(
+                                move |_, window, cx| {
+                                    // ダイアログを閉じたあとなら、変える先がない
+                                    let _ = this.update(cx, |d, cx| {
+                                        d.change(|s| (options[ix].2)(s), window, cx)
+                                    });
+                                },
+                            ));
+                        }
+                        menu
+                    })
+            };
+        let line = |label: &'static str, control: AnyElement| {
+            row()
+                .gap_3()
+                .child(
+                    div()
+                        .flex_none()
+                        .w(gpui_kit::px(150.))
+                        .whitespace_nowrap()
+                        .text_sm()
+                        .text_color(theme.muted_foreground)
+                        .child(label),
+                )
+                .child(div().flex_1().min_w_0().child(control))
+        };
+        let muted = theme.muted_foreground;
+        let pages = pick(
+            "browser-print-pages",
+            setup.pages.label().to_owned(),
+            Pages::ALL
+                .into_iter()
+                .map(|p| {
+                    let f: Box<dyn Fn(&mut crate::print_setup::PrintSetup)> =
+                        Box::new(move |s| s.pages = p);
+                    (p.label().to_owned(), setup.pages == p, f)
+                })
+                .collect(),
+            muted,
+        );
+        let layout = pick(
+            "browser-print-layout",
+            if setup.landscape { "横" } else { "縦" }.to_owned(),
+            [(false, "縦"), (true, "横")]
+                .into_iter()
+                .map(|(landscape, label)| {
+                    let f: Box<dyn Fn(&mut crate::print_setup::PrintSetup)> =
+                        Box::new(move |s| s.landscape = landscape);
+                    (label.to_owned(), setup.landscape == landscape, f)
+                })
+                .collect(),
+            muted,
+        );
+        let mut body = col()
+            .gap_2()
+            .child(line("ページ", pages.into_any_element()))
+            .when(setup.pages == Pages::Custom, |d| {
+                d.child(line(
+                    "",
+                    div()
+                        .id("browser-print-ranges")
+                        .child(Input::new(&self.ranges).small().aria_label("ページの範囲"))
+                        .test_support()
+                        .into_any_element(),
+                ))
+            })
+            .child(line("レイアウト", layout.into_any_element()))
+            .child(
+                row()
+                    .id("browser-print-more")
+                    .gap_1()
+                    .py_1()
+                    .cursor_pointer()
+                    .text_sm()
+                    .text_color(theme.muted_foreground)
+                    .hover(|s| s.text_color(theme.foreground))
+                    .child(if setup.more {
+                        "詳細設定を閉じる"
+                    } else {
+                        "詳細設定"
+                    })
+                    .child(
+                        app_icon(if setup.more {
+                            "chevron-up"
+                        } else {
+                            "chevron-down"
+                        })
+                        .small(),
+                    )
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.change(|s| s.more = !s.more, window, cx)
+                    }))
+                    .test_support(),
+            );
+        if setup.more {
+            let paper = pick(
+                "browser-print-paper",
+                setup.paper.label().to_owned(),
+                Paper::ALL
+                    .into_iter()
+                    .map(|p| {
+                        let f: Box<dyn Fn(&mut crate::print_setup::PrintSetup)> =
+                            Box::new(move |s| s.paper = p);
+                        (p.label().to_owned(), setup.paper == p, f)
+                    })
+                    .collect(),
+                muted,
+            );
+            let per_sheet = pick(
+                "browser-print-per-sheet",
+                setup.per_sheet().to_string(),
+                PER_SHEET
+                    .into_iter()
+                    .map(|n| {
+                        let f: Box<dyn Fn(&mut crate::print_setup::PrintSetup)> =
+                            Box::new(move |s| s.per_sheet = n);
+                        (n.to_string(), setup.per_sheet() == n, f)
+                    })
+                    .collect(),
+                muted,
+            );
+            let margins = pick(
+                "browser-print-margins",
+                setup.margins.label().to_owned(),
+                Margins::ALL
+                    .into_iter()
+                    .map(|m| {
+                        let f: Box<dyn Fn(&mut crate::print_setup::PrintSetup)> =
+                            Box::new(move |s| s.margins = m);
+                        (m.label().to_owned(), setup.margins == m, f)
+                    })
+                    .collect(),
+                muted,
+            );
+            let scale = pick(
+                "browser-print-scale",
+                if setup.scale.is_some() {
+                    "カスタム"
+                } else {
+                    "標準"
+                }
+                .to_owned(),
+                [(false, "標準"), (true, "カスタム")]
+                    .into_iter()
+                    .map(|(custom, label)| {
+                        let f: Box<dyn Fn(&mut crate::print_setup::PrintSetup)> =
+                            Box::new(move |s| {
+                                s.scale = custom.then(|| s.scale.unwrap_or(100));
+                            });
+                        (label.to_owned(), setup.scale.is_some() == custom, f)
+                    })
+                    .collect(),
+                muted,
+            );
+            let edges = row()
+                .gap_1()
+                .children(self.margins.iter().zip(Side::ALL).map(|(input, side)| {
+                    col()
+                        .id(SharedString::from(format!(
+                            "browser-print-margin-{}",
+                            side.key()
+                        )))
+                        .flex_1()
+                        .min_w_0()
+                        .gap_0p5()
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child(side.label()),
+                        )
+                        .child(
+                            Input::new(input)
+                                .small()
+                                .suffix(div().text_xs().text_color(muted).child("mm"))
+                                .aria_label(side.label()),
+                        )
+                        .test_support()
+                }));
+            let backgrounds = Checkbox::new("browser-print-backgrounds")
+                .label("背景のグラフィック")
+                .checked(setup.backgrounds)
+                .on_click(cx.listener(|this, on: &bool, window, cx| {
+                    let on = *on;
+                    this.change(|s| s.backgrounds = on, window, cx)
+                }));
+            let header = Checkbox::new("browser-print-header-footer")
+                .label("ヘッダーとフッター")
+                .checked(setup.header_footer)
+                .on_click(cx.listener(|this, on: &bool, window, cx| {
+                    let on = *on;
+                    this.change(|s| s.header_footer = on, window, cx)
+                }));
+            body = body
+                .child(line("用紙サイズ", paper.into_any_element()))
+                .when(N_UP, |d| {
+                    d.child(line("1 枚あたりのページ数", per_sheet.into_any_element()))
+                })
+                .child(line("余白", margins.into_any_element()))
+                .when(setup.margins == Margins::Custom, |d| {
+                    d.child(line("", edges.into_any_element()))
+                })
+                .child(line("倍率", scale.into_any_element()))
+                .when(setup.scale.is_some(), |d| {
+                    d.child(line(
+                        "",
+                        div()
+                            .id("browser-print-scale-value")
+                            .child(
+                                Input::new(&self.scale)
+                                    .small()
+                                    .suffix(div().text_xs().text_color(muted).child("%"))
+                                    .aria_label("倍率"),
+                            )
+                            .test_support()
+                            .into_any_element(),
+                    ))
+                })
+                .child(line(
+                    "オプション",
+                    col()
+                        .gap_1p5()
+                        .when(HEADER_FOOTER, |d| d.child(header))
+                        .child(backgrounds)
+                        .into_any_element(),
+                ));
+        }
+        body
     }
 }
 
@@ -1954,8 +2464,9 @@ impl Render for PrintDialog {
                 }),
             )
             .occlude()
-            .w(gpui_kit::px(380.))
+            .w(gpui_kit::px(440.))
             .max_w(relative(0.94))
+            .max_h(relative(0.92))
             .p_4()
             .gap_3()
             .rounded(feel::lg())
@@ -2005,6 +2516,28 @@ impl Render for PrintDialog {
                     ),
                 )
             })
+            .when(pdf, |d| {
+                d.child(
+                    div()
+                        .id("browser-print-settings")
+                        .flex_shrink(1.)
+                        .min_h_0()
+                        .overflow_y_scrollbar()
+                        .child(self.settings(cx)),
+                )
+            })
+            .children(
+                pdf.then(|| self.problem.clone().or_else(|| self.error.clone()))
+                    .flatten()
+                    .map(|text| {
+                        div()
+                            .id("browser-print-problem")
+                            .text_sm()
+                            .text_color(theme.danger)
+                            .child(text)
+                            .test_support()
+                    }),
+            )
             .child(
                 row()
                     .gap_2()
@@ -2021,6 +2554,7 @@ impl Render for PrintDialog {
                         button("browser-print-submit")
                             .label(if pdf { "保存" } else { "印刷" })
                             .primary()
+                            .disabled(pdf && self.problem.is_some())
                             .on_click(cx.listener(|this, _, window, cx| this.submit(window, cx))),
                     )),
             )
@@ -2053,6 +2587,24 @@ impl Render for PrintDialog {
             .child(card)
             .into_any_element()
     }
+}
+
+/// 余白の mm を欄に書く形にする（`10`、`4.5`）。
+fn mm_text(mm: f32) -> String {
+    let text = format!("{mm:.1}");
+    text.strip_suffix(".0").unwrap_or(&text).to_owned()
+}
+
+/// 全角の数字と小数点を半角にする（欄に全角で書いても読む）。
+fn to_ascii_digits(text: &str) -> String {
+    text.chars()
+        .map(|c| match c {
+            '０'..='９' => char::from_u32(c as u32 - '０' as u32 + '0' as u32).unwrap_or(c),
+            '．' => '.',
+            '％' => '%',
+            c => c,
+        })
+        .collect()
 }
 
 /// 場所の欄の右に出す、ページの拡大率。押すと 100% に戻す。
@@ -2272,6 +2824,13 @@ impl Render for BrowserPane {
             self.terms.update(cx, |terms, _| terms.focus_bar = false);
             self.bar.update(cx, |bar, cx| bar.focus(window, cx));
         }
+        if self.terms.read(cx).show_downloads && !elsewhere {
+            self.terms
+                .update(cx, |terms, _| terms.show_downloads = false);
+            window.activate_window();
+            self.downloads
+                .update(cx, |downloads, cx| downloads.show(window, cx));
+        }
         let tool = |id: &'static str, icon: &str, tip: &'static str| {
             button(id)
                 .icon(app_icon(icon))
@@ -2353,7 +2912,9 @@ impl Render for BrowserPane {
                         let url = url.clone();
                         move |_, _, cx| cx.open_url(&url)
                     }),
-            ));
+            ))
+            // Chrome と同じく、ツールバーのいちばん右にダウンロード
+            .children(crate::downloads_ui::toolbar_button(&self.downloads, cx));
         let body = if let Some(error) = error {
             div()
                 .flex()
@@ -2449,6 +3010,7 @@ impl Render for BrowserPane {
                     .when(loading, |d| d.child(loading_line(theme.primary))),
             )
             .child(body)
+            .child(self.downloads.clone())
             .test_support()
             .into_any_element()
     }

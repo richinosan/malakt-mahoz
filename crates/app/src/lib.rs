@@ -15,6 +15,7 @@ pub(crate) mod clock;
 pub mod date_pick;
 pub mod db;
 pub mod downloads;
+pub mod downloads_ui;
 pub mod drops;
 pub mod estimate_pick;
 mod feel;
@@ -33,6 +34,7 @@ pub mod plugins;
 pub mod pomodoro;
 pub mod pr_times;
 mod press;
+pub mod print_setup;
 pub mod reminders;
 mod render;
 mod repeat_view;
@@ -224,7 +226,7 @@ pub fn init_with(store: malakt_core::Store, ai: AiConfig, cx: &mut App) {
         cx.quit()
     });
     cx.on_action(|_: &LockNow, cx| lock_now_or_settings(cx));
-    // メインのウィンドウの外（小さなウィンドウ、シェルのウィンドウ）では、メインのウィンドウに出す
+    // ブラウザの画面の外（リンクから開いた小さなウィンドウ）では、ブラウザの画面に出す
     cx.on_action(|_: &shell_keys::ShowDownloads, cx| show_downloads(cx));
     cx.set_menus([Menu {
         name: APP_NAME.into(),
@@ -463,31 +465,11 @@ fn open_settings_now(
     });
 }
 
-/// ダウンロードの一覧を、今のウィンドウかメインのウィンドウに出して、手前に出す。
+/// ダウンロードの一覧を、ブラウザの画面のツールバーの下に出す。次に描くブラウザの画面が出す。
 pub(crate) fn show_downloads(cx: &mut App) {
-    // キーから呼ぶときは、そのウィンドウを更新している最中なので、終わってから開く
-    cx.defer(|cx| {
-        let mut windows = cx.windows();
-        for first in [session::main_window(cx), cx.active_window()]
-            .into_iter()
-            .flatten()
-        {
-            if let Some(ix) = windows.iter().position(|w| *w == first) {
-                let window = windows.remove(ix);
-                windows.insert(0, window);
-            }
-        }
-        let Some((handle, view)) = windows
-            .into_iter()
-            .find_map(|handle| Some((handle, main_view_in(handle, cx)?)))
-        else {
-            return;
-        };
-        // 探したあとに閉じたウィンドウなら、開く先がない
-        let _ = handle.update(cx, |_, window, cx| {
-            window.activate_window();
-            view.update(cx, |this, cx| this.open_downloads(window, cx));
-        });
+    term::shared(cx).update(cx, |terms, cx| {
+        terms.show_downloads = true;
+        cx.notify();
     });
 }
 
