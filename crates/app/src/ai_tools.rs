@@ -37,7 +37,7 @@ pub fn is_app_tool(name: &str) -> bool {
         || name == crate::plugins::RUN_TOOL
 }
 
-const SORTS: [(&str, Sort); 8] = [
+const SORTS: [(&str, Sort); 10] = [
     ("due", Sort::Due),
     ("priority", Sort::Priority),
     ("updated", Sort::Updated),
@@ -45,15 +45,25 @@ const SORTS: [(&str, Sort); 8] = [
     ("title", Sort::Title),
     ("status", Sort::Status),
     ("assignee", Sort::Assignee),
+    ("estimate", Sort::Estimate),
+    ("elapsed", Sort::Elapsed),
     ("manual", Sort::Manual),
 ];
 
-const COLUMNS: [(&str, Column); 5] = [
+const TIME_FILTERS: [(&str, malakt_core::view::TimeFilter); 3] = [
+    ("estimated", malakt_core::view::TimeFilter::Estimated),
+    ("not_estimated", malakt_core::view::TimeFilter::NotEstimated),
+    ("over", malakt_core::view::TimeFilter::Over),
+];
+
+const COLUMNS: [(&str, Column); 7] = [
     ("status", Column::Status),
     ("priority", Column::Priority),
     ("assignee", Column::Assignee),
     ("due", Column::Due),
     ("updated", Column::Updated),
+    ("estimate", Column::Estimate),
+    ("elapsed", Column::Elapsed),
 ];
 
 const MODES: [(&str, Choice); 3] = [
@@ -701,6 +711,7 @@ impl MainView {
             },
             "priority": q.priority.map(|p| key_of(&PRIORITIES, p)),
             "category": q.category,
+            "time": q.time.map(|f| key_of(&TIME_FILTERS, f)),
             "sort": key_of(&SORTS, q.sort),
             "descending": q.descending,
             "shown_tasks": self.visible.len(),
@@ -847,6 +858,12 @@ impl MainView {
             Some(Value::String(s)) if s.is_empty() => q.category = None,
             Some(Value::String(s)) => q.category = Some(s.clone()),
             Some(other) => return Err(format!("category が正しくありません: {other}")),
+        }
+        match args.get("time") {
+            None => {}
+            Some(Value::Null) => q.time = None,
+            Some(Value::String(s)) => q.time = Some(parse_in(&TIME_FILTERS, s, "time")?),
+            Some(other) => return Err(format!("time が正しくありません: {other}")),
         }
         if let Some(sort) = str_arg(args, "sort") {
             q.sort = parse_in(&SORTS, sort, "sort")?;

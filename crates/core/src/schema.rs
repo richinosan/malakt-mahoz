@@ -418,6 +418,33 @@ pub(crate) const MIGRATIONS: &[&str] = &[
         PRIMARY KEY (account_id, uri)
     ) STRICT;
     "#,
+    // 24: 予想工数（ISO 8601 の期間）と所要時間の基準（`in_process>completed` の形）、進行中にした時刻と
+    //     担当が付いた時刻。今までのタスクの 2 つの時刻は、変更履歴から埋める（残っていなければ作った時刻）
+    r#"
+    ALTER TABLE tasks ADD COLUMN estimate TEXT;
+    ALTER TABLE tasks ADD COLUMN time_basis TEXT;
+    ALTER TABLE tasks ADD COLUMN started_at INTEGER;
+    ALTER TABLE tasks ADD COLUMN assigned_at INTEGER;
+    ALTER TABLE workspaces ADD COLUMN time_basis TEXT;
+    UPDATE tasks SET started_at = (
+        SELECT MIN(c.created_at) FROM changes c
+        WHERE c.task_id = tasks.id
+          AND ((c.field = 'status' AND c.new_value = 'in_process')
+               OR (c.field = 'created' AND json_valid(c.new_value)
+                   AND json_extract(c.new_value, '$.status') = 'in_process'))
+          AND c.created_at >= COALESCE((
+              SELECT MAX(d.created_at) FROM changes d
+              WHERE d.task_id = tasks.id AND d.field = 'status' AND d.new_value = 'needs_action'), 0)
+    ) WHERE status <> 'needs_action';
+    UPDATE tasks SET assigned_at = COALESCE((
+        SELECT MAX(c.created_at) FROM changes c
+        WHERE c.task_id = tasks.id
+          AND ((c.field = 'assignees' AND c.old_value = '' AND c.new_value <> '')
+               OR (c.field = 'created' AND json_valid(c.new_value)
+                   AND json_extract(c.new_value, '$.assignees') IS NOT NULL))
+    ), created_at)
+    WHERE EXISTS (SELECT 1 FROM task_assignees a WHERE a.task_id = tasks.id);
+    "#,
 ];
 
 pub(crate) fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
@@ -524,5 +551,56 @@ mod tests {
             .collect::<rusqlite::Result<_>>()
             .unwrap();
         assert_eq!(left, vec!["ai.provider".to_owned()]);
+    }
+
+    /// 今までのタスクの、進行中にした時刻と担当が付いた時刻を、変更履歴から埋める。
+    #[test]
+    fn fills_start_and_assign_times_from_history() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        for sql in &super::MIGRATIONS[..23] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 23).unwrap();
+        conn.execute_batch(
+            r#"INSERT INTO people(id, name, is_self, created_at, updated_at) VALUES ('p', '佐藤', 0, 0, 0);
+             INSERT INTO tasks(id, title, description, status, priority, position, created_at, updated_at)
+             VALUES ('done', 'a', '', 'completed', 0, 0, 100, 0),
+                    ('again', 'b', '', 'in_process', 0, 1, 100, 0),
+                    ('born', 'c', '', 'in_process', 0, 2, 100, 0),
+                    ('todo', 'd', '', 'needs_action', 0, 3, 100, 0),
+                    ('old', 'e', '', 'completed', 0, 4, 100, 0);
+             INSERT INTO task_assignees(task_id, person_id) VALUES ('done', 'p'), ('born', 'p'), ('old', 'p');
+             INSERT INTO changes(id, task_id, field, old_value, new_value, created_at) VALUES
+               ('1', 'done', 'created', '', '{"status":"needs_action"}', 100),
+               ('2', 'done', 'status', 'needs_action', 'in_process', 200),
+               ('3', 'done', 'assignees', '', 'p', 250),
+               ('4', 'done', 'status', 'in_process', 'completed', 300),
+               ('5', 'again', 'status', 'needs_action', 'in_process', 200),
+               ('6', 'again', 'status', 'in_process', 'needs_action', 300),
+               ('7', 'again', 'status', 'needs_action', 'in_process', 400),
+               ('8', 'born', 'created', '', '{"status":"in_process","assignees":"p"}', 100),
+               ('9', 'todo', 'status', 'needs_action', 'in_process', 200),
+               ('10', 'todo', 'status', 'in_process', 'needs_action', 300);"#,
+        )
+        .unwrap();
+        super::migrate(&mut conn).unwrap();
+        let times: Vec<(String, Option<i64>, Option<i64>)> = conn
+            .prepare("SELECT id, started_at, assigned_at FROM tasks ORDER BY position")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(
+            times,
+            vec![
+                ("done".into(), Some(200), Some(250)),
+                ("again".into(), Some(400), None),
+                ("born".into(), Some(100), Some(100)),
+                ("todo".into(), None, None),
+                // 変更履歴が残っていなければ、作った時刻を担当が付いた時刻にする
+                ("old".into(), None, Some(100)),
+            ]
+        );
     }
 }

@@ -70,6 +70,8 @@ pub enum Modal {
     Appearance,
     /// AI を使っていないときに、起動してすぐ出す AI のおすすめ
     AiPromo,
+    /// 予想工数と所要時間の統計。`None` は全体、ワークスペースならサブワークスペースを含む
+    Stats(Option<Id>),
 }
 
 /// AI のおすすめを「今後は表示しない」にしたかを覚える設定。
@@ -378,6 +380,8 @@ pub struct Inputs {
     /// カレンダーの、日付と時刻の入力欄。
     pub pick_date: Entity<InputState>,
     pub pick_time: Entity<InputState>,
+    /// 予想工数のパネルの入力欄。
+    pub estimate: Entity<InputState>,
     pub category: Entity<InputState>,
     pub description: Entity<TextareaState>,
     pub comment: Entity<TextareaState>,
@@ -427,6 +431,8 @@ pub struct MainView {
     pub repeating: HashSet<Id>,
     pub people: Vec<Person>,
     pub self_id: Option<Id>,
+    /// 所要時間の基準の、全体の標準。
+    pub time_standard: malakt_core::timing::Basis,
     pub categories: Vec<String>,
     pub tasks: Rc<Vec<Todo>>,
     pub visible: Rc<Vec<usize>>,
@@ -480,6 +486,14 @@ pub struct MainView {
     pub date_pick: Option<crate::date_pick::DatePick>,
     /// カレンダーを開いた回数（出てくる動きに使う）。
     pub date_opens: usize,
+    /// 統計の期間。
+    pub stats_period: malakt_core::timing::Period,
+    /// 統計のダイアログに出す数字。
+    pub stats_view: Option<crate::timing_view::StatsView>,
+    /// 開いている予想工数のパネル。
+    pub estimate_pick: Option<crate::estimate_pick::EstimatePick>,
+    /// 予想工数のパネルを開いた回数（出てくる動きに使う）。
+    pub estimate_opens: usize,
     /// カレンダーの、キーで日を動かす所。
     pub date_grid: FocusHandle,
     /// カレンダーの月の一覧のスクロール。
@@ -685,6 +699,7 @@ impl MainView {
             subtask: input(window, cx, "サブタスクを追加…"),
             pick_date: input(window, cx, "11/30、明日、金曜"),
             pick_time: input(window, cx, "18:30、18時"),
+            estimate: input(window, cx, "1日3時間、90分、1.5h"),
             category: input(window, cx, "カテゴリを追加して Enter"),
             description: area(window, cx, "説明"),
             comment: area(window, cx, "コメントを追加"),
@@ -770,7 +785,8 @@ impl MainView {
             }),
             // AI やほかのウィンドウが開始日と期限を変えたら、開いているカレンダーの入力欄も合わせる
             cx.observe_in(&db, window, |this, _, window, cx| {
-                this.sync_date_texts(window, cx)
+                this.sync_date_texts(window, cx);
+                this.sync_estimate_text(window, cx);
             }),
         ];
         macro_rules! on_enter {
@@ -880,6 +896,7 @@ impl MainView {
             window,
             cx,
         ));
+        subs.push(Self::subscribe_estimate_pick(&inputs.estimate, window, cx));
         on_enter!(category, submit_category);
         subs.push(cx.subscribe_in(
             &inputs.font_search,
@@ -1017,6 +1034,7 @@ impl MainView {
             repeating: HashSet::new(),
             people: Vec::new(),
             self_id: None,
+            time_standard: Default::default(),
             categories: Vec::new(),
             tasks: Rc::new(Vec::new()),
             visible: Rc::new(Vec::new()),
@@ -1052,6 +1070,10 @@ impl MainView {
             modal: Modal::None,
             date_pick: None,
             date_opens: 0,
+            estimate_pick: None,
+            estimate_opens: 0,
+            stats_period: Default::default(),
+            stats_view: None,
             date_grid: cx.focus_handle(),
             month_scroll: ScrollHandle::new(),
             bulk_due: None,
@@ -1144,6 +1166,7 @@ impl MainView {
             inputs,
             _subscriptions: subs,
         };
+        Self::start_timing_clock(cx);
         // ダイアログを閉じて入力欄がなくなっても、続けてキーで操作できるようにする
         this._subscriptions
             .push(cx.on_focus_lost(window, |this, window, cx| {
@@ -1250,6 +1273,7 @@ impl MainView {
         self.repeating = store.repeating_task_ids()?;
         self.people = store.people()?;
         self.self_id = self.people.iter().find(|p| p.is_self).map(|p| p.id.clone());
+        self.time_standard = store.time_basis_standard()?;
         self.categories = store.categories()?;
         self.notices = store.notices(NOTICES_SHOWN)?;
         self.unread_notices = store.unread_notice_count()?;
@@ -1308,15 +1332,40 @@ impl MainView {
             self.panel = None;
             self.editing = None;
         }
+        self.refresh_stats(cx);
         Ok(())
+    }
+
+    /// 所要時間を数えるのに要るもの（今の時刻で）。
+    pub fn timing(&self) -> view::Timing<'_> {
+        view::Timing {
+            workspaces: &self.workspaces,
+            standard: self.time_standard,
+            now: malakt_core::now_ms(),
+        }
+    }
+
+    /// そのタスクの所要時間の基準。
+    pub fn task_basis(&self, task: &malakt_core::Task) -> malakt_core::timing::Basis {
+        malakt_core::timing::basis_of(task, &self.workspaces, self.time_standard)
+    }
+
+    /// そのタスクの所要時間の区間。
+    pub fn task_span(&self, task: &malakt_core::Task) -> Option<malakt_core::timing::Span> {
+        self.timing().span(task, self.self_id.as_deref())
     }
 
     /// 絞り込みと並べ替えだけをやり直す（データベースは読まない）。
     pub fn refilter(&mut self) {
         self.counts = view::counts(&self.tasks);
-        let hits = view::apply_named(&self.tasks, &self.query, self.self_id.as_deref(), &|id| {
-            self.person_name(id).to_owned()
-        });
+        let timing = self.timing();
+        let hits = view::apply_timed(
+            &self.tasks,
+            &self.query,
+            self.self_id.as_deref(),
+            &|id| self.person_name(id).to_owned(),
+            &timing,
+        );
         let outline = match &self.nav {
             // 絞り込んでいる間は、条件に合うタスクがないサブワークスペースを出さない
             Nav::Workspace(id) => view::outline(
@@ -1649,6 +1698,7 @@ impl MainView {
         self.editing = None;
         self.assignee_picker = false;
         self.date_pick = None;
+        self.estimate_pick = None;
         self.reload(cx);
     }
 
@@ -5015,7 +5065,7 @@ impl MainView {
     /// （重ねたほうの入力欄がなくなると、フォーカスの行き先がなくなる）。
     pub fn dismiss_in(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // その場に開いたカレンダーがいちばん上にある
-        if self.dismiss_date_pick(window, cx) {
+        if self.dismiss_date_pick(window, cx) || self.dismiss_estimate_pick(window, cx) {
             return;
         }
         let over = self.sub_modal.is_some();
@@ -5197,15 +5247,19 @@ pub enum Column {
     Assignee,
     Due,
     Updated,
+    Estimate,
+    Elapsed,
 }
 
 impl Column {
-    pub const ALL: [Column; 5] = [
+    pub const ALL: [Column; 7] = [
         Column::Status,
         Column::Priority,
         Column::Assignee,
         Column::Due,
         Column::Updated,
+        Column::Estimate,
+        Column::Elapsed,
     ];
 
     pub fn label(self) -> &'static str {
@@ -5215,6 +5269,8 @@ impl Column {
             Column::Assignee => "担当",
             Column::Due => "期限",
             Column::Updated => "更新",
+            Column::Estimate => "予想工数",
+            Column::Elapsed => "所要時間",
         }
     }
 
@@ -5225,6 +5281,8 @@ impl Column {
             Column::Assignee => "assignee",
             Column::Due => "due",
             Column::Updated => "updated",
+            Column::Estimate => "estimate",
+            Column::Elapsed => "elapsed",
         }
     }
 
@@ -5236,7 +5294,14 @@ impl Column {
             Column::Assignee => 160.,
             Column::Due => 150.,
             Column::Updated => 84.,
+            Column::Estimate => 96.,
+            Column::Elapsed => 96.,
         }
+    }
+
+    /// 最初は隠しておく列（あとから足した列。見出しの右クリックで出す）。
+    pub fn hidden_at_first(self) -> bool {
+        matches!(self, Column::Estimate | Column::Elapsed)
     }
 
     /// この列で並べ替えるときの並び順。
@@ -5247,6 +5312,8 @@ impl Column {
             Column::Assignee => view::Sort::Assignee,
             Column::Due => view::Sort::Due,
             Column::Updated => view::Sort::Updated,
+            Column::Estimate => view::Sort::Estimate,
+            Column::Elapsed => view::Sort::Elapsed,
         }
     }
 }
@@ -5270,7 +5337,7 @@ impl TableColumn {
         TableColumn {
             column,
             width: column.default_width(),
-            hidden: false,
+            hidden: column.hidden_at_first(),
         }
     }
 }
@@ -5621,6 +5688,9 @@ bundled_icons! {
         "calendar-sync",
         "server",
         "cloud-alert",
+        "timer",
+        "chart-column",
+        "minus",
     ],
 }
 
@@ -5733,6 +5803,7 @@ mod tests {
             date: None,
             icon: None,
             color: None,
+            time_basis: None,
             position,
             created_at: 0,
             updated_at: 0,

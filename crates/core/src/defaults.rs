@@ -113,6 +113,37 @@ pub(crate) fn save(conn: &Connection, d: &TaskDefaults) -> Result<()> {
 }
 
 impl Store {
+    /// ワークスペースの所要時間の基準を決める。`None` は全体の標準に従う。
+    pub fn set_workspace_time_basis(
+        &mut self,
+        id: &str,
+        basis: Option<crate::timing::Basis>,
+    ) -> Result<Workspace> {
+        let n = self.conn.execute(
+            "UPDATE workspaces SET time_basis = ?2, updated_at = ?3 WHERE id = ?1",
+            params![id, basis.map(|b| b.code()), now_ms()],
+        )?;
+        if n == 0 {
+            return Err(Error::NotFound(format!("ワークスペース {id}")));
+        }
+        self.workspace(id)
+    }
+
+    /// 全体の標準の、所要時間の基準。
+    pub fn time_basis_standard(&self) -> Result<crate::timing::Basis> {
+        Ok(self
+            .setting(crate::timing::BASIS_SETTING)?
+            .as_deref()
+            .and_then(crate::timing::Basis::parse)
+            .unwrap_or_default())
+    }
+
+    /// 全体の標準を変える。
+    pub fn set_time_basis_standard(&mut self, basis: crate::timing::Basis) -> Result<()> {
+        let code = basis.code();
+        self.set_setting(crate::timing::BASIS_SETTING, Some(&code))
+    }
+
     /// ワークスペースの基準日（開催日など）を決める。`None` で消す。
     pub fn set_workspace_date(&mut self, id: &str, date: Option<&str>) -> Result<Workspace> {
         let date = match date.map(str::trim) {

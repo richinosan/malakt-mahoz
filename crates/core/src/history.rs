@@ -137,6 +137,8 @@ pub fn field_label(field: &str) -> &'static str {
         "assignee_done" => "担当者ごとの完了",
         "categories" => "カテゴリ",
         "urls" => "URL",
+        "estimate" => "予想工数",
+        "time_basis" => "所要時間の基準",
         "workspace" => "ワークスペース",
         "link" => "表示するワークスペース",
         crate::repeat::FIELD => "繰り返し",
@@ -147,7 +149,7 @@ pub fn field_label(field: &str) -> &'static str {
 
 /// 項目の並び順（タイトルが先、説明はあと）。
 fn field_order(field: &str) -> usize {
-    const ORDER: [&str; 17] = [
+    const ORDER: [&str; 19] = [
         "title",
         "urls",
         "status",
@@ -160,6 +162,8 @@ fn field_order(field: &str) -> usize {
         "categories",
         "parent",
         "percent",
+        "estimate",
+        "time_basis",
         "workspace",
         "link",
         crate::repeat::FIELD,
@@ -236,6 +240,11 @@ fn show(field: &str, value: &str, names: &dyn Names) -> String {
             .join("、"),
         "categories" => list(value).join("、"),
         "urls" => url_list(value).join("\n"),
+        "estimate" => crate::estimate::Estimate::from_iso(value)
+            .map_or_else(|| value.to_owned(), |e| e.label()),
+        "time_basis" => {
+            crate::timing::Basis::parse(value).map_or_else(|| value.to_owned(), |b| b.label())
+        }
         "workspace" | "link" => names.workspace(value),
         "parent" => names.task(value),
         _ => value.to_owned(),
@@ -588,6 +597,23 @@ pub fn events(entry: &Entry, names: &dyn Names, status_comments: &[StatusComment
                     let text = format!("URL {}を外しました", quoted(removed));
                     add("urls-removed", "link", text, false);
                 }
+            }
+            "estimate" => {
+                let text = match crate::estimate::Estimate::from_iso(new) {
+                    None => "予想工数を外しました".to_owned(),
+                    Some(e) => {
+                        let verb = if old.is_empty() { "設定" } else { "変更" };
+                        format!("予想工数を{}に{verb}しました", quote(&e.label()))
+                    }
+                };
+                add("estimate", "hourglass", text, false);
+            }
+            "time_basis" => {
+                let text = match crate::timing::Basis::parse(new) {
+                    None => "所要時間の基準を標準に戻しました".to_owned(),
+                    Some(b) => format!("所要時間の基準を{}に変更しました", quote(&b.label())),
+                };
+                add("time_basis", "timer", text, false);
             }
             "parent" => {
                 let text = if new.is_empty() {

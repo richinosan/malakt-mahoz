@@ -1163,12 +1163,12 @@ fn panel_shift(panel: Div, t: f32) -> Div {
     panel.right(rest + px(-48.) * (1. - t)).opacity(t)
 }
 
-fn section_title(text: &'static str) -> Div {
+pub(crate) fn section_title(text: &'static str) -> Div {
     div().font_weight(FontWeight::BOLD).child(text)
 }
 
 /// 詳細の中の 1 まとまり。白い地に枠。
-fn card(cx: &App) -> Div {
+pub(crate) fn card(cx: &App) -> Div {
     let theme = cx.theme();
     col()
         .p_4()
@@ -3228,6 +3228,10 @@ impl MainView {
                 Some(c.clone()),
             ));
         }
+        let mut time = vec![(SharedString::from("すべて"), q.time.is_none(), None)];
+        for f in view::TimeFilter::ALL {
+            time.push((f.label().into(), q.time == Some(f), Some(f)));
+        }
         let sort = Sort::ALL
             .into_iter()
             .map(|s| (SharedString::from(s.label()), q.sort == s, s))
@@ -3305,6 +3309,13 @@ impl MainView {
                 "カテゴリ",
                 category,
                 |this, v| this.query.category = v,
+                cx,
+            ))
+            .child(self.filter_select(
+                "f-time",
+                "予想工数",
+                time,
+                |this, v| this.query.time = v,
                 cx,
             ))
             .child(self.select("f-sort", "並び順", sort, |this, v| this.query.sort = v, cx))
@@ -3510,7 +3521,7 @@ impl MainView {
                         })),
                 ));
         }
-        header = header.child(feel::gloss(
+        header = header.child(self.stats_button(cx)).child(feel::gloss(
             button("new-task-open")
                 .icon(app_icon("plus"))
                 .label("新しいタスク")
@@ -3885,7 +3896,7 @@ impl MainView {
     }
 
     /// 表の 1 行に、今出している列の順でセルを並べる。
-    fn column_cells(&self, mut cells: [Option<AnyElement>; 5]) -> Vec<Div> {
+    fn column_cells(&self, mut cells: [Option<AnyElement>; 7]) -> Vec<Div> {
         self.shown_columns()
             .map(|c| {
                 div()
@@ -4450,6 +4461,15 @@ impl MainView {
             .text_sm()
             .text_color(theme.muted_foreground)
             .child(view::format_relative(task.updated_at, now));
+        let estimate = self.estimate_trigger(
+            ("estimate", ix),
+            crate::estimate_pick::EstimateTarget {
+                id: id.clone(),
+                list: true,
+            },
+            cx,
+        );
+        let elapsed = self.elapsed_cell(task, ix, cx);
 
         let view = cx.entity().downgrade();
         let menu_id = id.clone();
@@ -4533,6 +4553,8 @@ impl MainView {
                     Some(assignees.into_any_element()),
                     Some(due.into_any_element()),
                     Some(updated.into_any_element()),
+                    Some(estimate.into_any_element()),
+                    Some(elapsed),
                 ]))
         } else {
             // 狭い画面では 1 件を 2 段のカードにする
@@ -4683,6 +4705,8 @@ impl MainView {
                     Some(assignees.into_any_element()),
                     Some(due.into_any_element()),
                     updated_shown.then(|| submit().into_any_element()),
+                    None,
+                    None,
                 ]))
                 .when(!updated_shown, |d| d.child(submit()))
         } else {
@@ -6288,6 +6312,18 @@ impl MainView {
                                     .test_support()
                             }))
                         })
+                        .child(self.property("予想工数", cx).child(self.estimate_trigger(
+                            "estimate-value",
+                            crate::estimate_pick::EstimateTarget {
+                                id: task.id.clone(),
+                                list: false,
+                            },
+                            cx,
+                        )))
+                        .child(
+                            self.property("所要時間", cx)
+                                .child(self.elapsed_property(task, cx)),
+                        )
                         .child(self.property("カテゴリ", cx).child(categories))
                         .child(self.property("親タスク", cx).child(parent))
                         .child(self.property("ワークスペース", cx).child(workspace))
@@ -9357,6 +9393,7 @@ impl MainView {
                 self.dialog(title, body, cx)
             }
             Modal::Appearance => self.render_appearance(cx),
+            Modal::Stats(scope) => self.stats_dialog(scope.as_deref(), cx),
             Modal::AiPromo => {
                 let body = col()
                     .gap_4()
@@ -10039,6 +10076,7 @@ impl MainView {
                             .child(label("定時タスク"))
                             .child(self.schedules_opener(id, cx)),
                     )
+                    .child(self.workspace_basis_setting(id, cx))
                     .child(
                         col().gap_1().child(label("ターミナルのフォルダー")).child(
                             Input::new(&self.inputs.ws_term_dir)

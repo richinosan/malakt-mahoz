@@ -34,7 +34,15 @@ fn plan_work_and_move_to_another_device() {
         "https://example.com/rental?id=1,2".into(),
         "github.com/acme/event/issues/3".into(),
     ];
+    // 予想工数と所要時間の基準も一緒に移す
+    d.estimate = malakt_core::estimate::parse("1日3時間");
     let desk = a.create_task(Some(&venue.id), &d).unwrap();
+    let created_first = malakt_core::timing::Basis::new(
+        malakt_core::timing::StartBasis::Created,
+        malakt_core::timing::EndBasis::Completed,
+    );
+    a.set_workspace_time_basis(&venue.id, Some(created_first))
+        .unwrap();
     let flyer = a
         .create_task(Some(&print.id), &draft("チラシを刷る"))
         .unwrap();
@@ -133,6 +141,16 @@ fn plan_work_and_move_to_another_device() {
         ]
     );
     assert_eq!(b.task(&flyer.id).unwrap(), a.task(&flyer.id).unwrap());
+    let moved = b.task(&desk.id).unwrap();
+    assert_eq!(
+        moved.estimate.map(|e| e.label()).as_deref(),
+        Some("1日3時間")
+    );
+    assert!(moved.started_at.is_some() && moved.assigned_at.is_some());
+    assert_eq!(
+        b.workspace(&venue.id).unwrap().time_basis,
+        Some(created_first)
+    );
     assert_eq!(b.comments(&desk.id).unwrap(), a.comments(&desk.id).unwrap());
     assert_eq!(b.changes(&desk.id).unwrap(), a.changes(&desk.id).unwrap());
     assert_eq!(b.workspace_path(&venue.id).unwrap().len(), 2);

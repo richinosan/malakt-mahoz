@@ -4539,8 +4539,13 @@ fn table_columns_resize_reorder_hide_and_sort(cx: &mut TestAppContext) {
     let head = |column: Column| ("col-head", column as usize);
     ui(cx, window, |window, _| {
         for column in Column::ALL {
-            assert!(window.try_find(head(column)).is_some());
-            assert!(window.try_find(("col-resize", column as usize)).is_some());
+            // 予想工数と所要時間は、最初は隠してある（見出しの右クリックで出す）
+            let shown = !column.hidden_at_first();
+            assert_eq!(window.try_find(head(column)).is_some(), shown);
+            assert_eq!(
+                window.try_find(("col-resize", column as usize)).is_some(),
+                shown
+            );
         }
         assert!(window.try_find("col-title").is_some());
     });
@@ -4598,7 +4603,7 @@ fn table_columns_resize_reorder_hide_and_sort(cx: &mut TestAppContext) {
     let saved = store(cx, |s| s.setting("table.columns").unwrap());
     assert_eq!(
         saved.as_deref(),
-        Some("updated:84,status:116,priority:84,-assignee:160,due:150")
+        Some("updated:84,status:116,priority:84,-assignee:160,due:150,-estimate:96,-elapsed:96")
     );
 
     // 新しく開いたウィンドウも同じ列で始まる
@@ -7780,6 +7785,98 @@ fn repeat_is_chosen_in_place_and_makes_the_next_copy(cx: &mut TestAppContext) {
     assert!(store(cx, |s| s.repeat(&copy.id).unwrap()).is_none());
 }
 
+/// 詳細の予想工数は、値を押すとその場に開く欄で決める。「1日3時間」のような書き方を Enter で保存し、
+/// チップはすぐ保存、単位ごとの − ＋ で足し引きし、クリアで外して閉じる。完了にすると所要時間が出て、
+/// 統計のダイアログで完了の数が数えられる。
+#[gpui_kit::test]
+fn estimate_is_typed_picked_and_counted_in_the_stats(cx: &mut TestAppContext) {
+    use malakt_core::estimate::Estimate;
+    start(cx);
+    cx.update(|cx| malakt_mahoz::theme::set_overlay(false, cx).unwrap());
+    let (window, view) = open(cx, wide());
+    ui(cx, window, |window, cx| {
+        window.click("nav-all", cx);
+        window.click("quick-add", cx);
+        window.input("資料を出す", cx);
+        window.press("enter", cx);
+    });
+    ui(cx, window, |window, cx| window.click(("title", 0usize), cx));
+    let estimate = |cx: &mut TestAppContext| all_tasks(cx)[0].estimate;
+    let open_now = |cx: &mut TestAppContext| cx.update(|cx| view.read(cx).estimate_pick.is_some());
+    let click = |cx: &mut TestAppContext, id: &'static str| {
+        ui(cx, window, |window, cx| window.click(id, cx));
+    };
+
+    // 書いて Enter で保存して閉じる
+    click(cx, "estimate-value");
+    assert!(open_now(cx));
+    ui(cx, window, |window, cx| {
+        window.input("1日3時間", cx);
+        window.press("enter", cx);
+    });
+    assert_eq!(estimate(cx), Some(Estimate::new(0, 1, 3, 0)));
+    assert!(!open_now(cx));
+
+    // 読めない書き方では保存せず、開いたまま。Esc で閉じる
+    click(cx, "estimate-value");
+    ui(cx, window, |window, cx| {
+        window.press("secondary-a", cx);
+        window.input("そのうち", cx);
+        window.press("enter", cx);
+    });
+    assert!(open_now(cx));
+    assert_eq!(estimate(cx), Some(Estimate::new(0, 1, 3, 0)));
+    ui(cx, window, |window, cx| window.press("escape", cx));
+    assert!(!open_now(cx));
+
+    // チップはすぐ保存し、開いたまま。＋ − は単位ごとに足し引きする
+    click(cx, "estimate-value");
+    ui(cx, window, |window, cx| {
+        window.click(("estimate-chip", 1usize), cx)
+    });
+    assert_eq!(estimate(cx), Some(Estimate::new(0, 0, 0, 30)));
+    assert!(open_now(cx));
+    click(cx, "estimate-hours-plus");
+    click(cx, "estimate-hours-plus");
+    click(cx, "estimate-minutes-minus");
+    assert_eq!(estimate(cx), Some(Estimate::new(0, 0, 2, 15)));
+    // クリアで外して閉じる
+    click(cx, "estimate-clear");
+    assert_eq!(estimate(cx), None);
+    assert!(!open_now(cx));
+    click(cx, "estimate-value");
+    click(cx, "estimate-hours-plus");
+    assert_eq!(estimate(cx), Some(Estimate::new(0, 0, 1, 0)));
+    ui(cx, window, |window, cx| window.press("escape", cx));
+
+    // 進行中にしてから完了にすると、所要時間が出て、統計で数えられる
+    let id = all_tasks(cx)[0].id.clone();
+    cx.update(|cx| {
+        view.update(cx, |v, cx| {
+            v.set_status(&id, malakt_core::Status::InProcess, cx);
+            v.set_status(&id, malakt_core::Status::Completed, cx);
+        })
+    });
+    cx.run_until_parked();
+    let task = all_tasks(cx).remove(0);
+    assert!(task.started_at.is_some());
+    ui(cx, window, |window, _| {
+        assert!(window.try_find("elapsed-value").is_some());
+    });
+    click(cx, "open-stats");
+    cx.update(|cx| {
+        let v = view.read(cx);
+        assert_eq!(v.modal, malakt_mahoz::state::Modal::Stats(None));
+        let stats = v.stats_view.as_ref().unwrap();
+        assert_eq!(stats.total.done, 1);
+        assert_eq!(stats.total.estimated, 1);
+        assert_eq!(stats.total.within, 1);
+    });
+    ui(cx, window, |window, _| {
+        assert!(window.try_find("stats-done").is_some());
+    });
+}
+
 /// CalDAV のサーバー（メモリの中）とパスワードの置き場を差し替える。
 fn caldav(
     cx: &mut TestAppContext,
@@ -7851,7 +7948,7 @@ fn caldav_calendar_syncs_with_a_workspace(cx: &mut TestAppContext) {
         "/dav/cal/r1.ics",
         "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Other//EN\r\nBEGIN:VTODO\r\nUID:r1\r\n\
          SUMMARY:記事のレビュー\r\nDESCRIPTION:下書きを読む\\n\\nhttps://tasks.example.com/t/r1\r\n\
-         STATUS:NEEDS-ACTION\r\nEND:VTODO\r\nEND:VCALENDAR\r\n",
+         ESTIMATED-DURATION:PT1H30M\r\nSTATUS:NEEDS-ACTION\r\nEND:VTODO\r\nEND:VCALENDAR\r\n",
     );
     let (window, view) = open(cx, wide());
     cx.run_until_parked();
@@ -7884,6 +7981,10 @@ fn caldav_calendar_syncs_with_a_workspace(cx: &mut TestAppContext) {
     .expect("サーバーのタスク");
     assert_eq!(task.description, "下書きを読む");
     assert_eq!(task.urls, vec!["https://tasks.example.com/t/r1".to_owned()]);
+    assert_eq!(
+        task.estimate,
+        Some(malakt_core::estimate::Estimate::new(0, 0, 1, 30))
+    );
 
     // アプリで足したタスクは、少し待つとサーバーへ出る
     cx.update(|cx| {
@@ -8138,4 +8239,48 @@ fn plugins_are_approved_then_run_from_the_right_click_menu(cx: &mut TestAppConte
     ui(cx, window, |window, _| {
         assert!(window.try_find_by_label("Markdown でコピー").is_none());
     });
+}
+
+/// 「予想工数を超えた」の絞り込みは、時間がたって超えたタスクも 1 分のうちに出す。
+#[gpui_kit::test]
+fn the_over_estimate_filter_follows_the_clock(cx: &mut TestAppContext) {
+    use malakt_core::estimate::Estimate;
+    start(cx);
+    let (window, view) = open(cx, wide());
+    cx.update(|cx| {
+        db::shared(cx).update(cx, |db, cx| {
+            cx.notify();
+            let draft = malakt_core::TaskDraft {
+                title: "Lorem ipsum".into(),
+                status: Status::InProcess,
+                estimate: Some(Estimate::new(0, 0, 1, 0)),
+                ..Default::default()
+            };
+            db.store.create_task(None, &draft).unwrap();
+        })
+    });
+    ui(cx, window, |window, cx| window.click("nav-all", cx));
+    cx.run_until_parked();
+    let shown = |cx: &mut TestAppContext| cx.update(|cx| view.read(cx).visible.len());
+    cx.update(|cx| {
+        view.update(cx, |v, cx| {
+            v.query.time = Some(malakt_core::view::TimeFilter::Over);
+            v.refilter();
+            cx.notify();
+        })
+    });
+    assert_eq!(shown(cx), 0);
+    // 2 時間前に進行中にしたことにする（画面の中の値だけ。データベースは読み直さない）
+    cx.update(|cx| {
+        view.update(cx, |v, _| {
+            let mut tasks = (*v.tasks).clone();
+            tasks[0].started_at = Some(malakt_core::now_ms() - 2 * 3_600_000);
+            v.tasks = std::rc::Rc::new(tasks);
+        })
+    });
+    assert_eq!(shown(cx), 0);
+    cx.executor()
+        .advance_clock(std::time::Duration::from_secs(61));
+    cx.run_until_parked();
+    assert_eq!(shown(cx), 1);
 }

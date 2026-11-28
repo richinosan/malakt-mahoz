@@ -45,7 +45,7 @@ impl Drop for Store {
 
 const TASK_COLUMNS: &str = "t.id, t.workspace_id, t.title, t.description, t.status, t.priority, \
      t.due, t.position, t.created_at, t.updated_at, t.completed_at, t.start, t.percent, t.parent_id, \
-     t.created_by, t.updated_by";
+     t.created_by, t.updated_by, t.estimate, t.time_basis, t.started_at, t.assigned_at";
 
 /// 自動で作る「自分」の名前。あとから変えられる。
 const SELF_NAME: &str = "自分";
@@ -163,6 +163,7 @@ impl Store {
             date: None,
             icon: None,
             color: None,
+            time_basis: None,
             position,
             created_at: now,
             updated_at: now,
@@ -174,7 +175,7 @@ impl Store {
     pub fn workspace(&self, id: &str) -> Result<Workspace> {
         self.conn
             .prepare_cached(
-                "SELECT id, parent_id, name, position, created_at, updated_at, date, icon, color \
+                "SELECT id, parent_id, name, position, created_at, updated_at, date, icon, color, time_basis \
                  FROM workspaces WHERE id = ?1",
             )?
             .query_row(params![id], workspace_from_row)
@@ -185,7 +186,7 @@ impl Store {
     /// すべてのワークスペース。親ごとに `position` 順。
     pub fn workspaces(&self) -> Result<Vec<Workspace>> {
         let mut stmt = self.conn.prepare_cached(
-            "SELECT id, parent_id, name, position, created_at, updated_at, date, icon, color \
+            "SELECT id, parent_id, name, position, created_at, updated_at, date, icon, color, time_basis \
              FROM workspaces ORDER BY parent_id, position, id",
         )?;
         let rows = stmt.query_map([], workspace_from_row)?;
@@ -322,14 +323,14 @@ impl Store {
     /// 最上位からそのワークスペースまでの道筋（パンくず用）。
     pub fn workspace_path(&self, id: &str) -> Result<Vec<Workspace>> {
         let mut stmt = self.conn.prepare_cached(
-            "WITH RECURSIVE up(id, parent_id, name, position, created_at, updated_at, date, icon, color, depth) AS ( \
-                 SELECT id, parent_id, name, position, created_at, updated_at, date, icon, color, 0 \
+            "WITH RECURSIVE up(id, parent_id, name, position, created_at, updated_at, date, icon, color, time_basis, depth) AS ( \
+                 SELECT id, parent_id, name, position, created_at, updated_at, date, icon, color, time_basis, 0 \
                  FROM workspaces WHERE id = ?1 \
                  UNION ALL \
                  SELECT w.id, w.parent_id, w.name, w.position, w.created_at, w.updated_at, \
-                        w.date, w.icon, w.color, up.depth + 1 \
+                        w.date, w.icon, w.color, w.time_basis, up.depth + 1 \
                  FROM workspaces w JOIN up ON w.id = up.parent_id) \
-             SELECT id, parent_id, name, position, created_at, updated_at, date, icon, color \
+             SELECT id, parent_id, name, position, created_at, updated_at, date, icon, color, time_basis \
              FROM up ORDER BY depth DESC",
         )?;
         let rows = stmt.query_map(params![id], workspace_from_row)?;
@@ -548,12 +549,18 @@ impl Store {
         found(n, "担当者", id)
     }
 
-    /// 担当から外れるだけで、タスクは残る。
+    /// 担当から外れるだけで、タスクは残る。担当がいなくなったタスクは、担当が付いた時刻を消す。
     pub fn delete_person(&mut self, id: &str) -> Result<()> {
-        let n = self
-            .conn
-            .execute("DELETE FROM people WHERE id = ?1", params![id])?;
-        found(n, "担当者", id)
+        let tx = self.conn.transaction()?;
+        let n = tx.execute("DELETE FROM people WHERE id = ?1", params![id])?;
+        found(n, "担当者", id)?;
+        tx.execute(
+            "UPDATE tasks SET assigned_at = NULL WHERE assigned_at IS NOT NULL \
+             AND NOT EXISTS (SELECT 1 FROM task_assignees a WHERE a.task_id = tasks.id)",
+            [],
+        )?;
+        tx.commit()?;
+        Ok(())
     }
 
     // ---- タスク ----
@@ -574,6 +581,7 @@ impl Store {
             params![workspace_id],
             |r| r.get(0),
         )?;
+        let assigned_at = (!draft.assignee_ids.is_empty()).then_some(now);
         let task = Task {
             id: new_id(),
             workspace_id: workspace_id.map(str::to_owned),
@@ -600,6 +608,10 @@ impl Store {
             completed_at: (draft.status == Status::Completed).then_some(now),
             created_by: self.actor.clone(),
             updated_by: self.actor.clone(),
+            estimate: draft.estimate,
+            time_basis: draft.time_basis,
+            started_at: (draft.status == Status::InProcess).then_some(now),
+            assigned_at,
         };
         insert_task(&tx, &task)?;
         record_created(&tx, &task, &self.actor)?;
@@ -847,6 +859,22 @@ impl Store {
             (Status::Completed, _) => old.completed_at,
             _ => Some(now),
         };
+        // 進行中にした時刻は、進行中になったときに付け、未着手に戻すと消す。担当が付いた時刻は、
+        // 担当がいない状態から付いたときに付け、担当がいなくなると消す。わからない時刻（前の書き出しから
+        // 取り込んだものなど）は、ほかの項目を変えただけでは付けない
+        let started_at = match draft.status {
+            Status::NeedsAction => None,
+            Status::InProcess if old.status == Status::InProcess => old.started_at,
+            Status::InProcess => old.started_at.or(Some(now)),
+            Status::Completed | Status::Cancelled => old.started_at,
+        };
+        let assigned_at = if draft.assignee_ids.is_empty() {
+            None
+        } else if old.assignee_ids.is_empty() {
+            Some(now)
+        } else {
+            old.assigned_at
+        };
         let actor = self.actor.clone();
         let tx = self.conn.transaction()?;
         let mut changed = false;
@@ -904,6 +932,16 @@ impl Store {
             draft.categories.join(","),
         )?;
         record("urls", old.urls.join("\n"), draft.urls.join("\n"))?;
+        record(
+            "estimate",
+            old.estimate.map(|e| e.to_iso()).unwrap_or_default(),
+            draft.estimate.map(|e| e.to_iso()).unwrap_or_default(),
+        )?;
+        record(
+            "time_basis",
+            old.time_basis.map(|b| b.code()).unwrap_or_default(),
+            draft.time_basis.map(|b| b.code()).unwrap_or_default(),
+        )?;
         if !changed {
             drop(tx);
             return Ok(old);
@@ -911,7 +949,8 @@ impl Store {
         tx.execute(
             "UPDATE tasks SET title = ?2, description = ?3, status = ?4, priority = ?5, \
              due = ?6, updated_at = ?7, completed_at = ?8, start = ?9, percent = ?10, \
-             parent_id = ?11, updated_by = ?12 WHERE id = ?1",
+             parent_id = ?11, updated_by = ?12, estimate = ?13, time_basis = ?14, \
+             started_at = ?15, assigned_at = ?16 WHERE id = ?1",
             params![
                 id,
                 draft.title,
@@ -924,7 +963,11 @@ impl Store {
                 draft.start,
                 draft.percent,
                 draft.parent_id,
-                actor
+                actor,
+                draft.estimate.map(|e| e.to_iso()),
+                draft.time_basis.map(|b| b.code()),
+                started_at,
+                assigned_at
             ],
         )?;
         if old.assignee_ids != draft.assignee_ids {
@@ -1715,16 +1758,19 @@ pub(crate) fn clean_draft(draft: &TaskDraft) -> Result<TaskDraft> {
         assignee_ids,
         categories,
         urls,
+        estimate: draft.estimate.and_then(crate::estimate::Estimate::non_zero),
+        time_basis: draft.time_basis,
     })
 }
 
 fn insert_workspace(conn: &Connection, w: &Workspace) -> rusqlite::Result<usize> {
     conn.prepare_cached(
-        "INSERT INTO workspaces(id, parent_id, name, position, created_at, updated_at, date, icon, color) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) \
+        "INSERT INTO workspaces(id, parent_id, name, position, created_at, updated_at, date, icon, color, \
+         time_basis) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) \
          ON CONFLICT(id) DO UPDATE SET parent_id = excluded.parent_id, name = excluded.name, \
          position = excluded.position, updated_at = excluded.updated_at, date = excluded.date, \
-         icon = excluded.icon, color = excluded.color",
+         icon = excluded.icon, color = excluded.color, time_basis = excluded.time_basis",
     )?
     .execute(params![
         w.id,
@@ -1735,7 +1781,8 @@ fn insert_workspace(conn: &Connection, w: &Workspace) -> rusqlite::Result<usize>
         w.updated_at,
         w.date,
         w.icon,
-        w.color
+        w.color,
+        w.time_basis.map(|b| b.code())
     ])
 }
 
@@ -1775,14 +1822,17 @@ pub(crate) fn insert_task(conn: &Connection, t: &Task) -> rusqlite::Result<()> {
     conn.prepare_cached(
         "INSERT INTO tasks(id, workspace_id, title, description, status, priority, due, \
          position, created_at, updated_at, completed_at, start, percent, parent_id, \
-         created_by, updated_by) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16) \
+         created_by, updated_by, estimate, time_basis, started_at, assigned_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, \
+         ?17, ?18, ?19, ?20) \
          ON CONFLICT(id) DO UPDATE SET workspace_id = excluded.workspace_id, \
          title = excluded.title, description = excluded.description, status = excluded.status, \
          priority = excluded.priority, due = excluded.due, position = excluded.position, \
          updated_at = excluded.updated_at, completed_at = excluded.completed_at, \
          start = excluded.start, percent = excluded.percent, parent_id = excluded.parent_id, \
-         created_by = excluded.created_by, updated_by = excluded.updated_by",
+         created_by = excluded.created_by, updated_by = excluded.updated_by, \
+         estimate = excluded.estimate, time_basis = excluded.time_basis, \
+         started_at = excluded.started_at, assigned_at = excluded.assigned_at",
     )?
     .execute(params![
         t.id,
@@ -1800,7 +1850,11 @@ pub(crate) fn insert_task(conn: &Connection, t: &Task) -> rusqlite::Result<()> {
         t.percent,
         t.parent_id,
         t.created_by,
-        t.updated_by
+        t.updated_by,
+        t.estimate.map(|e| e.to_iso()),
+        t.time_basis.map(|b| b.code()),
+        t.started_at,
+        t.assigned_at
     ])?;
     insert_assignees(
         conn,
@@ -1939,6 +1993,14 @@ pub(crate) fn record_created(conn: &Connection, t: &Task, actor: &Actor) -> rusq
         ("assignees", t.assignee_ids.join(",")),
         ("categories", t.categories.join(",")),
         ("urls", t.urls.join("\n")),
+        (
+            "estimate",
+            t.estimate.map(|e| e.to_iso()).unwrap_or_default(),
+        ),
+        (
+            "time_basis",
+            t.time_basis.map(|b| b.code()).unwrap_or_default(),
+        ),
         ("workspace", t.workspace_id.clone().unwrap_or_default()),
     ];
     let values: serde_json::Map<String, serde_json::Value> = fields
@@ -2000,6 +2062,7 @@ fn workspace_from_row(r: &Row<'_>) -> rusqlite::Result<Workspace> {
         date: r.get(6)?,
         icon: r.get(7)?,
         color: r.get(8)?,
+        time_basis: basis_at(r, 9)?,
     })
 }
 
@@ -2013,6 +2076,13 @@ fn person_from_row(r: &Row<'_>) -> rusqlite::Result<Person> {
         updated_at: r.get(5)?,
         workspace_ids: Vec::new(),
     })
+}
+
+/// 保存した所要時間の基準。空・読めないものは `None`（標準に従う）。
+fn basis_at(r: &Row<'_>, i: usize) -> rusqlite::Result<Option<crate::timing::Basis>> {
+    Ok(r.get_ref(i)?
+        .as_str_or_null()?
+        .and_then(crate::timing::Basis::parse))
 }
 
 fn task_from_row(r: &Row<'_>) -> rusqlite::Result<Task> {
@@ -2040,6 +2110,14 @@ fn task_from_row(r: &Row<'_>) -> rusqlite::Result<Task> {
         completed_at: r.get(10)?,
         created_by: r.get(14)?,
         updated_by: r.get(15)?,
+        estimate: r
+            .get_ref(16)?
+            .as_str_or_null()?
+            .and_then(crate::estimate::Estimate::from_iso)
+            .and_then(crate::estimate::Estimate::non_zero),
+        time_basis: basis_at(r, 17)?,
+        started_at: r.get(18)?,
+        assigned_at: r.get(19)?,
     })
 }
 
@@ -4107,5 +4185,142 @@ mod actor_tests {
         let ch = s.changes("t").unwrap();
         assert_eq!(ch[0].actor, Actor::Unknown);
         assert!(history::misses_older(&history::entries(&ch)));
+    }
+
+    #[test]
+    fn 進行中にした時刻と担当が付いた時刻を自動で残す() {
+        let mut s = Store::open_in_memory().unwrap();
+        let p = s.create_person("佐藤", false).unwrap();
+        let t = s
+            .create_task(
+                None,
+                &TaskDraft {
+                    title: "下見".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!((t.started_at, t.assigned_at), (None, None));
+        let mut d = TaskDraft::from(&t);
+        d.assignee_ids = vec![p.id.clone()];
+        let t = s.update_task(&t.id, &d).unwrap();
+        let assigned = t.assigned_at.expect("担当が付いた時刻");
+        let t = s.set_task_status(&t.id, Status::InProcess).unwrap();
+        let started = t.started_at.expect("進行中にした時刻");
+        assert!(started >= assigned);
+        // 完了にしても、完了から戻しても、進行中にした時刻はそのまま
+        let t = s.set_task_status(&t.id, Status::Completed).unwrap();
+        assert_eq!(t.started_at, Some(started));
+        let t = s.set_task_status(&t.id, Status::InProcess).unwrap();
+        assert_eq!(t.started_at, Some(started));
+        assert_eq!(t.assigned_at, Some(assigned));
+        // 未着手に戻すと消え、担当がいなくなると消える
+        let t = s.set_task_status(&t.id, Status::NeedsAction).unwrap();
+        assert_eq!(t.started_at, None);
+        let mut d = TaskDraft::from(&t);
+        d.assignee_ids.clear();
+        let t = s.update_task(&t.id, &d).unwrap();
+        assert_eq!(t.assigned_at, None);
+        // 進行中や担当付きで作れば、作った時刻
+        let made = s
+            .create_task(
+                None,
+                &TaskDraft {
+                    title: "設営".into(),
+                    status: Status::InProcess,
+                    assignee_ids: vec![p.id.clone()],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(made.started_at, Some(made.created_at));
+        assert_eq!(made.assigned_at, Some(made.created_at));
+    }
+
+    #[test]
+    fn わからない時刻はほかの項目の変更で付けず_担当を消すと担当の時刻も消える() {
+        let mut s = Store::open_in_memory().unwrap();
+        let p = s.create_person("佐藤", false).unwrap();
+        let q = s.create_person("鈴木", false).unwrap();
+        let t = s
+            .create_task(
+                None,
+                &TaskDraft {
+                    title: "下見".into(),
+                    status: Status::InProcess,
+                    assignee_ids: vec![p.id.clone()],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        // 前の書き出しから取り込んだタスクのように、進行中にした時刻がわからない
+        s.conn
+            .execute(
+                "UPDATE tasks SET started_at = NULL, assigned_at = 1 WHERE id = ?1",
+                params![t.id],
+            )
+            .unwrap();
+        let mut d = TaskDraft::from(&s.task(&t.id).unwrap());
+        d.title = "下見に行く".into();
+        let t = s.update_task(&t.id, &d).unwrap();
+        assert_eq!(t.started_at, None);
+        // 担当がいるまま入れ替えても、担当が付いた時刻はそのまま
+        let mut d = TaskDraft::from(&t);
+        d.assignee_ids = vec![p.id.clone(), q.id.clone()];
+        let t = s.update_task(&t.id, &d).unwrap();
+        assert_eq!(t.assigned_at, Some(1));
+        // 担当者を消して担当がいなくなると消え、次に付けた時刻から数える
+        s.delete_person(&p.id).unwrap();
+        assert_eq!(s.task(&t.id).unwrap().assigned_at, Some(1));
+        s.delete_person(&q.id).unwrap();
+        assert_eq!(s.task(&t.id).unwrap().assigned_at, None);
+        let r = s.create_person("高橋", false).unwrap();
+        let mut d = TaskDraft::from(&s.task(&t.id).unwrap());
+        d.assignee_ids = vec![r.id.clone()];
+        let t = s.update_task(&t.id, &d).unwrap();
+        assert!(t.assigned_at.is_some_and(|at| at > 1));
+    }
+
+    #[test]
+    fn 予想工数と所要時間の基準は変更履歴に残る() {
+        use crate::estimate::Estimate;
+        use crate::timing::{Basis, EndBasis, StartBasis};
+        let mut s = Store::open_in_memory().unwrap();
+        let t = s
+            .create_task(
+                None,
+                &TaskDraft {
+                    title: "見積もり".into(),
+                    estimate: Some(Estimate::new(0, 0, 0, 0)),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        // 0 はなしと同じ
+        assert_eq!(t.estimate, None);
+        let mut d = TaskDraft::from(&t);
+        d.estimate = Some(Estimate::new(0, 1, 3, 0));
+        d.time_basis = Some(Basis::new(StartBasis::Created, EndBasis::SelfDone));
+        let u = s.update_task(&t.id, &d).unwrap();
+        assert_eq!(u.estimate, Some(Estimate::new(0, 1, 3, 0)));
+        assert_eq!(u, s.task(&t.id).unwrap());
+        let edits = s.edits(&t.id).unwrap();
+        let est = edits.iter().find(|c| c.field == "estimate").unwrap();
+        assert_eq!(
+            (est.old_value.as_str(), est.new_value.as_str()),
+            ("", "P1DT3H")
+        );
+        let basis = edits.iter().find(|c| c.field == "time_basis").unwrap();
+        assert_eq!(basis.new_value, "created>self_done");
+        // 全体の標準とワークスペースの基準
+        assert_eq!(s.time_basis_standard().unwrap(), Basis::default());
+        let created = Basis::new(StartBasis::Created, EndBasis::Completed);
+        s.set_time_basis_standard(created).unwrap();
+        assert_eq!(s.time_basis_standard().unwrap(), created);
+        let w = s.create_workspace(None, "仕事").unwrap();
+        let w = s.set_workspace_time_basis(&w.id, Some(created)).unwrap();
+        assert_eq!(w.time_basis, Some(created));
+        assert_eq!(s.workspace(&w.id).unwrap().time_basis, Some(created));
+        assert!(s.set_workspace_time_basis("ない", None).is_err());
     }
 }

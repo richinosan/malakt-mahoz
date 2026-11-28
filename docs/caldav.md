@@ -27,12 +27,13 @@ CalDAV のタスク（VTODO）を扱えるサーバーなら、どれとも同�
 | 状態（未着手・進行中・完了・中止） | STATUS（NEEDS-ACTION・IN-PROCESS・COMPLETED・CANCELLED） |
 | 優先度 | PRIORITY |
 | 進み具合 | PERCENT-COMPLETE |
+| 予想工数 | ESTIMATED-DURATION（DURATION には月がないので、1 か月は 30 日で送ります） |
 | 開始日・期限 | DTSTART・DUE（日付だけなら日付、時刻つきなら UTC で書きます） |
 | カテゴリ | CATEGORIES |
 | 親タスク | RELATED-TO（RELTYPE=PARENT） |
 | 担当者と RACI | ATTENDEE（R は REQ-PARTICIPANT、A は CHAIR、C は OPT-PARTICIPANT、I は NON-PARTICIPANT。担当者ごとの完了は PARTSTAT=COMPLETED） |
 
-- コメント・添付・変更履歴・繰り返し・AI の記録は、このアプリだけのものです。サーバーには送りません
+- コメント・添付・変更履歴・繰り返し・AI の記録・所要時間の基準は、このアプリだけのものです。サーバーには送りません
 - このアプリが扱わない項目（通知の VALARM、繰り返しの RRULE、`X-` で始まる項目など）は、サーバーにあったとおりに残して送り返します
 - 担当者は、自分のアカウントの URI（メールアドレスなど）なら「自分」になります。知らない人は、そのワークスペースの担当者として足します。このアプリの担当者は `urn:uuid:` の URI で送ります
 - 1 人に複数の役を付けているときは、R、A、C、I の順で最初の役を送ります。サーバーから同じ役が返ってきたときは、このアプリの複数の役をそのまま残します

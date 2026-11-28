@@ -8,6 +8,7 @@
 //! - `attachment`: 添付ファイル（重複なし・圧縮つきで保存）
 //! - `bulk`: 複数のタスクをまとめて変える操作と、一覧での選択
 //! - `calendar`: 日付を選ぶカレンダー（月の並び・日本の祝日・よく使う日・入力の解釈）
+//! - `estimate`: 予想工数（月・日・時間・分の組み合わせ）の読み書き
 //! - `diff`: 文字列の差分（変更履歴の赤と緑）
 //! - `done_notice`: ほかの人が完了にしたときに知らせるか（役・担当者・ワークスペースで選ぶ）
 //! - `defaults`: ワークスペースごとのタスク追加時の既定値と基準日
@@ -19,6 +20,7 @@
 //! - `repeat`: 繰り返すタスク（決まった時刻に次の回を作り、AI に頼むこともできる）
 //! - `rules`: AI のルール（グローバルとワークスペースごと）
 //! - `schedule`: 定時タスク（決まった時刻に雛形から新しいタスクを作り、AI に頼むこともできる）
+//! - `timing`: 所要時間（開始の基準から完了の基準まで）と、その統計
 //! - `ticket`: 完了チケット（画面で発行し、コマンドで完了報告する）
 //! - `undo`: 元に戻す・やり直し（上限つきの記録）
 //! - `lock`: アプリロック
@@ -41,6 +43,7 @@ pub mod defaults;
 pub mod diff;
 pub mod done_notice;
 pub mod error;
+pub mod estimate;
 pub mod history;
 pub mod icon;
 pub mod links;
@@ -60,6 +63,7 @@ pub mod store;
 pub mod tasklink;
 pub mod text;
 pub mod ticket;
+pub mod timing;
 pub mod undo;
 pub mod view;
 pub mod weblink;

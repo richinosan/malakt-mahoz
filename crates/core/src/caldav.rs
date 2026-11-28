@@ -239,6 +239,7 @@ impl Maps {
             status: status_text(task.status).into(),
             priority: task.priority,
             percent: task.percent,
+            estimate: task.estimate.map(|e| e.to_ical_duration()),
             start: task.start.clone(),
             due: task.due.clone(),
             categories: task.categories.clone(),
@@ -699,6 +700,17 @@ impl Store {
         });
         let mut ids: Vec<Id> = people.iter().map(|(p, _, _)| p.clone()).collect();
         ids.dedup();
+        // DURATION には月がない（1 か月は 30 日で送る）。サーバーの値が今の予想工数と同じなら、今のまま
+        let estimate = match (current, fields.estimate.as_deref()) {
+            (Some((task, _)), Some(d))
+                if task.estimate.map(|e| e.to_ical_duration()).as_deref() == Some(d) =>
+            {
+                task.estimate
+            }
+            (_, Some(d)) => crate::estimate::Estimate::from_ical_duration(d)
+                .and_then(crate::estimate::Estimate::non_zero),
+            (_, None) => None,
+        };
         let draft = TaskDraft {
             title: if fields.summary.is_empty() {
                 "（タイトルなし）".into()
@@ -715,6 +727,9 @@ impl Store {
             assignee_ids: ids,
             categories: fields.categories.clone(),
             urls,
+            estimate,
+            // 所要時間の基準はこのアプリだけのもの
+            time_basis: current.and_then(|(t, _)| t.time_basis),
         };
         Ok((draft, people))
     }
