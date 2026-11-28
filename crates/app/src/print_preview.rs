@@ -12,10 +12,12 @@ const PIXELS: f32 = 16_000_000.;
 /// 1 枚の幅の上限（画素）。
 const MAX_WIDTH: f32 = 1240.;
 
-/// プレビューの PDF を一時的に置く場所。描いたら消す。
-pub fn temp_path(gen: u64) -> PathBuf {
+/// プレビューの PDF を一時的に置く場所。描いたら消す。作るたびに違う名前にする。
+pub fn temp_path() -> PathBuf {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     std::env::temp_dir().join(format!(
-        "malakt-mahoz-print-preview-{}-{gen}.pdf",
+        "malakt-mahoz-print-preview-{}-{n}.pdf",
         std::process::id()
     ))
 }
