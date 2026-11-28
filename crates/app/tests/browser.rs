@@ -1779,6 +1779,9 @@ fn ctrl_p_saves_the_page_as_a_pdf(cx: &mut TestAppContext) {
     });
     let call = last_pdf(&fake);
     assert!(call.ends_with("議事録 (1).pdf"), "{call}");
+    write_pdf(&dir.path().join("議事録 (1).pdf"), 1, true);
+    fake.pdf.borrow_mut().take().unwrap()(Ok(()));
+    cx.run_until_parked();
     // 題名がそのままファイル名になる（使えない文字は _）
     press_in_page(cx, &world, window, tab, key("ctrl-p", "cmd-p"));
     ui(cx, window, |window, cx| {
@@ -1986,6 +1989,82 @@ fn a_pdf_without_embedded_fonts_fails(cx: &mut TestAppContext) {
         "{reason}"
     );
     assert!(!saved.exists());
+}
+
+/// 印刷のダイアログを開くと、今の設定で作った PDF をプレビューに並べる。設定を変えると作り直し、
+/// プレビューの PDF は残さない。作っている途中に保存すると、プレビューが終わってから保存を作る。
+#[gpui_kit::test]
+fn the_print_dialog_previews_the_pages(cx: &mut TestAppContext) {
+    let (world, window, tab, fake, dir) = pdf_page(cx);
+    press_in_page(cx, &world, window, tab, key("ctrl-p", "cmd-p"));
+    cx.executor().advance_clock(browser::PREVIEW_WAIT);
+    cx.run_until_parked();
+    let preview = last_pdf(&fake);
+    assert!(preview.contains("print-preview"), "{preview}");
+    let path = std::path::PathBuf::from(preview.trim_start_matches("pdf "));
+    assert!(
+        !path.starts_with(dir.path()),
+        "ダウンロードのフォルダには置かない"
+    );
+    write_pdf(&path, 2, true);
+    fake.pdf.borrow_mut().take().unwrap()(Ok(()));
+    cx.run_until_parked();
+    ui(cx, window, |window, _| {
+        assert!(window.find("browser-print-page-0").visible());
+        assert!(window.try_find("browser-print-page-1").is_some());
+        assert!(window.try_find("browser-print-page-2").is_none());
+    });
+    assert_eq!(terms(cx, |t| t.preview(tab).unwrap().pages.len()), 2);
+    assert!(!path.exists(), "プレビューの PDF は消す");
+    // 横にすると、横の設定で作り直す
+    ui(cx, window, |window, cx| {
+        window.click("browser-print-layout", cx)
+    });
+    pick(cx, window, "横");
+    cx.executor().advance_clock(browser::PREVIEW_WAIT);
+    cx.run_until_parked();
+    let (setup, _) = fake.pdf_setup.borrow().last().cloned().unwrap();
+    assert!(setup.landscape);
+    let again = std::path::PathBuf::from(last_pdf(&fake).trim_start_matches("pdf "));
+    assert_ne!(again, path);
+    // 作っている途中に保存すると、プレビューが終わるのを待つ
+    let made = fake.pdf_setup.borrow().len();
+    ui(cx, window, |window, cx| {
+        window.click("browser-print-submit", cx)
+    });
+    assert_eq!(
+        fake.pdf_setup.borrow().len(),
+        made,
+        "1 つのページで 2 つ同時に作らない"
+    );
+    write_pdf(&again, 1, true);
+    fake.pdf.borrow_mut().take().unwrap()(Ok(()));
+    cx.run_until_parked();
+    assert!(!again.exists(), "閉じたあとにできたプレビューも消す");
+    let saved = dir.path().join("報告.pdf");
+    assert_eq!(last_pdf(&fake), format!("pdf {}", saved.display()));
+    let (setup, _) = fake.pdf_setup.borrow().last().cloned().unwrap();
+    assert!(setup.landscape);
+}
+
+/// フォントを埋め込めないページは、保存する前にプレビューで分かる。
+#[gpui_kit::test]
+fn the_preview_shows_why_it_cannot_be_saved(cx: &mut TestAppContext) {
+    let (world, window, tab, fake, _dir) = pdf_page(cx);
+    press_in_page(cx, &world, window, tab, key("ctrl-p", "cmd-p"));
+    cx.executor().advance_clock(browser::PREVIEW_WAIT);
+    cx.run_until_parked();
+    let path = std::path::PathBuf::from(last_pdf(&fake).trim_start_matches("pdf "));
+    write_pdf(&path, 1, false);
+    fake.pdf.borrow_mut().take().unwrap()(Ok(()));
+    cx.run_until_parked();
+    ui(cx, window, |window, _| {
+        assert!(window.find("browser-print-preview-error").visible());
+        assert!(window.try_find("browser-print-page-0").is_none());
+    });
+    let error = terms(cx, |t| t.preview(tab).unwrap().error.clone()).unwrap();
+    assert!(error.contains("Helvetica"), "{error}");
+    assert!(!path.exists());
 }
 
 /// 設定の保存先と日付のフォルダに、PDF を保存する。

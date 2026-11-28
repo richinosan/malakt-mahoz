@@ -196,6 +196,14 @@ pub struct Terms {
     pub print_pdf: bool,
     /// 前に PDF に保存したときの印刷の設定（`browser.print`）。次に開いたときに使う。
     pub print_setup: crate::print_setup::PrintSetup,
+    /// 順番を待っている PDF の作成。1 つのページでは 1 度に 1 つずつ作る。
+    pub(crate) pdf_jobs: std::collections::VecDeque<crate::browser::PdfJob>,
+    /// PDF を作っている途中のページ。
+    pub(crate) pdf_running: std::collections::HashSet<u64>,
+    /// ページごとの印刷のプレビュー。
+    pub(crate) previews: std::collections::HashMap<u64, crate::browser::Preview>,
+    /// プレビューを作った回。古い回の結果は捨てる。
+    pub(crate) preview_gen: u64,
 }
 
 pub struct SharedTerms(pub Entity<Terms>);
@@ -287,6 +295,10 @@ impl Terms {
             focus_ai: false,
             print_pdf: true,
             print_setup: Default::default(),
+            pdf_jobs: Default::default(),
+            pdf_running: Default::default(),
+            previews: Default::default(),
+            preview_gen: 0,
         };
         terms.restore_pages(cx);
         terms.restore_print_setup(cx);
