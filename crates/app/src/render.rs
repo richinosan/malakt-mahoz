@@ -306,6 +306,14 @@ pub(crate) fn window_menu(
     )
 }
 
+/// タスクの画面の地。背景の画像の上では薄く塗って、文字を読めるようにする。
+fn page_fill(theme: &gpui_kit::component::Theme, cx: &App) -> Hsla {
+    match crate::theme::backdrop(cx) {
+        Some(backdrop) => theme.background.opacity(backdrop.alpha * 0.45),
+        None => theme.background,
+    }
+}
+
 /// 背景の画像を出しているときは、面を透かして塗る。
 fn glass(color: Hsla, cx: &App) -> Hsla {
     match crate::theme::backdrop(cx) {
@@ -429,15 +437,67 @@ fn floating_card(fill: Hsla, edges: [Pixels; 4], cx: &App) -> Div {
         })
 }
 
-/// 画面の後ろに敷く画像。
-fn backdrop_layer(cx: &App) -> Option<Img> {
-    let backdrop = crate::theme::backdrop(cx)?;
+thread_local! {
+    /// 背景の画像を最後に描いた場所（ウィンドウごと）。すりガラスの面が、同じ場所に画像を合わせる。
+    static BACKDROP_AT: std::cell::RefCell<Vec<(WindowId, Bounds<Pixels>)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// 画面の後ろに敷く画像。描いた場所を覚えておき、すりガラスの面（`frosted_glass`）が使う。
+fn backdrop_layer(cx: &App) -> Option<impl IntoElement> {
+    let image = crate::theme::backdrop(cx)?.image.clone();
     Some(
-        img(backdrop.image.clone())
-            .absolute()
-            .inset_0()
-            .size_full()
-            .object_fit(ObjectFit::Cover),
+        canvas(
+            |_, _, _| (),
+            move |bounds, _, window, _| {
+                let id = window.window_handle().window_id();
+                BACKDROP_AT.with_borrow_mut(|at| {
+                    at.retain(|(other, _)| *other != id);
+                    at.push((id, bounds));
+                });
+                let fit = ObjectFit::Cover.get_bounds(bounds, image.size(0));
+                if let Err(error) =
+                    window.paint_image(bounds, fit, Corners::default(), image.clone(), 0, false)
+                {
+                    // 描く途中なので画面には出せない。前の img と同じくログに残す
+                    eprintln!("背景の画像を描けませんでした: {error}");
+                }
+            },
+        )
+        .absolute()
+        .inset_0()
+        .size_full(),
+    )
+}
+
+/// 一覧の上に重ねるパネルの地。後ろの一覧は見せず、背景の画像を強くぼかしたものを
+/// 画面の後ろの画像と同じ位置に敷いて、その上を `fills` の順に塗る（すりガラス）。
+/// gpui には後ろをぼかす塗りがないので、ぼかした画像で代わりにする。
+/// パネルの最初の子にする。`corners` はパネルの角の丸み。
+fn frosted_glass(corners: Corners<Pixels>, fills: Vec<Hsla>, cx: &App) -> Option<impl IntoElement> {
+    let image = crate::theme::backdrop(cx)?.frosted.clone();
+    Some(
+        canvas(
+            |_, _, _| (),
+            move |bounds, _, window, _| {
+                let id = window.window_handle().window_id();
+                let under = BACKDROP_AT
+                    .with_borrow(|at| at.iter().find(|(other, _)| *other == id).map(|(_, b)| *b))
+                    .unwrap_or_else(|| Bounds::new(Point::default(), window.viewport_size()));
+                let fit = ObjectFit::Cover.get_bounds(under, image.size(0));
+                if let Err(error) =
+                    window.paint_image(bounds, fit, corners, image.clone(), 0, false)
+                {
+                    // 描く途中なので画面には出せない。ログに残す
+                    eprintln!("パネルの後ろの画像を描けませんでした: {error}");
+                }
+                for color in fills {
+                    window.paint_quad(fill(bounds, color).corner_radii(corners));
+                }
+            },
+        )
+        .absolute()
+        .inset_0(),
     )
 }
 
@@ -6023,6 +6083,26 @@ impl MainView {
                     ),
                 );
 
+        // 背景の画像の上に浮かせたパネルは、地を透かして塗る
+        let glass_fill = crate::theme::backdrop(cx)
+            .filter(|_| crate::theme::floating_now())
+            .map(|backdrop| theme.background.opacity((backdrop.alpha + 1.) / 2.));
+        // 一覧の上に重ねる（全面のシートか、重ねる詳細）ときの角の丸み。一覧の上では
+        // 地をすりガラスにする
+        let corner = px(15.);
+        let frost = (sheet || crate::theme::overlay(cx)).then(|| {
+            if !crate::theme::floating_now() {
+                Corners::default()
+            } else if sheet {
+                Corners::all(corner)
+            } else {
+                Corners {
+                    top_right: corner,
+                    bottom_right: corner,
+                    ..Default::default()
+                }
+            }
+        });
         Some(
             div()
                 .absolute()
@@ -6036,7 +6116,6 @@ impl MainView {
                 // 浮かせたパネルの中に収めて、角をパネルに合わせる
                 .when(crate::theme::floating_now(), |d| {
                     let half = FLOAT_GAP / 2.;
-                    let corner = px(15.);
                     d.top(half)
                         .right(FLOAT_GAP)
                         .bottom(FLOAT_GAP)
@@ -6051,12 +6130,15 @@ impl MainView {
                 .when(!sheet && crate::theme::overlay(cx), |d| {
                     d.elevate(Elevation::High, cx)
                 })
-                // 背景の画像の上では、後ろが少し透ける
-                .bg(match crate::theme::backdrop(cx) {
-                    Some(backdrop) if crate::theme::floating_now() => {
-                        theme.background.opacity((backdrop.alpha + 1.) / 2.)
-                    }
-                    _ => theme.background,
+                // 背景の画像の上では、後ろが少し透ける。一覧の上に重ねるときは、一覧は透かさず、
+                // ぼかした背景の画像だけを透かす（すりガラス）
+                .map(|d| match (frost, glass_fill) {
+                    (Some(corners), Some(fill)) => d.children(frosted_glass(
+                        corners,
+                        vec![page_fill(&theme, cx), fill],
+                        cx,
+                    )),
+                    (_, fill) => d.bg(fill.unwrap_or(theme.background)),
                 })
                 .occlude()
                 // 詳細の下にある行は、ドラッグの落とし先にしない
@@ -9803,10 +9885,7 @@ impl Render for MainView {
         } else {
             (None, ai)
         };
-        let page_fill = match crate::theme::backdrop(cx) {
-            Some(backdrop) => theme.background.opacity(backdrop.alpha * 0.45),
-            None => theme.background,
-        };
+        let page_fill = page_fill(&theme, cx);
         let body = div()
             .id("main-view")
             .key_context("MainView")
