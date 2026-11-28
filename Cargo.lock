@@ -4922,6 +4922,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "malakt-autostart"
+version = "0.1.0"
+dependencies = [
+ "tempfile",
+ "windows-registry 0.6.1",
+ "windows-result 0.4.1",
+]
+
+[[package]]
 name = "malakt-core"
 version = "0.1.0"
 dependencies = [
@@ -4956,6 +4965,7 @@ dependencies = [
  "gtk",
  "image",
  "malakt-ai",
+ "malakt-autostart",
  "malakt-core",
  "malakt-passkey",
  "malakt-reminders",

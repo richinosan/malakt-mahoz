@@ -668,6 +668,57 @@ fn the_chat_offers_the_app_tools(cx: &mut TestAppContext) {
 }
 
 /// 自動でロックするまでの時間と、ロック中の通知も、AI に頼んで変えられる。
+/// AI に頼むと、スタートアップに登録する・外す。登録できなければ、ほかの項目も変えずに失敗する。
+#[gpui_kit::test]
+fn the_ai_switches_the_autostart(cx: &mut TestAppContext) {
+    let world = start(cx, Store::open_in_memory().unwrap());
+    let (window, view) = open(cx);
+    let pane = open_chat(cx, window, &view);
+    let on = Arc::new(Mutex::new(false));
+    let fail = Arc::new(Mutex::new(false));
+    let (read, written, failing) = (on.clone(), on.clone(), fail.clone());
+    cx.update(|cx| {
+        cx.set_global(malakt_mahoz::autostart::Launcher {
+            available: true,
+            read: Arc::new(move || Ok(*read.lock().unwrap())),
+            write: Arc::new(move |value| {
+                if *failing.lock().unwrap() {
+                    return Err("スタートアップに登録できませんでした: 拒否".into());
+                }
+                *written.lock().unwrap() = value;
+                Ok(())
+            }),
+        })
+    });
+
+    world.call(
+        "set_app_options",
+        json!({"autostart": true}),
+        "登録しました。",
+    );
+    say(cx, window, &pane, "スタートアップに追加して");
+    assert!(*on.lock().unwrap());
+    let (result, error) = world.last_result();
+    assert!(!error && result.contains("\"autostart\":true"), "{result}");
+
+    *fail.lock().unwrap() = true;
+    world.call(
+        "set_app_options",
+        json!({"autostart": false, "reminders": true}),
+        "できませんでした。",
+    );
+    say(
+        cx,
+        window,
+        &pane,
+        "スタートアップから外して、リマインダーと連携して",
+    );
+    let (result, error) = world.last_result();
+    assert!(error && result.contains("拒否"), "{result}");
+    assert!(*on.lock().unwrap());
+    cx.update(|cx| assert!(!malakt_mahoz::reminders::enabled(cx)));
+}
+
 #[gpui_kit::test]
 fn the_ai_changes_the_lock_options(cx: &mut TestAppContext) {
     let world = start(cx, Store::open_in_memory().unwrap());

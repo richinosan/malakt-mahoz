@@ -1,0 +1,14 @@
+[package]
+name = "malakt-autostart"
+description = "OS にログインしたときにアプリを起動する（Windows の Run、macOS の LaunchAgent、Linux の autostart）"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-registry = "0.6"
+windows-result = "0.4"
+
+[dev-dependencies]
+tempfile = "3"

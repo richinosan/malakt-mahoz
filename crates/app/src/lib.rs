@@ -4,6 +4,7 @@ pub mod ai;
 pub mod ai_settings;
 pub mod ai_tools;
 pub mod ai_view;
+pub mod autostart;
 pub mod browser;
 pub mod browser_popup;
 mod caret;
@@ -155,6 +156,7 @@ pub fn init_with(store: malakt_core::Store, ai: AiConfig, cx: &mut App) {
     term::init(cx);
     reminders::init(cx);
     update::init(cx);
+    autostart::init(cx);
     theme::init(cx);
     cx.bind_keys([
         #[cfg(target_os = "macos")]

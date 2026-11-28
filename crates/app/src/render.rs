@@ -370,6 +370,7 @@ enum SettingKey {
     AutoLock,
     LockedNotices,
     Reminders,
+    Autostart,
     AutoUpdate,
     Export,
     Import,
@@ -7074,6 +7075,15 @@ impl MainView {
                 list(&["ロック"]),
             ));
         }
+        if crate::autostart::available(cx) {
+            all.push(Setting::new(
+                Section::Startup,
+                SettingKey::Autostart,
+                "ログインしたときに起動",
+                None,
+                list(&["スタートアップ", "自動起動", "起動", "ログイン"]),
+            ));
+        }
         if crate::update::menu_label(cx).is_some() {
             all.push(Setting::new(
                 Section::Update,
@@ -7650,6 +7660,10 @@ impl MainView {
                 SettingKey::Reminders => Switch::new("reminders-switch")
                     .checked(crate::reminders::enabled(cx))
                     .on_click(cx.listener(|this, _: &bool, _, cx| this.toggle_reminders(cx)))
+                    .into_any_element(),
+                SettingKey::Autostart => Switch::new("autostart-switch")
+                    .checked(crate::autostart::enabled(cx))
+                    .on_click(cx.listener(|this, _: &bool, _, cx| this.toggle_autostart(cx)))
                     .into_any_element(),
                 SettingKey::AutoUpdate => Switch::new("auto-update-switch")
                     .checked(crate::update::enabled(cx))

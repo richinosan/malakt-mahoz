@@ -131,6 +131,7 @@ pub enum CustomizeSection {
     Lock,
     AccessKeys,
     Notices,
+    Startup,
     Update,
     People,
     Keys,
@@ -139,7 +140,7 @@ pub enum CustomizeSection {
 }
 
 impl CustomizeSection {
-    pub const ALL: [CustomizeSection; 18] = [
+    pub const ALL: [CustomizeSection; 19] = [
         CustomizeSection::Theme,
         CustomizeSection::Layout,
         CustomizeSection::Backdrop,
@@ -153,6 +154,7 @@ impl CustomizeSection {
         CustomizeSection::Lock,
         CustomizeSection::AccessKeys,
         CustomizeSection::Notices,
+        CustomizeSection::Startup,
         CustomizeSection::Update,
         CustomizeSection::People,
         CustomizeSection::Keys,
@@ -175,6 +177,7 @@ impl CustomizeSection {
             CustomizeSection::Lock => "ロック",
             CustomizeSection::AccessKeys => "アクセスキー",
             CustomizeSection::Notices => "通知",
+            CustomizeSection::Startup => "スタートアップ",
             CustomizeSection::Update => "アップデート",
             CustomizeSection::People => "担当者",
             CustomizeSection::Keys => "キー操作",
@@ -198,6 +201,7 @@ impl CustomizeSection {
             CustomizeSection::Lock => "lock",
             CustomizeSection::AccessKeys => "key-round",
             CustomizeSection::Notices => "bell",
+            CustomizeSection::Startup => "power",
             CustomizeSection::Update => "refresh-cw",
             CustomizeSection::People => "users",
             CustomizeSection::Keys => "keyboard",
@@ -216,6 +220,7 @@ impl CustomizeSection {
             | CustomizeSection::AiGithub => "AI",
             CustomizeSection::Lock | CustomizeSection::AccessKeys => "セキュリティ",
             CustomizeSection::Notices
+            | CustomizeSection::Startup
             | CustomizeSection::Update
             | CustomizeSection::People
             | CustomizeSection::Keys
@@ -3987,6 +3992,14 @@ impl MainView {
         cx.notify();
     }
 
+    // ---- スタートアップ ----
+
+    /// OS にログインしたときにアプリを起動するかを切り替える。
+    pub fn toggle_autostart(&mut self, cx: &mut Context<Self>) {
+        self.error = crate::autostart::toggle(cx).err().map(Into::into);
+        cx.notify();
+    }
+
     // ---- 自動アップデート ----
 
     /// 自動アップデートを有効にする・無効にする。
@@ -5420,6 +5433,7 @@ bundled_icons! {
         "square",
         "arrow-up",
         "refresh-cw",
+        "power",
         "github",
         "check",
         "play",
