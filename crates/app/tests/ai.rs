@@ -3040,11 +3040,11 @@ fn a_comment_updates_the_progress(cx: &mut TestAppContext) {
     assert_eq!((now.percent, now.status), (60, Status::InProcess));
     let label = read(cx, |s| s.tracked[&task].label.clone());
     assert_eq!(label.as_ref(), "0% → 60%・進行中・期限 2026-12-01");
-    // 開いている詳細の期限の欄にも出る
+    // 開いている詳細の期限にも出る
     cx.update(|cx| {
         assert_eq!(
-            view.read(cx).inputs.due.read(cx).value().as_ref(),
-            "2026-12-01"
+            view.read(cx).detail.as_ref().unwrap().task.due.as_deref(),
+            Some("2026-12-01")
         );
     });
     ui(cx, window, |window, _| {
@@ -3063,7 +3063,7 @@ fn a_comment_updates_the_progress(cx: &mut TestAppContext) {
         (0, Status::NeedsAction, None)
     );
     cx.update(|cx| {
-        assert_eq!(view.read(cx).inputs.due.read(cx).value().as_ref(), "");
+        assert_eq!(view.read(cx).detail.as_ref().unwrap().task.due, None);
     });
     ui(cx, window, |window, _| {
         assert!(window.try_find("ai-tracked-undo").is_none());

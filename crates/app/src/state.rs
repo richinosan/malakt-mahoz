@@ -352,10 +352,9 @@ pub struct Inputs {
     /// 繰り返しの、回を作ったときに AI に頼むこと。
     pub repeat_ai: Entity<TextareaState>,
     pub subtask: Entity<InputState>,
-    pub start: Entity<InputState>,
-    pub start_time: Entity<InputState>,
-    pub due: Entity<InputState>,
-    pub due_time: Entity<InputState>,
+    /// カレンダーの、日付と時刻の入力欄。
+    pub pick_date: Entity<InputState>,
+    pub pick_time: Entity<InputState>,
     pub category: Entity<InputState>,
     pub description: Entity<TextareaState>,
     pub comment: Entity<TextareaState>,
@@ -368,7 +367,6 @@ pub struct Inputs {
     pub def_description: Entity<TextareaState>,
     /// ターミナルを始めるフォルダー。
     pub ws_term_dir: Entity<InputState>,
-    pub bulk_due: Entity<InputState>,
     pub bulk_categories: Entity<InputState>,
 }
 
@@ -453,6 +451,16 @@ pub struct MainView {
     /// コメントの本文から作った、描く Markdown。本文が同じなら作り直さない。
     md_cache: std::cell::RefCell<HashMap<String, SharedString>>,
     pub modal: Modal,
+    /// 開いているカレンダー。
+    pub date_pick: Option<crate::date_pick::DatePick>,
+    /// カレンダーを開いた回数（出てくる動きに使う）。
+    pub date_opens: usize,
+    /// カレンダーの、キーで日を動かす所。
+    pub date_grid: FocusHandle,
+    /// カレンダーの月の一覧のスクロール。
+    pub month_scroll: ScrollHandle,
+    /// 期限をまとめて変えるダイアログで選んだ期限。
+    pub bulk_due: Option<String>,
     /// 完了チケットをだれの分として発行するか（`None` は自分）と、発行したばかりのチケット。
     /// チケットの文字列は発行したときしか分からないので、ダイアログを閉じるまで持つ
     pub ticket_person: Option<Id>,
@@ -646,10 +654,8 @@ impl MainView {
                     .placeholder("AI への指示")
             }),
             subtask: input(window, cx, "サブタスクを追加…"),
-            start: input(window, cx, "日付"),
-            start_time: input(window, cx, "時刻"),
-            due: input(window, cx, "日付"),
-            due_time: input(window, cx, "時刻"),
+            pick_date: input(window, cx, "11/30、明日、金曜"),
+            pick_time: input(window, cx, "18:30、18時"),
             category: input(window, cx, "カテゴリを追加して Enter"),
             description: area(window, cx, "説明"),
             comment: area(window, cx, "コメントを追加"),
@@ -661,7 +667,6 @@ impl MainView {
             def_time: input(window, cx, "HH:MM（空なら日付だけ）"),
             def_categories: input(window, cx, "「、」で区切って入力"),
             def_description: area(window, cx, "説明の雛形"),
-            bulk_due: input(window, cx, "11/27 14:00"),
             bulk_categories: input(window, cx, "「、」で区切って入力"),
         };
 
@@ -717,9 +722,9 @@ impl MainView {
             cx.observe_in(&db, window, |this, _, window, cx| {
                 this.deliver_notices(window, cx)
             }),
-            // AI やほかのウィンドウが開始日と期限を変えたら、詳細の入力欄も合わせる
+            // AI やほかのウィンドウが開始日と期限を変えたら、開いているカレンダーの入力欄も合わせる
             cx.observe_in(&db, window, |this, _, window, cx| {
-                this.sync_dates(window, cx)
+                this.sync_date_texts(window, cx)
             }),
         ];
         macro_rules! on_enter {
@@ -823,33 +828,12 @@ impl MainView {
             },
         ));
         on_enter!(subtask, submit_subtask);
-        // 開始日と期限は、Enter と、書き換えてからほかの場所を押したときに保存する
-        for (which, time, input) in [
-            (When::Start, false, &inputs.start),
-            (When::Start, true, &inputs.start_time),
-            (When::Due, false, &inputs.due),
-            (When::Due, true, &inputs.due_time),
-        ] {
-            subs.push(cx.subscribe_in(
-                input,
-                window,
-                move |this, input, event: &InputEvent, window, cx| match event {
-                    InputEvent::PressEnter { .. } => this.save_when(which, time, window, cx),
-                    InputEvent::Blur => {
-                        let saved = this.current_when(which).unwrap_or_default();
-                        let saved = if time {
-                            malakt_core::time_of(&saved).unwrap_or_default()
-                        } else {
-                            malakt_core::date_of(&saved)
-                        };
-                        if input.read(cx).value().trim() != saved {
-                            this.save_when(which, time, window, cx);
-                        }
-                    }
-                    _ => {}
-                },
-            ));
-        }
+        // カレンダーの入力欄は、Enter と、書き換えてからほかの場所を押したときに保存する
+        subs.extend(Self::subscribe_date_pick(
+            [(&inputs.pick_date, false), (&inputs.pick_time, true)],
+            window,
+            cx,
+        ));
         on_enter!(category, submit_category);
         subs.push(cx.subscribe_in(
             &inputs.font_search,
@@ -1019,6 +1003,11 @@ impl MainView {
             previewing: HashSet::new(),
             md_cache: Default::default(),
             modal: Modal::None,
+            date_pick: None,
+            date_opens: 0,
+            date_grid: cx.focus_handle(),
+            month_scroll: ScrollHandle::new(),
+            bulk_due: None,
             ticket_person: None,
             status_draft: None,
             outside_busy: false,
@@ -1599,7 +1588,7 @@ impl MainView {
         }
     }
 
-    pub fn open_panel(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn open_panel(&mut self, id: &str, _window: &mut Window, cx: &mut Context<Self>) {
         if self.panel.as_deref() != Some(id) {
             self.comment_mode = CommentMode::New;
             self.pending_anchor = None;
@@ -1609,59 +1598,8 @@ impl MainView {
         self.cursor = Some(id.to_owned());
         self.editing = None;
         self.assignee_picker = false;
+        self.date_pick = None;
         self.reload(cx);
-        self.fill_when_inputs(window, cx);
-    }
-
-    /// 詳細の開始日と期限の、日付の欄と時刻の欄と、そこに入る保存されている値。
-    fn when_inputs(&self) -> Vec<(Entity<InputState>, String)> {
-        let Some(detail) = &self.detail else {
-            return Vec::new();
-        };
-        let mut out = Vec::new();
-        for (value, date, time) in [
-            (
-                &detail.task.start,
-                &self.inputs.start,
-                &self.inputs.start_time,
-            ),
-            (&detail.task.due, &self.inputs.due, &self.inputs.due_time),
-        ] {
-            let value = value.as_deref().unwrap_or_default();
-            out.push((date.clone(), malakt_core::date_of(value).to_owned()));
-            out.push((
-                time.clone(),
-                malakt_core::time_of(value).unwrap_or_default().to_owned(),
-            ));
-        }
-        out
-    }
-
-    /// 詳細の開始日と期限の入力欄に、保存されている値を入れる。
-    fn fill_when_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        for (input, value) in self.when_inputs() {
-            input.update(cx, |s, cx| s.set_value(value, window, cx));
-        }
-    }
-
-    /// 詳細の開始日と期限の入力欄を、タスクの今の値に合わせる。入力している途中の欄は変えない。
-    fn sync_dates(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        for (input, value) in self.when_inputs() {
-            input.update(cx, |s, cx| {
-                if s.value().as_ref() != value && !s.focus_handle(cx).is_focused(window) {
-                    s.set_value(value, window, cx);
-                }
-            });
-        }
-    }
-
-    /// 詳細のタスクの、いまの開始日か期限。
-    fn current_when(&self, which: When) -> Option<String> {
-        let task = &self.detail.as_ref()?.task;
-        match which {
-            When::Start => task.start.clone(),
-            When::Due => task.due.clone(),
-        }
     }
 
     /// 詳細の中身を変える。閉じたときは、消える動きの間だけ最後の中身を残す。
@@ -1777,78 +1715,6 @@ impl MainView {
         self.edit_task(cx, |d| d.description = description);
         if self.error.is_none() {
             self.editing = None;
-        }
-    }
-
-    /// 開始日か期限の、日付の欄（`time` なら時刻の欄）を保存する。
-    /// 「11/27」「明日」「来週金曜 14時」「14時」のような書き方も読む。
-    ///
-    /// - 日付の欄に日付だけを書いたときは、時刻の欄の時刻を残す
-    /// - 時刻の欄を空にすると、日付だけに戻る。日付がまだなければ今日の時刻にする
-    pub fn save_when(
-        &mut self,
-        which: When,
-        time: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let (date_input, time_input) = match which {
-            When::Start => (&self.inputs.start, &self.inputs.start_time),
-            When::Due => (&self.inputs.due, &self.inputs.due_time),
-        };
-        let current = self.current_when(which);
-        let now = view::now();
-        let value = if time {
-            let text = time_input.read(cx).value().trim().to_owned();
-            if text.is_empty() {
-                current
-                    .as_deref()
-                    .map(|v| malakt_core::date_of(v).to_owned())
-            } else {
-                Some(when::resolve(&text, &now, current.as_deref()))
-            }
-        } else {
-            let text = date_input.read(cx).value().to_string();
-            let value = when::resolve(&text, &now, None);
-            Some(if malakt_core::is_valid_date(&value) {
-                view::with_time_of(&value, current.as_deref())
-            } else {
-                value
-            })
-        };
-        self.set_when(which, value, window, cx);
-    }
-
-    /// 開始日か期限を今日から `days` 日後にする。時刻は残す。`None` ならなくす。
-    pub fn set_when_in(
-        &mut self,
-        which: When,
-        days: Option<i64>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let current = self.current_when(which);
-        let value =
-            days.map(|d| view::with_time_of(&view::add_days(&self.today, d), current.as_deref()));
-        self.set_when(which, value, window, cx);
-    }
-
-    /// 開始日か期限を保存する。保存できたら、入力欄を保存した形（`2026-11-27` と `14:00`）に直す。
-    /// 保存できなかったときは、書いたものを残す。
-    fn set_when(
-        &mut self,
-        which: When,
-        value: Option<String>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.edit_task(cx, |d| match which {
-            When::Start => d.start = value,
-            When::Due => d.due = value,
-        });
-        if self.error.is_none() {
-            self.reload(cx);
-            self.fill_when_inputs(window, cx);
         }
     }
 
@@ -2686,8 +2552,12 @@ impl MainView {
 
     /// まとめて変えるダイアログを開く。入力は毎回空から始める。
     pub fn open_bulk(&mut self, modal: Modal, window: &mut Window, cx: &mut Context<Self>) {
-        Self::take(&self.inputs.bulk_due.clone(), window, cx);
         Self::take(&self.inputs.bulk_categories.clone(), window, cx);
+        self.bulk_due = None;
+        self.date_pick = None;
+        if modal == Modal::BulkDue {
+            self.open_date_pick(crate::date_pick::DateTarget::Bulk, window, cx);
+        }
         self.bulk_mode = ListMode::Add;
         self.bulk_people.clear();
         self.bulk_category_add = true;
@@ -2701,17 +2571,18 @@ impl MainView {
         let due = if clear {
             None
         } else {
-            let value = self.inputs.bulk_due.read(cx).value().trim().to_owned();
-            let value = when::resolve(&value, &view::now(), None);
-            if value.is_empty() {
-                self.error = Some("期限を入力してください。".into());
-                cx.notify();
-                return;
+            match self.bulk_due.clone() {
+                Some(value) => Some(value),
+                None => {
+                    self.error = Some("期限を選んでください。".into());
+                    cx.notify();
+                    return;
+                }
             }
-            Some(value)
         };
         if self.bulk_apply(&BulkOp::Due(due), cx) {
             self.modal = Modal::None;
+            self.date_pick = None;
         }
     }
 
@@ -4993,6 +4864,10 @@ impl MainView {
     /// Esc。重ねたダイアログを閉じたときは、下のダイアログが次の Esc を受けられるようにする
     /// （重ねたほうの入力欄がなくなると、フォーカスの行き先がなくなる）。
     pub fn dismiss_in(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // その場に開いたカレンダーがいちばん上にある
+        if self.dismiss_date_pick(window, cx) {
+            return;
+        }
         let over = self.sub_modal.is_some();
         self.dismiss(cx);
         if over {
@@ -5017,8 +4892,22 @@ impl MainView {
         self.key_limit_editing = None;
         self.modal = Modal::None;
         self.issued_ticket = None;
+        self.drop_dialog_pick();
         self.issued_access_key = None;
         cx.notify();
+    }
+
+    /// ダイアログを閉じたら、その中のカレンダーも閉じる。
+    pub fn drop_dialog_pick(&mut self) {
+        use crate::date_pick::DateTarget;
+        if self.date_pick.as_ref().is_some_and(|p| {
+            matches!(
+                p.target,
+                DateTarget::Bulk | DateTarget::DefaultDue | DateTarget::BaseDate
+            )
+        }) {
+            self.date_pick = None;
+        }
     }
 
     /// ダイアログの外側の暗い所を押した。いちばん上のダイアログを 1 枚だけ閉じる。
@@ -5059,6 +4948,7 @@ impl MainView {
         } else if self.modal != Modal::None {
             self.modal = Modal::None;
             self.issued_ticket = None;
+            self.drop_dialog_pick();
             self.issued_access_key = None;
         } else if self.workspace_naming.take().is_some() {
             // 書きかけの名前を捨てる
@@ -5087,6 +4977,7 @@ impl MainView {
         } else if self.modal != Modal::None {
             self.modal = Modal::None;
             self.issued_ticket = None;
+            self.drop_dialog_pick();
             self.issued_access_key = None;
         } else if self.editing.is_some() {
             self.editing = None;
