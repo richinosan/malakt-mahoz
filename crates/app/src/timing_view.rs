@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use gpui_kit::base::TestSupportExt;
 use gpui_kit::component::button::ButtonVariants;
 use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
+use gpui_kit::component::scroll::ScrollableElement;
 use gpui_kit::component::{ActiveTheme, Sizable};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
@@ -30,6 +31,8 @@ pub struct StatsView {
     pub people: Vec<(String, Stats)>,
     /// ワークスペースごと（全体なら最上位のワークスペース、ワークスペースならサブワークスペース）。
     pub groups: Vec<(String, Stats)>,
+    /// グラフ（完了数の推移・所要時間の分布・予想工数との比）。
+    pub charts: timing::Charts,
 }
 
 /// 基準を選ぶメニューの、選んだときの動き。`None` は「標準に合わせる」。
@@ -57,6 +60,61 @@ fn diff_text(task: &Task, span: &Span) -> Option<(String, bool)> {
     let over = diff > 0;
     let text = elapsed_label(diff.abs());
     Some((format!("{}{text}", if over { "+" } else { "−" }), over))
+}
+
+/// 詳細の、予想工数に対してどれだけ時間がたったかの棒。予想工数がなければ出さない。
+/// 収まっている間は予想工数を全体にして緑で伸び、超えたら所要時間を全体にして超えた分を赤で出す。
+fn estimate_meter(task: &Task, span: &Span, cx: &App) -> Option<AnyElement> {
+    let est = task.estimate?.total_ms();
+    if est <= 0 {
+        return None;
+    }
+    let theme = cx.theme();
+    let elapsed = span.ms().max(0);
+    let percent = elapsed.saturating_mul(100) / est;
+    let tip = format!(
+        "予想工数 {} に対して {}（{percent}%）",
+        elapsed_label(est),
+        elapsed_label(elapsed)
+    );
+    let track = row()
+        .w_full()
+        .h(px(6.))
+        .gap(px(2.))
+        .rounded(px(3.))
+        .overflow_hidden()
+        .bg(theme.secondary);
+    let track = if elapsed > est {
+        track
+            .child(
+                div()
+                    .h_full()
+                    .w(relative(est as f32 / elapsed as f32))
+                    .bg(theme.success),
+            )
+            .child(div().h_full().flex_1().bg(theme.danger))
+    } else {
+        track.child(
+            div()
+                .h_full()
+                .w(relative(elapsed as f32 / est as f32))
+                .bg(theme.success),
+        )
+    };
+    Some(
+        div()
+            .id("elapsed-meter")
+            .w_full()
+            .max_w(px(260.))
+            .px_2()
+            .py_0p5()
+            .child(track)
+            .tooltip(move |window, cx| {
+                gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
+            })
+            .test_support()
+            .into_any_element(),
+    )
 }
 
 /// 数えた区間の補足（ホバーで出す）。
@@ -156,9 +214,12 @@ impl MainView {
             this.edit_task_by_id(&id, cx, |d| d.time_basis = basis)
         });
         let muted = theme.muted_foreground;
-        div()
-            .flex()
+        let meter = span
+            .as_ref()
+            .and_then(|span| estimate_meter(task, span, cx));
+        col()
             .min_w_0()
+            .gap_1()
             .child(
                 button("elapsed-basis")
                     .ghost()
@@ -180,6 +241,7 @@ impl MainView {
                         basis_items(menu, &view, own, standard, "標準に合わせる", on.clone())
                     }),
             )
+            .children(meter)
             .into_any_element()
     }
 
@@ -400,11 +462,13 @@ impl MainView {
             }
         }
         groups.retain(|(_, s)| s.done > 0 || s.open > 0);
+        let charts = timing::charts(&items, me, now, self.stats_period);
         self.stats_view = Some(StatsView {
             scope,
             total,
             people,
             groups,
+            charts,
         });
     }
 
@@ -415,8 +479,16 @@ impl MainView {
             Some(id) => format!("「{}」の統計", self.workspace_name(Some(id))),
             None => "すべてのタスクの統計".to_owned(),
         };
-        let body = self.render_stats(cx);
-        self.dialog_as("dialog", px(720.), title, body, cx)
+        // グラフと表で長くなるので、高さを決めて中身をスクロールする
+        let body = col().flex_1().min_h_0().child(
+            div()
+                .id("stats-scroll")
+                .flex_1()
+                .min_h_0()
+                .child(self.render_stats(cx).pr_3().pb_1())
+                .overflow_y_scrollbar(),
+        );
+        self.dialog_sized("dialog", px(760.), Some(px(860.)), title, body, cx)
     }
 
     /// ワークスペースの設定の「所要時間の基準」の欄。
@@ -606,6 +678,7 @@ impl MainView {
                     .child(self.basis_button("stats-basis", scope.as_deref(), cx)),
             )
             .child(tiles)
+            .when(stats.total.done > 0, |d| d.child(charts(&stats.charts, cx)))
             .when(!stats.people.is_empty(), |d| {
                 d.child(table("stats-people", "担当", &stats.people))
             })
@@ -674,4 +747,39 @@ fn basis_items(
         );
     }
     menu
+}
+
+/// 統計のグラフ 3 つ（凡例は 1 つ）。終わったタスクがないときは出さない。
+#[inline(never)]
+fn charts(charts: &timing::Charts, cx: &App) -> AnyElement {
+    use crate::stats_chart::{bar_chart, legend};
+    col()
+        .id("stats-charts")
+        .gap_3()
+        .child(legend(cx))
+        .child(bar_chart(
+            "stats-trend",
+            "終わった数の推移",
+            &charts.trend,
+            cx,
+        ))
+        .child(
+            row()
+                .gap_6()
+                .flex_wrap()
+                .child(bar_chart(
+                    "stats-spread",
+                    "所要時間の分布",
+                    &charts.spread,
+                    cx,
+                ))
+                .child(bar_chart(
+                    "stats-ratio",
+                    "予想工数との比",
+                    &charts.ratio,
+                    cx,
+                )),
+        )
+        .test_support()
+        .into_any_element()
 }

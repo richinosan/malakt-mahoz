@@ -186,6 +186,7 @@ mod tests {
         ("browser.rs", include_str!("browser.rs")),
         ("date_pick.rs", include_str!("date_pick.rs")),
         ("pomodoro.rs", include_str!("pomodoro.rs")),
+        ("timing_view.rs", include_str!("timing_view.rs")),
     ];
 
     /// コメントを除いたコードの行。
