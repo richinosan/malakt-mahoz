@@ -14,6 +14,7 @@ data/attachments.json       添付の名前と大きさ
 data/repeats.json           タスクに付けた繰り返しと AI への指示
 data/schedules.json         定時タスク（雛形と次に作る日時）
 data/schedule_files.json    定時タスクの雛形の添付（中身は files/）
+data/work_logs.json         ポモドーロで測った作業の記録
 files/<SHA-256>             添付の中身（同じ中身は 1 つだけ）
 ```
 

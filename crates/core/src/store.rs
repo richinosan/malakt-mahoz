@@ -1489,6 +1489,7 @@ impl Store {
             repeats: self.all_repeats()?,
             schedules: self.all_schedules()?,
             schedule_files: self.all_schedule_files()?,
+            work_logs: self.all_work_logs()?,
         })
     }
 
@@ -1623,6 +1624,9 @@ impl Store {
                 crate::attachment::put_blob(&tx, &f.hash, &bytes)?;
             }
             crate::schedule::insert_file(&tx, f)?;
+        }
+        for l in &data.work_logs {
+            crate::pomodoro::insert_log(&tx, l)?;
         }
         // 取り込んだ結果、親子が輪になっていないか確かめる。
         let reachable: i64 = tx.query_row(

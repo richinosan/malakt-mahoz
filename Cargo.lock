@@ -4986,6 +4986,7 @@ dependencies = [
  "malakt-autostart",
  "malakt-caldav",
  "malakt-core",
+ "malakt-media",
  "malakt-passkey",
  "malakt-reminders",
  "malakt-term",
@@ -5003,6 +5004,15 @@ dependencies = [
  "webview2-com",
  "windows 0.62.2",
  "wry",
+]
+
+[[package]]
+name = "malakt-media"
+version = "0.1.0"
+dependencies = [
+ "windows 0.62.2",
+ "windows-future 0.3.2",
+ "zbus 5.19.0",
 ]
 
 [[package]]

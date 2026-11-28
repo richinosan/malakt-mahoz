@@ -337,6 +337,8 @@ pub struct Detail {
     pub linked: Vec<Todo>,
     /// タスクに付いている繰り返し。
     pub repeat: Option<malakt_core::repeat::Repeat>,
+    /// ポモドーロで測った作業の回数と、合計の秒数。
+    pub work: (usize, i64),
 }
 
 /// ワークスペースのツリーの 1 行。
@@ -1282,6 +1284,7 @@ impl MainView {
                     changes: store.changes(id)?,
                     subtasks: store.subtasks(id)?,
                     repeat: store.repeat(id)?,
+                    work: store.work_total(id)?,
                     parent: task.parent_id.as_deref().and_then(|p| store.task(p).ok()),
                     task,
                 }),

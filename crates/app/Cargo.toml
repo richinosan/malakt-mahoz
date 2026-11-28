@@ -26,6 +26,7 @@ malakt-term.workspace = true
 malakt-autostart.workspace = true
 malakt-caldav.workspace = true
 keyring = "4"
+malakt-media.workspace = true
 raw-window-handle = "0.6"
 async-channel = "2"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "tiff"] }

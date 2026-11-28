@@ -362,7 +362,20 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     ALTER TABLE access_keys ADD COLUMN expires TEXT;
     ALTER TABLE access_keys ADD COLUMN windows TEXT NOT NULL DEFAULT '[]';
     "#,
-    // 22: CalDAV のサーバーとの同期（`caldav`）。パスワードは OS のキーチェーンに置き、ここには入れない。
+    // 22: ポモドーロの作業の記録（`pomodoro`）。task_id がなければタスクを選ばずに測った分。
+    //     時刻は UNIX ミリ秒、seconds は一時停止の間を除いた長さ
+    r#"
+    CREATE TABLE work_logs (
+        id TEXT PRIMARY KEY NOT NULL,
+        task_id TEXT REFERENCES tasks(id) ON DELETE CASCADE,
+        started_at INTEGER NOT NULL,
+        ended_at INTEGER NOT NULL,
+        seconds INTEGER NOT NULL
+    ) STRICT;
+    CREATE INDEX work_logs_task ON work_logs(task_id, ended_at);
+    CREATE INDEX work_logs_ended ON work_logs(ended_at);
+    "#,
+    // 23: CalDAV のサーバーとの同期（`caldav`）。パスワードは OS のキーチェーンに置き、ここには入れない。
     //     カレンダー 1 つをワークスペース 1 つにつなぐ。items はサーバーのタスクとアプリのタスクのつながりで、
     //     ics はサーバーの中身、base は前の同期でそろっていた項目（JSON）。people は担当者の URI と担当者。
     //     その端末だけのものなので、元に戻す相手にも書き出しにも入れない
