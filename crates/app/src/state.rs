@@ -488,6 +488,8 @@ pub struct MainView {
     pub date_opens: usize,
     /// 統計の期間。
     pub stats_period: malakt_core::timing::Period,
+    /// 出した、PR の時刻を読めなかった失敗の番号（[`crate::db::Db::pr_error`]）。
+    pr_error_seen: u64,
     /// 統計のダイアログに出す数字。
     pub stats_view: Option<crate::timing_view::StatsView>,
     /// 開いている予想工数のパネル。
@@ -1073,6 +1075,7 @@ impl MainView {
             estimate_pick: None,
             estimate_opens: 0,
             stats_period: Default::default(),
+            pr_error_seen: 0,
             stats_view: None,
             date_grid: cx.focus_handle(),
             month_scroll: ScrollHandle::new(),
@@ -1245,6 +1248,12 @@ impl MainView {
         if let Some(error) = self.db.read(cx).repeat_error.clone() {
             self.error = Some(error.into());
         }
+        if let Some((n, error)) = self.db.read(cx).pr_error.clone() {
+            if n > self.pr_error_seen {
+                self.pr_error_seen = n;
+                self.error = Some(error.into());
+            }
+        }
         let description = self
             .detail
             .as_ref()
@@ -1414,6 +1423,8 @@ impl MainView {
             cx.notify();
             result.and_then(|value| marked.map(|()| value))
         });
+        // PR の時刻を読むタスクが増えたかもしれない
+        crate::pr_times::nudge(cx);
         match result {
             Ok(value) => {
                 self.error = None;

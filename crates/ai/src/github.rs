@@ -283,6 +283,86 @@ impl Link {
     }
 }
 
+/// PR の時刻（所要時間の基準）を読むときに受け取る項目。
+const PR_TIME_FIELDS: &str = "author,createdAt,mergedAt,reviews";
+
+/// PR の時刻（UNIX 時刻、ミリ秒）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PrTimes {
+    /// 作った時
+    pub opened: i64,
+    /// 作った人以外が初めてレビューした時（承認・変更の依頼・コメントのどれでも）
+    pub reviewed: Option<i64>,
+    /// マージした時
+    pub merged: Option<i64>,
+}
+
+impl Link {
+    /// PR の時刻を読むコマンド。PR のリンクでなければ `None`。
+    pub fn pr_times_command(&self) -> Option<Spec> {
+        let Kind::Pull(n) = self.kind else {
+            return None;
+        };
+        let mut spec = Spec::direct(
+            "gh",
+            vec![
+                "pr".into(),
+                "view".into(),
+                n.to_string(),
+                "-R".into(),
+                self.slug(),
+                "--json".into(),
+                PR_TIME_FIELDS.into(),
+            ],
+        );
+        spec.env = quiet_env();
+        Some(spec)
+    }
+}
+
+/// [`Link::pr_times_command`] の出力を読む。
+pub fn parse_pr_times(output: &str) -> Result<PrTimes, String> {
+    let v: Value = serde_json::from_str(output.trim())
+        .map_err(|e| format!("gh の出力を JSON として読めませんでした: {e}"))?;
+    let time = |v: &Value, key: &str| -> Result<Option<i64>, String> {
+        match v.get(key).and_then(Value::as_str).filter(|s| !s.is_empty()) {
+            None => Ok(None),
+            Some(s) => crate::watch::parse_time(s)
+                .map(|secs| Some(secs * 1000))
+                .ok_or_else(|| format!("{key} の時刻を読めませんでした: {s}")),
+        }
+    };
+    let opened = time(&v, "createdAt")?.ok_or("PR を作った時刻（createdAt）がありません")?;
+    let login = |v: &Value| {
+        v.get("author")
+            .and_then(|a| a.get("login"))
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    };
+    let author = login(&v);
+    let mut reviewed: Option<i64> = None;
+    for review in v
+        .get("reviews")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let state = review.get("state").and_then(Value::as_str).unwrap_or("");
+        // 下書きのレビューと、作った人が自分の PR に付けたものは数えない
+        if state == "PENDING" || (author.is_some() && login(review) == author) {
+            continue;
+        }
+        if let Some(at) = time(review, "submittedAt")? {
+            reviewed = Some(reviewed.map_or(at, |r| r.min(at)));
+        }
+    }
+    Ok(PrTimes {
+        opened,
+        reviewed,
+        merged: time(&v, "mergedAt")?,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -525,5 +605,42 @@ mod tests {
             },
         );
         assert_eq!(file.format_api_response("{\"a\":1}"), "{\"a\":1}");
+    }
+
+    #[test]
+    fn pr_times_are_read_from_gh() {
+        let link = parse_link("https://github.com/o/r/pull/12").unwrap();
+        let spec = link.pr_times_command().unwrap();
+        assert_eq!(
+            spec.args,
+            [
+                "pr",
+                "view",
+                "12",
+                "-R",
+                "o/r",
+                "--json",
+                "author,createdAt,mergedAt,reviews"
+            ]
+        );
+        assert!(parse_link("https://github.com/o/r/issues/12")
+            .unwrap()
+            .pr_times_command()
+            .is_none());
+        let out = r#"{"author":{"login":"me"},"createdAt":"2026-11-27T01:00:00Z","mergedAt":"2026-11-27T05:00:00Z",
+            "reviews":[{"author":{"login":"me"},"state":"COMMENTED","submittedAt":"2026-11-27T01:30:00Z"},
+                       {"author":{"login":"you"},"state":"PENDING","submittedAt":""},
+                       {"author":{"login":"you"},"state":"APPROVED","submittedAt":"2026-11-27T03:00:00Z"},
+                       {"author":{"login":"bot"},"state":"COMMENTED","submittedAt":"2026-11-27T02:00:00Z"}]}"#;
+        let t = parse_pr_times(out).unwrap();
+        let at = |s: &str| crate::watch::parse_time(s).unwrap() * 1000;
+        assert_eq!(t.opened, at("2026-11-27T01:00:00Z"));
+        assert_eq!(t.reviewed, Some(at("2026-11-27T02:00:00Z")));
+        assert_eq!(t.merged, Some(at("2026-11-27T05:00:00Z")));
+        // まだのものは None。読めないものはエラー
+        let t = parse_pr_times(r#"{"author":{"login":"me"},"createdAt":"2026-11-27T01:00:00Z","mergedAt":null,"reviews":[]}"#).unwrap();
+        assert_eq!((t.reviewed, t.merged), (None, None));
+        assert!(parse_pr_times("not json").is_err());
+        assert!(parse_pr_times(r#"{"reviews":[]}"#).is_err());
     }
 }

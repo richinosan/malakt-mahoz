@@ -28,6 +28,7 @@ pub mod panes;
 pub mod passkey;
 pub mod plugins;
 pub mod pomodoro;
+pub mod pr_times;
 mod press;
 pub mod reminders;
 mod render;
