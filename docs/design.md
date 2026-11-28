@@ -10,6 +10,8 @@
 | `crates/update`（`malakt-update`） | 自動アップデート。GitHub Releases の確認、ダウンロードと検証、実行ファイルの入れ替え。画面に依存しません |
 | `crates/app`（`malakt-mahoz`） | gpui の画面。状態は `state.rs`、描画は `render.rs`、コマンドは `cli.rs`、AI チャットは `ai.rs` と `ai_view.rs`、ターミナルは `term.rs` |
 
+ツールの名前・説明・引数は `api/`（TypeSpec）に 1 か所で書き、`api/generated/tools.json` を `ai` が実行ファイルに埋め込んで読みます（[docs/api.md](api.md)）。
+
 画面に依存する部分を `app` に閉じ込めているので、`core` はそのままほかの画面からも使えます。
 
 ## 速さ

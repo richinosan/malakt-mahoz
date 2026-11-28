@@ -1,0 +1,13 @@
+{
+  "name": "malakt-mahoz-api",
+  "private": true,
+  "type": "module",
+  "description": "malakt-mahoz の API の定義（TypeSpec）と、そこからツールの一覧を作るスクリプト",
+  "scripts": {
+    "build": "node build.mjs",
+    "check": "node build.mjs --check"
+  },
+  "devDependencies": {
+    "@typespec/compiler": "1.18.0"
+  }
+}

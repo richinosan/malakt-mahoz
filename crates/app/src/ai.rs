@@ -4142,7 +4142,7 @@ impl Session {
                                 .and_then(|p| p.into_iter().find(|p| p.is_self))
                                 .map(|p| p.id);
                             // 変更は、ツールの呼び出し 1 回を元に戻す 1 つの段にする（Ctrl+Z で戻せる）
-                            let write = tools::WRITES.contains(&name);
+                            let write = tools::writes(name);
                             let marked = if write {
                                 db.store.undo_mark().map_err(|e| e.to_string())
                             } else {

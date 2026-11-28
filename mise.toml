@@ -1,5 +1,7 @@
 [tools]
 rust = { version = "1.100.0", components = "rustfmt,clippy" }
+# API の定義（api/*.tsp）からツールの一覧を作るときだけ使う。アプリのビルドには要らない
+node = "26.13.1"
 
 [tasks.dev]
 description = "開発用にアプリを起動する（デバッグビルド）"
@@ -33,9 +35,19 @@ run = [
   "cargo clippy --workspace --all-targets --locked -- -D warnings",
 ]
 
+[tasks.api]
+description = "API の定義（api/*.tsp）から、ツールの一覧 api/generated/tools.json を作り直す"
+dir = "api"
+run = ["npm install --prefer-offline --no-audit --no-fund --silent", "node build.mjs"]
+
+[tasks.api-check]
+description = "api/generated/tools.json が API の定義（api/*.tsp）と合っているかを確かめる"
+dir = "api"
+run = ["npm install --prefer-offline --no-audit --no-fund --silent", "node build.mjs --check"]
+
 [tasks.verify]
-description = "コミットの前の確認（書式、clippy、テスト）。pre-commit フックが実行する"
-depends = ["lint"]
+description = "コミットの前の確認（書式、clippy、API の定義、テスト）。pre-commit フックが実行する"
+depends = ["lint", "api-check"]
 run = "cargo test --workspace --locked"
 
 [tasks.hooks]

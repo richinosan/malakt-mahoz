@@ -75,6 +75,7 @@ mise run verify     # 書式、clippy、テスト
 mise run hooks      # コミットの前に verify を走らせるフックを入れる
 mise run bench      # 1 万件のタスクでの一覧・検索・エクスポートの時間
 mise run mutants    # ミューテーションテスト（cargo-mutants が必要）
+mise run api        # API の定義（api/*.tsp）からツールの一覧を作り直す
 ```
 
 ## ドキュメント
@@ -85,6 +86,7 @@ mise run mutants    # ミューテーションテスト（cargo-mutants が必�
 - [AI チャット](docs/ai.md)
 - [ターミナル](docs/terminal.md)
 - [Claude Code などから使う（MCP）](docs/mcp.md)
+- [API の定義（TypeSpec）](docs/api.md)
 - [リマインダーとの連携](docs/reminders.md)
 - [スタートアップ](docs/startup.md)
 - [自動アップデート](docs/update.md)
