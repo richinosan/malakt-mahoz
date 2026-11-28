@@ -115,6 +115,8 @@ impl Scene {
 /// 今、画面の後ろに敷いている画像。
 pub struct Backdrop {
     pub image: Arc<RenderImage>,
+    /// 同じ画像を強くぼかしたもの。一覧の上に重ねるパネルの後ろに敷き、すりガラスに見せる。
+    pub frosted: Arc<RenderImage>,
     /// 画像の上に重ねる面の濃さ（0〜1）。
     pub alpha: f32,
     made_from: (Scene, bool, u8),
@@ -1110,18 +1112,13 @@ pub fn take_failure(cx: &mut App) -> Option<String> {
 pub fn set_scene(scene: Scene, cx: &mut App) -> Result<(), String> {
     let dark = Theme::global(cx).mode.is_dark();
     // 先に読んで確かめる。読めなければ保存もしない
-    let image = render(&scene, dark, blur(cx))?;
+    let alpha = 1. - f32::from(clear(cx)) / 100.;
+    let made = make((scene.clone(), dark, blur(cx)), alpha)?;
     let key = scene.key();
     db::shared(cx)
         .update(cx, |db, _| db.store.set_setting(SCENE, key.as_deref()))
         .map_err(|error| format!("背景の画像の選択を保存できませんでした。{error}"))?;
-    let alpha = 1. - f32::from(clear(cx)) / 100.;
-    let made_from = (scene, dark, blur(cx));
-    cx.global_mut::<Shown>().backdrop = image.map(|image| Backdrop {
-        image,
-        alpha,
-        made_from,
-    });
+    cx.global_mut::<Shown>().backdrop = made;
     reload(cx);
     Ok(())
 }
@@ -1166,15 +1163,11 @@ fn sync_backdrop(cx: &mut App) -> Result<(), String> {
         return Ok(());
     }
     let alpha = 1. - f32::from(clear(cx)) / 100.;
-    let made = render(&wanted.0, wanted.1, wanted.2);
+    let made = make(wanted, alpha);
     let shown = cx.global_mut::<Shown>();
     match made {
-        Ok(image) => {
-            shown.backdrop = image.map(|image| Backdrop {
-                image,
-                alpha,
-                made_from: wanted,
-            });
+        Ok(backdrop) => {
+            shown.backdrop = backdrop;
             Ok(())
         }
         Err(error) => {
@@ -1182,6 +1175,24 @@ fn sync_backdrop(cx: &mut App) -> Result<(), String> {
             Err(error)
         }
     }
+}
+
+/// すりガラスの画像のぼかしの強さ（`blur` と同じ 0〜100）。画像のぼかしがこれより強ければ、そちらに合わせる。
+const FROST_BLUR: u8 = 70;
+
+/// 敷く画像と、すりガラスに使う強くぼかした画像を作る。
+fn make(made_from: (Scene, bool, u8), alpha: f32) -> Result<Option<Backdrop>, String> {
+    let (scene, dark, blur) = &made_from;
+    let Some(image) = render(scene, *dark, *blur)? else {
+        return Ok(None);
+    };
+    let frosted = render(scene, *dark, (*blur).max(FROST_BLUR))?.unwrap_or_else(|| image.clone());
+    Ok(Some(Backdrop {
+        image,
+        frosted,
+        alpha,
+        made_from,
+    }))
 }
 
 /// 敷く画像を作る。ぼかすときは小さくしてからぼかす（引き伸ばして描くので、粗さは見えない）。
@@ -1523,7 +1534,30 @@ fn repaint(mode: ThemeMode, cx: &mut App) {
 
 #[cfg(test)]
 mod tests {
-    use super::{overlaid, themes, Color, Look, THEMES};
+    use super::{make, overlaid, themes, Color, Look, Scene, THEMES};
+
+    /// 横に隣り合う画素の差の平均。ぼけているほど小さい。
+    fn roughness(image: &gpui_kit::RenderImage) -> f64 {
+        let width = image.size(0).width.0 as usize * 4;
+        let bytes = image.as_bytes(0).unwrap();
+        let mut total = 0u64;
+        let mut count = 0u64;
+        for line in bytes.chunks(width) {
+            for (a, b) in line.iter().zip(&line[4..]) {
+                total += u64::from(a.abs_diff(*b));
+                count += 1;
+            }
+        }
+        total as f64 / count as f64
+    }
+
+    #[test]
+    fn panels_over_the_list_get_a_more_blurred_backdrop() {
+        // 一覧の上に重ねるパネルの後ろには、敷いた画像より強くぼかした画像を使う
+        let backdrop = make((Scene::Sky, true, 10), 0.5).unwrap().unwrap();
+        assert!(roughness(&backdrop.frosted) < roughness(&backdrop.image));
+        assert!(make((Scene::None, true, 10), 0.5).unwrap().is_none());
+    }
 
     #[test]
     fn nothing_chosen_keeps_the_bundled_colors() {
