@@ -279,6 +279,11 @@ pub(crate) fn window_menu(
                         .icon(app_icon("timer"))
                         .action(Box::new(crate::pomodoro::OpenPomodoro)),
                 )
+                .item(
+                    PopupMenuItem::new("タイマー")
+                        .icon(app_icon("alarm-clock"))
+                        .action(Box::new(crate::timer::OpenTimer)),
+                )
             },
         )
     } else {
@@ -411,6 +416,7 @@ enum SettingKey {
     Keys,
     NewWindow,
     Pomodoro,
+    Timer,
 }
 
 impl Setting {
@@ -7566,6 +7572,18 @@ impl MainView {
                 list(&["ウィンドウ", "タイマー", "作業時間", "休憩", "音楽"]),
             ),
             Setting::new(
+                Section::Window,
+                SettingKey::Timer,
+                "タイマー",
+                None,
+                list(&[
+                    "ウィンドウ",
+                    "カウントダウン",
+                    "ストップウォッチ",
+                    "アラーム",
+                ]),
+            ),
+            Setting::new(
                 Section::Data,
                 SettingKey::Export,
                 "エクスポート",
@@ -7736,6 +7754,17 @@ impl MainView {
                         .small()
                         .on_click(|_, window, cx| {
                             window.dispatch_action(Box::new(crate::pomodoro::OpenPomodoro), cx)
+                        }),
+                )
+                .into_any_element(),
+                SettingKey::Timer => feel::gloss(
+                    button("open-timer")
+                        .icon(app_icon("alarm-clock"))
+                        .label("開く")
+                        .outline()
+                        .small()
+                        .on_click(|_, window, cx| {
+                            window.dispatch_action(Box::new(crate::timer::OpenTimer), cx)
                         }),
                 )
                 .into_any_element(),

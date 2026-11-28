@@ -4322,18 +4322,30 @@ impl MainView {
         }
     }
 
-    /// 通知を開く。既読にして、そのタスクの詳細を出す。
+    /// 通知を開く。既読にして、そのタスクの詳細を出す。タイマーとポモドーロの通知は、
+    /// そのウィンドウを手前に出す。
     pub fn open_notice(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(task_id) = self
+        let Some((kind, task_id)) = self
             .notices
             .iter()
             .find(|n| n.id == id)
-            .map(|n| n.task_id.clone())
+            .map(|n| (n.kind, n.task_id.clone()))
         else {
             return;
         };
         self.write(cx, |s| s.mark_notice_read(id));
         self.modal = Modal::None;
+        let Some(task_id) = task_id else {
+            let action: Box<dyn Action> = match kind {
+                malakt_core::notice::NoticeKind::Pomodoro => {
+                    Box::new(crate::pomodoro::OpenPomodoro)
+                }
+                _ => Box::new(crate::timer::OpenTimer),
+            };
+            window.dispatch_action(action, cx);
+            cx.notify();
+            return;
+        };
         self.query.tab = if self
             .db
             .read(cx)

@@ -445,6 +445,36 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     ), created_at)
     WHERE EXISTS (SELECT 1 FROM task_assignees a WHERE a.task_id = tasks.id);
     "#,
+    // 25: タスクに付かない通知（タイマーとポモドーロの終わり）。task_id を空にでき、文は text に置く
+    r#"
+    CREATE TABLE notices_new (
+        id TEXT PRIMARY KEY NOT NULL,
+        kind TEXT NOT NULL,
+        task_id TEXT REFERENCES tasks(id) ON DELETE CASCADE,
+        task_title TEXT NOT NULL,
+        actor TEXT NOT NULL DEFAULT '',
+        comment_id TEXT REFERENCES comments(id) ON DELETE SET NULL,
+        excerpt TEXT NOT NULL DEFAULT '',
+        status TEXT,
+        done_count INTEGER NOT NULL DEFAULT 0,
+        total_count INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL,
+        read_at INTEGER,
+        delivered_at INTEGER,
+        dedupe TEXT UNIQUE,
+        due TEXT,
+        text TEXT NOT NULL DEFAULT ''
+    ) STRICT;
+    INSERT INTO notices_new(id, kind, task_id, task_title, actor, comment_id, excerpt, status,
+                            done_count, total_count, created_at, read_at, delivered_at, dedupe, due)
+        SELECT id, kind, task_id, task_title, actor, comment_id, excerpt, status,
+               done_count, total_count, created_at, read_at, delivered_at, dedupe, due
+        FROM notices;
+    DROP TABLE notices;
+    ALTER TABLE notices_new RENAME TO notices;
+    CREATE INDEX notices_created ON notices(created_at);
+    CREATE INDEX notices_task ON notices(task_id);
+    "#,
 ];
 
 pub(crate) fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
@@ -602,5 +632,58 @@ mod tests {
                 ("old".into(), None, Some(100)),
             ]
         );
+    }
+
+    /// 通知の表を作り直しても、今までの通知はそのまま残り、タスクのない通知も入れられる。
+    #[test]
+    fn keeps_notices_and_allows_ones_without_a_task() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
+        for sql in &super::MIGRATIONS[..24] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 24).unwrap();
+        conn.execute_batch(
+            r#"INSERT INTO tasks(id, title, description, status, priority, position, created_at, updated_at)
+             VALUES ('t', '請求書', '', 'needs_action', 0, 0, 100, 0);
+             INSERT INTO notices(id, kind, task_id, task_title, created_at, read_at, delivered_at, dedupe, due)
+             VALUES ('n', 'due', 't', '請求書', 200, NULL, 210, 'due:t:2026-11-28:0', '2026-11-28');"#,
+        )
+        .unwrap();
+        super::migrate(&mut conn).unwrap();
+        let kept: (String, Option<String>, Option<i64>, String, String) = conn
+            .query_row(
+                "SELECT kind, task_id, delivered_at, dedupe, text FROM notices WHERE id = 'n'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            kept,
+            (
+                "due".into(),
+                Some("t".into()),
+                Some(210),
+                "due:t:2026-11-28:0".into(),
+                String::new()
+            )
+        );
+        conn.execute(
+            "INSERT INTO notices(id, kind, task_id, task_title, created_at, text) \
+             VALUES ('x', 'timer', NULL, '', 300, 'タイマーが終わりました')",
+            [],
+        )
+        .unwrap();
+        // タスクを消すと、そのタスクの通知だけが消える
+        conn.execute("DELETE FROM tasks WHERE id = 't'", [])
+            .unwrap();
+        let ids: Vec<String> = conn
+            .prepare("SELECT id FROM notices")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(ids, ["x"]);
     }
 }

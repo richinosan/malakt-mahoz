@@ -11,6 +11,7 @@ pub mod caldav;
 mod caldav_settings;
 mod caret;
 pub mod cli;
+pub(crate) mod clock;
 pub mod date_pick;
 pub mod db;
 pub mod downloads;
@@ -39,6 +40,7 @@ pub mod state;
 mod task_urls;
 pub mod term;
 pub mod theme;
+pub mod timer;
 pub mod timing_view;
 pub mod update;
 mod webview;
@@ -167,6 +169,7 @@ pub fn init_with(store: malakt_core::Store, ai: AiConfig, cx: &mut App) {
     update::init(cx);
     autostart::init(cx);
     pomodoro::init(cx);
+    timer::init(cx);
     theme::init(cx);
     cx.bind_keys([
         #[cfg(target_os = "macos")]
@@ -221,6 +224,7 @@ pub fn init_with(store: malakt_core::Store, ai: AiConfig, cx: &mut App) {
             MenuItem::action("新しいタスク", shortcuts::NewTask),
             MenuItem::action("新しいウィンドウ", NewWindow),
             MenuItem::action("ポモドーロ", pomodoro::OpenPomodoro),
+            MenuItem::action("タイマー", timer::OpenTimer),
             MenuItem::action("元に戻す", shortcuts::Undo),
             MenuItem::action("やり直す", shortcuts::Redo),
             MenuItem::action("検索", shortcuts::Find),

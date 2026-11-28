@@ -2,18 +2,17 @@
 //!
 //! タイマーの状態はデータベース（[`malakt_core::pomodoro`]）にあり、画面・AI チャット・MCP の
 //! どこから動かしても同じものを見る。ここは、1 秒ごとに時刻を見て段を進めること、段が終わったら
-//! 知らせること、段の始まりに OS で再生中の音楽を操作すること（[`malakt_media`]、標準は何もしない）と、
+//! ウィンドウの輪を光らせること（通知はデータベースが作り、メインのウィンドウが OS とベルに出す）、段の始まりに OS で再生中の音楽を操作すること（[`malakt_media`]、標準は何もしない）と、
 //! ウィンドウを受け持つ。ウィンドウを閉じてもタイマーは止まらない。
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use gpui_kit::base::TestSupportExt;
 use gpui_kit::component::button::ButtonVariants;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::scroll::ScrollableElement;
 use gpui_kit::component::switch::Switch;
-use gpui_kit::component::WindowExt;
 use gpui_kit::component::{ActiveTheme, Disableable, Placement, Sizable};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
@@ -21,36 +20,22 @@ use malakt_core::pomodoro::{self, Media, Op, Phase, Run, Settings, Timer};
 use malakt_core::{Scope, Task, TaskFilter};
 use malakt_media::{Command, Failure};
 
+use crate::clock::{self, px, BarHold, FLASH, RING, TICK};
 use crate::db;
-use crate::feel::{self, Grip};
+use crate::feel;
 use crate::press::button;
-use crate::render::{app_icon, col, row, window_controls};
+use crate::render::{app_icon, col, row};
 use crate::scroll::Menus;
-use crate::{APP_ID, UI_SCALE};
 
 actions!(pomodoro, [OpenPomodoro, TogglePomodoro, ClosePomodoroPage]);
 
-/// 参照する寸法を、画面全体の拡大率に合わせる。
-const fn px(value: f32) -> Pixels {
-    gpui_kit::px(value * UI_SCALE)
-}
-
-/// 上のバーの高さ。別ウィンドウのバーと同じ。
-const BAR_HEIGHT: Pixels = px(30.);
 /// 開いたときの大きさ。
 const SIZE: Size<Pixels> = Size {
     width: px(340.),
     height: px(440.),
 };
-/// 残り時間の輪の大きさと太さ。
-const RING: Pixels = px(188.);
-const RING_WIDTH: f32 = 8. * UI_SCALE;
-/// 段が終わったときに、輪を光らせる長さ。
-const FLASH: Duration = Duration::from_millis(2400);
 /// タスクを選ぶ一覧に出す数。
 const PICK_LIMIT: usize = 100;
-/// 時刻を見る間隔。
-const TICK: Duration = Duration::from_secs(1);
 /// 位置と大きさ、開いていたかを覚える設定の名前。
 const WINDOW_KEY: &str = "pomodoro.window";
 const OPEN_KEY: &str = "pomodoro.open";
@@ -155,14 +140,7 @@ pub fn run(cx: &mut App) {
 
 /// 前に閉じたときに開いていれば、ポモドーロのウィンドウを開き直す。
 pub fn reopen(cx: &mut App) {
-    let open_before = db::shared(cx)
-        .read(cx)
-        .store
-        .setting(OPEN_KEY)
-        .ok()
-        .flatten()
-        .is_some();
-    if open_before {
+    if clock::was_open(OPEN_KEY, cx) {
         if let Err(e) = open(cx) {
             shared(cx).update(cx, |this, cx| {
                 this.fail(format!("ポモドーロのウィンドウを開けませんでした: {e}"), cx)
@@ -241,7 +219,7 @@ impl Pomodoro {
         cx: &mut Context<Self>,
     ) {
         if timer.ended > self.seen_ended {
-            self.announce(&timer, &settings, cx);
+            self.announce();
         }
         self.seen_ended = timer.ended;
         if let Some(command) = media_step(&self.timer, &timer, &settings, now) {
@@ -316,26 +294,10 @@ impl Pomodoro {
         .detach();
     }
 
-    /// 段が終わったことを知らせる。OS の通知と、ウィンドウの輪の光。
-    fn announce(&mut self, timer: &Timer, settings: &Settings, cx: &mut Context<Self>) {
+    /// 段が終わったら、ウィンドウの輪を光らせる。通知はデータベースが作り
+    /// （[`malakt_core::notice::NoticeKind::Pomodoro`]）、メインのウィンドウが OS とベルに出す。
+    fn announce(&mut self) {
         self.flashed = Some(Instant::now());
-        let ended = timer.last_ended.unwrap_or(Phase::Work);
-        let title = format!("{}が終わりました", ended.label());
-        let next = format!(
-            "次は{} {} 分",
-            timer.phase.label(),
-            settings.minutes(timer.phase)
-        );
-        let target = self.window.or_else(|| crate::session::main_window(cx));
-        let Some(target) = target else { return };
-        cx.defer(move |cx| {
-            let note = gpui_kit::component::notification::Notification::new()
-                .title(title)
-                .message(next)
-                .system();
-            // 閉じたウィンドウなら、知らせる先がない
-            let _ = target.update(cx, |_, window, cx| window.push_notification(note, cx));
-        });
     }
 }
 
@@ -354,38 +316,13 @@ pub fn open(cx: &mut App) -> Result<AnyWindowHandle> {
             return Ok(handle);
         }
     }
-    let saved: Option<[f32; 4]> = db::shared(cx)
-        .read(cx)
-        .store
-        .setting(WINDOW_KEY)
-        .ok()
-        .flatten()
-        .and_then(|text| serde_json::from_str(&text).ok());
-    let bounds = match saved {
-        Some([x, y, w, h]) => Bounds {
-            origin: point(gpui_kit::px(x), gpui_kit::px(y)),
-            size: size(gpui_kit::px(w), gpui_kit::px(h)),
-        },
-        None => Bounds::centered(None, SIZE, cx),
-    };
-    let options = WindowOptions {
-        window_bounds: Some(WindowBounds::Windowed(bounds)),
-        window_min_size: Some(size(px(260.), px(320.))),
-        // ほかの別ウィンドウと同じく、OS のタイトルバーは出さず、中の細いバーで代える
-        titlebar: Some(TitlebarOptions {
-            title: Some(crate::window_title("ポモドーロ").into()),
-            ..gpui_kit::component::TitleBar::title_bar_options()
-        }),
-        #[cfg(target_os = "linux")]
-        window_decorations: Some(WindowDecorations::Client),
-        app_id: Some(APP_ID.into()),
-        ..gpui_kit::component::TitleBar::window_options()
-    };
+    let options =
+        clock::window_options("ポモドーロ", WINDOW_KEY, SIZE, size(px(260.), px(320.)), cx);
     let (handle, _) = gpui_kit::open_window(options, cx, |window, cx| {
         cx.new(|cx| PomodoroView::new(window, cx))
     })?;
     shared(cx).update(cx, |this, _| this.window = Some(handle));
-    db::shared(cx).update(cx, |db, _| db.store.set_setting(OPEN_KEY, Some("1")))?;
+    clock::mark_open(OPEN_KEY, cx)?;
     Ok(handle)
 }
 
@@ -436,31 +373,14 @@ impl PomodoroView {
                 }
             }),
             cx.observe_window_bounds(window, |this, window, _| {
-                let b = window.bounds();
-                this.bounds = Some([
-                    f32::from(b.origin.x),
-                    f32::from(b.origin.y),
-                    f32::from(b.size.width),
-                    f32::from(b.size.height),
-                ]);
+                this.bounds = Some(clock::bounds_of(window));
             }),
             // 閉じたら、位置と大きさを覚える。終了で閉じるときは、次の起動で開き直す
             cx.on_release(|this, cx| {
                 let bounds = this.bounds;
                 cx.defer(move |cx| {
-                    let quitting = crate::session::is_quitting(cx);
                     shared(cx).update(cx, |this, _| this.window = None);
-                    let result = db::shared(cx).update(cx, |db, _| {
-                        if let Some(bounds) = bounds {
-                            let text = serde_json::to_string(&bounds).unwrap_or_default();
-                            db.store.set_setting(WINDOW_KEY, Some(&text))?;
-                        }
-                        if !quitting {
-                            db.store.set_setting(OPEN_KEY, None)?;
-                        }
-                        Ok::<_, malakt_core::Error>(())
-                    });
-                    if let Err(e) = result {
+                    if let Err(e) = clock::remember_closed(WINDOW_KEY, OPEN_KEY, bounds, cx) {
                         shared(cx).update(cx, |this, cx| {
                             this.fail(
                                 format!("ポモドーロのウィンドウの位置を保存できませんでした: {e}"),
@@ -537,119 +457,38 @@ impl PomodoroView {
 
     /// 上の低い 1 行のバー。空いているところを掴むと、ウィンドウを動かせる。
     fn render_bar(&self, unlocked: bool, window: &Window, cx: &mut Context<Self>) -> Stateful<Div> {
-        let theme = cx.theme().clone();
-        // OS がタイトルバーを描いているときは、動かすのはそちらに任せる
-        #[cfg(target_os = "linux")]
-        let own_bar = matches!(window.window_decorations(), Decorations::Client { .. });
-        #[cfg(not(target_os = "linux"))]
-        let own_bar = true;
         let (back, title) = match self.page {
             Page::Timer => (false, "ポモドーロ"),
             Page::Tasks => (true, "タスクを選ぶ"),
             Page::Settings => (true, "ポモドーロの設定"),
         };
-        row()
-            .id("pomodoro-bar")
-            .flex_none()
-            .h(BAR_HEIGHT)
-            .gap_0p5()
-            .border_b_1()
-            .border_color(theme.border)
-            .bg(theme.background)
-            // 空いているところに乗せるとうっすら、つまんでいる間は少し濃くなる
-            .grip(cx)
-            .when(own_bar && cfg!(target_os = "windows"), |d| {
-                d.window_control_area(WindowControlArea::Drag)
+        let left = if back {
+            clock::back_button("pomodoro-back", cx, |this, window, cx| {
+                this.show(Page::Timer, window, cx)
             })
-            .when(own_bar && !cfg!(target_os = "windows"), |d| {
-                d.on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, event: &MouseDownEvent, window, cx| {
-                        // ボタンが受けた押下では動かさない
-                        if window.default_prevented() {
-                            return;
-                        }
-                        if event.click_count == 2 {
-                            if cfg!(target_os = "macos") {
-                                window.titlebar_double_click();
-                            } else {
-                                window.zoom_window();
-                            }
-                            return;
-                        }
-                        this.bar_pressed = true;
-                        cx.notify();
-                    }),
+        } else {
+            clock::bar_icon("timer")
+        };
+        let mut right = Vec::new();
+        if self.page == Page::Timer && unlocked {
+            right.push(
+                feel::gloss(
+                    button("pomodoro-settings")
+                        .icon(app_icon("settings"))
+                        .tooltip("設定")
+                        .tooltip_placement(Placement::Left)
+                        .ghost()
+                        .xsmall()
+                        .on_click(
+                            cx.listener(|this, _, window, cx| {
+                                this.show(Page::Settings, window, cx)
+                            }),
+                        ),
                 )
-                .on_mouse_up(
-                    MouseButton::Left,
-                    cx.listener(|this, _, _, _| this.bar_pressed = false),
-                )
-                .on_mouse_move(cx.listener(
-                    |this, event: &MouseMoveEvent, window, _| {
-                        if !this.bar_pressed {
-                            return;
-                        }
-                        this.bar_pressed = false;
-                        if event.pressed_button == Some(MouseButton::Left) {
-                            window.start_window_move();
-                        }
-                    },
-                ))
-            })
-            .pl_1()
-            // macOS は左に信号機ボタンが乗るので、その分を空ける
-            .when(cfg!(target_os = "macos"), |d| d.pl(px(80.)))
-            .child(
-                // バーの判定に取られないよう、ボタンのある場所はマウスを受け止める
-                row().occlude().map(|d| {
-                    if back {
-                        d.child(feel::gloss(
-                            button("pomodoro-back")
-                                .icon(app_icon("arrow-left"))
-                                .tooltip("戻る")
-                                .tooltip_placement(Placement::Right)
-                                .ghost()
-                                .xsmall()
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.show(Page::Timer, window, cx)
-                                })),
-                        ))
-                    } else {
-                        d.child(div().px_1().child(app_icon("timer").small()))
-                    }
-                }),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .px_1()
-                    .text_sm()
-                    .truncate()
-                    .child(title),
-            )
-            .child(
-                row()
-                    .occlude()
-                    .gap_0p5()
-                    .when(self.page == Page::Timer && unlocked, |d| {
-                        d.child(feel::gloss(
-                            button("pomodoro-settings")
-                                .icon(app_icon("settings"))
-                                .tooltip("設定")
-                                .tooltip_placement(Placement::Left)
-                                .ghost()
-                                .xsmall()
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.show(Page::Settings, window, cx)
-                                })),
-                        ))
-                    })
-                    .when(own_bar, |d| {
-                        d.children(window_controls(BAR_HEIGHT, false, window, cx))
-                    }),
-            )
+                .into_any_element(),
+            );
+        }
+        clock::bar("pomodoro-bar", left, title.into(), right, window, cx)
     }
 
     /// 残り時間の輪と、段の名前、残り時間、済んだ作業の数。
@@ -668,20 +507,7 @@ impl PomodoroView {
         let rounds = p.settings.rounds;
         let done = timer.done.min(rounds);
         let today = p.today;
-        let ring = canvas(
-            |_, _, _| {},
-            move |bounds, _, window, _| {
-                let center = bounds.center();
-                let radius =
-                    (f32::from(bounds.size.width.min(bounds.size.height)) - RING_WIDTH) / 2.;
-                paint_arc(window, center, radius, 0., 1., track);
-                if progress > 0. {
-                    paint_arc(window, center, radius, 0., progress, color);
-                }
-            },
-        )
-        .absolute()
-        .inset_0();
+        let ring = clock::ring(progress, color, track);
         let dots = row()
             .id("pomodoro-rounds")
             .gap_1()
@@ -739,26 +565,13 @@ impl PomodoroView {
                     .test_support(),
             )
             .child(dots);
-        if flashing && !reduce_motion {
-            // 段が終わったら、輪の外側が 3 回ふくらんで消える
-            let glow = div()
-                .absolute()
-                .inset_0()
-                .rounded_full()
-                .border_4()
-                .border_color(color);
-            div()
-                .relative()
-                .child(face)
-                .child(glow.with_animation(
-                    ("pomodoro-flash", p.seen_ended),
-                    Animation::new(FLASH / 3).repeat(),
-                    |glow, delta| glow.opacity(1. - delta).m(-px(10.) * delta),
-                ))
-                .into_any_element()
-        } else {
-            face.into_any_element()
-        }
+        // 段が終わったら、輪の外側が 3 回ふくらんで消える
+        clock::glow(
+            face,
+            ("pomodoro-flash", p.seen_ended),
+            color,
+            flashing && !reduce_motion,
+        )
     }
 
     fn render_timer(
@@ -1088,32 +901,9 @@ impl PomodoroView {
     }
 }
 
-/// 輪の一部を描く。`from` と `to` は、上を 0 として時計回りに数えた割合（0〜1）。
-fn paint_arc(
-    window: &mut Window,
-    center: Point<Pixels>,
-    radius: f32,
-    from: f32,
-    to: f32,
-    color: Hsla,
-) {
-    // 細かい線でつないで描く（1 周 180 本）
-    let steps = ((to - from) * 180.).ceil().max(1.) as usize;
-    let at = |t: f32| {
-        let angle = std::f32::consts::TAU * t - std::f32::consts::FRAC_PI_2;
-        point(
-            center.x + gpui_kit::px(radius * angle.cos()),
-            center.y + gpui_kit::px(radius * angle.sin()),
-        )
-    };
-    let mut path = PathBuilder::stroke(gpui_kit::px(RING_WIDTH));
-    path.move_to(at(from));
-    for i in 1..=steps {
-        path.line_to(at(from + (to - from) * i as f32 / steps as f32));
-    }
-    // 形が作れないことはない（点を並べた線）
-    if let Ok(path) = path.build() {
-        window.paint_path(path, color);
+impl BarHold for PomodoroView {
+    fn bar_pressed(&mut self) -> &mut bool {
+        &mut self.bar_pressed
     }
 }
 
@@ -1176,31 +966,12 @@ impl Render for PomodoroView {
             .child(db::input_watcher())
             .child(bar)
             .children(error.map(|error| {
-                row()
-                    .id("pomodoro-error")
-                    .flex_none()
-                    .gap_2()
-                    .px_2()
-                    .py_1()
-                    .text_sm()
-                    .text_color(theme.danger)
-                    .bg(theme.danger.opacity(0.08))
-                    .aria_label(error.clone())
-                    .child(div().flex_1().min_w_0().child(error))
-                    .child(
-                        button("pomodoro-error-close")
-                            .icon(app_icon("x"))
-                            .tooltip("閉じる")
-                            .ghost()
-                            .xsmall()
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.pomodoro.update(cx, |p, cx| {
-                                    p.error = None;
-                                    cx.notify()
-                                })
-                            })),
-                    )
-                    .test_support()
+                clock::error_row("pomodoro", error, cx, |this, cx| {
+                    this.pomodoro.update(cx, |p, cx| {
+                        p.error = None;
+                        cx.notify()
+                    })
+                })
             }))
             .child(body)
             .test_support()

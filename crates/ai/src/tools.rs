@@ -1169,6 +1169,25 @@ fn pomodoro_json(store: &mut Store) -> Result<Value, String> {
     }))
 }
 
+/// タイマーの状態。時刻が来たカウントダウンは止めてから返す。
+fn timer_json(store: &mut Store) -> Result<Value, String> {
+    use malakt_core::timer;
+    let now = malakt_core::now_ms();
+    let t = store.timer_now(now).map_err(|e| e.to_string())?;
+    let shown = t.shown_ms(now);
+    Ok(json!({
+        "mode": t.mode.as_str(),
+        "run": t.run().as_str(),
+        "length_seconds": t.length,
+        "length_text": timer::length_label(t.length),
+        "shown_seconds": match t.mode {
+            timer::Mode::Countdown => (shown + 999) / 1000,
+            timer::Mode::Stopwatch => shown / 1000,
+        },
+        "shown_text": t.label(now),
+    }))
+}
+
 fn task_row(task: &Task) -> Value {
     let mut row = task_json(task);
     if let Some(map) = row.as_object_mut() {
@@ -1746,6 +1765,57 @@ pub fn execute(
                 }
             }
             pomodoro_json(store)?
+        }
+        "get_timer" => timer_json(store)?,
+        "timer" => {
+            use malakt_core::timer::{parse_length, Mode, Op};
+            let now = malakt_core::now_ms();
+            let mode = match args.get("mode") {
+                None | Some(Value::Null) => None,
+                Some(v) => Some(
+                    v.as_str()
+                        .and_then(Mode::parse)
+                        .ok_or_else(|| format!("mode は countdown / stopwatch です: {v}"))?,
+                ),
+            };
+            let seconds = match (args.get("seconds"), args.get("text")) {
+                (Some(v), _) if !v.is_null() => Some(
+                    v.as_i64()
+                        .ok_or_else(|| format!("seconds が正しくありません: {v}"))?,
+                ),
+                (_, Some(Value::String(text))) if !text.trim().is_empty() => Some(
+                    parse_length(text).ok_or_else(|| format!("text の時間が読めません: {text}"))?,
+                ),
+                (_, Some(v)) if !v.is_null() && !v.is_string() => {
+                    return Err(format!("text が正しくありません: {v}"))
+                }
+                _ => None,
+            };
+            let mut ops = Vec::new();
+            match required(args, "action")? {
+                "start" => {
+                    ops.extend(mode.map(Op::SetMode));
+                    ops.extend(seconds.map(Op::SetLength));
+                    ops.push(Op::Start);
+                }
+                "pause" => ops.push(Op::Pause),
+                "reset" => ops.push(Op::Reset),
+                "set" => {
+                    if mode.is_none() && seconds.is_none() {
+                        return Err("set には seconds か text か mode を渡します".into());
+                    }
+                    ops.extend(mode.map(Op::SetMode));
+                    ops.extend(seconds.map(Op::SetLength));
+                }
+                "add" => ops.push(Op::Add(
+                    seconds.ok_or("add には seconds か text を渡します")?,
+                )),
+                other => return Err(format!("action が正しくありません: {other}")),
+            }
+            for op in ops {
+                store.timer(op, now).map_err(core)?;
+            }
+            timer_json(store)?
         }
         "list_work_logs" => {
             let since = match optional(args, "since").filter(|s| !s.trim().is_empty()) {
@@ -2401,6 +2471,14 @@ pub fn summary(name: &str, args: &Value) -> String {
             _ => "ポモドーロの設定を変更".into(),
         },
         "list_work_logs" => "作業の記録を取得".into(),
+        "get_timer" => "タイマーの状態を取得".into(),
+        "timer" => match arg("action").as_str() {
+            "start" => "タイマーを開始".into(),
+            "pause" => "タイマーを一時停止".into(),
+            "reset" => "タイマーをリセット".into(),
+            "add" => "タイマーに時間を足す".into(),
+            _ => "タイマーの時間を変更".into(),
+        },
         "get_due_alerts" => "期限の通知のタイミングを取得".into(),
         "set_due_alerts" => "期限の通知のタイミングを変更".into(),
         "get_time_stats" => "予想工数と所要時間の統計を取得".into(),
@@ -3181,6 +3259,15 @@ mod tests {
         }
         assert_eq!(timer["rounds"]["minimum"], json!(pomodoro::MIN_ROUNDS));
         assert_eq!(timer["rounds"]["maximum"], json!(pomodoro::MAX_ROUNDS));
+        let countdown = props("timer");
+        assert_eq!(
+            countdown["seconds"]["minimum"],
+            json!(malakt_core::timer::MIN_SECS)
+        );
+        assert_eq!(
+            countdown["seconds"]["maximum"],
+            json!(malakt_core::timer::MAX_SECS)
+        );
         // RACI の説明は、システムの指示と同じ文
         let roles = &props("set_assignee")["roles"]["description"];
         assert!(roles.as_str().unwrap().contains(RACI), "{roles}");
@@ -3210,7 +3297,7 @@ mod tests {
         for tool in definitions() {
             let reads = tool.name.starts_with("list_") || tool.name.starts_with("get_");
             // ポモドーロの状態と設定は設定の表にあり、元に戻す相手にしない
-            if !in_app_only(tool.name) && tool.name != "pomodoro" {
+            if !in_app_only(tool.name) && !["pomodoro", "timer"].contains(&tool.name) {
                 assert_eq!(writes(tool.name), !reads, "{}", tool.name);
             }
         }

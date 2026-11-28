@@ -205,10 +205,10 @@ op open_dialog(
 
 /**
  * 新しいウィンドウを開く。
- * kind は main（タスクの画面をもう 1 枚。標準）か pomodoro（ポモドーロタイマー。開いていれば手前に出す。タイマーの操作は pomodoro ツール）。
+ * kind は main（タスクの画面をもう 1 枚。標準）、pomodoro（ポモドーロタイマー。開いていれば手前に出す。タイマーの操作は pomodoro ツール）、timer（カウントダウンとストップウォッチのタイマー。開いていれば手前に出す。タイマーの操作は timer ツール）。
  */
 @view
-op open_window(kind?: "main" | "pomodoro"): void;
+op open_window(kind?: "main" | "pomodoro" | "timer"): void;
 
 /**
  * ターミナルを開く。
