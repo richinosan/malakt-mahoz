@@ -385,8 +385,14 @@ impl Engine for Wry {
         self.view.print().map_err(text)
     }
 
-    fn save_pdf(&self, path: &std::path::Path, done: PdfDone) -> Result<(), String> {
-        save_pdf(&self.view, path, done)
+    fn save_pdf(
+        &self,
+        path: &std::path::Path,
+        setup: &crate::print_setup::PrintSetup,
+        pages: Option<&[u32]>,
+        done: PdfDone,
+    ) -> Result<(), String> {
+        save_pdf(&self.view, path, setup, pages, done)
     }
 
     fn find(
@@ -749,20 +755,83 @@ fn watch_downloads(_: &WebView, _: impl Fn(Event) + Clone + 'static) -> Result<(
     Ok(())
 }
 
-/// Windows: WebView2 の PrintToPdf で、ページを印刷したときと同じ形の PDF にする。
+/// Windows: WebView2 の PrintToPdf で、印刷の設定どおりの PDF にする。
+/// 長さはインチで渡す。フォントは WebView2 が埋め込む。
 #[cfg(windows)]
-fn save_pdf(view: &WebView, path: &std::path::Path, done: PdfDone) -> Result<(), String> {
+fn save_pdf(
+    view: &WebView,
+    path: &std::path::Path,
+    setup: &crate::print_setup::PrintSetup,
+    pages: Option<&[u32]>,
+    done: PdfDone,
+) -> Result<(), String> {
     use webview2_com::Microsoft::Web::WebView2::Win32::{
-        ICoreWebView2PrintSettings, ICoreWebView2_7,
+        ICoreWebView2Environment6, ICoreWebView2PrintSettings2, ICoreWebView2_7,
+        COREWEBVIEW2_PRINT_ORIENTATION_LANDSCAPE, COREWEBVIEW2_PRINT_ORIENTATION_PORTRAIT,
     };
     use webview2_com::PrintToPdfCompletedHandler;
     use windows::core::{Interface, HSTRING};
     use wry::WebViewExtWindows;
 
+    let wrong = |e: windows::core::Error| format!("印刷の設定を渡せませんでした: {}", e.message());
     let webview: ICoreWebView2_7 = view
         .webview()
         .cast()
         .map_err(|e| format!("この WebView2 は PDF を作れません: {}", e.message()))?;
+    let environment: ICoreWebView2Environment6 = view.environment().cast().map_err(|e| {
+        format!(
+            "この WebView2 は印刷の設定を受け取れません: {}",
+            e.message()
+        )
+    })?;
+    let inch = |mm: f32| f64::from(mm) / 25.4;
+    let settings = unsafe { environment.CreatePrintSettings() }.map_err(wrong)?;
+    let (width, height) = setup.paper.mm();
+    let margins = setup.margins_mm();
+    unsafe {
+        settings
+            .SetOrientation(if setup.landscape {
+                COREWEBVIEW2_PRINT_ORIENTATION_LANDSCAPE
+            } else {
+                COREWEBVIEW2_PRINT_ORIENTATION_PORTRAIT
+            })
+            .map_err(wrong)?;
+        settings.SetPageWidth(inch(width)).map_err(wrong)?;
+        settings.SetPageHeight(inch(height)).map_err(wrong)?;
+        settings.SetMarginTop(inch(margins.top)).map_err(wrong)?;
+        settings
+            .SetMarginRight(inch(margins.right))
+            .map_err(wrong)?;
+        settings
+            .SetMarginBottom(inch(margins.bottom))
+            .map_err(wrong)?;
+        settings.SetMarginLeft(inch(margins.left)).map_err(wrong)?;
+        settings
+            .SetScaleFactor(setup.scale_factor())
+            .map_err(wrong)?;
+        settings
+            .SetShouldPrintBackgrounds(setup.backgrounds)
+            .map_err(wrong)?;
+        settings
+            .SetShouldPrintHeaderAndFooter(setup.header_footer)
+            .map_err(wrong)?;
+    }
+    let per_sheet = setup.per_sheet();
+    if pages.is_some() || per_sheet > 1 {
+        let more: ICoreWebView2PrintSettings2 = settings.cast().map_err(|e| {
+            format!(
+                "この WebView2 はページを選んだり並べたりできません: {}",
+                e.message()
+            )
+        })?;
+        unsafe {
+            if let Some(pages) = pages {
+                more.SetPageRanges(&HSTRING::from(crate::print_setup::ranges_text(pages)))
+                    .map_err(wrong)?;
+            }
+            more.SetPagesPerSide(i32::from(per_sheet)).map_err(wrong)?;
+        }
+    }
     let handler = PrintToPdfCompletedHandler::create(Box::new(move |result, saved| {
         done(match result {
             Ok(()) if saved => Ok(()),
@@ -772,47 +841,150 @@ fn save_pdf(view: &WebView, path: &std::path::Path, done: PdfDone) -> Result<(),
         Ok(())
     }));
     let path = HSTRING::from(path.as_os_str());
-    unsafe { webview.PrintToPdf(&path, None::<&ICoreWebView2PrintSettings>, &handler) }
-        .map_err(|e| e.message().to_string())
+    unsafe { webview.PrintToPdf(&path, &settings, &handler) }.map_err(|e| e.message().to_string())
 }
 
-/// macOS: WKWebView の createPDF で、ページ全体を PDF にする。
+/// macOS: WKWebView の印刷（NSPrintOperation）を、パネルを出さずにファイルへ保存する。
+/// 長さはポイント（1/72 インチ）で渡す。WebKit はフォントを埋め込む。
+/// 1 枚に何ページも並べることはできない（[`crate::print_setup::N_UP`]）ので、`pages` は来ない。
+/// ページは保存したあとで選ぶ。
 #[cfg(target_os = "macos")]
-fn save_pdf(view: &WebView, path: &std::path::Path, done: PdfDone) -> Result<(), String> {
+fn save_pdf(
+    view: &WebView,
+    path: &std::path::Path,
+    setup: &crate::print_setup::PrintSetup,
+    pages: Option<&[u32]>,
+    done: PdfDone,
+) -> Result<(), String> {
     use std::cell::Cell;
+    use std::ffi::c_void;
 
-    use block2::RcBlock;
-    use objc2_foundation::{NSData, NSError};
+    use objc2::rc::Retained;
+    use objc2::runtime::{AnyObject, Bool, NSObject, NSObjectProtocol};
+    use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadOnly};
+    use objc2_app_kit::{
+        NSPaperOrientation, NSPrintHeaderAndFooter, NSPrintInfo, NSPrintJobSavingURL,
+        NSPrintOperation, NSPrintSaveJob, NSPrintScalingFactor, NSPrintingPaginationMode,
+    };
+    use objc2_foundation::{MainThreadMarker, NSNumber, NSSize, NSString, NSURL};
     use wry::WebViewExtMacOS;
 
-    let path = path.to_path_buf();
-    let done = Cell::new(Some(done));
-    let block = RcBlock::new(move |data: *mut NSData, error: *mut NSError| {
-        // 完了は 1 回だけ届く
-        let Some(done) = done.take() else {
-            return;
-        };
-        let data = unsafe { data.as_ref() };
-        let error = unsafe { error.as_ref() };
-        match (data, error) {
-            (Some(data), _) => {
-                done(std::fs::write(&path, data.to_vec()).map_err(|e| e.to_string()))
+    struct Waiting {
+        done: Cell<Option<PdfDone>>,
+    }
+    define_class!(
+        /// 印刷が終わったことを受け取る。
+        #[unsafe(super(NSObject))]
+        #[thread_kind = MainThreadOnly]
+        #[name = "MalaktPrintFinished"]
+        #[ivars = Waiting]
+        struct PrintFinished;
+
+        impl PrintFinished {
+            #[unsafe(method(printOperationDidRun:success:contextInfo:))]
+            fn did_run(&self, _operation: &NSPrintOperation, success: Bool, _context: *mut c_void) {
+                if let Some(done) = self.ivars().done.take() {
+                    done(if success.as_bool() {
+                        Ok(())
+                    } else {
+                        Err("macOS が PDF を書き込めませんでした".to_owned())
+                    });
+                }
+                WAITING.with(|waiting| {
+                    waiting
+                        .borrow_mut()
+                        .retain(|d| !std::ptr::eq::<PrintFinished>(&**d, self))
+                });
             }
-            (None, Some(error)) => done(Err(error.localizedDescription().to_string())),
-            (None, None) => done(Err("WKWebView が PDF を作れませんでした".to_owned())),
         }
+    );
+    thread_local! {
+        /// 印刷している途中の受け取り口。終わるまで持っておく。
+        static WAITING: RefCell<Vec<Retained<PrintFinished>>> = const { RefCell::new(Vec::new()) };
+    }
+
+    if pages.is_some() {
+        return Err("macOS の部品は、ページを選んで PDF にできません".to_owned());
+    }
+    let mtm = MainThreadMarker::new().ok_or("PDF は画面の処理の中でしか作れません")?;
+    let webview = view.webview();
+    let window = webview
+        .window()
+        .ok_or("ページがウィンドウに入っていないので、PDF にできません")?;
+    // 背景を印刷する設定は macOS 13.3 から
+    let preferences = unsafe { webview.configuration().preferences() };
+    if preferences.respondsToSelector(sel!(setShouldPrintBackgrounds:)) {
+        unsafe { preferences.setShouldPrintBackgrounds(setup.backgrounds) };
+    } else if setup.backgrounds {
+        return Err(
+            "この macOS では背景のグラフィックを印刷できません（macOS 13.3 以降で使えます）"
+                .to_owned(),
+        );
+    }
+    let points = |mm: f32| f64::from(mm) * 72. / 25.4;
+    let (width, height) = setup.paper_mm();
+    let margins = setup.margins_mm();
+    let info = NSPrintInfo::new();
+    info.setOrientation(if setup.landscape {
+        NSPaperOrientation::Landscape
+    } else {
+        NSPaperOrientation::Portrait
     });
+    info.setPaperSize(NSSize::new(points(width), points(height)));
+    info.setTopMargin(points(margins.top));
+    info.setRightMargin(points(margins.right));
+    info.setBottomMargin(points(margins.bottom));
+    info.setLeftMargin(points(margins.left));
+    info.setHorizontalPagination(NSPrintingPaginationMode::Fit);
+    info.setVerticalPagination(NSPrintingPaginationMode::Automatic);
     unsafe {
-        view.webview()
-            .createPDFWithConfiguration_completionHandler(None, &block)
+        info.setJobDisposition(NSPrintSaveJob);
+        let target = NSURL::fileURLWithPath(&NSString::from_str(&path.to_string_lossy()));
+        let settings = info.dictionary();
+        settings.insert(NSPrintJobSavingURL, AsRef::<AnyObject>::as_ref(&*target));
+        settings.insert(
+            NSPrintScalingFactor,
+            AsRef::<AnyObject>::as_ref(&*NSNumber::new_f64(setup.scale_factor())),
+        );
+        settings.insert(
+            NSPrintHeaderAndFooter,
+            AsRef::<AnyObject>::as_ref(&*NSNumber::new_bool(setup.header_footer)),
+        );
+    }
+    let operation = unsafe { webview.printOperationWithPrintInfo(&info) };
+    operation.setShowsPrintPanel(false);
+    operation.setShowsProgressPanel(false);
+    // 印刷するビューに大きさがないと、白紙の PDF になる
+    if let Some(printing) = operation.view() {
+        printing.setFrame(webview.frame());
+    }
+    let finished = PrintFinished::alloc(mtm).set_ivars(Waiting {
+        done: Cell::new(Some(done)),
+    });
+    let finished: Retained<PrintFinished> = unsafe { msg_send![super(finished), init] };
+    WAITING.with(|waiting| waiting.borrow_mut().push(finished.clone()));
+    unsafe {
+        operation.runOperationModalForWindow_delegate_didRunSelector_contextInfo(
+            &window,
+            Some(AsRef::<AnyObject>::as_ref(&*finished)),
+            Some(sel!(printOperationDidRun:success:contextInfo:)),
+            std::ptr::null_mut(),
+        )
     };
     Ok(())
 }
 
 /// Linux: WebKitGTK の印刷を、ダイアログを出さずに「ファイルへ印刷」（PDF）に送る。
+/// 余白は mm、倍率は % で渡す。cairo がフォントを埋め込む。
 #[cfg(target_os = "linux")]
-fn save_pdf(view: &WebView, path: &std::path::Path, done: PdfDone) -> Result<(), String> {
-    use webkit2gtk::{PrintOperation, PrintOperationExt};
+fn save_pdf(
+    view: &WebView,
+    path: &std::path::Path,
+    setup: &crate::print_setup::PrintSetup,
+    pages: Option<&[u32]>,
+    done: PdfDone,
+) -> Result<(), String> {
+    use webkit2gtk::{PrintOperation, PrintOperationExt, SettingsExt, WebViewExt};
     use wry::WebViewExtUnix;
 
     thread_local! {
@@ -825,8 +997,47 @@ fn save_pdf(view: &WebView, path: &std::path::Path, done: PdfDone) -> Result<(),
     settings.set_printer("Print to File");
     settings.set(gtk::PRINT_SETTINGS_OUTPUT_FILE_FORMAT, Some("pdf"));
     settings.set(gtk::PRINT_SETTINGS_OUTPUT_URI, Some(&uri));
-    let operation = PrintOperation::new(&view.webview());
+    let orientation = if setup.landscape {
+        gtk::PageOrientation::Landscape
+    } else {
+        gtk::PageOrientation::Portrait
+    };
+    let paper = gtk::PaperSize::new(Some(setup.paper.pwg()));
+    settings.set_orientation(orientation);
+    settings.set_paper_size(&paper);
+    settings.set_scale(setup.scale_factor() * 100.);
+    settings.set_number_up(i32::from(setup.per_sheet()));
+    if let Some(pages) = pages {
+        // GTK のページは 0 から数える
+        let ranges: Vec<gtk::PageRange> = pages
+            .iter()
+            .map(|p| {
+                let p = *p as i32 - 1;
+                gtk::PageRange::new(p, p)
+            })
+            .collect();
+        settings.set_print_pages(gtk::PrintPages::Ranges);
+        settings.set_page_ranges(&ranges);
+    }
+    let page_setup = gtk::PageSetup::new();
+    page_setup.set_paper_size(&paper);
+    page_setup.set_orientation(orientation);
+    let margins = setup.margins_mm();
+    page_setup.set_top_margin(f64::from(margins.top), gtk::Unit::Mm);
+    page_setup.set_right_margin(f64::from(margins.right), gtk::Unit::Mm);
+    page_setup.set_bottom_margin(f64::from(margins.bottom), gtk::Unit::Mm);
+    page_setup.set_left_margin(f64::from(margins.left), gtk::Unit::Mm);
+    let webview = view.webview();
+    if let Some(preferences) = WebViewExt::settings(&webview) {
+        preferences.set_print_backgrounds(setup.backgrounds);
+    } else if setup.backgrounds {
+        return Err(
+            "WebKitGTK の設定を読めないので、背景のグラフィックを印刷できません".to_owned(),
+        );
+    }
+    let operation = PrintOperation::new(&webview);
     operation.set_print_settings(&settings);
+    operation.set_page_setup(&page_setup);
     let done = Rc::new(RefCell::new(Some(done)));
     let failed = done.clone();
     operation.connect_failed(move |_, error| {
@@ -847,7 +1058,13 @@ fn save_pdf(view: &WebView, path: &std::path::Path, done: PdfDone) -> Result<(),
 }
 
 #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
-fn save_pdf(_: &WebView, _: &std::path::Path, _: PdfDone) -> Result<(), String> {
+fn save_pdf(
+    _: &WebView,
+    _: &std::path::Path,
+    _: &crate::print_setup::PrintSetup,
+    _: Option<&[u32]>,
+    _: PdfDone,
+) -> Result<(), String> {
     Err("この OS では、ページを PDF にできません".into())
 }
 

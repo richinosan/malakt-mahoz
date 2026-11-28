@@ -62,8 +62,6 @@ pub enum Modal {
     BulkCategories,
     /// 通知の一覧
     Notices,
-    /// ブラウザのダウンロードと、PDF に保存したファイルの一覧
-    Downloads,
     /// 完了チケットの発行
     Ticket(Id),
     /// 書体と色
@@ -97,7 +95,7 @@ pub const NEW_WORKSPACE_NAME: &str = "新規ワークスペース";
 /// 保存したばかりのテーマの名前。同じ名前があれば、後ろの番号を増やす。
 pub const NEW_PRESET_NAME: &str = "マイテーマ";
 
-/// アクセスキーの、その場で書き直す値。
+/// アクセスキーと MCP の接続の、その場で書き直す値。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LimitField {
     Starts,
@@ -106,6 +104,8 @@ pub enum LimitField {
     From(usize),
     /// 何番目かの時間帯の終わり
     To(usize),
+    /// MCP を HTTP で開くポート（キーにはよらない）
+    Port,
 }
 
 impl LimitField {
@@ -115,6 +115,7 @@ impl LimitField {
             LimitField::Expires => "期限",
             LimitField::From(_) => "時間帯の始まり",
             LimitField::To(_) => "時間帯の終わり",
+            LimitField::Port => "ポート",
         }
     }
 }
@@ -134,6 +135,7 @@ pub enum CustomizeSection {
     AiGithub,
     Lock,
     AccessKeys,
+    McpConnection,
     Notices,
     Startup,
     Update,
@@ -146,7 +148,7 @@ pub enum CustomizeSection {
 }
 
 impl CustomizeSection {
-    pub const ALL: [CustomizeSection; 21] = [
+    pub const ALL: [CustomizeSection; 22] = [
         CustomizeSection::Theme,
         CustomizeSection::Layout,
         CustomizeSection::Backdrop,
@@ -159,6 +161,7 @@ impl CustomizeSection {
         CustomizeSection::AiGithub,
         CustomizeSection::Lock,
         CustomizeSection::AccessKeys,
+        CustomizeSection::McpConnection,
         CustomizeSection::Notices,
         CustomizeSection::Startup,
         CustomizeSection::Update,
@@ -184,6 +187,7 @@ impl CustomizeSection {
             CustomizeSection::AiGithub => crate::ai_settings::AiGroup::Github.label(),
             CustomizeSection::Lock => "ロック",
             CustomizeSection::AccessKeys => "アクセスキー",
+            CustomizeSection::McpConnection => "MCP の接続",
             CustomizeSection::Notices => "通知",
             CustomizeSection::Startup => "スタートアップ",
             CustomizeSection::Update => "アップデート",
@@ -210,6 +214,7 @@ impl CustomizeSection {
             CustomizeSection::AiGithub => "github",
             CustomizeSection::Lock => "lock",
             CustomizeSection::AccessKeys => "key-round",
+            CustomizeSection::McpConnection => "plug",
             CustomizeSection::Notices => "bell",
             CustomizeSection::Startup => "power",
             CustomizeSection::Update => "refresh-cw",
@@ -230,7 +235,9 @@ impl CustomizeSection {
             | CustomizeSection::AiRules
             | CustomizeSection::AiSchedules
             | CustomizeSection::AiGithub => "AI",
-            CustomizeSection::Lock | CustomizeSection::AccessKeys => "セキュリティ",
+            CustomizeSection::Lock
+            | CustomizeSection::AccessKeys
+            | CustomizeSection::McpConnection => "セキュリティ",
             CustomizeSection::Notices
             | CustomizeSection::Startup
             | CustomizeSection::Update
@@ -291,6 +298,8 @@ pub enum SubModal {
     DoneWorkspaces,
     /// プラグインを有効にする前の承認
     EnablePlugin,
+    /// 同期するアカウントを足す（プロバイダを選び、アカウントを書く）
+    AddAccount,
 }
 
 /// 詳細で日付と時刻を入れる 2 つの項目。
@@ -657,8 +666,6 @@ pub struct MainView {
     pub modal_seen: Option<(Modal, Option<crate::panes::PaneOverlay>)>,
     /// 今描いているダイアログの出方。0 で消えていて、1 で出きっている。
     pub dialog_t: std::cell::Cell<f32>,
-    /// 上のバーのダウンロードのボタンの場所。一覧はこの下に出す
-    pub downloads_anchor: Rc<std::cell::Cell<Bounds<Pixels>>>,
     pub today: String,
     pub inputs: Inputs,
     _subscriptions: Vec<Subscription>,
@@ -726,6 +733,25 @@ impl MainView {
         let mut subs = vec![
             cx.observe(&ai_settings, |_, _, cx| cx.notify()),
             cx.observe(&caldav_settings, |_, _, cx| cx.notify()),
+            // 「同期」の「アカウントを追加」は、設定の上に重ねて出す
+            cx.subscribe_in(
+                &caldav_settings,
+                window,
+                |this, _, event: &crate::caldav_settings::AddDialog, window, cx| {
+                    match event {
+                        crate::caldav_settings::AddDialog::Open => {
+                            this.sub_modal = Some(SubModal::AddAccount);
+                        }
+                        crate::caldav_settings::AddDialog::Close => {
+                            if this.sub_modal == Some(SubModal::AddAccount) {
+                                this.sub_modal = None;
+                                this.focus.focus(window, cx);
+                            }
+                        }
+                    }
+                    cx.notify();
+                },
+            ),
             cx.observe(&db, |this, _, cx| {
                 this.reload(cx);
                 // ロックを解除したら、待っていた AI のおすすめを出す
@@ -763,13 +789,6 @@ impl MainView {
             ),
             // 新しい版を取ってきたら、上のバーに印を出す
             cx.observe(&crate::update::shared(cx), |_, _, cx| cx.notify()),
-            // ダウンロードの数と進み具合を、上のバーに出す。一覧を出している間に増えたものは、見たことにする
-            cx.observe(&crate::downloads::shared(cx), |this, downloads, cx| {
-                if this.modal == Modal::Downloads && downloads.read(cx).unseen() > 0 {
-                    downloads.update(cx, |d, cx| d.opened(cx));
-                }
-                cx.notify();
-            }),
             // CalDAV の同期で失敗したこと・知らせることを出す
             cx.subscribe(
                 &crate::caldav::shared(cx),
@@ -1170,7 +1189,6 @@ impl MainView {
             sub_seen: None,
             modal_seen: None,
             dialog_t: std::cell::Cell::new(1.),
-            downloads_anchor: Rc::default(),
             today: view::today(),
             inputs,
             _subscriptions: subs,
@@ -4914,17 +4932,6 @@ impl MainView {
         cx.notify();
     }
 
-    /// ダウンロードの一覧を出す（上のバーのアイコン、ブラウザの Ctrl+J）。
-    pub fn open_downloads(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.db.read(cx).unlocked {
-            return;
-        }
-        self.modal = Modal::Downloads;
-        crate::downloads::shared(cx).update(cx, |d, cx| d.opened(cx));
-        self.focus.focus(window, cx);
-        cx.notify();
-    }
-
     pub fn toggle_ai(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(handle) = self.ai_session.read(cx).chat_window {
             if handle
@@ -5023,6 +5030,14 @@ impl MainView {
             self.toggle_ai(window, cx);
         }
         cx.notify();
+    }
+
+    /// AI のおすすめから、ローカル AI に切り替えてチャットを開く。手元のサーバーを探し、
+    /// 見つけたサーバーの最初のモデルを使う。
+    pub fn use_local_ai_from_promo(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.ai_session
+            .update(cx, |s, cx| s.set_provider(malakt_ai::Provider::Local, cx));
+        self.open_ai_from_promo(window, cx);
     }
 
     /// このウィンドウの右に、チャットを出すか。
@@ -5717,6 +5732,7 @@ bundled_icons! {
         "calendar-sync",
         "server",
         "cloud-alert",
+        "cloud",
         "timer",
         "chart-column",
         "minus",

@@ -11,11 +11,12 @@ use malakt_ai::ansi;
 use malakt_ai::files::{FilePart, Shelf};
 use malakt_ai::github::{self, Link};
 use malakt_ai::keys::{self, KeyStore, Source};
+use malakt_ai::local::{self, Lack, Server};
 use malakt_ai::provider::{self, CatalogModel, Endpoint};
 use malakt_ai::shell::{self, Shell, Spec};
 use malakt_ai::slack;
 use malakt_ai::watch;
-use malakt_ai::wire::{self, Reply, ToolCall, Turn, Wire};
+use malakt_ai::wire::{self, Media, Reply, ToolCall, Turn, Wire};
 use malakt_ai::{clip_tail, tools, Effort, Provider, MAX_TOOL_OUTPUT_CHARS};
 use serde_json::Value;
 
@@ -518,6 +519,13 @@ pub type EnvFn = dyn Fn(&str) -> Option<String> + Send + Sync;
 pub type PostFn = dyn Fn(&str, &Headers, &Value) -> Result<Value, String> + Send + Sync;
 /// GET して、本文を受け取る。
 pub type GetFn = dyn Fn(&str, &Headers) -> Result<String, String> + Send + Sync;
+/// 手元のサーバーに GET して、状態コードと本文を受け取る。つながらなければ `Err`。短く待つ。
+pub type ProbeFn = dyn Fn(&str, &[(&str, String)]) -> Result<(u16, String), String> + Send + Sync;
+
+/// ローカル AI のサーバーの URL を保存する設定の名前。空なら手元のポートを探す。
+const LOCAL_URL_SETTING: &str = "ai.local.url";
+/// ツールを使えないモデルに、最初の指示に添えること。
+const NO_TOOLS_NOTE: &str = "\n\nこのモデルではツールを使えません。アプリの操作を頼まれたら、ユーザーが画面で操作する手順を短く伝えてください。";
 
 /// ワークスペースのアイコンを選ぶときの、AI への指示。
 const ICON_PROMPT: &str = "ワークスペース（タスクをまとめるフォルダ）の名前を受け取り、その名前に合うアイコンを探すための英単語を答えます。\n\
@@ -537,6 +545,8 @@ pub struct AiConfig {
     pub env: Arc<EnvFn>,
     pub post: Arc<PostFn>,
     pub get: Arc<GetFn>,
+    /// ローカル AI のサーバーを探す・モデルの一覧を読む。
+    pub probe: Arc<ProbeFn>,
     /// GitHub のリンクを取りに行くコマンド。
     pub gh: Arc<dyn Fn(&Link) -> Spec + Send + Sync>,
     /// Slack のリンクを取りに行くコマンド。前のものが起動できなければ、次のものを試す。
@@ -564,6 +574,7 @@ impl Default for AiConfig {
             env: Arc::new(|name| std::env::var(name).ok()),
             post: Arc::new(malakt_ai::http::post_json),
             get: Arc::new(malakt_ai::http::get_text),
+            probe: Arc::new(malakt_ai::http::probe),
             gh: Arc::new(Link::gh),
             slack: Arc::new(slack::Link::commands),
             whoami: Arc::new(github::whoami),
@@ -719,6 +730,22 @@ pub struct Session {
     /// サービスの一覧にあった、モデルの表示名。
     model_names: HashMap<String, String>,
     catalog: Option<(Provider, Arc<Vec<CatalogModel>>)>,
+    /// ローカル AI のサーバーの URL。空なら手元のポートを探して、最初に見つけたものを使う。
+    pub local_url: String,
+    /// 手元で見つけたサーバー。
+    pub local_found: Vec<Server>,
+    /// 今使っているサーバー。
+    pub local_server: Option<Server>,
+    /// サーバーを探している、モデルの一覧を読んでいる。
+    pub local_searching: bool,
+    /// サーバーが見つからなかった、モデルの一覧を読めなかった理由。
+    pub local_error: Option<SharedString>,
+    /// 探した回数。古い結果を使わないために数える。
+    local_search: u64,
+    /// 送ってみて、モデルが受け付けなかったもの。モデルの ID ごと。
+    local_lacks: HashMap<String, HashSet<Lack>>,
+    /// この会話で、モデルが受け付けないものを知らせた。
+    lack_noticed: HashSet<Lack>,
     turns: Vec<Turn>,
     pub items: Vec<Item>,
     pub busy: bool,
@@ -1042,6 +1069,15 @@ impl Session {
         if efforts_error.is_some() {
             error = efforts_error;
         }
+        let local_url = db
+            .read(cx)
+            .store
+            .setting(LOCAL_URL_SETTING)
+            .unwrap_or_else(|e| {
+                error = Some(format!("AI の設定を読めませんでした: {e}").into());
+                None
+            })
+            .unwrap_or_default();
         let mut this = Self {
             db,
             config,
@@ -1055,6 +1091,14 @@ impl Session {
             listed: Vec::new(),
             model_names,
             catalog: None,
+            local_url,
+            local_found: Vec::new(),
+            local_server: None,
+            local_searching: false,
+            local_error: None,
+            local_search: 0,
+            local_lacks: HashMap::new(),
+            lack_noticed: HashSet::new(),
             turns: Vec::new(),
             items: Vec::new(),
             busy: false,
@@ -1498,6 +1542,7 @@ impl Session {
             tools: &[],
             fallbacks: false,
             prefix_ttl: None,
+            media: Media::All,
         };
         let conversation = malakt_core::new_id();
         let (_, reply) =
@@ -1527,6 +1572,7 @@ impl Session {
             self.catalog.clone(),
             self.model_names.clone(),
         );
+        let local = (self.local_server.clone(), self.local_lacks.clone());
         let worker = cx.new(|cx| {
             let mut w = Session::create(db, config, true, cx);
             (
@@ -1540,6 +1586,8 @@ impl Session {
                 w.catalog,
                 w.model_names,
             ) = copy;
+            w.local_server = local.0;
+            w.local_lacks = local.1;
             w.attached = queued.attached.clone();
             w.attached_workspaces = queued.attached_workspaces.clone();
             w.files = queued.files.clone();
@@ -2519,6 +2567,7 @@ impl Session {
             tools: &[],
             fallbacks: false,
             prefix_ttl: None,
+            media: Media::All,
         };
         let conversation = malakt_core::new_id();
         let (_, reply) =
@@ -3018,6 +3067,26 @@ impl Session {
         }
     }
 
+    /// ローカル AI のモデルで使えるもの（印のアイコンと名前）。分からないものは出さない。
+    pub fn model_abilities(&self, id: &str) -> Vec<(&'static str, &'static str)> {
+        let Some((Provider::Local, catalog)) = &self.catalog else {
+            return Vec::new();
+        };
+        let Some(entry) = catalog.iter().find(|m| m.id == id) else {
+            return Vec::new();
+        };
+        let lacks = self.local_lacks.get(id);
+        let lacks = |lack| lacks.is_some_and(|l| l.contains(&lack));
+        let mut out = Vec::new();
+        if entry.tools == Some(true) && !lacks(Lack::Tools) {
+            out.push(("wrench", "ツール"));
+        }
+        if entry.vision == Some(true) && !lacks(Lack::Images) {
+            out.push(("image", "画像"));
+        }
+        out
+    }
+
     pub fn model(&self) -> &str {
         self.models
             .get(&self.provider)
@@ -3108,6 +3177,14 @@ impl Session {
     /// API キーがなければ通信しない。
     fn load_catalog(&mut self, cx: &mut Context<Self>) {
         let provider = self.provider;
+        if provider == Provider::Local {
+            let loaded = self.local_server.is_some()
+                && self.catalog.as_ref().is_some_and(|(p, _)| *p == provider);
+            if !loaded && !self.local_searching {
+                self.search_local(cx);
+            }
+            return;
+        }
         let Some(url) = provider.catalog_url() else {
             return;
         };
@@ -3174,6 +3251,95 @@ impl Session {
         self.efforts = efforts;
         self.effort = effort;
         cx.notify();
+    }
+
+    /// ローカル AI のサーバーを探し、使うサーバーのモデルの一覧を読む。手元のポートと、
+    /// 入力された URL にだけ通信する。
+    pub fn search_local(&mut self, cx: &mut Context<Self>) {
+        self.local_search += 1;
+        let search = self.local_search;
+        self.local_searching = true;
+        let (config, url) = (self.config.clone(), self.local_url.clone());
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let (found, result) = cx
+                .background_executor()
+                .spawn(async move { find_local(&config, &url) })
+                .await;
+            // チャットがもうなければ、知らせる先もない
+            let _ = this.update(cx, |this, cx| {
+                // あとから探し直していたら、そちらの結果を使う
+                if this.local_search != search {
+                    return;
+                }
+                this.local_searching = false;
+                this.local_found = found;
+                match result {
+                    Ok((server, catalog)) => {
+                        this.local_error = None;
+                        this.use_local(server, catalog, cx);
+                    }
+                    Err(e) => {
+                        this.local_error = Some(e.into());
+                        this.local_server = None;
+                        if this.provider == Provider::Local {
+                            this.listed.clear();
+                        }
+                        if this
+                            .catalog
+                            .as_ref()
+                            .is_some_and(|(p, _)| *p == Provider::Local)
+                        {
+                            this.catalog = None;
+                        }
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// 見つけたサーバーとモデルの一覧を使う。モデルを選んでいなければ、一覧の最初のモデルにする。
+    fn use_local(&mut self, server: Server, catalog: Vec<CatalogModel>, cx: &mut Context<Self>) {
+        for m in &catalog {
+            if let Some(name) = m.name.as_ref().filter(|n| !n.is_empty()) {
+                self.model_names.insert(m.id.clone(), name.clone());
+            }
+        }
+        if self.provider == Provider::Local {
+            self.listed = catalog.iter().map(|m| m.id.clone().into()).collect();
+        }
+        let first = catalog.first().map(|m| m.id.clone());
+        self.local_server = Some(server);
+        self.catalog = Some((Provider::Local, Arc::new(catalog)));
+        let unset = self
+            .models
+            .get(&Provider::Local)
+            .is_none_or(|m| m.is_empty());
+        if let Some(first) = first.filter(|_| unset && self.provider == Provider::Local) {
+            self.set_model(&first, cx);
+        }
+    }
+
+    /// ローカル AI のサーバーの URL を変える。空にすると、手元のポートを探す。
+    pub fn set_local_url(&mut self, url: &str, cx: &mut Context<Self>) {
+        let url = local::normalize(url);
+        if url == self.local_url {
+            return;
+        }
+        let saved = self.db.update(cx, |db, _| {
+            db.store
+                .set_setting(LOCAL_URL_SETTING, (!url.is_empty()).then_some(url.as_str()))
+        });
+        if let Err(e) = saved {
+            self.local_error = Some(format!("AI の設定を保存できませんでした: {e}").into());
+            cx.notify();
+            return;
+        }
+        self.local_url = url;
+        self.local_server = None;
+        self.search_local(cx);
     }
 
     /// 選んでいるサービスのキーがあるかを調べ直す。
@@ -3274,6 +3440,11 @@ impl Session {
 
     /// サービスにモデルの一覧を聞く（Claude と OpenCode）。
     pub fn fetch_models(&mut self, cx: &mut Context<Self>) {
+        // ローカル AI は、サーバーを探し直してモデルの一覧を読み直す（入れたばかりのモデルも出る）
+        if self.provider == Provider::Local {
+            self.search_local(cx);
+            return;
+        }
         let (config, provider) = (self.config.clone(), self.provider);
         cx.spawn(async move |this, cx| {
             let result = cx
@@ -3376,6 +3547,7 @@ impl Session {
         self.conversation = malakt_core::new_id();
         self.chat_task = None;
         self.error = None;
+        self.lack_noticed.clear();
     }
 
     /// 新しい会話を始める。今の会話は一覧に残る。
@@ -4197,6 +4369,7 @@ impl Session {
             tools: &definitions,
             fallbacks: false,
             prefix_ttl: None,
+            media: Media::All,
         };
         Self::request(this, config, provider, key, conversation, request, cx).await
     }
@@ -4212,6 +4385,10 @@ impl Session {
         cx: &mut AsyncApp,
     ) -> Result<(Wire, Reply), String> {
         let (model, effort) = (request.model, request.effort);
+
+        if provider == Provider::Local {
+            return Self::request_local(this, config, key, request, cx).await;
+        }
 
         if provider == Provider::Cursor {
             let Value::String(prompt) = wire::body(Wire::Cursor, &request) else {
@@ -4277,6 +4454,157 @@ impl Session {
             .spawn(async move { post(&endpoint.url, &endpoint.headers, &body) })
             .await?;
         wire::parse(wire, &response).map(|reply| (wire, reply))
+    }
+
+    /// ローカル AI に 1 回問い合わせる。モデルがツールや画像を受け付けなければ、外して送り直す。
+    async fn request_local(
+        this: &WeakEntity<Self>,
+        config: &AiConfig,
+        key: &str,
+        mut request: wire::Request<'_>,
+        cx: &mut AsyncApp,
+    ) -> Result<(Wire, Reply), String> {
+        let model = request.model.to_owned();
+        if model.is_empty() {
+            return Err(
+                "ローカル AI のモデルを選んでください。「設定」の「モデル」で選べます".into(),
+            );
+        }
+        let (server, catalog, url) = this
+            .read_with(cx, |s, _| {
+                (
+                    s.local_server.clone(),
+                    s.catalog
+                        .as_ref()
+                        .filter(|(p, _)| *p == Provider::Local)
+                        .map(|(_, c)| c.clone()),
+                    s.local_url.clone(),
+                )
+            })
+            .map_err(gone)?;
+        let (server, catalog) = match (server, catalog) {
+            (Some(server), Some(catalog)) => (server, catalog),
+            _ => {
+                let config = config.clone();
+                let (found, result) = cx
+                    .background_executor()
+                    .spawn(async move { find_local(&config, &url) })
+                    .await;
+                let (server, catalog) = result?;
+                let catalog = Arc::new(catalog);
+                this.update(cx, |s, cx| {
+                    s.local_found = found;
+                    s.local_error = None;
+                    s.local_server = Some(server.clone());
+                    s.catalog = Some((Provider::Local, catalog.clone()));
+                    cx.notify();
+                })
+                .map_err(gone)?;
+                (server, catalog)
+            }
+        };
+        let entry = catalog.iter().find(|m| m.id == model);
+        let context = entry.and_then(|m| m.context);
+        let endpoint = local::endpoint(&server, key);
+        let wire = endpoint.wire;
+        let (auto, label, mut lacks) = this
+            .read_with(cx, |s, _| {
+                (
+                    s.auto,
+                    s.model_label(&model),
+                    s.local_lacks.get(&model).cloned().unwrap_or_default(),
+                )
+            })
+            .map_err(gone)?;
+        // 一覧に書いてあることは、送る前に使う
+        if entry.and_then(|m| m.tools) == Some(false) {
+            lacks.insert(Lack::Tools);
+        }
+        if entry.and_then(|m| m.vision) == Some(false) {
+            lacks.insert(Lack::Images);
+        }
+        let wants_tools = !request.tools.is_empty();
+        let has_images = request.turns.iter().any(|t| {
+            matches!(t, Turn::Files(parts)
+                if parts.iter().any(|p| p.kind == malakt_ai::files::Kind::Image && p.data.is_some()))
+        });
+        loop {
+            let no_tools = wants_tools && lacks.contains(&Lack::Tools);
+            if no_tools {
+                // 自動の処理は、ツールで結果を書くので進められない
+                if auto {
+                    return Err(format!(
+                        "{label} はツールを使えないモデルなので、タスクを読み書きできません。ツールを使えるモデルを「設定」で選んでください"
+                    ));
+                }
+                request.tools = &[];
+            }
+            request.media = if lacks.contains(&Lack::Images) {
+                Media::None
+            } else {
+                Media::Images
+            };
+            let mut body = wire::body(wire, &request);
+            if no_tools {
+                if let Some(Value::String(system)) = body.pointer_mut("/messages/0/content") {
+                    system.push_str(NO_TOOLS_NOTE);
+                }
+            }
+            if wire == Wire::Ollama {
+                local::fit_context(&mut body, context);
+            }
+            if !auto {
+                let notices: Vec<(Lack, String)> = [
+                    (
+                        no_tools,
+                        Lack::Tools,
+                        format!("{label} はツールを使えないので、アプリを操作せずに答えます"),
+                    ),
+                    (
+                        has_images && lacks.contains(&Lack::Images),
+                        Lack::Images,
+                        format!("{label} は画像を読めないので、画像は置いた場所だけを伝えます"),
+                    ),
+                ]
+                .into_iter()
+                .filter(|(on, _, _)| *on)
+                .map(|(_, lack, text)| (lack, text))
+                .collect();
+                this.update(cx, |s, cx| {
+                    for (lack, text) in notices {
+                        if s.lack_noticed.insert(lack) {
+                            s.items.push(Item::Notice(text.into()));
+                            cx.notify();
+                        }
+                    }
+                })
+                .map_err(gone)?;
+            }
+            let (post, url, headers) = (
+                config.post.clone(),
+                endpoint.url.clone(),
+                endpoint.headers.clone(),
+            );
+            let response = cx
+                .background_executor()
+                .spawn(async move { post(&url, &headers, &body) })
+                .await;
+            match response {
+                Ok(response) => return wire::parse(wire, &response).map(|reply| (wire, reply)),
+                Err(error) => match local::lacking(&error) {
+                    // 受け付けないと分かったものを外して、送り直す。モデルごとに覚える
+                    Some(lack) if !lacks.contains(&lack) => {
+                        lacks.insert(lack);
+                        let model = model.clone();
+                        this.update(cx, |s, _| {
+                            s.local_lacks.entry(model).or_default().insert(lack);
+                        })
+                        .map_err(gone)?;
+                    }
+                    _ => return Err(error),
+                },
+            }
+        }
     }
 
     /// ツールを 1 つ実行する。外側の `Err` は、チャットがなくなったとき。
@@ -4791,6 +5119,56 @@ fn without_fetch_notes(store: &malakt_core::Store, args: &Value) -> Value {
 
 fn gone<E>(_: E) -> String {
     String::new()
+}
+
+/// 手元で見つけたサーバーと、使うサーバーとそのモデルの一覧。
+type LocalFound = (Vec<Server>, Result<(Server, Vec<CatalogModel>), String>);
+
+/// ローカル AI のサーバーを探し、使うサーバーとそのモデルの一覧を返す。見つけたサーバーも返す。
+/// `url` が空なら、手元で最初に見つけたサーバーを使う。
+fn find_local(config: &AiConfig, url: &str) -> LocalFound {
+    let key = match keys::lookup(&*config.keys, Provider::Local, |n| (config.env)(n)) {
+        Ok(found) => found.map(|(key, _)| key).unwrap_or_default(),
+        Err(e) => return (Vec::new(), Err(e)),
+    };
+    let probe: local::Probe = &*config.probe;
+    let found = local::detect(probe, &key);
+    let url = local::normalize(url);
+    let server = if url.is_empty() {
+        found.first().cloned().ok_or_else(|| {
+            "手元に AI のサーバーが見つかりません。Ollama や LM Studio などを起動するか、サーバーの URL を入れてください".to_owned()
+        })
+    } else {
+        found
+            .iter()
+            .find(|s| s.base == url)
+            .cloned()
+            .or_else(|| local::identify(probe, &url, &key))
+            .ok_or_else(|| {
+                format!("{url} に AI のサーバーが見つかりません。サーバーが動いているか、URL を確認してください")
+            })
+    };
+    let result = server.and_then(|server| {
+        let post = config.post.clone();
+        let post = move |url: &str, headers: &[(&'static str, String)], body: &Value| {
+            post(url, headers, body)
+        };
+        let catalog = local::catalog(probe, &post, &server, &key).map_err(|e| {
+            format!(
+                "{} のモデルの一覧を読めませんでした: {e}",
+                server.kind.label()
+            )
+        })?;
+        if catalog.is_empty() {
+            return Err(format!(
+                "{}（{}）に、チャットに使えるモデルが入っていません",
+                server.kind.label(),
+                server.address()
+            ));
+        }
+        Ok((server, catalog))
+    });
+    (found, result)
 }
 
 fn fetch_catalog(config: &AiConfig, url: &str) -> Result<Vec<CatalogModel>, String> {

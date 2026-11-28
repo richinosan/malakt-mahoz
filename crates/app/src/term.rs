@@ -168,6 +168,8 @@ pub struct Terms {
     registered: std::collections::HashSet<String>,
     /// ブラウザの場所の欄に、キーの入力先を移す。
     pub focus_bar: bool,
+    /// ブラウザの画面に、ダウンロードの一覧を出す（ブラウザの画面の外で Ctrl+J を押したとき）。
+    pub show_downloads: bool,
     /// ブラウザの部品からの知らせを送る口。
     pub(crate) page_events: async_channel::Sender<(u64, crate::browser::Event)>,
     /// ウィンドウごとの、描いた回。ページを見せるかを決めるのに使う。
@@ -192,6 +194,8 @@ pub struct Terms {
     pub focus_ai: bool,
     /// 印刷のダイアログの送信先。`true` なら PDF に保存、`false` ならプリンター。
     pub print_pdf: bool,
+    /// 前に PDF に保存したときの印刷の設定（`browser.print`）。次に開いたときに使う。
+    pub print_setup: crate::print_setup::PrintSetup,
 }
 
 pub struct SharedTerms(pub Entity<Terms>);
@@ -269,6 +273,7 @@ impl Terms {
             register_mcp: false,
             registered: std::collections::HashSet::new(),
             focus_bar: false,
+            show_downloads: false,
             page_events,
             frames: Default::default(),
             rechecking: Vec::new(),
@@ -281,9 +286,51 @@ impl Terms {
             focus_page: None,
             focus_ai: false,
             print_pdf: true,
+            print_setup: Default::default(),
         };
         terms.restore_pages(cx);
+        terms.restore_print_setup(cx);
         terms
+    }
+
+    /// 前に使った印刷の設定を読む。読めなければ標準の設定で始めて、読めなかったことを出す。
+    fn restore_print_setup(&mut self, cx: &mut Context<Self>) {
+        let saved = self
+            .db
+            .read(cx)
+            .store
+            .setting(crate::print_setup::SETTING)
+            .map_err(|e| e.to_string())
+            .and_then(|saved| match saved {
+                Some(saved) => serde_json::from_str(&saved).map_err(|e| e.to_string()),
+                None => Ok(Default::default()),
+            });
+        match saved {
+            Ok(setup) => self.print_setup = setup,
+            Err(e) => self.fail(format!("前に使った印刷の設定を読めませんでした: {e}"), cx),
+        }
+    }
+
+    /// 印刷の設定を覚える（PDF に保存したとき）。
+    pub fn set_print_setup(
+        &mut self,
+        setup: crate::print_setup::PrintSetup,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        if self.print_setup == setup {
+            return Ok(());
+        }
+        let value = serde_json::to_string(&setup)
+            .map_err(|e| format!("印刷の設定を保存できませんでした: {e}"))?;
+        self.db
+            .update(cx, |db, _| {
+                db.store
+                    .set_setting(crate::print_setup::SETTING, Some(&value))
+            })
+            .map_err(|e| format!("印刷の設定を保存できませんでした: {e}"))?;
+        self.print_setup = setup;
+        cx.notify();
+        Ok(())
     }
 
     /// AI のタブで動かすシェル。「カスタマイズ」で選んだもの、選んでいなければ標準のシェル。

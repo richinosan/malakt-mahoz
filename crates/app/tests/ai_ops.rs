@@ -79,6 +79,7 @@ fn start(cx: &mut TestAppContext, store: Store) -> World {
                 .ok_or_else(|| "テストに返事が用意されていません".into())
         }),
         get: Arc::new(|url, _| Err(format!("テストでは {url} を読めません"))),
+        probe: Arc::new(|url, _| Err(format!("テストでは {url} に接続しません"))),
         gh: Arc::new(|_| Spec::shell("exit 1")),
         slack: Arc::new(|_| Vec::new()),
         whoami: Arc::new(|_| vec![Spec::shell("exit 1")]),

@@ -1473,6 +1473,14 @@ impl Store {
 
     // ---- 設定 ----
 
+    /// データベースのファイルの場所。メモリーの中に開いたものは `None`。
+    pub fn file_path(&self) -> Option<std::path::PathBuf> {
+        self.conn
+            .path()
+            .filter(|path| !path.is_empty())
+            .map(std::path::PathBuf::from)
+    }
+
     pub fn setting(&self, key: &str) -> Result<Option<String>> {
         Ok(self
             .conn

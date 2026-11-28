@@ -88,6 +88,8 @@ pub enum Source {
     Keychain,
     /// 環境変数（`ANTHROPIC_API_KEY` など）
     Env,
+    /// キーを入れていない。キーが要らないサービス（ローカルの AI）だけ
+    None,
 }
 
 /// キーを探す。キーチェーンが先で、なければ環境変数。
@@ -104,11 +106,20 @@ pub fn lookup(
             .filter(|key| !key.is_empty())
             .map(|key| (key, Source::Env))
     };
-    match store.get(provider) {
+    let found = match store.get(provider) {
         Ok(Some(key)) => Ok(Some((key, Source::Keychain))),
         Ok(None) => Ok(from_env()),
         // キーチェーンがない環境でも、環境変数のキーで使える
         Err(error) => from_env().map(Some).ok_or(error),
+    };
+    if provider.needs_key() {
+        return found;
+    }
+    match found {
+        Ok(Some(found)) => Ok(Some(found)),
+        // キーが要らないサービスは、キーなしで送る。キーチェーンが読めなくても止めない
+        // （キーが要るサーバーなら、送ったときに 401 のエラーが画面に出る）
+        Ok(None) | Err(_) => Ok(Some((String::new(), Source::None))),
     }
 }
 
@@ -178,6 +189,20 @@ mod tests {
         assert_eq!(
             lookup(&MemoryKeys::default(), Provider::Claude, empty),
             Ok(None)
+        );
+    }
+
+    #[test]
+    fn local_ai_works_without_a_key() {
+        let keys = MemoryKeys::default();
+        let none = Ok(Some((String::new(), Source::None)));
+        assert_eq!(lookup(&keys, Provider::Local, no_env), none);
+        // キーチェーンが読めなくても、キーなしで送る
+        assert_eq!(lookup(&Broken, Provider::Local, no_env), none);
+        keys.set(Provider::Local, "jan-key").unwrap();
+        assert_eq!(
+            lookup(&keys, Provider::Local, no_env),
+            Ok(Some(("jan-key".into(), Source::Keychain)))
         );
     }
 

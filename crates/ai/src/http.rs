@@ -9,11 +9,18 @@ use crate::wire::error_message;
 /// 深く考えるモデルは、返事までに何分もかかることがある。
 const TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
+/// 手元のサーバーを探すときに待つ長さ。動いていないポートは、すぐに断られる。
+const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+
 fn agent() -> ureq::Agent {
+    agent_with(TIMEOUT)
+}
+
+fn agent_with(timeout: Duration) -> ureq::Agent {
     ureq::Agent::config_builder()
         // エラーの本文を読んで、理由を画面に出す
         .http_status_as_error(false)
-        .timeout_global(Some(TIMEOUT))
+        .timeout_global(Some(timeout))
         // OpenCode は、クライアントが自分の名前を名乗ることを求めている
         .user_agent(concat!("malakt-mahoz/", env!("CARGO_PKG_VERSION")))
         .tls_config(
@@ -78,6 +85,24 @@ pub fn get_text(url: &str, headers: &[(&str, String)]) -> Result<String, String>
         return Err(describe(status, &text));
     }
     Ok(text)
+}
+
+/// 手元のサーバーが答えるかを、短く待って確かめる。答えたら状態コードと本文を返す
+/// （エラーの状態コードでも `Ok`）。`Err` は、つながらなかったとき。
+pub fn probe(url: &str, headers: &[(&str, String)]) -> Result<(u16, String), String> {
+    let mut request = agent_with(PROBE_TIMEOUT).get(url);
+    for (name, value) in headers {
+        request = request.header(*name, value);
+    }
+    let mut response = request
+        .call()
+        .map_err(|e| format!("{url} に接続できませんでした: {e}"))?;
+    let status = response.status().as_u16();
+    let text = response
+        .body_mut()
+        .read_to_string()
+        .map_err(|e| format!("返事を読めませんでした: {e}"))?;
+    Ok((status, text))
 }
 
 #[cfg(test)]

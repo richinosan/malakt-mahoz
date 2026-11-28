@@ -35,7 +35,8 @@ actions!(
         BrowserZoomReset,
         ClosePrint,
         SubmitPrint,
-        ShowDownloads
+        ShowDownloads,
+        CloseDownloads
     ]
 );
 
@@ -52,6 +53,8 @@ pub const BROWSER: &str = "Browser";
 pub const FIND: &str = "BrowserFind";
 /// 印刷のダイアログの場所の名前。
 pub const PRINT: &str = "BrowserPrint";
+/// ブラウザのダウンロードの一覧
+pub const DOWNLOADS: &str = "BrowserDownloads";
 
 /// 印刷のキー。ページの window.print も、このキーとしてアプリに知らせる
 pub const PRINT_KEY: &str = if cfg!(target_os = "macos") {
@@ -124,6 +127,7 @@ pub fn bind(cx: &mut App) {
         // 印刷のダイアログ。ファイル名の欄の Enter は、欄の Enter の知らせで受ける
         KeyBinding::new("escape", ClosePrint, Some(PRINT)),
         KeyBinding::new("enter", SubmitPrint, Some(PRINT)),
+        KeyBinding::new("escape", CloseDownloads, Some(DOWNLOADS)),
     ];
     keys.extend(digits(if MAC { CMD_DIGITS } else { CTRL_DIGITS }, SHELL));
     if MAC {

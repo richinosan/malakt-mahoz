@@ -7,17 +7,16 @@
 
 オフラインで使うタスク管理ツールです。Rust と [gpui](https://www.gpui.rs/) で作っていて、macOS・Windows・Linux で動きます。
 
-![タスクの一覧](docs/images/list.png)
+<picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/list-dark.webp"><img alt="タスクの一覧" src="docs/images/list-light.webp"></picture>
 <sub>タスクの一覧</sub>
 
-| | |
-| --- | --- |
-| ![ホーム](docs/images/home.png)<br><sub>ホーム</sub> | ![タスクの詳細](docs/images/detail.png)<br><sub>タスクの詳細</sub> |
-| ![ペイン](docs/images/panes.png)<br><sub>ペイン</sub> | ![AI bot](docs/images/ai.png)<br><sub>AI bot</sub> |
-| ![ターミナル](docs/images/terminal.png)<br><sub>ターミナル</sub> | ![すべてのタスク](docs/images/all.png)<br><sub>すべてのタスク</sub> |
-
-![カスタマイズ](docs/images/themes.png)
-<sub>カスタマイズ</sub>
+<table>
+<tr><td><picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/home-dark.webp"><img alt="ホーム" src="docs/images/home-light.webp"></picture><br><sub>ホーム</sub></td><td><picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/detail-dark.webp"><img alt="タスクの詳細" src="docs/images/detail-light.webp"></picture><br><sub>タスクの詳細</sub></td></tr>
+<tr><td><picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/date-dark.webp"><img alt="開始と期限の入力" src="docs/images/date-light.webp"></picture><br><sub>開始と期限の入力</sub></td><td><picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/panes-dark.webp"><img alt="ペイン" src="docs/images/panes-light.webp"></picture><br><sub>ペイン</sub></td></tr>
+<tr><td><picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/stats-dark.webp"><img alt="統計" src="docs/images/stats-light.webp"></picture><br><sub>統計</sub></td><td><picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/ai-dark.webp"><img alt="AI bot とターミナル" src="docs/images/ai-light.webp"></picture><br><sub>AI bot とターミナル</sub></td></tr>
+<tr><td><picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/browser-dark.webp"><img alt="アプリ内ブラウザのダウンロード" src="docs/images/browser-light.webp"></picture><br><sub>アプリ内ブラウザのダウンロード</sub></td><td><picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/settings-dark.webp"><img alt="設定" src="docs/images/settings-light.webp"></picture><br><sub>設定</sub></td></tr>
+<tr><td colspan="2" align="center"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/pomodoro-dark.webp"><img alt="ポモドーロ（別ウィンドウ）" src="docs/images/pomodoro-light.webp" width="320"></picture><br><sub>ポモドーロ（別ウィンドウ）</sub></td></tr>
+</table>
 
 ## 機能
 
@@ -40,14 +39,14 @@
 - **タイマー**（別ウィンドウ）: カウントダウンとストップウォッチ。カウントダウンが 0 になると通知が出る（[docs/timer.md](docs/timer.md)）
 - **ロック**: パスキー（Windows Hello、Touch ID、fprintd）。`Ctrl + Shift + L`（macOS は `⇧⌘L`）か、上のバーの右クリック。操作がないときに自動でロックする時間を選べます。ロック中も OS の通知は届きます（[docs/lock.md](docs/lock.md)）
 - **エクスポート / インポート**: 全データを zip 1 つに書き出し、別の端末で取り込み
-- **リマインダーとの連携**（標準はオフ）: macOS の「リマインダー」、Windows の通知（[docs/reminders.md](docs/reminders.md)）
+- **リマインダーとの連携**（標準はオフ）: macOS の「リマインダー」との同期、Windows の通知の予約（[docs/reminders.md](docs/reminders.md)）
 - **スタートアップ**（標準はオフ）: PC にログインしたときに起動（[docs/startup.md](docs/startup.md)）
-- **CalDAV との同期**（標準はオフ）: Nextcloud などのサーバーのタスクを、ワークスペースと両方向に同期（[docs/caldav.md](docs/caldav.md)）
+- **CalDAV との同期**（標準はオフ）: Fastmail・Nextcloud などのサーバーのタスクを、ワークスペースと両方向に同期（[docs/caldav.md](docs/caldav.md)）
 - **自動アップデート**: GitHub Releases の新しい版に入れ替え（[docs/update.md](docs/update.md)）
 - **完了チケット**: コマンドからタスクを完了にする（[docs/tickets.md](docs/tickets.md)）
 - **AI bot**: `Ctrl/⌘ + J`（[docs/ai.md](docs/ai.md)）
 - **ターミナル**: アプリの中で WSL や zsh を開き、Claude Code などをそのまま動かす（[docs/terminal.md](docs/terminal.md)）
-- **MCP サーバー**: Claude Code などのエージェントからタスクを読み書き。アクセスキーで、エージェントごとに読み取りのみ・ロック中も使えるかを選べる（[docs/mcp.md](docs/mcp.md)）
+- **MCP サーバー**: Claude Code などのエージェントからタスクを読み書き。アクセスキーで、エージェントごとに読み取りのみ・ロック中も使えるかを選べる。キーなしで使える条件（時間帯・ロック中）も決められ、HTTP のポートでも開ける（[docs/mcp.md](docs/mcp.md)）
 - **プラグイン**: WASM のプラグインで、タスクやワークスペースの右クリックにコマンドを足す。有効にするのは、許すことを確かめて承認したものだけ（[docs/plugins.md](docs/plugins.md)）
 
 ## 起動とビルド

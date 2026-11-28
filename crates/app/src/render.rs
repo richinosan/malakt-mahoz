@@ -421,6 +421,9 @@ enum SettingKey {
     LockNow,
     McpKeyless,
     McpKeys,
+    McpHttp,
+    McpHttpPort,
+    McpHttpUrl,
     People,
     CalDav,
     Keys,
@@ -2542,7 +2545,6 @@ impl MainView {
                             .on_click(cx.listener(|this, _, _, cx| this.update_now(cx))),
                     )
                 }))
-                .children(self.downloads_button(cx))
                 .child(
                     div()
                         .relative()
@@ -2582,396 +2584,6 @@ impl MainView {
                 ))
                 .children(controls),
         )
-    }
-
-    /// 上のバーの、ダウンロードのアイコン。一覧に何かあるときだけ出す。
-    /// まだ見ていない数を右上に出し、ダウンロード中は下に進み具合の線を出す。
-    fn downloads_button(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let downloads = crate::downloads::shared(cx);
-        let (empty, unseen, activity) = {
-            let d = downloads.read(cx);
-            (d.items.is_empty(), d.unseen(), d.activity())
-        };
-        if empty {
-            return None;
-        }
-        let theme = cx.theme().clone();
-        let bar = activity.map(|ratio| {
-            let track = div()
-                .absolute()
-                .left(px(6.))
-                .right(px(6.))
-                .bottom(px(3.))
-                .h(gpui_kit::px(2.))
-                .rounded_full()
-                .overflow_hidden()
-                .bg(theme.muted);
-            match ratio {
-                Some(ratio) => track.child(
-                    div()
-                        .h_full()
-                        .w(relative(ratio.max(0.04)))
-                        .rounded_full()
-                        .bg(theme.primary),
-                ),
-                None => track.child(crate::browser::loading_line(theme.primary)),
-            }
-        });
-        let anchor = self.downloads_anchor.clone();
-        Some(
-            div()
-                .relative()
-                .child(
-                    canvas(move |bounds, _, _| anchor.set(bounds), |_, _, _, _| {})
-                        .absolute()
-                        .inset_0(),
-                )
-                .child(feel::gloss(
-                    button("open-downloads")
-                        .icon(app_icon("download"))
-                        .ghost()
-                        .small()
-                        .tooltip("ダウンロード")
-                        .on_click(
-                            cx.listener(|this, _, window, cx| this.open_downloads(window, cx)),
-                        ),
-                ))
-                .children(bar)
-                .children(count_bubble(
-                    "open-downloads-count",
-                    unseen,
-                    Bubble::Bell,
-                    Some((px(-4.), px(-4.))),
-                    cx,
-                ))
-                // 新しいものが増えるたびに、アイコンを少し弾ませる
-                .with_animation(
-                    ("open-downloads-bump", unseen as usize),
-                    Animation::new(std::time::Duration::from_millis(if self.motion {
-                        360
-                    } else {
-                        1
-                    }))
-                    .with_easing(ease_in_out),
-                    move |d, t| {
-                        if unseen == 0 {
-                            return d;
-                        }
-                        d.top(px(-3. * (t * std::f32::consts::PI).sin()))
-                    },
-                )
-                .into_any_element(),
-        )
-    }
-
-    /// ダウンロードの一覧。項目を押すと、OS のファイルマネージャーでそのファイルを選んで開く。
-    fn render_downloads(&self, cx: &mut Context<Self>) -> Div {
-        let theme = cx.theme().clone();
-        let downloads = crate::downloads::shared(cx);
-        let (items, error) = {
-            let d = downloads.read(cx);
-            (d.items.clone(), d.error.clone())
-        };
-        let now = malakt_core::now_ms();
-        let mut list = col().gap_0p5();
-        for (ix, item) in items.iter().enumerate() {
-            let id = item.id;
-            let running = item.running();
-            let failed = matches!(item.state, crate::downloads::State::Failed { .. });
-            let gone = item.missing || failed;
-            let group = SharedString::from(format!("download-{ix}"));
-            let icon = match item.kind {
-                crate::downloads::Kind::Pdf => "file-text",
-                crate::downloads::Kind::File => file_icon(&item.name()),
-            };
-            let menu_downloads = downloads.clone();
-            let open = !running && !gone;
-            let url = item.url.clone();
-            let detail_color = if failed {
-                theme.danger
-            } else {
-                theme.muted_foreground
-            };
-            list = list.child(
-                row()
-                    .id(("download", ix))
-                    .test_support()
-                    .group(group.clone())
-                    .gap_3()
-                    .px_2()
-                    .py_1p5()
-                    .rounded(feel::md())
-                    .when(open, |d| {
-                        d.cursor_pointer()
-                            .lit(theme.secondary_hover, cx)
-                            .sunk(theme.accent, cx)
-                    })
-                    .child(
-                        div()
-                            .flex_none()
-                            .size_8()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(feel::md())
-                            .bg(theme.muted)
-                            .text_color(if gone {
-                                theme.muted_foreground
-                            } else {
-                                theme.foreground
-                            })
-                            .child(app_icon(if gone { "file-x" } else { icon }).size_4()),
-                    )
-                    .child(
-                        col()
-                            .flex_1()
-                            .min_w_0()
-                            .gap_0p5()
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .truncate()
-                                    .when(gone, |d| {
-                                        d.line_through().text_color(theme.muted_foreground)
-                                    })
-                                    .child(item.name()),
-                            )
-                            .when(running, |d| {
-                                let track = div()
-                                    .h(gpui_kit::px(3.))
-                                    .w_full()
-                                    .rounded_full()
-                                    .overflow_hidden()
-                                    .bg(theme.muted);
-                                d.child(match item.ratio() {
-                                    Some(ratio) => track.child(
-                                        div()
-                                            .h_full()
-                                            .w(relative(ratio.max(0.02)))
-                                            .rounded_full()
-                                            .bg(theme.primary),
-                                    ),
-                                    None => {
-                                        track.child(crate::browser::loading_line(theme.primary))
-                                    }
-                                })
-                            })
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .truncate()
-                                    .text_color(detail_color)
-                                    .child(item.detail(now)),
-                            ),
-                    )
-                    // 乗せたときに出すボタン。「フォルダで表示」と「一覧から削除」は同じ形と動き
-                    .when(open, |d| {
-                        let downloads = downloads.clone();
-                        d.child(
-                            div()
-                                .opacity(0.)
-                                .group_hover(group.clone(), |s| s.opacity(1.))
-                                .child(
-                                    round_icon(
-                                        ("download-reveal", ix),
-                                        "folder-open",
-                                        "フォルダで表示",
-                                        move |_, _, cx| {
-                                            downloads.update(cx, |d, cx| d.reveal(id, cx))
-                                        },
-                                        cx,
-                                    )
-                                    .test_support(),
-                                ),
-                        )
-                    })
-                    .when(!running, |d| {
-                        let downloads = downloads.clone();
-                        d.child(
-                            div()
-                                .opacity(0.)
-                                .group_hover(group.clone(), |s| s.opacity(1.))
-                                .child(
-                                    remove_x(
-                                        ("download-remove", ix),
-                                        "一覧から削除",
-                                        move |_, _, cx| {
-                                            downloads.update(cx, |d, cx| d.remove(id, cx))
-                                        },
-                                        cx,
-                                    )
-                                    .test_support(),
-                                ),
-                        )
-                    })
-                    .when(open, |d| {
-                        let downloads = downloads.clone();
-                        d.on_click(move |_, _, cx| downloads.update(cx, |d, cx| d.reveal(id, cx)))
-                    })
-                    .right_menu(move |menu, _, _| {
-                        let (reveal, opener, remover) = (
-                            menu_downloads.clone(),
-                            menu_downloads.clone(),
-                            menu_downloads.clone(),
-                        );
-                        let url = url.clone();
-                        menu.item(
-                            PopupMenuItem::new("フォルダで表示")
-                                .icon(app_icon("folder-open"))
-                                .disabled(!open)
-                                .on_click(move |_, _, cx| {
-                                    reveal.update(cx, |d, cx| d.reveal(id, cx))
-                                }),
-                        )
-                        .item(
-                            PopupMenuItem::new("開く")
-                                .icon(app_icon("external-link"))
-                                .disabled(!open)
-                                .on_click(move |_, _, cx| {
-                                    opener.update(cx, |d, cx| d.open_file(id, cx))
-                                }),
-                        )
-                        .item(
-                            PopupMenuItem::new("リンクをコピー")
-                                .icon(app_icon("link"))
-                                .disabled(!crate::browser::is_web(&url))
-                                .on_click(move |_, _, cx| {
-                                    cx.write_to_clipboard(ClipboardItem::new_string(url.clone()))
-                                }),
-                        )
-                        .separator()
-                        .item(
-                            PopupMenuItem::new("一覧から削除")
-                                .icon(app_icon("x"))
-                                .disabled(running)
-                                .on_click(move |_, _, cx| {
-                                    remover.update(cx, |d, cx| d.remove(id, cx))
-                                }),
-                        )
-                    }),
-            );
-        }
-        let any_done = items.iter().any(|i| !i.running());
-        let body = col()
-            .gap_3()
-            .min_h_0()
-            .when_some(error, |d, error| {
-                d.child(
-                    div()
-                        .id("downloads-error")
-                        .text_sm()
-                        .text_color(theme.danger)
-                        .child(error)
-                        .test_support(),
-                )
-            })
-            .when(items.is_empty(), |d| {
-                d.child(
-                    div()
-                        .text_sm()
-                        .text_color(theme.muted_foreground)
-                        .child("ダウンロードはまだありません。"),
-                )
-            })
-            .child(
-                div()
-                    .id("downloads-scroll")
-                    .flex_1()
-                    .min_h_0()
-                    .max_h(px(420.))
-                    .overflow_y_scrollbar()
-                    .child(list),
-            )
-            .child(
-                row()
-                    .gap_1()
-                    .justify_end()
-                    .child(feel::gloss(
-                        button("downloads-folder")
-                            .icon(app_icon("folder-open"))
-                            .ghost()
-                            .small()
-                            .tooltip("ダウンロードのフォルダを開く")
-                            .on_click(|_, _, cx| {
-                                cx.open_with_system(&crate::downloads::download_dir(cx))
-                            }),
-                    ))
-                    .when(any_done, |d| {
-                        let downloads = downloads.clone();
-                        d.child(feel::gloss(
-                            button("downloads-clear")
-                                .icon(app_icon("list-x"))
-                                .ghost()
-                                .small()
-                                .tooltip("一覧を消去")
-                                .on_click(move |_, _, cx| {
-                                    downloads.update(cx, |d, cx| d.clear(cx))
-                                }),
-                        ))
-                    }),
-            );
-        self.downloads_bubble(body, cx)
-    }
-
-    /// ダウンロードの一覧を、Chrome と同じく上のバーのボタンのすぐ下に出す。外を押すか Esc で閉じる。
-    /// ボタンをまだ描いていないとき（場所が分からないとき）は、ほかのダイアログと同じく真ん中に出す。
-    fn downloads_bubble(&self, body: Div, cx: &mut Context<Self>) -> Div {
-        let anchor = self.downloads_anchor.get();
-        if anchor.size.width <= px(0.) {
-            return self.dialog("ダウンロード", body, cx);
-        }
-        let theme = cx.theme().clone();
-        let t = self.dialog_t.get();
-        let panel =
-            col()
-                .id("dialog")
-                .occlude()
-                .w(px(380.))
-                .p_3()
-                .gap_2()
-                .when(t < 1., |d| d.relative().top(px(-8.) * (1. - t)))
-                .map(|d| {
-                    if crate::theme::floating_now() {
-                        d.rounded(px(16.))
-                    } else {
-                        d.rounded(feel::lg())
-                    }
-                })
-                .border_1()
-                .border_color(theme.border)
-                .bg(theme.background)
-                .elevate(Elevation::High, cx)
-                .child(
-                    row()
-                        .child(div().flex_1().text_base().child("ダウンロード"))
-                        .child(feel::gloss(
-                            button("dialog-close")
-                                .icon(app_icon("x"))
-                                .tooltip("閉じる")
-                                .ghost()
-                                .small()
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.close_top_dialog(window, cx)
-                                })),
-                        )),
-                )
-                .child(body)
-                .test_support();
-        // 外の所は暗くしない（Chrome のダウンロードと同じ）。押して離すまでがここなら閉じる
-        let backdrop = div()
-            .id("dialog-backdrop")
-            .size_full()
-            .when(t < 1., |d| d.opacity(t))
-            .occlude()
-            .on_click(cx.listener(|this, _, window, cx| this.dismiss_outside(window, cx)))
-            .child(
-                anchored()
-                    .position(point(anchor.right(), anchor.bottom() + px(6.)))
-                    .anchor(Anchor::TopRight)
-                    .snap_to_window_with_margin(px(8.))
-                    .child(panel),
-            );
-        div().absolute().inset_0().child(backdrop)
     }
 
     // ---- ホーム ----
@@ -7098,6 +6710,12 @@ impl MainView {
             Some(SubModal::Font) => ("フォント", px(440.), self.font_picker(false, cx)),
             Some(SubModal::MonoFont) => ("等幅フォント", px(440.), self.font_picker(true, cx)),
             Some(SubModal::Scene) => ("背景の画像", px(680.), self.scene_picker(cx)),
+            Some(SubModal::AddAccount) => {
+                let (title, over) = self
+                    .caldav_settings
+                    .update(cx, |s, cx| (s.add_title(), s.add_dialog(cx)));
+                (title, px(440.), over)
+            }
             Some(SubModal::DonePeople) => ("知らせる担当者", px(400.), self.done_picker(true, cx)),
             Some(SubModal::DoneWorkspaces) => (
                 "知らせるワークスペース",
@@ -7536,33 +7154,74 @@ impl MainView {
                 list(&["ロック"]),
             ));
         }
+        all.extend([Setting::new(
+            Section::AccessKeys,
+            SettingKey::McpKeys,
+            "アクセスキー",
+            None,
+            list(&[
+                "MCP",
+                "キー",
+                "トークン",
+                "エージェント",
+                "Claude Code",
+                "Cursor",
+                "Codex",
+                "期限",
+                "時間帯",
+                "セキュリティ",
+            ]),
+        )]);
         all.extend([
             Setting::new(
-                Section::AccessKeys,
-                SettingKey::McpKeys,
-                "アクセスキー",
+                Section::McpConnection,
+                SettingKey::McpKeyless,
+                "キーなしの接続",
                 None,
                 list(&[
                     "MCP",
-                    "キー",
-                    "トークン",
+                    "アクセスキー",
                     "エージェント",
                     "Claude Code",
-                    "Cursor",
-                    "Codex",
-                    "期限",
+                    "ロック",
                     "時間帯",
                     "セキュリティ",
                 ]),
             ),
             Setting::new(
-                Section::AccessKeys,
-                SettingKey::McpKeyless,
-                "キーなしの接続",
-                None,
-                list(&["MCP", "アクセスキー", "エージェント", "Claude Code"]),
+                Section::McpConnection,
+                SettingKey::McpHttp,
+                "HTTP で開く",
+                Some("この PC からだけ"),
+                list(&[
+                    "MCP",
+                    "HTTP",
+                    "ポート",
+                    "URL",
+                    "Streamable HTTP",
+                    "Claude Code",
+                ]),
             ),
         ]);
+        // ポートと URL は、HTTP で開いているときだけ
+        if self.mcp_http(cx).0 {
+            all.extend([
+                Setting::new(
+                    Section::McpConnection,
+                    SettingKey::McpHttpPort,
+                    "ポート",
+                    None,
+                    list(&["MCP", "HTTP", "ポート"]),
+                ),
+                Setting::new(
+                    Section::McpConnection,
+                    SettingKey::McpHttpUrl,
+                    "URL",
+                    None,
+                    list(&["MCP", "HTTP", "URL", "アドレス"]),
+                ),
+            ]);
+        }
         all.extend([
             Setting::new(
                 Section::Notices,
@@ -7625,7 +7284,10 @@ impl MainView {
                 ),
             ]);
         }
-        if let Some(name) = crate::reminders::setting_label(cx) {
+        // macOS のリマインダーは「同期」のアカウントに並べる。ここは Windows の通知の予約
+        if let Some(name) =
+            crate::reminders::setting_label(cx).filter(|_| !crate::reminders::is_app(cx))
+        {
             all.push(Setting::new(
                 Section::Notices,
                 SettingKey::Reminders,
@@ -7682,12 +7344,18 @@ impl MainView {
             Setting::new(
                 Section::Sync,
                 SettingKey::CalDav,
-                "CalDAV",
+                if crate::reminders::is_app(cx) {
+                    "CalDAV・リマインダー同期"
+                } else {
+                    "CalDAV 同期"
+                },
                 None,
                 list(&[
                     "同期",
+                    "CalDAV",
                     "サーバー",
                     "カレンダー",
+                    "Fastmail",
                     "Nextcloud",
                     "リマインダー",
                     "アカウント",
@@ -7809,9 +7477,14 @@ impl MainView {
                     .into_any_element();
             }
             SettingKey::CalDav => {
-                return edge(div().py_3())
-                    .child(self.caldav_settings.clone())
-                    .into_any_element();
+                return setting_line(
+                    item.name,
+                    item.note,
+                    self.caldav_settings.clone().into_any_element(),
+                    true,
+                    first,
+                    &theme,
+                );
             }
             SettingKey::Keys => {
                 return edge(div().py_3())
@@ -7822,6 +7495,16 @@ impl MainView {
                 return edge(div().py_3())
                     .child(self.access_keys_editor(cx))
                     .into_any_element();
+            }
+            SettingKey::McpKeyless => {
+                return setting_line(
+                    item.name,
+                    item.note,
+                    self.keyless_editor(cx).into_any_element(),
+                    true,
+                    first,
+                    &theme,
+                );
             }
             SettingKey::Plugins => {
                 return edge(div().py_3())
@@ -7890,6 +7573,7 @@ impl MainView {
                 | SettingKey::People
                 | SettingKey::CalDav
                 | SettingKey::McpKeys
+                | SettingKey::McpKeyless
                 | SettingKey::Plugins
                 | SettingKey::PluginFolders
                 | SettingKey::Keys => unreachable!(),
@@ -8285,28 +7969,12 @@ impl MainView {
                         })
                         .into_any_element()
                 }
-                SettingKey::McpKeyless => {
-                    let view = cx.entity().downgrade();
-                    let keyless = self.keyless(cx);
-                    menu_choice("mcp-keyless", keyless.label().into(), &theme)
-                        .pop_menu(move |mut menu, _, _| {
-                            for option in malakt_core::access::Keyless::ALL {
-                                let view = view.clone();
-                                menu = menu.item(
-                                    PopupMenuItem::new(option.label())
-                                        .checked(keyless == option)
-                                        .on_click(move |_, _, cx| {
-                                            // ウィンドウを閉じたあとなら、反映する先がない
-                                            let _ = view.update(cx, |this, cx| {
-                                                this.set_keyless(option, cx);
-                                            });
-                                        }),
-                                );
-                            }
-                            menu
-                        })
-                        .into_any_element()
-                }
+                SettingKey::McpHttp => Switch::new("mcp-http-switch")
+                    .checked(self.mcp_http(cx).0)
+                    .on_click(cx.listener(|this, on: &bool, _, cx| this.set_mcp_http(*on, cx)))
+                    .into_any_element(),
+                SettingKey::McpHttpPort => self.mcp_port_control(cx),
+                SettingKey::McpHttpUrl => self.mcp_url_control(cx),
                 SettingKey::LockedNotices => {
                     let view = cx.entity().downgrade();
                     let notices = self.locked_notices(cx);
@@ -9555,20 +9223,30 @@ impl MainView {
                             )),
                     )
                     .child(
+                        Checkbox::new("ai-promo-never")
+                            .py(px(4.))
+                            .my(px(-4.))
+                            .label("今後は表示しない")
+                            .checked(self.ai_promo_never)
+                            .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                                this.set_ai_promo_never(*checked, cx)
+                            })),
+                    )
+                    // ボタンが 3 つあるので、チェックとは別の行で右に寄せる
+                    .child(
                         row()
                             .gap_2()
-                            .child(
-                                Checkbox::new("ai-promo-never")
-                                    .py(px(4.))
-                                    .my(px(-4.))
-                                    .label("今後は表示しない")
-                                    .checked(self.ai_promo_never)
-                                    .on_click(cx.listener(|this, checked: &bool, _, cx| {
-                                        this.set_ai_promo_never(*checked, cx)
-                                    })),
-                            )
-                            .child(div().flex_1())
+                            .justify_end()
                             .child(cancel(cx))
+                            // 手元で動かす AI なら、API キーも通信もいらない
+                            .child(feel::gloss(
+                                button("ai-promo-local")
+                                    .icon(app_icon("server"))
+                                    .label("ローカル AI を使う")
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.use_local_ai_from_promo(window, cx)
+                                    })),
+                            ))
                             .child(feel::gloss(
                                 button("ai-promo-open")
                                     .icon(app_icon("sparkles"))
@@ -9868,7 +9546,6 @@ impl MainView {
                         });
                 self.dialog("通知", body, cx)
             }
-            Modal::Downloads => self.render_downloads(cx),
             Modal::BulkDue => {
                 let body = col()
                     .gap_3()
@@ -10623,6 +10300,13 @@ impl MainView {
 
 impl Render for MainView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // 「アカウントを追加」を Esc や外側で閉じたら、調べている途中の結果を捨てる。
+        // 前に描いたときに出していたかで見る（開いた直後は、まだ `sub_modal` に入っていない）
+        if self.sub_seen == Some(SubModal::AddAccount)
+            && self.sub_modal != Some(SubModal::AddAccount)
+        {
+            self.caldav_settings.update(cx, |s, cx| s.end_adding(cx));
+        }
         self.tick_dialog_motion(window);
         if self.embedded {
             return self.render_embedded(window, cx);
@@ -10740,11 +10424,6 @@ impl Render for MainView {
                 }),
             )
             .on_action(cx.listener(|this, _: &ToggleAi, window, cx| this.toggle_ai(window, cx)))
-            .on_action(
-                cx.listener(|this, _: &crate::shell_keys::ShowDownloads, window, cx| {
-                    this.open_downloads(window, cx)
-                }),
-            )
             .on_action(cx.listener(|this, _: &PanePrefix, _, cx| {
                 this.pane_prefix = true;
                 cx.notify();

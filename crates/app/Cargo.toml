@@ -38,6 +38,10 @@ resvg = { version = "0.45", default-features = false }
 # アプリ内ブラウザ。OS のブラウザの部品（Windows は WebView2、macOS は WKWebView、Linux は WebKitGTK）を使う
 wry = "0.58"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# 保存した PDF のページを選び、フォントを埋め込んでいるかを確かめる
+lopdf = { version = "0.47", default-features = false }
+# MCP の HTTP（127.0.0.1 だけ）で、リクエストの頭を読む
+httparse = "1"
 
 [dev-dependencies]
 gpui-kit = { version = "0.11.0", features = ["test-support"] }
@@ -54,9 +58,9 @@ x11rb = "0.13"
 objc2 = "0.6"
 # メニューの後ろに出す、ページの画像を撮る
 block2 = "0.6"
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSImage"] }
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSData", "NSError", "NSString"] }
-objc2-web-kit = { version = "0.3", default-features = false, features = ["std", "block2", "objc2-app-kit", "WKWebView", "WKSnapshotConfiguration", "WKPDFConfiguration"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSImage", "NSPrintInfo", "NSPrintOperation", "NSView", "NSWindow", "NSResponder", "NSGraphics"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSData", "NSError", "NSString", "NSURL", "NSDictionary", "NSValue", "NSGeometry", "NSObject", "NSThread"] }
+objc2-web-kit = { version = "0.3", default-features = false, features = ["std", "block2", "objc2-app-kit", "WKWebView", "WKSnapshotConfiguration", "WKPDFConfiguration", "WKPreferences", "WKWebViewConfiguration"] }
 
 # メニューの後ろに出す、ページの画像を撮る
 [target.'cfg(windows)'.dependencies]

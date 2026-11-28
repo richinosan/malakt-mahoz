@@ -35,12 +35,18 @@ pub struct Account {
     /// 自分を表す URI。
     pub addresses: Vec<String>,
     pub created_at: i64,
+    /// 付けた名前（「説明」）。空なら `label` は `ユーザー名@ホスト名`。
+    pub name: String,
 }
 
 impl Account {
-    /// 画面と変更履歴に出す名前（`ユーザー名@ホスト名`）。
+    /// 画面に出す名前。付けた名前がなければ `ユーザー名@ホスト名`。
     pub fn label(&self) -> String {
-        format!("{}@{}", self.username, self.host())
+        if self.name.trim().is_empty() {
+            format!("{}@{}", self.username, self.host())
+        } else {
+            self.name.clone()
+        }
     }
 
     /// サーバーのホスト名。
@@ -259,6 +265,7 @@ fn account_row(r: &rusqlite::Row) -> rusqlite::Result<Account> {
         username: r.get(2)?,
         addresses: serde_json::from_str(&addresses).unwrap_or_default(),
         created_at: r.get(4)?,
+        name: r.get(5)?,
     })
 }
 
@@ -281,7 +288,7 @@ impl Store {
 
     pub fn caldav_accounts(&self) -> Result<Vec<Account>> {
         let mut stmt = self.conn.prepare_cached(
-            "SELECT id, url, username, addresses, created_at FROM caldav_accounts \
+            "SELECT id, url, username, addresses, created_at, name FROM caldav_accounts \
              ORDER BY created_at, id",
         )?;
         let rows = stmt.query_map([], account_row)?;
@@ -291,7 +298,7 @@ impl Store {
     pub fn caldav_account(&self, id: &str) -> Result<Account> {
         self.conn
             .query_row(
-                "SELECT id, url, username, addresses, created_at FROM caldav_accounts WHERE id = ?1",
+                "SELECT id, url, username, addresses, created_at, name FROM caldav_accounts WHERE id = ?1",
                 [id],
                 account_row,
             )
@@ -306,6 +313,7 @@ impl Store {
         &mut self,
         url: &str,
         username: &str,
+        name: &str,
         addresses: &[String],
         found: &[Found],
     ) -> Result<Account> {
@@ -315,17 +323,19 @@ impl Store {
             username: username.trim().to_owned(),
             addresses: addresses.to_vec(),
             created_at: now_ms(),
+            name: crate::text::normalize_line(name),
         };
         let tx = self.conn.transaction()?;
         tx.execute(
-            "INSERT INTO caldav_accounts (id, url, username, addresses, created_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO caldav_accounts (id, url, username, addresses, created_at, name) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 account.id,
                 account.url,
                 account.username,
                 serde_json::to_string(&account.addresses).unwrap_or_else(|_| "[]".into()),
-                account.created_at
+                account.created_at,
+                account.name
             ],
         )?;
         put_calendars(&tx, &account.id, found)?;
