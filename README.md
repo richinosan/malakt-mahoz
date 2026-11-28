@@ -35,6 +35,7 @@
 - **ペイン**: 画面を分けて、配置をプリセットとして保存
 - **カスタマイズ**: テーマ 13 個、レイアウト、密度、背景の画像、書体の優先順（画面と等幅）、色。自分のテーマを保存
 - **マルチウィンドウ**: `Ctrl/⌘ + N`
+- **ポモドーロ**（別ウィンドウ）: タスクを選んで作業と休憩を測り、作業時間をタスクに残す。作業や休憩の始まりに OS で再生中の音楽を再生・一時停止できる（[docs/pomodoro.md](docs/pomodoro.md)）
 - **ロック**: パスキー（Windows Hello、Touch ID、fprintd）。`Ctrl + Shift + L`（macOS は `⇧⌘L`）か、上のバーの右クリック。操作がないときに自動でロックする時間を選べます。ロック中も OS の通知は届きます（[docs/lock.md](docs/lock.md)）
 - **エクスポート / インポート**: 全データを zip 1 つに書き出し、別の端末で取り込み
 - **リマインダーとの連携**（標準はオフ）: macOS の「リマインダー」、Windows の通知（[docs/reminders.md](docs/reminders.md)）
@@ -87,6 +88,7 @@ mise run mutants    # ミューテーションテスト（cargo-mutants が必�
 - [Claude Code などから使う（MCP）](docs/mcp.md)
 - [リマインダーとの連携](docs/reminders.md)
 - [スタートアップ](docs/startup.md)
+- [ポモドーロ](docs/pomodoro.md)
 - [自動アップデート](docs/update.md)
 - [エクスポートの形式](docs/export.md)
 - [設計（構成、速さ、ディスクの使い方、モバイル）](docs/design.md)

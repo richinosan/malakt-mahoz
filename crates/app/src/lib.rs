@@ -22,6 +22,7 @@ mod mcp_keys;
 pub mod mcp_register;
 pub mod panes;
 pub mod passkey;
+pub mod pomodoro;
 mod press;
 pub mod reminders;
 mod render;
@@ -160,6 +161,7 @@ pub fn init_with(store: malakt_core::Store, ai: AiConfig, cx: &mut App) {
     reminders::init(cx);
     update::init(cx);
     autostart::init(cx);
+    pomodoro::init(cx);
     theme::init(cx);
     cx.bind_keys([
         #[cfg(target_os = "macos")]
@@ -211,6 +213,7 @@ pub fn init_with(store: malakt_core::Store, ai: AiConfig, cx: &mut App) {
         items: vec![
             MenuItem::action("新しいタスク", shortcuts::NewTask),
             MenuItem::action("新しいウィンドウ", NewWindow),
+            MenuItem::action("ポモドーロ", pomodoro::OpenPomodoro),
             MenuItem::action("元に戻す", shortcuts::Undo),
             MenuItem::action("やり直す", shortcuts::Redo),
             MenuItem::action("検索", shortcuts::Find),

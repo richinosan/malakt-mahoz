@@ -362,6 +362,19 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     ALTER TABLE access_keys ADD COLUMN expires TEXT;
     ALTER TABLE access_keys ADD COLUMN windows TEXT NOT NULL DEFAULT '[]';
     "#,
+    // 22: ポモドーロの作業の記録（`pomodoro`）。task_id がなければタスクを選ばずに測った分。
+    //     時刻は UNIX ミリ秒、seconds は一時停止の間を除いた長さ
+    r#"
+    CREATE TABLE work_logs (
+        id TEXT PRIMARY KEY NOT NULL,
+        task_id TEXT REFERENCES tasks(id) ON DELETE CASCADE,
+        started_at INTEGER NOT NULL,
+        ended_at INTEGER NOT NULL,
+        seconds INTEGER NOT NULL
+    ) STRICT;
+    CREATE INDEX work_logs_task ON work_logs(task_id, ended_at);
+    CREATE INDEX work_logs_ended ON work_logs(ended_at);
+    "#,
 ];
 
 pub(crate) fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {

@@ -14,6 +14,7 @@
 //! - `history`: 変更履歴を、1 回の変更ごとの差分と、コメント欄に挟む出来事にする
 //! - `links`: 1 つのタスクを複数のワークスペースに表示する
 //! - `notice`: 通知（期限が近い、ほかの人からの変更）
+//! - `pomodoro`: ポモドーロタイマー（作業と休憩）と、タスクごとの作業の記録
 //! - `remind`: OS のリマインダーとの連携（何を作り・直し・消すかの判断）
 //! - `repeat`: 繰り返すタスク（決まった時刻に次の回を作り、AI に頼むこともできる）
 //! - `rules`: AI のルール（グローバルとワークスペースごと）
@@ -48,6 +49,7 @@ pub mod mention;
 pub mod model;
 pub mod notice;
 pub mod panes;
+pub mod pomodoro;
 pub mod remind;
 pub mod repeat;
 pub mod rules;

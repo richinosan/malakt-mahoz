@@ -416,6 +416,7 @@ fn archive_layout_is_portable() {
             "data/task_alerts.json",
             "data/task_defaults.json",
             "data/tasks.json",
+            "data/work_logs.json",
             "data/workspaces.json",
             "manifest.json"
         ]
