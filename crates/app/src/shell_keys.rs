@@ -52,6 +52,13 @@ pub const BROWSER: &str = "Browser";
 pub const FIND: &str = "BrowserFind";
 /// 印刷のダイアログの場所の名前。
 pub const PRINT: &str = "BrowserPrint";
+
+/// 印刷のキー。ページの window.print も、このキーとしてアプリに知らせる
+pub const PRINT_KEY: &str = if cfg!(target_os = "macos") {
+    "cmd-p"
+} else {
+    "ctrl-p"
+};
 /// シェルの場所（タブの列の下すべて）の名前。
 pub const SHELL: &str = "AiShell";
 /// ターミナルの画面の場所の名前。
