@@ -8,7 +8,7 @@
 //! ログインの情報（Cookie）は OS の部品がデータベースの隣の `browser` に保存する
 //! （macOS は OS が決めた場所）。キャッシュは上限を超えたら、最初のページを開く前に消す。
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -284,8 +284,10 @@ pub struct Page {
     pub(crate) find_turn: u64,
     /// 最後に探した言葉が、ページの中になかった。
     pub find_missing: bool,
-    /// 印刷のダイアログやダウンロードの一覧を、ページの上に出している。出している間は、ページを隠して画像を出す。
-    pub(crate) covered: bool,
+    /// 印刷のダイアログやダウンロードの一覧を、ページの上に描いたウィンドウと、その描いた回。
+    /// 描いている間は、ページを隠して画像を出す。描かなくなったら（閉じた、ダイアログの部品ごと
+    /// なくなった）、次に描くときにはもう隠さない。
+    pub(crate) covered: Option<(WindowId, u64)>,
 }
 
 impl Page {
@@ -319,7 +321,7 @@ impl Page {
             zoom_leaving: false,
             find_turn: 0,
             find_missing: false,
-            covered: false,
+            covered: None,
         }
     }
 
@@ -870,11 +872,13 @@ impl Terms {
         engine.save_pdf(&path, &pass, pages, done)
     }
 
-    /// 印刷のダイアログやダウンロードの一覧を出している間は、ページを隠して画像を出す。
-    pub(crate) fn set_covered(&mut self, id: u64, covered: bool, cx: &mut Context<Self>) {
+    /// 印刷のダイアログやダウンロードの一覧を、ページの上に描く。描く前（prepaint）に、描くたびに呼ぶ。
+    /// 描いている間は、ページを隠して画像を出す。
+    fn cover_page(&mut self, id: u64, window: &Window) {
+        let here = window.window_handle().window_id();
+        let frame = *self.frames.entry(here).or_default();
         if let Some(page) = self.page_mut(id) {
-            page.covered = covered;
-            cx.notify();
+            page.covered = Some((here, frame));
         }
     }
 
@@ -1279,8 +1283,8 @@ impl Terms {
                 continue;
             };
             let wanted = page.painted == Some((here, now));
-            // 印刷のダイアログは、そのページの上にだけ出る
-            let covered = covered || page.covered;
+            // 印刷のダイアログは、そのページの上にだけ出る。この回に描いたものだけで隠す
+            let covered = covered || page.covered == Some((here, now));
             let mut visible = wanted && !covered;
             if wanted && covered && page.shown && page.shot.is_none() && !page.shot_failed {
                 // 隠す前に画像を撮る。撮れるまで（長くても SHOT_WAIT）ページを見せておく
@@ -1412,21 +1416,49 @@ impl Step {
 
 /// 開いているメニュー（右クリックのメニュー）。ページはメニューより手前に出るので、開いている間は隠す。
 #[derive(Default)]
-struct OpenMenus(Vec<WeakEntity<PopupMenu>>);
+struct OpenMenus(Vec<NotedMenu>);
 
 impl Global for OpenMenus {}
 
-/// メニューを開いた。`scroll::Menus` が作るときに呼ぶ。
-pub fn note_menu(menu: WeakEntity<PopupMenu>, cx: &mut App) {
+/// 開いたメニュー。右クリックのメニューの部品は、閉じたあとも押した所に残るので、
+/// 部品が生きているかではなく、閉じた知らせ（DismissEvent）で閉じたことにする。
+struct NotedMenu {
+    menu: WeakEntity<PopupMenu>,
+    closed: Rc<Cell<bool>>,
+    _dismiss: Subscription,
+}
+
+impl NotedMenu {
+    fn open(&self) -> bool {
+        !self.closed.get() && self.menu.upgrade().is_some()
+    }
+}
+
+/// メニューを開いた。メニューを作るとき（`scroll::Menus` やリンクのメニュー）に、その中で呼ぶ。
+pub fn note_menu(cx: &mut Context<PopupMenu>) {
+    let closed = Rc::new(Cell::new(false));
+    let dismiss = {
+        let closed = closed.clone();
+        cx.subscribe_self(move |_, _: &DismissEvent, cx| {
+            closed.set(true);
+            // 閉じたらすぐにページを見せる
+            cx.refresh_windows();
+        })
+    };
+    let menu = cx.weak_entity();
     let menus = cx.default_global::<OpenMenus>();
-    menus.0.retain(|m| m.upgrade().is_some());
-    menus.0.push(menu);
+    menus.0.retain(NotedMenu::open);
+    menus.0.push(NotedMenu {
+        menu,
+        closed,
+        _dismiss: dismiss,
+    });
 }
 
 /// メニューやドロップダウンが開いているか。
 pub fn menus_open(cx: &App) -> bool {
     cx.try_global::<OpenMenus>()
-        .is_some_and(|menus| menus.0.iter().any(|m| m.upgrade().is_some()))
+        .is_some_and(|menus| menus.0.iter().any(NotedMenu::open))
         || gpui_kit::component::GlobalState::is_in_deferred_context(cx)
 }
 
@@ -1506,7 +1538,8 @@ pub fn on_link(url: &SharedString, event: &ClickEvent, window: &mut Window, cx: 
 }
 
 fn show_link_menu(url: String, at: Point<Pixels>, window: &mut Window, cx: &mut App) {
-    let menu = PopupMenu::build(window, cx, move |menu, _, _| {
+    let menu = PopupMenu::build(window, cx, move |menu, _, cx| {
+        note_menu(cx);
         let menu = menu.scrollable(true);
         let (inside, outside, copy) = (url.clone(), url.clone(), url.clone());
         menu.item(
@@ -1527,7 +1560,6 @@ fn show_link_menu(url: String, at: Point<Pixels>, window: &mut Window, cx: &mut 
                 }),
         )
     });
-    note_menu(menu.downgrade(), cx);
     let dismiss = cx.subscribe(&menu, |_, _: &DismissEvent, cx| {
         cx.remove_global::<LinkMenu>();
         cx.refresh_windows();
@@ -2113,10 +2145,8 @@ impl PrintDialog {
             .get(..file.len() - ".pdf".len())
             .unwrap_or(&file)
             .to_owned();
-        self.terms.update(cx, |terms, cx| {
-            terms.release_page(id, cx);
-            terms.set_covered(id, true, cx);
-        });
+        self.terms
+            .update(cx, |terms, cx| terms.release_page(id, cx));
         self.open = Some(id);
         self.error = None;
         self.name
@@ -2145,10 +2175,7 @@ impl PrintDialog {
         let Some(id) = self.open.take() else {
             return false;
         };
-        self.terms.update(cx, |terms, cx| {
-            terms.set_covered(id, false, cx);
-            terms.focus_page(id, cx);
-        });
+        self.terms.update(cx, |terms, cx| terms.focus_page(id, cx));
         cx.notify();
         true
     }
@@ -2485,7 +2512,12 @@ impl PrintDialog {
 
 impl Render for PrintDialog {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if self.open.is_none() {
+        let Some(id) = self.open else {
+            return div().into_any_element();
+        };
+        if (self.page)(cx) != Some(id) {
+            // ほかのタブに切り替えた。ダイアログはそのページのものなので閉じる
+            self.open = None;
             return div().into_any_element();
         }
         let theme = cx.theme().clone();
@@ -2634,6 +2666,8 @@ impl Render for PrintDialog {
                     })),
             )
             .child(card)
+            // 出している間は、ページを隠して画像を出す
+            .child(cover(id))
             .into_any_element()
     }
 }
@@ -2773,6 +2807,20 @@ pub(crate) fn page_view(id: u64, shot: Option<Arc<RenderImage>>, background: Hsl
         )
         .test_support()
         .into_any_element()
+}
+
+/// ページの上に出すもの（印刷のダイアログ、ダウンロードの一覧）に添える部品。描いている間だけページを隠す。
+/// 閉じ忘れても、描かなくなればページはまた見える。
+pub(crate) fn cover(id: u64) -> AnyElement {
+    canvas(
+        move |_, window, cx| {
+            term::shared(cx).update(cx, |terms, _| terms.cover_page(id, window));
+        },
+        |_, _, _, _| {},
+    )
+    .absolute()
+    .size_0()
+    .into_any_element()
 }
 
 /// ウィンドウを閉じる前に呼ぶ。そこに置いたページの部品を、ウィンドウより先に捨てる。

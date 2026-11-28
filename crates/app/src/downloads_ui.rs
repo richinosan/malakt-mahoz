@@ -28,8 +28,8 @@ pub(crate) struct DownloadsBubble {
     terms: Entity<Terms>,
     /// 一覧で隠すページ（見ているページ）。
     page: crate::browser::PageOf,
-    /// 出している。隠しているページ。
-    open: Option<Option<u64>>,
+    /// 出している。
+    open: bool,
     /// ツールバーのボタンの場所。
     anchor: Rc<Cell<Bounds<Pixels>>>,
     /// 開いた回数。出てくる動きを毎回はじめから描く。
@@ -47,7 +47,7 @@ impl DownloadsBubble {
         let subscriptions = vec![
             // 一覧を出している間に増えたものは、見たことにする
             cx.observe(&downloads, |this, downloads, cx| {
-                if this.open.is_some() && downloads.read(cx).unseen() > 0 {
+                if this.open && downloads.read(cx).unseen() > 0 {
                     downloads.update(cx, |d, cx| d.opened(cx));
                 }
                 cx.notify();
@@ -56,7 +56,7 @@ impl DownloadsBubble {
         Self {
             terms: term::shared(cx),
             page: Box::new(page),
-            open: None,
+            open: false,
             anchor: Rc::default(),
             opens: 0,
             focus: cx.focus_handle(),
@@ -66,7 +66,7 @@ impl DownloadsBubble {
 
     /// 出す・閉じる（ボタン、Ctrl+J）。
     pub(crate) fn toggle(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.open.is_some() {
+        if self.open {
             self.hide(cx);
         } else {
             self.show(window, cx);
@@ -74,19 +74,17 @@ impl DownloadsBubble {
     }
 
     pub(crate) fn show(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.open.is_some() {
+        if self.open {
             window.focus(&self.focus, cx);
             return;
         }
         let page = (self.page)(cx);
         // ページは一覧より手前に出るので、出している間は隠して画像を出す
         if let Some(id) = page {
-            self.terms.update(cx, |terms, cx| {
-                terms.release_page(id, cx);
-                terms.set_covered(id, true, cx);
-            });
+            self.terms
+                .update(cx, |terms, cx| terms.release_page(id, cx));
         }
-        self.open = Some(page);
+        self.open = true;
         self.opens += 1;
         crate::downloads::shared(cx).update(cx, |d, cx| d.opened(cx));
         window.focus(&self.focus, cx);
@@ -95,14 +93,12 @@ impl DownloadsBubble {
 
     /// 閉じる（Esc、外を押す）。出していなければ false。
     pub(crate) fn hide(&mut self, cx: &mut Context<Self>) -> bool {
-        let Some(page) = self.open.take() else {
+        if !std::mem::take(&mut self.open) {
             return false;
-        };
-        if let Some(id) = page {
-            self.terms.update(cx, |terms, cx| {
-                terms.set_covered(id, false, cx);
-                terms.focus_page(id, cx);
-            });
+        }
+        // タブを切り替えていれば、今見ているページに戻る
+        if let Some(id) = (self.page)(cx) {
+            self.terms.update(cx, |terms, cx| terms.focus_page(id, cx));
         }
         cx.notify();
         true
@@ -426,9 +422,11 @@ fn list(cx: &mut App) -> Div {
 
 impl Render for DownloadsBubble {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if self.open.is_none() {
+        if !self.open {
             return div().into_any_element();
         }
+        // 一覧はタブを切り替えても出したまま。そのとき見ているページを隠す
+        let page = (self.page)(cx);
         let theme = cx.theme().clone();
         let anchor = self.anchor.get();
         let body = list(cx);
@@ -491,14 +489,21 @@ impl Render for DownloadsBubble {
                 Animation::new(Duration::from_millis(180)).with_easing(ease_out_quint()),
                 |d, t| d.opacity(0.3 + 0.7 * t).mt(px(-8. * (1. - t))),
             );
-        deferred(
-            anchored()
-                .position(point(anchor.right(), anchor.bottom() + px(6.)))
-                .anchor(Anchor::TopRight)
-                .snap_to_window_with_margin(px(8.))
-                .child(panel),
-        )
-        .with_priority(2)
-        .into_any_element()
+        div()
+            .absolute()
+            .size_0()
+            // 出している間は、ページを隠して画像を出す（ページは一覧より手前に出る）
+            .children(page.map(crate::browser::cover))
+            .child(
+                deferred(
+                    anchored()
+                        .position(point(anchor.right(), anchor.bottom() + px(6.)))
+                        .anchor(Anchor::TopRight)
+                        .snap_to_window_with_margin(px(8.))
+                        .child(panel),
+                )
+                .with_priority(2),
+            )
+            .into_any_element()
     }
 }
