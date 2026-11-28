@@ -824,6 +824,7 @@ mod tests {
             time_basis: None,
             started_at: None,
             assigned_at: None,
+            pr: None,
         }
     }
 

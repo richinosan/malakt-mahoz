@@ -138,6 +138,20 @@ impl Store {
             .unwrap_or_default())
     }
 
+    /// どこかで所要時間の基準に GitHub の PR の時刻を使っているか（全体の標準・ワークスペース・タスク）。
+    /// 使っていなければ、PR の時刻を読みに行かない。
+    pub fn uses_pr_basis(&self) -> Result<bool> {
+        if self.time_basis_standard()?.uses_pr() {
+            return Ok(true);
+        }
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM tasks WHERE instr(time_basis, 'pr_') > 0) \
+             OR EXISTS(SELECT 1 FROM workspaces WHERE instr(time_basis, 'pr_') > 0)",
+            [],
+            |r| r.get(0),
+        )?)
+    }
+
     /// 全体の標準を変える。
     pub fn set_time_basis_standard(&mut self, basis: crate::timing::Basis) -> Result<()> {
         let code = basis.code();

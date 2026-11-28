@@ -117,17 +117,44 @@ fn estimate_meter(task: &Task, span: &Span, cx: &App) -> Option<AnyElement> {
     )
 }
 
-/// 数えた区間の補足（ホバーで出す）。
-fn span_tip(span: &Span, basis: Basis) -> String {
+/// 数えた区間の補足（ホバーで出す）。選んだ基準の時刻がなく、ほかの時刻から数えたときは、使った基準を出す。
+fn span_tip(span: &Span) -> String {
     let mut tip = span_text(span);
     tip.push('\n');
-    if span.from != basis.start {
-        // 選んだ始まりの時刻がなく、ほかの時刻から数えた
-        tip.push_str(&format!("{} → {}", span.from.label(), basis.end.label()));
-    } else {
-        tip.push_str(&basis.label());
-    }
+    tip.push_str(&Basis::new(span.from, span.to).label());
     tip
+}
+
+/// 詳細の、付けた PR の時刻の行（基準に PR の時刻を使うときだけ）。
+fn pr_line(task: &Task, cx: &App) -> AnyElement {
+    let muted = cx.theme().muted_foreground;
+    let at = |ms: Option<i64>| {
+        ms.map_or("—".to_owned(), |ms| {
+            view::format_datetime(ms)
+                .get(5..)
+                .unwrap_or_default()
+                .to_owned()
+        })
+    };
+    let text = match (&task.pr, timing::pr_url(task)) {
+        (_, None) => "PR のリンクなし".to_owned(),
+        (Some(pr), Some(url)) if pr.url == url => format!(
+            "{}　作成 {}・レビュー {}・マージ {}",
+            crate::task_urls::shown(&url).label,
+            at(Some(pr.opened)),
+            at(pr.reviewed),
+            at(pr.merged)
+        ),
+        (_, Some(url)) => format!("{}　読み込み中", crate::task_urls::shown(&url).label),
+    };
+    div()
+        .id("elapsed-pr")
+        .px_2()
+        .text_xs()
+        .text_color(muted)
+        .child(text)
+        .test_support()
+        .into_any_element()
 }
 
 impl MainView {
@@ -138,7 +165,7 @@ impl MainView {
             return div().into_any_element();
         };
         let over = timing::over_estimate(task, Some(span));
-        let tip = span_tip(&span, self.task_basis(task));
+        let tip = span_tip(&span);
         div()
             .id(("elapsed", ix))
             .flex()
@@ -211,15 +238,29 @@ impl MainView {
         let standard = self.workspace_or_standard(task.workspace_id.as_deref());
         let view = cx.entity().downgrade();
         let on: OnBasis = std::rc::Rc::new(move |this, basis, cx| {
-            this.edit_task_by_id(&id, cx, |d| d.time_basis = basis)
+            this.edit_task_by_id(&id, cx, |d| d.time_basis = basis);
+            let uses_pr = this
+                .db
+                .read(cx)
+                .store
+                .task(&id)
+                .is_ok_and(|t| this.task_basis(&t).uses_pr());
+            if uses_pr {
+                crate::pr_times::read_now(Some(id.clone()), cx);
+            }
         });
+        let uses_pr = basis.uses_pr();
+        let pr_line = uses_pr.then(|| pr_line(task, cx));
+        let reread = task.id.clone();
         let muted = theme.muted_foreground;
         let meter = span
             .as_ref()
             .and_then(|span| estimate_meter(task, span, cx));
+        // ボタンは中身の幅にする（下の行に合わせて広げない）
         col()
             .min_w_0()
             .gap_1()
+            .items_start()
             .child(
                 button("elapsed-basis")
                     .ghost()
@@ -238,9 +279,22 @@ impl MainView {
                             .child(app_icon("chevron-down").small().text_color(muted)),
                     )
                     .pop_menu(move |menu, _, _| {
-                        basis_items(menu, &view, own, standard, "標準に合わせる", on.clone())
+                        let menu =
+                            basis_items(menu, &view, own, standard, "標準に合わせる", on.clone());
+                        if !uses_pr {
+                            return menu;
+                        }
+                        let id = reread.clone();
+                        menu.separator().item(
+                            PopupMenuItem::new("PR の時刻を読み直す")
+                                .icon(app_icon("refresh-cw"))
+                                .on_click(move |_, _, cx| {
+                                    crate::pr_times::read_now(Some(id.clone()), cx)
+                                }),
+                        )
                     }),
             )
+            .children(pr_line)
             .children(meter)
             .into_any_element()
     }
@@ -256,6 +310,9 @@ impl MainView {
     pub(crate) fn set_time_standard(&mut self, basis: Basis, cx: &mut Context<Self>) {
         self.write(cx, |s| s.set_time_basis_standard(basis));
         self.reload(cx);
+        if basis.uses_pr() {
+            crate::pr_times::read_now(None, cx);
+        }
     }
 
     /// ワークスペースの基準を変える。`None` は全体の標準に合わせる。
@@ -267,6 +324,9 @@ impl MainView {
     ) {
         self.write(cx, |s| s.set_workspace_time_basis(id, basis).map(|_| ()));
         self.reload(cx);
+        if basis.is_some_and(|b| b.uses_pr()) {
+            crate::pr_times::read_now(None, cx);
+        }
     }
 
     /// 基準を選ぶボタン（統計とワークスペースの設定）。`workspace` が `None` なら全体の標準を変える。

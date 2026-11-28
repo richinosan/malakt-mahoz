@@ -8091,3 +8091,110 @@ fn the_over_estimate_filter_follows_the_clock(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert_eq!(shown(cx), 1);
 }
+
+/// 所要時間の基準に PR の時刻を選ぶと、タスクに付けた PR の時刻を gh で読んで数える。
+/// 読み直すと新しい時刻（マージ）が入り、読めなければ何が読めなかったかをエラーに出す。
+#[gpui_kit::test]
+fn pr_times_become_the_elapsed_basis(cx: &mut TestAppContext) {
+    use malakt_ai::github::PrTimes;
+    use malakt_mahoz::pr_times::{self, ReadError};
+    use std::sync::{Arc, Mutex};
+    const H: i64 = 3_600_000;
+    start(cx);
+    let now = malakt_core::now_ms();
+    let merged: Arc<Mutex<Option<i64>>> = Arc::new(Mutex::new(None));
+    let reads: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    {
+        let (merged, reads) = (merged.clone(), reads.clone());
+        cx.update(|cx| {
+            pr_times::set_reader(
+                Arc::new(move |url: &str| {
+                    reads.lock().unwrap().push(url.to_owned());
+                    if url.ends_with("/404") {
+                        return Err(ReadError::Failed(
+                            "Could not resolve to a PullRequest".into(),
+                        ));
+                    }
+                    Ok(PrTimes {
+                        opened: now - 3 * H,
+                        reviewed: Some(now - 2 * H),
+                        merged: *merged.lock().unwrap(),
+                    })
+                }),
+                cx,
+            )
+        });
+    }
+    let (window, view) = open(cx, wide());
+    cx.update(|cx| {
+        db::shared(cx).update(cx, |db, cx| {
+            cx.notify();
+            let draft = malakt_core::TaskDraft {
+                title: "Lorem ipsum".into(),
+                status: Status::InProcess,
+                urls: vec!["https://github.com/o/r/pull/7".into()],
+                ..Default::default()
+            };
+            db.store.create_task(None, &draft).unwrap();
+        })
+    });
+    ui(cx, window, |window, cx| window.click("nav-all", cx));
+    ui(cx, window, |window, cx| window.click(("title", 0usize), cx));
+    let task_span = |cx: &mut TestAppContext| {
+        let task = all_tasks(cx).remove(0);
+        cx.update(|cx| view.read(cx).task_span(&task))
+    };
+
+    // 基準を選ぶまでは読まない
+    cx.run_until_parked();
+    assert!(reads.lock().unwrap().is_empty());
+    ui(cx, window, |window, cx| window.click("elapsed-basis", cx));
+    pick(cx, window, "PR を作った時");
+    cx.run_until_parked();
+    assert_eq!(reads.lock().unwrap().len(), 1);
+    let task = all_tasks(cx).remove(0);
+    let pr = task.pr.clone().expect("PR の時刻");
+    assert_eq!(
+        (pr.opened, pr.reviewed, pr.merged),
+        (now - 3 * H, Some(now - 2 * H), None)
+    );
+    let s = task_span(cx).unwrap();
+    assert_eq!((s.start, s.running), (now - 3 * H, true));
+    ui(cx, window, |window, _| {
+        assert!(window.try_find("elapsed-pr").is_some());
+    });
+
+    // 終わりを「PR をマージした時」に。マージしたあとに読み直すと、そこまでになる
+    *merged.lock().unwrap() = Some(now - H);
+    ui(cx, window, |window, cx| window.click("elapsed-basis", cx));
+    pick(cx, window, "PR をマージした時");
+    cx.run_until_parked();
+    assert_eq!(reads.lock().unwrap().len(), 2);
+    let s = task_span(cx).unwrap();
+    assert_eq!((s.ms(), s.running), (2 * H, false));
+
+    // 読めない PR は、どの PR かをエラーに出す
+    let id = all_tasks(cx)[0].id.clone();
+    cx.update(|cx| {
+        view.update(cx, |v, cx| {
+            v.edit_task_by_id(&id, cx, |d| {
+                d.urls = vec!["https://github.com/o/r/pull/404".into()]
+            })
+        })
+    });
+    ui(cx, window, |window, cx| window.click("elapsed-basis", cx));
+    pick(cx, window, "PR の時刻を読み直す");
+    cx.run_until_parked();
+    assert_eq!(
+        reads.lock().unwrap().last().map(String::as_str),
+        Some("https://github.com/o/r/pull/404")
+    );
+    let error = cx.update(|cx| view.read(cx).error.clone()).expect("エラー");
+    assert!(error.contains("https://github.com/o/r/pull/404"), "{error}");
+    // 前に読んだ時刻（別の PR）では数えない
+    assert_eq!(
+        all_tasks(cx)[0].pr.as_ref().map(|p| p.url.as_str()),
+        Some("https://github.com/o/r/pull/7")
+    );
+    assert_eq!(task_span(cx), None);
+}

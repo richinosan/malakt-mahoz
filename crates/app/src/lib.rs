@@ -26,6 +26,7 @@ pub mod mcp_register;
 pub mod panes;
 pub mod passkey;
 pub mod pomodoro;
+pub mod pr_times;
 mod press;
 pub mod reminders;
 mod render;

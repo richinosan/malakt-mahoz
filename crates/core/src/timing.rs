@@ -21,14 +21,17 @@ pub enum StartBasis {
     InProcess,
     /// 開始日（時刻がなければその日の 0:00）
     StartDate,
+    /// タスクに付けた GitHub の PR を作った時
+    PrOpened,
 }
 
 impl StartBasis {
-    pub const ALL: [StartBasis; 4] = [
+    pub const ALL: [StartBasis; 5] = [
         StartBasis::Created,
         StartBasis::Assigned,
         StartBasis::InProcess,
         StartBasis::StartDate,
+        StartBasis::PrOpened,
     ];
 
     pub fn code(self) -> &'static str {
@@ -37,6 +40,7 @@ impl StartBasis {
             StartBasis::Assigned => "assigned",
             StartBasis::InProcess => "in_process",
             StartBasis::StartDate => "start_date",
+            StartBasis::PrOpened => "pr_opened",
         }
     }
 
@@ -50,6 +54,7 @@ impl StartBasis {
             StartBasis::Assigned => "担当が付いた時",
             StartBasis::InProcess => "進行中にした時",
             StartBasis::StartDate => "開始日",
+            StartBasis::PrOpened => "PR を作った時",
         }
     }
 }
@@ -62,15 +67,26 @@ pub enum EndBasis {
     Completed,
     /// 自分の分を完了にした時（自分が担当でなければ、タスクを完了にした時）
     SelfDone,
+    /// タスクに付けた GitHub の PR に、作った人以外が初めてレビューした時
+    PrReviewed,
+    /// タスクに付けた GitHub の PR をマージした時
+    PrMerged,
 }
 
 impl EndBasis {
-    pub const ALL: [EndBasis; 2] = [EndBasis::Completed, EndBasis::SelfDone];
+    pub const ALL: [EndBasis; 4] = [
+        EndBasis::Completed,
+        EndBasis::SelfDone,
+        EndBasis::PrReviewed,
+        EndBasis::PrMerged,
+    ];
 
     pub fn code(self) -> &'static str {
         match self {
             EndBasis::Completed => "completed",
             EndBasis::SelfDone => "self_done",
+            EndBasis::PrReviewed => "pr_reviewed",
+            EndBasis::PrMerged => "pr_merged",
         }
     }
 
@@ -82,6 +98,8 @@ impl EndBasis {
         match self {
             EndBasis::Completed => "完了にした時",
             EndBasis::SelfDone => "自分の分を完了にした時",
+            EndBasis::PrReviewed => "PR の 1 回目のレビュー",
+            EndBasis::PrMerged => "PR をマージした時",
         }
     }
 }
@@ -115,6 +133,38 @@ impl Basis {
     /// 「進行中にした時 → 完了にした時」。
     pub fn label(&self) -> String {
         format!("{} → {}", self.start.label(), self.end.label())
+    }
+
+    /// GitHub の PR の時刻を使うか。使うなら、タスクに付けた PR の時刻を読みに行く。
+    pub fn uses_pr(&self) -> bool {
+        self.start == StartBasis::PrOpened
+            || matches!(self.end, EndBasis::PrReviewed | EndBasis::PrMerged)
+    }
+}
+
+/// タスクに付けた GitHub の PR の時刻（GitHub から読んだもの。UNIX 時刻、ミリ秒）。
+///
+/// 所要時間の基準に PR の時刻を選んだタスクだけ、アプリが `gh` で読んで残す。
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub struct PrTimes {
+    /// 読んだ PR（`https://github.com/owner/repo/pull/12`）
+    pub url: String,
+    /// PR を作った時
+    pub opened: i64,
+    /// 作った人以外が初めてレビューした時
+    #[serde(default)]
+    pub reviewed: Option<i64>,
+    /// マージした時
+    #[serde(default)]
+    pub merged: Option<i64>,
+    /// GitHub から読んだ時
+    pub checked: i64,
+}
+
+impl PrTimes {
+    /// まだ変わりうるか（マージしていなければ、レビューやマージがこれから付く）。
+    pub fn settled(&self) -> bool {
+        self.merged.is_some()
     }
 }
 
@@ -162,6 +212,118 @@ pub fn workspace_basis(workspaces: &[crate::model::Workspace], id: &str) -> Opti
     None
 }
 
+/// PR の時刻を読み直す間隔（ミリ秒）。マージするまでは、この間隔で読み直す。
+pub const PR_REFRESH_MS: i64 = 60 * 60 * 1000;
+/// 完了にしたあとも PR の時刻を読み直す長さ（ミリ秒）。タスクを先に完了にして、あとでマージすることがある。
+pub const PR_AFTER_DONE_MS: i64 = 7 * 24 * 60 * 60 * 1000;
+/// 1 回に読む PR の数の上限。残りは次の回に読む。
+pub const PR_MAX_READS: usize = 30;
+
+/// PR の時刻についてすること。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PrJob {
+    /// GitHub から読む
+    Read { id: Id, url: String },
+    /// PR のリンクを外したので、残した時刻を消す
+    Clear { id: Id },
+}
+
+/// タスクに付けた GitHub の PR のリンク（`https://github.com/owner/repo/pull/12` の形）。
+/// URL 欄 → タイトル → 説明の順に探し、最初に見つかったもの。
+pub fn pr_url(task: &Task) -> Option<String> {
+    task.urls
+        .iter()
+        .map(String::as_str)
+        .chain([task.title.as_str(), task.description.as_str()])
+        .find_map(find_pr)
+}
+
+fn find_pr(text: &str) -> Option<String> {
+    const HOST: &str = "https://github.com/";
+    let mut rest = text;
+    while let Some(at) = rest.find(HOST) {
+        let candidate = &rest[at..];
+        // リンクは ASCII だけ。日本語の文に続けて書かれていても、そこで切る
+        let end = candidate
+            .find(|c: char| !c.is_ascii_graphic() || "<>\"'()[]{}`".contains(c))
+            .unwrap_or(candidate.len());
+        let path = candidate[HOST.len()..end]
+            .split(['?', '#'])
+            .next()
+            .unwrap_or("");
+        let parts: Vec<&str> = path.split('/').collect();
+        if let [owner, repo, "pull", number, ..] = parts.as_slice() {
+            let name = |s: &str| {
+                !s.is_empty()
+                    && s.chars()
+                        .all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c))
+            };
+            if name(owner) && name(repo) && number.parse::<u64>().is_ok() {
+                return Some(format!("{HOST}{owner}/{repo}/pull/{number}"));
+            }
+        }
+        rest = &candidate[end.max(HOST.len())..];
+    }
+    None
+}
+
+/// PR の時刻を読む・消すタスク。所要時間の基準に PR の時刻を使うタスクだけを見る。
+///
+/// 読むのは、まだ読んでいない・リンクが変わった・`force` で頼まれたものと、マージしていない PR を
+/// [`PR_REFRESH_MS`] より前に読んだもの（完了にしたタスクは、完了から [`PR_AFTER_DONE_MS`] の間だけ）。
+/// 頼まれたもの → まだ読んでいないもの → 古く読んだものの順に、[`PR_MAX_READS`] 件まで。
+pub fn pr_jobs(
+    tasks: &[Task],
+    workspaces: &[crate::model::Workspace],
+    standard: Basis,
+    now: i64,
+    force: Option<&str>,
+) -> Vec<PrJob> {
+    let mut clears = Vec::new();
+    // (順番, 読んだ時刻, id, URL)
+    let mut reads: Vec<(u8, i64, Id, String)> = Vec::new();
+    for task in tasks {
+        if task.status == Status::Cancelled || !basis_of(task, workspaces, standard).uses_pr() {
+            continue;
+        }
+        let forced = force == Some(task.id.as_str());
+        let Some(url) = pr_url(task) else {
+            if task.pr.is_some() {
+                clears.push(PrJob::Clear {
+                    id: task.id.clone(),
+                });
+            }
+            continue;
+        };
+        let rank = match &task.pr {
+            _ if forced => 0,
+            Some(pr) if pr.url == url => {
+                let watching = task.status.is_open()
+                    || task
+                        .completed_at
+                        .is_some_and(|done| pr.checked < done + PR_AFTER_DONE_MS);
+                if pr.settled() || !watching || now - pr.checked < PR_REFRESH_MS {
+                    continue;
+                }
+                2
+            }
+            _ => 1,
+        };
+        let checked = task.pr.as_ref().map_or(i64::MIN, |pr| pr.checked);
+        reads.push((rank, checked, task.id.clone(), url));
+    }
+    reads.sort_by_key(|r| (r.0, r.1));
+    clears
+        .into_iter()
+        .chain(
+            reads
+                .into_iter()
+                .take(PR_MAX_READS)
+                .map(|(_, _, id, url)| PrJob::Read { id, url }),
+        )
+        .collect()
+}
+
 /// 数えた区間。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Span {
@@ -173,6 +335,8 @@ pub struct Span {
     pub running: bool,
     /// 始まりに実際に使った基準。選んだ基準の時刻がないときは、ほかの時刻から数える
     pub from: StartBasis,
+    /// 終わりに実際に使った基準。PR の時刻がないまま完了にしたタスクは、完了にした時まで数える
+    pub to: EndBasis,
 }
 
 impl Span {
@@ -195,6 +359,12 @@ fn start_date_ms(when: &str) -> Option<i64> {
         .map(|t| t.timestamp_millis())
 }
 
+/// 残した PR の時刻。今付いている PR のものだけ（リンクを付け替えたら、読み直すまで使わない）。
+pub fn pr_of(task: &Task) -> Option<&PrTimes> {
+    let pr = task.pr.as_ref()?;
+    (pr_url(task).as_deref() == Some(pr.url.as_str())).then_some(pr)
+}
+
 /// その基準の始まりの時刻。なければ `None`。
 fn start_of(task: &Task, basis: StartBasis) -> Option<i64> {
     match basis {
@@ -202,11 +372,30 @@ fn start_of(task: &Task, basis: StartBasis) -> Option<i64> {
         StartBasis::Assigned => task.assigned_at,
         StartBasis::InProcess => task.started_at,
         StartBasis::StartDate => task.start.as_deref().and_then(start_date_ms),
+        StartBasis::PrOpened => pr_of(task).map(|pr| pr.opened),
     }
 }
 
-/// その基準の終わりの時刻。まだなら `None`。
-fn end_of(task: &Task, basis: EndBasis, self_id: Option<&str>) -> Option<i64> {
+/// その基準の終わりの時刻と、実際に使った基準。まだなら `None`。
+///
+/// PR の基準で、PR の時刻がまだない（PR がない、まだレビューやマージがない）まま完了にしたタスクは、
+/// 完了にした時を使う。
+fn end_of(task: &Task, basis: EndBasis, self_id: Option<&str>) -> Option<(i64, EndBasis)> {
+    let pr = match basis {
+        EndBasis::PrReviewed => pr_of(task).and_then(|pr| pr.reviewed),
+        EndBasis::PrMerged => pr_of(task).and_then(|pr| pr.merged),
+        EndBasis::Completed | EndBasis::SelfDone => {
+            return own_end_of(task, basis, self_id).map(|at| (at, basis))
+        }
+    };
+    match pr {
+        Some(at) => Some((at, basis)),
+        None => own_end_of(task, EndBasis::Completed, self_id).map(|at| (at, EndBasis::Completed)),
+    }
+}
+
+/// タスクの中で決まる終わりの時刻（完了にした時・自分の分を完了にした時）。
+fn own_end_of(task: &Task, basis: EndBasis, self_id: Option<&str>) -> Option<i64> {
     let completed = (task.status == Status::Completed)
         .then_some(task.completed_at)
         .flatten();
@@ -219,6 +408,7 @@ fn end_of(task: &Task, basis: EndBasis, self_id: Option<&str>) -> Option<i64> {
             }
             None => completed,
         },
+        EndBasis::PrReviewed | EndBasis::PrMerged => None,
     }
 }
 
@@ -234,7 +424,7 @@ pub fn span(task: &Task, basis: Basis, self_id: Option<&str>, now: i64) -> Optio
     }
     let chosen = start_of(task, basis.start);
     match end_of(task, basis.end, self_id) {
-        Some(end) => {
+        Some((end, to)) => {
             let (from, start) = match chosen {
                 Some(at) => (basis.start, at),
                 None => [
@@ -250,6 +440,7 @@ pub fn span(task: &Task, basis: Basis, self_id: Option<&str>, now: i64) -> Optio
                 end,
                 running: false,
                 from,
+                to,
             })
         }
         None => {
@@ -259,6 +450,7 @@ pub fn span(task: &Task, basis: Basis, self_id: Option<&str>, now: i64) -> Optio
                 end: now,
                 running: true,
                 from: basis.start,
+                to: basis.end,
             })
         }
     }
@@ -709,6 +901,7 @@ mod tests {
             time_basis: None,
             started_at: None,
             assigned_at: None,
+            pr: None,
         }
     }
 
@@ -820,6 +1013,145 @@ mod tests {
         let mut t = done(Some(H), 2 * H);
         t.status = Status::Cancelled;
         assert_eq!(span(&t, Basis::default(), None, 4 * H), None);
+    }
+
+    #[test]
+    fn prのリンクを探す() {
+        let mut t = task(Status::InProcess);
+        t.description = "レビュー待ち（https://github.com/o/r.js/pull/12/files?x=1）".into();
+        assert_eq!(
+            pr_url(&t).as_deref(),
+            Some("https://github.com/o/r.js/pull/12")
+        );
+        // URL 欄が先。issue は PR ではない
+        t.urls = vec![
+            "https://github.com/o/r/issues/3".into(),
+            "https://github.com/a/b/pull/7".into(),
+        ];
+        assert_eq!(pr_url(&t).as_deref(), Some("https://github.com/a/b/pull/7"));
+        t.urls.clear();
+        t.description = "https://github.com/o/r/pull/x".into();
+        assert_eq!(pr_url(&t), None);
+    }
+
+    #[test]
+    fn prの時刻を読むタスクを選ぶ() {
+        let pr_basis = Some(Basis::new(StartBasis::PrOpened, EndBasis::PrMerged));
+        let url = "https://github.com/o/r/pull/1";
+        let with = |id: &str, basis: Option<Basis>, pr: Option<PrTimes>| {
+            let mut t = task(Status::InProcess);
+            t.id = id.into();
+            t.time_basis = basis;
+            t.urls = vec![url.into()];
+            t.pr = pr;
+            t
+        };
+        let times = |checked: i64, merged: Option<i64>| PrTimes {
+            url: url.into(),
+            opened: 0,
+            reviewed: None,
+            merged,
+            checked,
+        };
+        let now = 10 * PR_REFRESH_MS;
+        let mut gone = with("gone", pr_basis, Some(times(now, None)));
+        gone.urls.clear();
+        let tasks = vec![
+            // 基準が PR でなければ見ない
+            with("plain", None, None),
+            with("fresh", pr_basis, Some(times(now - 1, None))),
+            with("stale", pr_basis, Some(times(now - PR_REFRESH_MS, None))),
+            with("merged", pr_basis, Some(times(0, Some(1)))),
+            with("new", pr_basis, None),
+            gone,
+        ];
+        let read = |id: &str| PrJob::Read {
+            id: id.into(),
+            url: url.into(),
+        };
+        assert_eq!(
+            pr_jobs(&tasks, &[], Basis::default(), now, None),
+            vec![
+                PrJob::Clear { id: "gone".into() },
+                read("new"),
+                read("stale")
+            ]
+        );
+        // 頼まれたものは、読んだばかりでも、マージしていても読む
+        assert_eq!(
+            pr_jobs(&tasks, &[], Basis::default(), now, Some("merged"))[1],
+            read("merged")
+        );
+        // 全体の標準が PR なら、タスクに基準がなくても読む
+        let all = pr_jobs(
+            &tasks,
+            &[],
+            Basis::new(StartBasis::PrOpened, EndBasis::PrMerged),
+            now,
+            None,
+        );
+        assert!(all.contains(&read("plain")));
+        // 完了にしてから長くたったものは読み直さない
+        let mut done = with("done", pr_basis, Some(times(now - PR_REFRESH_MS, None)));
+        done.status = Status::Completed;
+        done.completed_at = Some(now - PR_REFRESH_MS - PR_AFTER_DONE_MS - 1);
+        assert!(pr_jobs(&[done.clone()], &[], Basis::default(), now, None).is_empty());
+        done.completed_at = Some(now - PR_REFRESH_MS * 2);
+        assert_eq!(
+            pr_jobs(&[done], &[], Basis::default(), now, None),
+            vec![read("done")]
+        );
+    }
+
+    #[test]
+    fn prの時刻から数える() {
+        let mut t = task(Status::InProcess);
+        t.created_at = 0;
+        t.started_at = Some(H);
+        let b = Basis::new(StartBasis::PrOpened, EndBasis::PrMerged);
+        assert!(b.uses_pr());
+        assert!(!Basis::default().uses_pr());
+        // PR をまだ読んでいなければ、終わっていないタスクは数えない
+        assert_eq!(span(&t, b, None, 10 * H), None);
+        t.urls = vec!["https://github.com/o/r/pull/1".into()];
+        t.pr = Some(PrTimes {
+            url: "https://github.com/o/r/pull/1".into(),
+            opened: 2 * H,
+            reviewed: None,
+            merged: None,
+            checked: 3 * H,
+        });
+        let s = span(&t, b, None, 10 * H).unwrap();
+        assert_eq!(
+            (s.start, s.running, s.from, s.to),
+            (2 * H, true, StartBasis::PrOpened, EndBasis::PrMerged)
+        );
+        // レビューとマージが付くと、そこまで（タスクが終わっていなくても終わり）
+        t.pr.as_mut().unwrap().reviewed = Some(4 * H);
+        t.pr.as_mut().unwrap().merged = Some(6 * H);
+        let s = span(&t, b, None, 10 * H).unwrap();
+        assert_eq!((s.ms(), s.running), (4 * H, false));
+        let r = Basis::new(StartBasis::PrOpened, EndBasis::PrReviewed);
+        assert_eq!(span(&t, r, None, 10 * H).unwrap().ms(), 2 * H);
+        // リンクを別の PR に付け替えたら、読み直すまで前の PR の時刻は使わない
+        t.urls = vec!["https://github.com/o/r/pull/2".into()];
+        assert_eq!(span(&t, b, None, 10 * H), None);
+        t.urls = vec!["https://github.com/o/r/pull/1".into()];
+        // PR がないまま完了にしたタスクは、進行中にした時 → 完了にした時
+        t.pr = None;
+        t.status = Status::Completed;
+        t.completed_at = Some(5 * H);
+        let s = span(&t, b, None, 10 * H).unwrap();
+        assert_eq!(
+            (s.ms(), s.from, s.to),
+            (4 * H, StartBasis::InProcess, EndBasis::Completed)
+        );
+        // 保存する形
+        assert_eq!(b.code(), "pr_opened>pr_merged");
+        assert_eq!(
+            Basis::parse("created>pr_reviewed"),
+            Some(Basis::new(StartBasis::Created, EndBasis::PrReviewed))
+        );
     }
 
     #[test]

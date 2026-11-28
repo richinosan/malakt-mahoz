@@ -445,6 +445,10 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     ), created_at)
     WHERE EXISTS (SELECT 1 FROM task_assignees a WHERE a.task_id = tasks.id);
     "#,
+    // 25: タスクに付けた GitHub の PR の時刻（JSON、`timing::PrTimes`）。所要時間の基準に PR の時刻を選んだときに読む
+    r#"
+    ALTER TABLE tasks ADD COLUMN pr TEXT;
+    "#,
 ];
 
 pub(crate) fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {

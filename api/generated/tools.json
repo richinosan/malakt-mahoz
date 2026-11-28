@@ -225,17 +225,20 @@
                   "created",
                   "assigned",
                   "in_process",
-                  "start_date"
+                  "start_date",
+                  "pr_opened"
                 ],
-                "description": "作った時 / 担当が付いた時 / 進行中にした時 / 開始日"
+                "description": "作った時 / 担当が付いた時 / 進行中にした時 / 開始日 / タスクに付けた GitHub の PR を作った時"
               },
               "end": {
                 "type": "string",
                 "enum": [
                   "completed",
-                  "self_done"
+                  "self_done",
+                  "pr_reviewed",
+                  "pr_merged"
                 ],
-                "description": "完了にした時 / 自分の分を完了にした時"
+                "description": "完了にした時 / 自分の分を完了にした時 / PR に作った人以外が初めてレビューした時 / PR をマージした時。PR の時刻はアプリが gh で読む。PR の時刻がないまま完了にしたタスクは完了にした時まで"
               }
             },
             "required": [
@@ -398,17 +401,20 @@
                   "created",
                   "assigned",
                   "in_process",
-                  "start_date"
+                  "start_date",
+                  "pr_opened"
                 ],
-                "description": "作った時 / 担当が付いた時 / 進行中にした時 / 開始日"
+                "description": "作った時 / 担当が付いた時 / 進行中にした時 / 開始日 / タスクに付けた GitHub の PR を作った時"
               },
               "end": {
                 "type": "string",
                 "enum": [
                   "completed",
-                  "self_done"
+                  "self_done",
+                  "pr_reviewed",
+                  "pr_merged"
                 ],
-                "description": "完了にした時 / 自分の分を完了にした時"
+                "description": "完了にした時 / 自分の分を完了にした時 / PR に作った人以外が初めてレビューした時 / PR をマージした時。PR の時刻はアプリが gh で読む。PR の時刻がないまま完了にしたタスクは完了にした時まで"
               }
             },
             "required": [
@@ -1356,17 +1362,20 @@
                   "created",
                   "assigned",
                   "in_process",
-                  "start_date"
+                  "start_date",
+                  "pr_opened"
                 ],
-                "description": "作った時 / 担当が付いた時 / 進行中にした時 / 開始日"
+                "description": "作った時 / 担当が付いた時 / 進行中にした時 / 開始日 / タスクに付けた GitHub の PR を作った時"
               },
               "end": {
                 "type": "string",
                 "enum": [
                   "completed",
-                  "self_done"
+                  "self_done",
+                  "pr_reviewed",
+                  "pr_merged"
                 ],
-                "description": "完了にした時 / 自分の分を完了にした時"
+                "description": "完了にした時 / 自分の分を完了にした時 / PR に作った人以外が初めてレビューした時 / PR をマージした時。PR の時刻はアプリが gh で読む。PR の時刻がないまま完了にしたタスクは完了にした時まで"
               }
             },
             "required": [
@@ -1738,17 +1747,20 @@
                   "created",
                   "assigned",
                   "in_process",
-                  "start_date"
+                  "start_date",
+                  "pr_opened"
                 ],
-                "description": "作った時 / 担当が付いた時 / 進行中にした時 / 開始日"
+                "description": "作った時 / 担当が付いた時 / 進行中にした時 / 開始日 / タスクに付けた GitHub の PR を作った時"
               },
               "end": {
                 "type": "string",
                 "enum": [
                   "completed",
-                  "self_done"
+                  "self_done",
+                  "pr_reviewed",
+                  "pr_merged"
                 ],
-                "description": "完了にした時 / 自分の分を完了にした時"
+                "description": "完了にした時 / 自分の分を完了にした時 / PR に作った人以外が初めてレビューした時 / PR をマージした時。PR の時刻はアプリが gh で読む。PR の時刻がないまま完了にしたタスクは完了にした時まで"
               }
             },
             "required": [
@@ -2042,17 +2054,20 @@
                   "created",
                   "assigned",
                   "in_process",
-                  "start_date"
+                  "start_date",
+                  "pr_opened"
                 ],
-                "description": "作った時 / 担当が付いた時 / 進行中にした時 / 開始日"
+                "description": "作った時 / 担当が付いた時 / 進行中にした時 / 開始日 / タスクに付けた GitHub の PR を作った時"
               },
               "end": {
                 "type": "string",
                 "enum": [
                   "completed",
-                  "self_done"
+                  "self_done",
+                  "pr_reviewed",
+                  "pr_merged"
                 ],
-                "description": "完了にした時 / 自分の分を完了にした時"
+                "description": "完了にした時 / 自分の分を完了にした時 / PR に作った人以外が初めてレビューした時 / PR をマージした時。PR の時刻はアプリが gh で読む。PR の時刻がないまま完了にしたタスクは完了にした時まで"
               }
             },
             "required": [
