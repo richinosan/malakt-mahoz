@@ -720,7 +720,7 @@ fn status_color(status: Status, cx: &App) -> Hsla {
     }
 }
 
-fn status_icon(status: Status) -> &'static str {
+pub(crate) fn status_icon(status: Status) -> &'static str {
     match status {
         Status::NeedsAction => "circle",
         Status::InProcess => "circle-dot",

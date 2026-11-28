@@ -226,6 +226,8 @@ pub struct AiSettings {
     schedule_open: Option<String>,
     schedule_title: Entity<InputState>,
     schedule_ai: Entity<TextareaState>,
+    /// 開いた定時タスクの、雛形の説明・URL・カテゴリ・サブタスクを書く欄。
+    schedule_inputs: schedules::TemplateInputs,
     /// 定時タスクを保存できなかった理由。
     schedules_error: Option<SharedString>,
     /// モデルの一覧を開いている。
@@ -256,8 +258,10 @@ impl AiSettings {
                 .auto_grow(2, 8)
                 .placeholder("例: 先週完了したタスクから、定例の報告を下書きする")
         });
+        let schedule_inputs = schedules::TemplateInputs::new(window, cx);
         crate::term::shared(cx).update(cx, |terms, cx| terms.load_profiles(cx));
-        let subscriptions = vec![
+        let mut subscriptions = schedule_inputs.subscribe(window, cx);
+        subscriptions.extend([
             cx.subscribe_in(
                 &schedule_title,
                 window,
@@ -327,7 +331,7 @@ impl AiSettings {
                     _ => {}
                 },
             ),
-        ];
+        ]);
         Self {
             session,
             key_input,
@@ -343,6 +347,7 @@ impl AiSettings {
             schedule_open: None,
             schedule_title,
             schedule_ai,
+            schedule_inputs,
             schedules_error: None,
             model_open: false,
             _subscriptions: subscriptions,

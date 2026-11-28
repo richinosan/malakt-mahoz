@@ -1488,6 +1488,7 @@ impl Store {
             ai_rules: self.all_ai_rules()?,
             repeats: self.all_repeats()?,
             schedules: self.all_schedules()?,
+            schedule_files: self.all_schedule_files()?,
         })
     }
 
@@ -1606,6 +1607,22 @@ impl Store {
                 crate::attachment::put_blob(&tx, &a.hash, &bytes)?;
             }
             crate::attachment::insert(&tx, a)?;
+        }
+        for f in &data.schedule_files {
+            let known: bool = tx
+                .prepare_cached("SELECT EXISTS(SELECT 1 FROM blobs WHERE hash = ?1)")?
+                .query_row(params![f.hash], |r| r.get(0))?;
+            if !known {
+                let bytes = fetch(&f.hash)?;
+                if bytes.len() as u64 != f.size || crate::attachment::hash_of(&bytes) != f.hash {
+                    return Err(Error::Invalid(format!(
+                        "定時タスクの添付「{}」の中身が壊れています",
+                        f.name
+                    )));
+                }
+                crate::attachment::put_blob(&tx, &f.hash, &bytes)?;
+            }
+            crate::schedule::insert_file(&tx, f)?;
         }
         // 取り込んだ結果、親子が輪になっていないか確かめる。
         let reachable: i64 = tx.query_row(

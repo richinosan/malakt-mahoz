@@ -1,34 +1,59 @@
 //! 定時タスクの一覧。未所属（どのワークスペースにも入れない）と、ワークスペースごと。
 //!
-//! 「＋」で「新規定時タスク」を足し、その場でタイトルを書く。行を押すと開き、タイトル・いつ・担当・
-//! 期限・AI への指示をその場で変えられる。タイトルは Enter かほかの場所を押すと、AI への指示は
-//! Enter かほかの場所を押すと保存し（Shift+Enter で改行）、Esc で書きかけを捨てて閉じる。
+//! 「＋」で「新規定時タスク」を足し、その場でタイトルを書く。行を押すと開き、いつ・AI への指示と、
+//! 作るタスクの項目（タスクの詳細と同じもの: URL・状態・優先度・担当と役・開始日・期限・通知・進捗・
+//! カテゴリ・親タスク・ほかのワークスペース・説明・サブタスク・添付）をその場で変えられる。
+//! タイトル・説明・AI への指示は Enter かほかの場所を押すと保存し（説明と AI への指示は Shift+Enter
+//! で改行）、URL・カテゴリ・サブタスクは Enter で足す。Esc で書きかけを捨てて閉じる。
 
 use crate::press::button;
 use gpui_kit::base::TestSupportExt;
 use gpui_kit::component::button::ButtonVariants;
-use gpui_kit::component::input::{Input, Textarea};
+use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_kit::component::menu::PopupMenuItem;
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{ActiveTheme, Sizable};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use malakt_core::repeat::{self, Rule};
-use malakt_core::schedule::{due_days_label, Schedule, SchedulePatch};
-use malakt_core::{Person, Store};
+use malakt_core::schedule::{due_days_label, Schedule, SchedulePatch, Template};
+use malakt_core::view::Priority;
+use malakt_core::{alert, Person, Role, Roles, Status, Store, Task, Workspace};
 
 use super::rules::workspace_tree;
 use super::{col, px, row, AiSettings, CONTROL_WIDTH};
 use crate::feel::{self, Lit};
-use crate::render::app_icon;
+use crate::render::{app_icon, remove_x};
 use crate::repeat_view::{repeat_menu, Pick};
 
+/// 進捗のメニューに出す値。タスクの詳細と同じ。
+const PERCENTS: [u8; 5] = [0, 25, 50, 75, 100];
+/// 親タスクのメニューに出すタスクの数。
+const MAX_PARENTS: usize = 50;
 /// 期限のメニューに出す、作った日から何日後か。
 const DUE_DAYS: [i64; 6] = [0, 1, 2, 3, 7, 14];
 /// 期限の時刻のメニューに出す時。
 const DUE_HOURS: [u32; 7] = [9, 10, 12, 13, 15, 17, 18];
 /// 開いた行の、項目名の幅。
 const LABEL_WIDTH: Pixels = px(88.);
+
+/// 読めたら値、読めなかったら `problems` に理由を足して `None`。
+fn take<T>(problems: &mut Vec<String>, what: &str, r: malakt_core::Result<T>) -> Option<T> {
+    match r {
+        Ok(v) => Some(v),
+        Err(e) => {
+            problems.push(format!("{what}を読めませんでした: {e}"));
+            None
+        }
+    }
+}
+
+/// 回の日から何日後かで決める日。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Offset {
+    Start,
+    Due,
+}
 
 /// 項目名と値の 1 行。
 fn field(label: &'static str, value: impl IntoElement, cx: &App) -> Div {
@@ -71,6 +96,99 @@ fn on_patch(
     }
 }
 
+/// 開いた定時タスクの、雛形の説明・URL・カテゴリ・サブタスクを書く欄。
+pub struct TemplateInputs {
+    description: Entity<TextareaState>,
+    url: Entity<InputState>,
+    category: Entity<InputState>,
+    subtask: Entity<InputState>,
+}
+
+impl TemplateInputs {
+    pub fn new(window: &mut Window, cx: &mut Context<AiSettings>) -> Self {
+        TemplateInputs {
+            description: cx.new(|cx| {
+                TextareaState::new(window, cx)
+                    .submit_on_enter(true)
+                    .auto_grow(2, 8)
+                    .placeholder("ワークスペースの設定")
+            }),
+            url: cx.new(|cx| InputState::new(window, cx).placeholder("URL を追加")),
+            category: cx.new(|cx| InputState::new(window, cx).placeholder("カテゴリを追加")),
+            subtask: cx.new(|cx| InputState::new(window, cx).placeholder("サブタスクを追加")),
+        }
+    }
+
+    /// 書いたものを保存する・足すきっかけ。
+    pub fn subscribe(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<AiSettings>,
+    ) -> Vec<Subscription> {
+        vec![
+            cx.subscribe_in(
+                &self.description,
+                window,
+                |this, _, event: &InputEvent, _, cx| {
+                    if matches!(
+                        event,
+                        InputEvent::PressEnter { shift: false, .. } | InputEvent::Blur
+                    ) {
+                        this.save_schedule_description(cx);
+                    }
+                },
+            ),
+            cx.subscribe_in(
+                &self.url,
+                window,
+                |this, _, event: &InputEvent, window, cx| {
+                    if matches!(event, InputEvent::PressEnter { .. } | InputEvent::Blur) {
+                        this.add_schedule_urls(window, cx);
+                    }
+                },
+            ),
+            cx.subscribe_in(
+                &self.category,
+                window,
+                |this, _, event: &InputEvent, window, cx| {
+                    if matches!(event, InputEvent::PressEnter { .. }) {
+                        this.add_schedule_category(window, cx);
+                    }
+                },
+            ),
+            cx.subscribe_in(
+                &self.subtask,
+                window,
+                |this, _, event: &InputEvent, window, cx| {
+                    if matches!(event, InputEvent::PressEnter { .. }) {
+                        this.add_schedule_subtask(window, cx);
+                    }
+                },
+            ),
+        ]
+    }
+
+    /// 開いた定時タスクの値を入れる。足す欄は空にする。
+    fn load(&self, s: &Schedule, window: &mut Window, cx: &mut App) {
+        let description = s.task.description.clone().unwrap_or_default();
+        self.description
+            .update(cx, |i, cx| i.set_value(description, window, cx));
+        for input in [&self.url, &self.category, &self.subtask] {
+            input.update(cx, |i, cx| i.set_value("", window, cx));
+        }
+    }
+}
+
+/// 雛形の項目を `f` で変えた書き換え。
+fn task_patch(s: &Schedule, f: impl FnOnce(&mut Template)) -> SchedulePatch {
+    let mut task = s.task.clone();
+    f(&mut task);
+    SchedulePatch {
+        task: Some(task),
+        ..SchedulePatch::default()
+    }
+}
+
 impl AiSettings {
     /// 定時タスクの一覧で見る場所を変える。`None` は未所属。
     pub fn show_schedules(&mut self, scope: Option<String>, cx: &mut Context<Self>) {
@@ -82,18 +200,27 @@ impl AiSettings {
         cx.notify();
     }
 
-    /// データベースを変える。1 回の操作を、元に戻す 1 つの段にする。
+    /// データベースを変える。1 回の操作を、元に戻す 1 つの段にする。失敗は呼んだ側に返す。
+    fn try_write_schedules<R>(
+        &mut self,
+        cx: &mut Context<Self>,
+        f: impl FnOnce(&mut Store) -> malakt_core::Result<R>,
+    ) -> malakt_core::Result<R> {
+        crate::db::shared(cx).update(cx, |db, cx| {
+            let result = db.store.undo_mark().and_then(|()| f(&mut db.store));
+            let marked = db.store.undo_mark();
+            cx.notify();
+            result.and_then(|value| marked.map(|()| value))
+        })
+    }
+
+    /// データベースを変える。失敗したら、一覧の下に理由を出す。
     fn write_schedules<R>(
         &mut self,
         cx: &mut Context<Self>,
         f: impl FnOnce(&mut Store) -> malakt_core::Result<R>,
     ) -> Option<R> {
-        let result = crate::db::shared(cx).update(cx, |db, cx| {
-            let result = db.store.undo_mark().and_then(|()| f(&mut db.store));
-            let marked = db.store.undo_mark();
-            cx.notify();
-            result.and_then(|value| marked.map(|()| value))
-        });
+        let result = self.try_write_schedules(cx, f);
         match result {
             Ok(value) => {
                 self.schedules_error = None;
@@ -143,6 +270,164 @@ impl AiSettings {
             .update(cx, |i, cx| i.set_value(title, window, cx));
         self.schedule_ai
             .update(cx, |i, cx| i.set_value(ai, window, cx));
+        self.schedule_inputs.load(s, window, cx);
+        cx.notify();
+    }
+
+    /// 開いている定時タスク。
+    fn open_schedule(&self, cx: &App) -> Option<Schedule> {
+        self.schedule_open
+            .as_deref()
+            .and_then(|id| self.schedule(id, cx))
+    }
+
+    /// 開いている定時タスクの雛形を `f` で変える。保存できたら true。
+    fn edit_open_template(
+        &mut self,
+        cx: &mut Context<Self>,
+        f: impl FnOnce(&mut Template),
+    ) -> bool {
+        let Some(s) = self.open_schedule(cx) else {
+            return false;
+        };
+        let patch = task_patch(&s, f);
+        let now = malakt_core::view::now();
+        self.write_schedules(cx, |store| store.update_schedule(&s.id, &patch, &now))
+            .is_some()
+    }
+
+    /// 書いた説明を保存する。空にすると、ワークスペースの設定を使う。
+    pub(super) fn save_schedule_description(&mut self, cx: &mut Context<Self>) {
+        let Some(s) = self.open_schedule(cx) else {
+            return;
+        };
+        let text = self
+            .schedule_inputs
+            .description
+            .read(cx)
+            .value()
+            .trim()
+            .to_owned();
+        let next = (!text.is_empty()).then_some(text);
+        if next == s.task.description {
+            return;
+        }
+        self.edit_open_template(cx, |t| t.description = next);
+    }
+
+    /// 書いた URL を足す。空白や改行で区切って、いくつも貼れる。足せなかったときは、書いたまま残す。
+    fn add_schedule_urls(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let input = self.schedule_inputs.url.clone();
+        let text = input.read(cx).value().to_string();
+        let urls: Vec<String> = malakt_core::weblink::split(&text)
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        if urls.is_empty() {
+            return;
+        }
+        if self.edit_open_template(cx, |t| t.urls.extend(urls)) {
+            input.update(cx, |i, cx| i.set_value("", window, cx));
+        }
+    }
+
+    /// 書いたカテゴリを足す。ワークスペースの設定を使っていたときは、その中身に足す。
+    fn add_schedule_category(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let input = self.schedule_inputs.category.clone();
+        let text = input.read(cx).value().trim().to_owned();
+        if text.is_empty() {
+            return;
+        }
+        let Some(s) = self.open_schedule(cx) else {
+            return;
+        };
+        let defaults = match crate::db::shared(cx)
+            .read(cx)
+            .store
+            .draft_for(s.workspace_id.as_deref(), "")
+        {
+            Ok(draft) => draft.categories,
+            Err(error) => {
+                self.schedules_error = Some(error.to_string().into());
+                cx.notify();
+                return;
+            }
+        };
+        let saved = self.edit_open_template(cx, |t| {
+            t.categories.get_or_insert(defaults).push(text);
+        });
+        if saved {
+            input.update(cx, |i, cx| i.set_value("", window, cx));
+        }
+    }
+
+    /// 書いたサブタスクを足す。
+    fn add_schedule_subtask(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let input = self.schedule_inputs.subtask.clone();
+        let text = input.read(cx).value().trim().to_owned();
+        if text.is_empty() {
+            return;
+        }
+        if self.edit_open_template(cx, |t| t.subtasks.push(text)) {
+            input.update(cx, |i, cx| i.set_value("", window, cx));
+        }
+    }
+
+    /// ファイルを選んで、開いている定時タスクに添付する。
+    fn attach_schedule_files(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = self.schedule_open.clone() else {
+            return;
+        };
+        let chosen = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: true,
+            prompt: Some("添付".into()),
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(paths))) = chosen.await else {
+                return;
+            };
+            // 設定を閉じたあとなら、反映する先がない
+            let _ = this.update(cx, |this, cx| this.attach_schedule_paths(&id, &paths, cx));
+        })
+        .detach();
+    }
+
+    /// ファイルを定時タスクに添付する。添付できなかったものは、名前を並べて知らせる。
+    pub fn attach_schedule_paths(
+        &mut self,
+        id: &str,
+        paths: &[std::path::PathBuf],
+        cx: &mut Context<Self>,
+    ) {
+        let mut failed = Vec::new();
+        for path in paths {
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            // 大きすぎるファイルは、読む前に断る
+            let bytes = std::fs::metadata(path)
+                .map_err(malakt_core::Error::from)
+                .and_then(|meta| {
+                    if meta.len() > malakt_core::MAX_ATTACHMENT_BYTES {
+                        return Err(malakt_core::Error::Invalid(format!(
+                            "添付できるのは 1 ファイル {} までです",
+                            malakt_core::view::format_bytes(malakt_core::MAX_ATTACHMENT_BYTES)
+                        )));
+                    }
+                    Ok(std::fs::read(path)?)
+                });
+            let result = bytes.and_then(|bytes| {
+                self.try_write_schedules(cx, |s| s.add_schedule_file(id, &name, &bytes))
+            });
+            if let Err(error) = result {
+                failed.push(format!("「{name}」: {error}"));
+            }
+        }
+        self.schedules_error = (!failed.is_empty())
+            .then(|| format!("添付できませんでした。{}", failed.join("、")).into());
         cx.notify();
     }
 
@@ -163,6 +448,7 @@ impl AiSettings {
     fn save_open_schedule(&mut self, cx: &mut Context<Self>) {
         self.save_schedule_title(cx);
         self.save_schedule_ai(cx);
+        self.save_schedule_description(cx);
     }
 
     /// 書いたタイトルを保存する。空にしたときと変えていないときは、今のタイトルのまま。
@@ -216,6 +502,7 @@ impl AiSettings {
             return;
         };
         if let Some(s) = self.schedule(&id, cx) {
+            self.schedule_inputs.load(&s, window, cx);
             self.schedule_title
                 .update(cx, |i, cx| i.set_value(s.title, window, cx));
             self.schedule_ai
@@ -500,7 +787,7 @@ impl AiSettings {
             .into_any_element()
     }
 
-    /// 開いた定時タスクの、いつ・担当・期限・AI への指示。
+    /// 開いた定時タスクの、いつ・AI への指示と、作るタスクの項目。並びはタスクの詳細と同じ。
     fn schedule_fields(
         &self,
         s: &Schedule,
@@ -511,6 +798,41 @@ impl AiSettings {
         let theme = cx.theme().clone();
         let settings = cx.entity().downgrade();
         let id = s.id.clone();
+        let store = &crate::db::shared(cx).read(cx).store;
+        let workspace = s.workspace_id.as_deref();
+        // 読めなかったものは、一覧の下に理由を出し、その欄は空にする
+        let mut problems: Vec<String> = Vec::new();
+        let workspaces: Vec<Workspace> =
+            take(&mut problems, "ワークスペース", store.workspaces()).unwrap_or_default();
+        let files = take(&mut problems, "添付", store.schedule_files(&s.id)).unwrap_or_default();
+        let link_defaults: Vec<String> = match workspace {
+            Some(w) => take(
+                &mut problems,
+                "ワークスペースの設定",
+                store.task_defaults(w),
+            )
+            .map(|d| d.link_workspace_ids)
+            .unwrap_or_default(),
+            None => Vec::new(),
+        };
+        let standard =
+            take(&mut problems, "通知の標準", store.due_alert_standard()).unwrap_or_default();
+        // 親にできるタスク: 同じ場所の、終わっていないタスク
+        let scope = match workspace {
+            Some(w) => malakt_core::Scope::Workspace(w),
+            None => malakt_core::Scope::Unfiled,
+        };
+        let filter = malakt_core::TaskFilter {
+            include_descendants: false,
+            open_only: true,
+            assignee_id: None,
+            query: None,
+        };
+        let mut parents: Vec<Task> =
+            take(&mut problems, "タスク", store.tasks(scope, &filter)).unwrap_or_default();
+        parents.truncate(MAX_PARENTS);
+        let parent: Option<Task> = s.task.parent_id.as_deref().and_then(|p| store.task(p).ok());
+        let t = s.task.clone();
 
         // いつ
         let pick: Pick = std::rc::Rc::new({
@@ -562,6 +884,130 @@ impl AiSettings {
                 )
             });
 
+        // URL。タスクの詳細と同じチップ
+        let mut urls = row().w_full().gap_1p5().flex_wrap().items_center();
+        for (ix, url) in t.urls.iter().enumerate() {
+            let shown = crate::task_urls::shown(url);
+            let tip: SharedString = url.clone().into();
+            let remove = url.clone();
+            let (settings, id) = (settings.clone(), id.clone());
+            urls = urls.child(
+                row()
+                    .id(("schedule-url", ix))
+                    .flex_none()
+                    .max_w(px(260.))
+                    .gap_1()
+                    .items_center()
+                    .pl_2()
+                    .pr_0p5()
+                    .py_0p5()
+                    .rounded(feel::md())
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(theme.background)
+                    .text_sm()
+                    .child(app_icon(shown.icon).small().flex_none())
+                    .child(div().min_w_0().truncate().child(shown.label))
+                    .child(
+                        remove_x(
+                            ("schedule-url-remove", ix),
+                            "URL を外す",
+                            move |_, _, cx| {
+                                let remove = remove.clone();
+                                let _ = settings.update(cx, |this, cx| {
+                                    this.patch_template(&id, cx, |t| {
+                                        t.urls.retain(|u| *u != remove)
+                                    })
+                                });
+                            },
+                            cx,
+                        )
+                        .text_color(theme.muted_foreground)
+                        .test_support(),
+                    )
+                    .tooltip(move |window, cx| {
+                        gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
+                    })
+                    .test_support(),
+            );
+        }
+        let urls = urls.child(
+            div().w(px(220.)).max_w_full().child(
+                Input::new(&self.schedule_inputs.url)
+                    .id("schedule-url-input")
+                    .aria_label("URL を追加")
+                    .small()
+                    .bg(theme.background),
+            ),
+        );
+
+        // 状態
+        let status = button("schedule-status")
+            .accessibility_label(format!("状態: {}", t.status.label()))
+            .outline()
+            .small()
+            .child(menu_face(
+                crate::render::status_icon(t.status),
+                t.status.label().into(),
+                cx,
+            ))
+            .pop_menu({
+                let (settings, s) = (settings.clone(), s.clone());
+                move |mut menu, _, _| {
+                    for status in Status::ALL {
+                        menu = menu.item(
+                            PopupMenuItem::new(status.label())
+                                .checked(s.task.status == status)
+                                .on_click(on_patch(
+                                    settings.clone(),
+                                    s.id.clone(),
+                                    task_patch(&s, |t| t.status = status),
+                                )),
+                        );
+                    }
+                    menu
+                }
+            });
+
+        // 優先度。決めていなければ、ワークスペースの設定
+        let ws_priority = Priority::of(defaults.priority).label();
+        let shown_priority: SharedString = match t.priority {
+            Some(p) => Priority::of(p).label().into(),
+            None => format!("ワークスペースの設定（{ws_priority}）").into(),
+        };
+        let priority = button("schedule-priority")
+            .accessibility_label(format!("優先度: {shown_priority}"))
+            .outline()
+            .small()
+            .child(menu_face("signal-high", shown_priority, cx))
+            .pop_menu({
+                let (settings, s) = (settings.clone(), s.clone());
+                move |mut menu, _, _| {
+                    let set = |p: Option<u8>| {
+                        on_patch(
+                            settings.clone(),
+                            s.id.clone(),
+                            task_patch(&s, |t| t.priority = p),
+                        )
+                    };
+                    menu = menu
+                        .item(
+                            PopupMenuItem::new(format!("ワークスペースの設定（{ws_priority}）"))
+                                .checked(s.task.priority.is_none())
+                                .on_click(set(None)),
+                        )
+                        .separator();
+                    for p in [Priority::High, Priority::Mid, Priority::Low, Priority::None] {
+                        menu = menu.item(
+                            PopupMenuItem::new(p.label())
+                                .checked(s.task.priority.map(Priority::of) == Some(p))
+                                .on_click(set(Some(p.value()))),
+                        );
+                    }
+                    menu
+                }
+            });
+
         // 担当。選んでいなければ、ワークスペースの既定値
         let name_of = |pid: &str| people.iter().find(|p| p.id == pid).map(|p| p.name.clone());
         let names = |ids: &[String]| {
@@ -578,7 +1024,7 @@ impl AiSettings {
         } else {
             format!("ワークスペースの設定（{}）", names(&defaults.assignee_ids)).into()
         };
-        let assignees = button("schedule-assignees")
+        let assignee_menu = button("schedule-assignees")
             .accessibility_label(format!("担当: {shown_people}"))
             .outline()
             .small()
@@ -612,77 +1058,472 @@ impl AiSettings {
                     menu
                 }
             });
+        // 担当ごとの役（RACI）。タスクの詳細と同じく、名前の横に出す
+        let mut assignees = col().gap_1().child(div().flex().child(assignee_menu));
+        for (ix, pid) in s.assignee_ids.iter().enumerate() {
+            let Some(name) = name_of(pid) else {
+                continue;
+            };
+            let roles = s.roles_of(pid).unwrap_or_default();
+            let code = roles.iter().map(Role::code).collect::<Vec<_>>().join("・");
+            let role_menu = button(("schedule-roles", ix))
+                .accessibility_label(format!("{name} の役: {code}"))
+                .ghost()
+                .xsmall()
+                .child(menu_face("users", code.into(), cx))
+                .pop_menu({
+                    let (settings, s) = (settings.clone(), s.clone());
+                    move |mut menu, _, _| {
+                        for role in Role::ALL {
+                            let on = roles.contains(role);
+                            let next = if on {
+                                roles.without(role)
+                            } else {
+                                roles.with(role)
+                            };
+                            // 役は 1 つ以上
+                            let next = if next.is_empty() { roles } else { next };
+                            let patch = task_patch(&s, |t| {
+                                t.roles = s
+                                    .assignee_ids
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(i, other)| {
+                                        let mine = s.roles_of(other).unwrap_or_default();
+                                        if i == ix {
+                                            next
+                                        } else if next.contains(Role::A) && !on {
+                                            // A は 1 人だけ。ほかの人の A は外す
+                                            let rest = mine.without(Role::A);
+                                            if rest.is_empty() {
+                                                Roles::R
+                                            } else {
+                                                rest
+                                            }
+                                        } else {
+                                            mine
+                                        }
+                                    })
+                                    .collect();
+                            });
+                            menu = menu.item(
+                                PopupMenuItem::new(format!("{}（{}）", role.code(), role.label()))
+                                    .checked(on)
+                                    .on_click(on_patch(settings.clone(), s.id.clone(), patch)),
+                            );
+                        }
+                        menu
+                    }
+                });
+            assignees = assignees.child(
+                row()
+                    .gap_2()
+                    .items_center()
+                    .child(div().text_sm().child(name))
+                    .child(role_menu),
+            );
+        }
 
-        // 期限。決めていなければ、ワークスペースの既定値
-        let shown_due: SharedString = match s.due_label() {
-            Some(label) => label.into(),
-            None if defaults.due.is_some() => "ワークスペースの設定".into(),
-            None => "なし".into(),
+        // 開始日・期限。回の日から何日後か
+        let start = self.offset_menu(s, Offset::Start, cx);
+        let due = self.offset_menu(s, Offset::Due, cx);
+
+        // 通知。期限があるときだけ（タスクの詳細と同じ）
+        let has_due = s.due_days.is_some() || defaults.due.is_some();
+        let timed = match s.due_days {
+            Some(_) => s.due_time.is_some(),
+            None => defaults
+                .due
+                .as_deref()
+                .and_then(malakt_core::time_of)
+                .is_some(),
         };
-        let none_label = if defaults.due.is_some() {
-            "ワークスペースの設定"
-        } else {
-            "なし"
-        };
-        let due = button("schedule-due")
-            .accessibility_label(format!("期限: {shown_due}"))
+        let alerts = has_due.then(|| {
+            let (choices, label): (&'static [u32], fn(u32) -> String) = if timed {
+                (&alert::TIMED_CHOICES, alert::timed_label)
+            } else {
+                (&alert::DATE_CHOICES, alert::date_label)
+            };
+            let (own, base) = if timed {
+                (t.alerts_timed.clone(), standard.timed.clone())
+            } else {
+                (t.alerts_date.clone(), standard.date.clone())
+            };
+            let shown: SharedString = match &own {
+                Some(values) => alert::summary(values, label).into(),
+                None => format!("標準（{}）", alert::summary(&base, label)).into(),
+            };
+            button("schedule-alerts")
+                .accessibility_label(format!("通知: {shown}"))
+                .outline()
+                .small()
+                .child(menu_face("bell", shown, cx))
+                .pop_menu({
+                    let (settings, s) = (settings.clone(), s.clone());
+                    move |mut menu, _, _| {
+                        let set = |values: Option<Vec<u32>>| {
+                            let patch = task_patch(&s, |t| {
+                                if timed {
+                                    t.alerts_timed = values
+                                } else {
+                                    t.alerts_date = values
+                                }
+                            });
+                            on_patch(settings.clone(), s.id.clone(), patch)
+                        };
+                        menu = menu
+                            .item(
+                                PopupMenuItem::new(format!(
+                                    "標準に合わせる（{}）",
+                                    alert::summary(&base, label)
+                                ))
+                                .checked(own.is_none())
+                                .on_click(set(None)),
+                            )
+                            .separator();
+                        let chosen = own.clone().unwrap_or_else(|| base.clone());
+                        for value in choices.iter().copied() {
+                            let on = chosen.contains(&value);
+                            let mut next = chosen.clone();
+                            if on {
+                                next.retain(|v| *v != value);
+                            } else {
+                                next.push(value);
+                            }
+                            menu = menu.item(
+                                PopupMenuItem::new(label(value))
+                                    .checked(on)
+                                    .on_click(set(Some(next))),
+                            );
+                        }
+                        menu
+                    }
+                })
+        });
+
+        // 進捗
+        let percent = button("schedule-percent")
+            .accessibility_label(format!("進捗: {}%", t.percent))
             .outline()
             .small()
-            .child(menu_face("calendar", shown_due, cx))
+            .child(menu_face("gauge", format!("{}%", t.percent).into(), cx))
             .pop_menu({
-                let (settings, id) = (settings.clone(), id.clone());
-                let (days, time) = (s.due_days, s.due_time.clone());
-                move |mut menu, window, cx| {
-                    let set = |patch| on_patch(settings.clone(), id.clone(), patch);
-                    menu = menu.item(
-                        PopupMenuItem::new(none_label)
-                            .checked(days.is_none())
-                            .on_click(set(SchedulePatch {
-                                due_days: Some(None),
-                                ..SchedulePatch::default()
-                            })),
-                    );
-                    menu = menu.separator();
-                    for n in DUE_DAYS {
+                let (settings, s) = (settings.clone(), s.clone());
+                move |mut menu, _, _| {
+                    for value in PERCENTS {
                         menu = menu.item(
-                            PopupMenuItem::new(due_days_label(n))
-                                .checked(days == Some(n))
-                                .on_click(set(SchedulePatch {
-                                    due_days: Some(Some(n)),
-                                    ..SchedulePatch::default()
-                                })),
+                            PopupMenuItem::new(format!("{value}%"))
+                                .checked(s.task.percent == value)
+                                .on_click(on_patch(
+                                    settings.clone(),
+                                    s.id.clone(),
+                                    task_patch(&s, |t| t.percent = value),
+                                )),
                         );
                     }
-                    if days.is_none() {
-                        return menu;
-                    }
-                    let (settings, id, time) = (settings.clone(), id.clone(), time.clone());
-                    menu.separator()
-                        .submenu("時刻", window, cx, move |mut menu, _, _| {
-                            let set = |patch| on_patch(settings.clone(), id.clone(), patch);
-                            menu = menu.item(
-                                PopupMenuItem::new("なし")
-                                    .checked(time.is_none())
-                                    .on_click(set(SchedulePatch {
-                                        due_time: Some(None),
-                                        ..SchedulePatch::default()
-                                    })),
-                            );
-                            for hour in DUE_HOURS {
-                                let value = format!("{hour:02}:00");
-                                menu = menu.item(
-                                    PopupMenuItem::new(format!("{hour}:00"))
-                                        .checked(time.as_deref() == Some(value.as_str()))
-                                        .on_click(set(SchedulePatch {
-                                            due_time: Some(Some(value)),
-                                            ..SchedulePatch::default()
-                                        })),
-                                );
-                            }
-                            menu
-                        })
+                    menu
                 }
             });
+
+        // カテゴリ。決めていなければ、ワークスペースの設定
+        let mut categories = row().w_full().gap_1p5().flex_wrap().items_center();
+        match &t.categories {
+            None => {
+                let text = if defaults.categories.is_empty() {
+                    "ワークスペースの設定（なし）".to_owned()
+                } else {
+                    format!("ワークスペースの設定（{}）", defaults.categories.join("、"))
+                };
+                categories = categories.child(
+                    div()
+                        .text_sm()
+                        .text_color(theme.muted_foreground)
+                        .child(text),
+                );
+            }
+            Some(list) => {
+                for (ix, c) in list.iter().enumerate() {
+                    let value = c.clone();
+                    let (settings, id) = (settings.clone(), id.clone());
+                    categories = categories.child(
+                        row()
+                            .id(("schedule-cat", ix))
+                            .flex_none()
+                            .max_w_full()
+                            .gap_0p5()
+                            .rounded_full()
+                            .bg(theme.secondary)
+                            .py_0p5()
+                            .pr_0p5()
+                            .pl_2p5()
+                            .text_sm()
+                            .text_color(theme.secondary_foreground)
+                            .child(div().min_w_0().truncate().child(c.clone()))
+                            .child(
+                                remove_x(
+                                    ("schedule-cat-remove", ix),
+                                    format!("カテゴリ「{c}」を外す"),
+                                    move |_, _, cx| {
+                                        let value = value.clone();
+                                        let _ = settings.update(cx, |this, cx| {
+                                            this.patch_template(&id, cx, |t| {
+                                                if let Some(list) = &mut t.categories {
+                                                    list.retain(|c| *c != value);
+                                                }
+                                            })
+                                        });
+                                    },
+                                    cx,
+                                )
+                                .test_support(),
+                            )
+                            .test_support(),
+                    );
+                }
+                categories = categories.child(feel::gloss(
+                    button("schedule-cat-reset")
+                        .label("ワークスペースの設定に戻す")
+                        .ghost()
+                        .xsmall()
+                        .on_click(cx.listener({
+                            let id = id.clone();
+                            move |this, _, _, cx| {
+                                this.patch_template(&id, cx, |t| t.categories = None)
+                            }
+                        })),
+                ));
+            }
+        }
+        let categories = categories.child(
+            div().w(px(168.)).child(
+                Input::new(&self.schedule_inputs.category)
+                    .id("schedule-category-input")
+                    .aria_label("カテゴリを追加")
+                    .small()
+                    .bg(theme.background),
+            ),
+        );
+
+        // 親タスク
+        let shown_parent: SharedString = match (&t.parent_id, &parent) {
+            (None, _) => "なし".into(),
+            (Some(_), Some(p)) => p.title.clone().into(),
+            (Some(_), None) => "（消したタスク）".into(),
+        };
+        let parent_menu = button("schedule-parent")
+            .accessibility_label(format!("親タスク: {shown_parent}"))
+            .outline()
+            .small()
+            .child(menu_face("list-tree", shown_parent, cx))
+            .pop_menu({
+                let (settings, s) = (settings.clone(), s.clone());
+                move |mut menu, _, _| {
+                    menu = menu.item(
+                        PopupMenuItem::new("なし")
+                            .checked(s.task.parent_id.is_none())
+                            .on_click(on_patch(
+                                settings.clone(),
+                                s.id.clone(),
+                                task_patch(&s, |t| t.parent_id = None),
+                            )),
+                    );
+                    if !parents.is_empty() {
+                        menu = menu.separator();
+                    }
+                    for p in &parents {
+                        let pid = p.id.clone();
+                        menu = menu.item(
+                            PopupMenuItem::new(p.title.clone())
+                                .checked(s.task.parent_id.as_deref() == Some(p.id.as_str()))
+                                .on_click(on_patch(
+                                    settings.clone(),
+                                    s.id.clone(),
+                                    task_patch(&s, |t| t.parent_id = Some(pid)),
+                                )),
+                        );
+                    }
+                    menu
+                }
+            });
+
+        // ほかのワークスペース。決めていなければ、ワークスペースの設定
+        let ws_name = |wid: &str| {
+            workspaces
+                .iter()
+                .find(|w| w.id == wid)
+                .map(|w| w.name.clone())
+        };
+        let ws_names = |ids: &[String]| {
+            let list: Vec<String> = ids.iter().filter_map(|w| ws_name(w)).collect();
+            if list.is_empty() {
+                "なし".to_owned()
+            } else {
+                list.join("、")
+            }
+        };
+        let shown_links: SharedString = match &t.linked_workspace_ids {
+            Some(ids) => ws_names(ids).into(),
+            None => format!("ワークスペースの設定（{}）", ws_names(&link_defaults)).into(),
+        };
+        let links = workspace.map(|own| {
+            let tree = super::rules::workspace_tree(&workspaces);
+            let own = own.to_owned();
+            button("schedule-links")
+                .accessibility_label(format!("同期先: {shown_links}"))
+                .outline()
+                .small()
+                .child(menu_face("folders", shown_links, cx))
+                .pop_menu({
+                    let (settings, s) = (settings.clone(), s.clone());
+                    let defaults = link_defaults.clone();
+                    let label = format!("ワークスペースの設定（{}）", ws_names(&link_defaults));
+                    move |mut menu, _, _| {
+                        menu = menu
+                            .item(
+                                PopupMenuItem::new(label.clone())
+                                    .checked(s.task.linked_workspace_ids.is_none())
+                                    .on_click(on_patch(
+                                        settings.clone(),
+                                        s.id.clone(),
+                                        task_patch(&s, |t| t.linked_workspace_ids = None),
+                                    )),
+                            )
+                            .separator();
+                        let current = s
+                            .task
+                            .linked_workspace_ids
+                            .clone()
+                            .unwrap_or_else(|| defaults.clone());
+                        for (w, depth) in tree.iter().filter(|(w, _)| w.id != own) {
+                            let on = current.contains(&w.id);
+                            let mut next = current.clone();
+                            if on {
+                                next.retain(|x| *x != w.id);
+                            } else {
+                                next.push(w.id.clone());
+                            }
+                            menu = menu.item(
+                                PopupMenuItem::new(format!("{}{}", "　".repeat(*depth), w.name))
+                                    .checked(on)
+                                    .on_click(on_patch(
+                                        settings.clone(),
+                                        s.id.clone(),
+                                        task_patch(&s, |t| t.linked_workspace_ids = Some(next)),
+                                    )),
+                            );
+                        }
+                        menu
+                    }
+                })
+        });
+
+        // 説明。空ならワークスペースの設定
+        let description = div()
+            .id("schedule-description")
+            .flex_1()
+            .min_w_0()
+            .child(
+                Textarea::new(&self.schedule_inputs.description)
+                    .aria_label("説明")
+                    .small()
+                    .bg(theme.background),
+            )
+            .test_support();
+
+        // サブタスク
+        let mut subtasks = col().w_full().gap_1();
+        for (ix, title) in t.subtasks.iter().enumerate() {
+            let (settings, id) = (settings.clone(), id.clone());
+            subtasks = subtasks.child(
+                row()
+                    .gap_2()
+                    .items_center()
+                    .child(
+                        app_icon("circle")
+                            .small()
+                            .text_color(theme.muted_foreground),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_sm()
+                            .child(title.clone()),
+                    )
+                    .child(
+                        remove_x(
+                            ("schedule-sub-remove", ix),
+                            format!("サブタスク「{title}」を外す"),
+                            move |_, _, cx| {
+                                let _ = settings.update(cx, |this, cx| {
+                                    this.patch_template(&id, cx, |t| {
+                                        if ix < t.subtasks.len() {
+                                            t.subtasks.remove(ix);
+                                        }
+                                    })
+                                });
+                            },
+                            cx,
+                        )
+                        .test_support(),
+                    ),
+            );
+        }
+        let subtasks = subtasks.child(
+            Input::new(&self.schedule_inputs.subtask)
+                .id("schedule-subtask-input")
+                .aria_label("サブタスクを追加")
+                .small()
+                .bg(theme.background),
+        );
+
+        // 添付
+        let mut attachments = col().w_full().gap_1();
+        for (ix, f) in files.iter().enumerate() {
+            let file_id = f.id.clone();
+            attachments = attachments.child(
+                row()
+                    .gap_2()
+                    .items_center()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_sm()
+                            .child(f.name.clone()),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(malakt_core::view::format_bytes(f.size)),
+                    )
+                    .child(feel::gloss(
+                        button(("schedule-file-remove", ix))
+                            .label("外す")
+                            .ghost()
+                            .xsmall()
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                let file_id = file_id.clone();
+                                this.write_schedules(cx, |s| s.delete_schedule_file(&file_id));
+                            })),
+                    )),
+            );
+        }
+        let attachments = attachments.child(
+            row().child(feel::gloss(
+                button("schedule-attach")
+                    .icon(app_icon("paperclip"))
+                    .label("ファイルを添付")
+                    .ghost()
+                    .xsmall()
+                    .on_click(
+                        cx.listener(|this, _, window, cx| this.attach_schedule_files(window, cx)),
+                    ),
+            )),
+        );
 
         let ai = div()
             .id("schedule-ai")
@@ -702,9 +1543,145 @@ impl AiSettings {
             .pb_3()
             .pt_1()
             .child(field("いつ", when, cx))
+            .child(field("URL", urls, cx))
+            .child(field("状態", status, cx))
+            .child(field("優先度", priority, cx))
             .child(field("担当", assignees, cx))
+            .child(field("開始日", start, cx))
             .child(field("期限", due, cx))
+            .when_some(alerts, |d, menu| d.child(field("通知", menu, cx)))
+            .child(field("進捗", percent, cx))
+            .child(field("カテゴリ", categories, cx))
+            .child(field("親タスク", parent_menu, cx))
+            .when_some(links, |d, menu| d.child(field("同期先", menu, cx)))
+            .child(field("説明", description, cx))
+            .child(field("サブタスク", subtasks, cx))
+            .child(field("添付", attachments, cx))
             .child(field("AI への指示", ai, cx))
+            .when(!problems.is_empty(), |d| {
+                d.child(
+                    div()
+                        .text_xs()
+                        .text_color(theme.danger)
+                        .child(problems.join("、")),
+                )
+            })
             .test_support()
+    }
+
+    /// 開始日か期限の、回の日から何日後かを選ぶメニュー。
+    fn offset_menu(&self, s: &Schedule, which: Offset, cx: &mut Context<Self>) -> AnyElement {
+        let settings = cx.entity().downgrade();
+        let store = &crate::db::shared(cx).read(cx).store;
+        // 期限は、決めていなければワークスペースの設定
+        let ws_due = which == Offset::Due
+            && store
+                .draft_for(s.workspace_id.as_deref(), "")
+                .is_ok_and(|d| d.due.is_some());
+        let (days, time, label, icon, key) = match which {
+            Offset::Start => (
+                s.task.start_days,
+                s.task.start_time.clone(),
+                s.start_label(),
+                "calendar-arrow-up",
+                "schedule-start",
+            ),
+            Offset::Due => (
+                s.due_days,
+                s.due_time.clone(),
+                s.due_label(),
+                "calendar",
+                "schedule-due",
+            ),
+        };
+        let none_label = if ws_due {
+            "ワークスペースの設定"
+        } else {
+            "なし"
+        };
+        let shown: SharedString = label.unwrap_or_else(|| none_label.to_owned()).into();
+        let name = match which {
+            Offset::Start => "開始日",
+            Offset::Due => "期限",
+        };
+        let patch = move |s: &Schedule, days: Option<Option<i64>>, time: Option<Option<String>>| {
+            match which {
+                Offset::Due => SchedulePatch {
+                    due_days: days,
+                    due_time: time,
+                    ..SchedulePatch::default()
+                },
+                Offset::Start => task_patch(s, |t| {
+                    if let Some(days) = days {
+                        t.start_days = days;
+                    }
+                    if let Some(time) = time {
+                        t.start_time = time;
+                    }
+                }),
+            }
+        };
+        div()
+            .flex()
+            .child(
+                button(key)
+                    .accessibility_label(format!("{name}: {shown}"))
+                    .outline()
+                    .small()
+                    .child(menu_face(icon, shown, cx))
+                    .pop_menu({
+                        let s = s.clone();
+                        move |mut menu, window, cx| {
+                            let set =
+                                |p: SchedulePatch| on_patch(settings.clone(), s.id.clone(), p);
+                            menu = menu.item(
+                                PopupMenuItem::new(none_label)
+                                    .checked(days.is_none())
+                                    .on_click(set(patch(&s, Some(None), None))),
+                            );
+                            menu = menu.separator();
+                            for n in DUE_DAYS {
+                                menu = menu.item(
+                                    PopupMenuItem::new(due_days_label(n))
+                                        .checked(days == Some(n))
+                                        .on_click(set(patch(&s, Some(Some(n)), None))),
+                                );
+                            }
+                            if days.is_none() {
+                                return menu;
+                            }
+                            let (settings, s, time) = (settings.clone(), s.clone(), time.clone());
+                            menu.separator()
+                                .submenu("時刻", window, cx, move |mut menu, _, _| {
+                                    let set = |p: SchedulePatch| {
+                                        on_patch(settings.clone(), s.id.clone(), p)
+                                    };
+                                    menu = menu.item(
+                                        PopupMenuItem::new("なし")
+                                            .checked(time.is_none())
+                                            .on_click(set(patch(&s, None, Some(None)))),
+                                    );
+                                    for hour in DUE_HOURS {
+                                        let value = format!("{hour:02}:00");
+                                        menu = menu.item(
+                                            PopupMenuItem::new(format!("{hour}:00"))
+                                                .checked(time.as_deref() == Some(value.as_str()))
+                                                .on_click(set(patch(&s, None, Some(Some(value))))),
+                                        );
+                                    }
+                                    menu
+                                })
+                        }
+                    }),
+            )
+            .into_any_element()
+    }
+
+    /// 定時タスク `id` の雛形を `f` で変える。
+    fn patch_template(&mut self, id: &str, cx: &mut Context<Self>, f: impl FnOnce(&mut Template)) {
+        let Some(s) = self.schedule(id, cx) else {
+            return;
+        };
+        self.patch_schedule(id, task_patch(&s, f), cx);
     }
 }
