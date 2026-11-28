@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 
+use malakt_core::bots::{AiBot, BotPatch, Motion};
 use malakt_core::rules::{AiRule, Apply, RulePatch};
 use malakt_core::view::Priority;
 use malakt_core::{
@@ -314,6 +315,34 @@ fn rule_json(r: &AiRule) -> Value {
         "body": r.body,
         "enabled": r.enabled,
         "apply": r.apply.as_str(),
+    })
+}
+
+fn bot_json(b: &AiBot) -> Value {
+    json!({
+        "id": b.id,
+        "name": b.name,
+        "instructions": b.instructions,
+        "icon": b.icon_name(),
+        "color": b.color,
+        "motion": b.motion.as_str(),
+        "memories": b.memories().collect::<Vec<_>>(),
+    })
+}
+
+/// bot の書き換え。渡された項目だけを持つ。
+fn bot_patch(args: &Value) -> Result<BotPatch, String> {
+    let motion = match optional(args, "motion") {
+        None => None,
+        Some(text) => {
+            Some(Motion::parse(text).ok_or_else(|| format!("motion が正しくありません: {text}"))?)
+        }
+    };
+    Ok(BotPatch {
+        name: optional(args, "name").map(str::to_owned),
+        instructions: optional(args, "instructions").map(str::to_owned),
+        motion,
+        ..Default::default()
     })
 }
 
@@ -639,7 +668,7 @@ fn clip(text: &str, max: usize) -> String {
     }
 }
 
-/// ワークスペース 1 つの中身（`get_workspace`）。AI チャットに添えたワークスペースにも使う。
+/// ワークスペース 1 つの中身（`get_workspace`）。AI bot に添えたワークスペースにも使う。
 /// タスクは `WORKSPACE_TASKS` 件と `WORKSPACE_CHARS` 文字までにして、残りは件数だけを返す。
 pub fn workspace_context(store: &Store, id: &str, include_done: bool) -> Result<Value, String> {
     let core = |e: malakt_core::Error| e.to_string();
@@ -2308,6 +2337,49 @@ pub fn execute(
             store.delete_ai_rule(required(args, "id")?).map_err(core)?;
             json!({"deleted": true})
         }
+        "list_ai_bots" => store
+            .ai_bots()
+            .map_err(core)?
+            .iter()
+            .map(bot_json)
+            .collect(),
+        "create_ai_bot" => {
+            let patch = bot_patch(args)?;
+            let bot = store
+                .create_ai_bot(
+                    patch.name.as_deref().unwrap_or_default(),
+                    patch.instructions.as_deref().unwrap_or_default(),
+                )
+                .map_err(core)?;
+            let bot = store
+                .update_ai_bot(
+                    &bot.id,
+                    &BotPatch {
+                        motion: patch.motion,
+                        ..Default::default()
+                    },
+                )
+                .map_err(core)?;
+            bot_json(&bot)
+        }
+        "update_ai_bot" => {
+            let id = required(args, "id")?;
+            bot_json(&store.update_ai_bot(id, &bot_patch(args)?).map_err(core)?)
+        }
+        "delete_ai_bot" => {
+            store.delete_ai_bot(required(args, "id")?).map_err(core)?;
+            json!({"deleted": true})
+        }
+        "remember_for_bot" => bot_json(
+            &store
+                .remember_ai_bot(required(args, "bot_id")?, required(args, "fact")?)
+                .map_err(core)?,
+        ),
+        "forget_for_bot" => bot_json(
+            &store
+                .forget_ai_bot(required(args, "bot_id")?, required(args, "fact")?)
+                .map_err(core)?,
+        ),
         "update_workspace_settings" => {
             let id = required(args, "id")?;
             store.workspace(id).map_err(core)?;
@@ -2497,6 +2569,12 @@ pub fn summary(name: &str, args: &Value) -> String {
         "create_ai_rule" => format!("AI のルールを追加: {}", arg("name")),
         "update_ai_rule" => "AI のルールを変更".into(),
         "delete_ai_rule" => "AI のルールを削除".into(),
+        "list_ai_bots" => "AI bot の一覧を取得".into(),
+        "create_ai_bot" => format!("AI bot を追加: {}", arg("name")),
+        "update_ai_bot" => "AI bot を変更".into(),
+        "delete_ai_bot" => "AI bot を削除".into(),
+        "remember_for_bot" => format!("覚える: {}", arg("fact")),
+        "forget_for_bot" => format!("覚えたことを消す: {}", arg("fact")),
         "list_schedules" => "定時タスクを取得".into(),
         "create_schedule" => format!("定時タスクを追加: {}", arg("title")),
         "update_schedule" => "定時タスクを変更".into(),
@@ -2540,6 +2618,34 @@ pub fn shell_note(shell: &Shell, in_tab: bool) -> String {
         shell.label(),
         shell.guide()
     )
+}
+
+/// [`system_prompt_as`] で足す、話している bot の名前とインストラクション。
+/// 会話の間は変わらないものだけを入れる（覚えたことは [`bot_memory_note`] でメッセージに添える）。
+pub fn bot_prompt(bot: &AiBot) -> String {
+    let mut text = format!(
+        "\n\nあなたは「{}」という名前の AI bot です（bot の ID: {}）。\
+         ユーザーの好み、直されたこと、これから先も覚えておいてほしいことが会話で分かったら、\
+         remember_for_bot でこの bot に覚えてください。覚えたことが古くなったら forget_for_bot で消してください。\
+         ほかの bot に頼むよう言われたときや、ほかの bot のインストラクションに合う仕事は、hand_off_to_bot で渡してください。",
+        bot.name, bot.id
+    );
+    if !bot.instructions.trim().is_empty() {
+        text.push_str(&format!(
+            "\n\nユーザーが決めた、この bot へのインストラクションです。いつも従ってください。\n{}",
+            bot.instructions.trim()
+        ));
+    }
+    text
+}
+
+/// [`turn_note`] に添える、bot が覚えたこと。何も覚えていなければ空。
+pub fn bot_memory_note(bot: &AiBot) -> String {
+    let lines: Vec<String> = bot.memories().map(|m| format!("- {m}")).collect();
+    if lines.is_empty() {
+        return String::new();
+    }
+    format!("この bot が前の会話で覚えたこと:\n{}", lines.join("\n"))
 }
 
 /// ルールを AI に渡す文にする。1 つずつ名前を見出しにする。
@@ -2599,6 +2705,13 @@ pub fn workspace_rules(
 pub const COMMENT_RULE: &str = "コメントは、あとでタスクを読む人に要る事実だけを書いてください（決まったこと、分かったこと、変わった状態、次にすること）。「確認しました」「レビューしました」「対応しました」のように、作業をしたことだけを伝える文は書かないでください。「まだ〜していません」「〜は未確認です」のように、していないことも書かないでください。書く事実がなければ、コメントを書かないでください。";
 
 pub fn system_prompt(rules: &str) -> String {
+    system_prompt_as(None, rules)
+}
+
+/// bot として話すときの最初の指示。bot の名前とインストラクション（[`bot_prompt`]）を、
+/// ユーザーが決めたグローバルのルールの前に入れる（ルールはいつも最後）。
+pub fn system_prompt_as(bot: Option<&AiBot>, rules: &str) -> String {
+    let persona = bot.map(bot_prompt).unwrap_or_default();
     let rules = if rules.trim().is_empty() {
         String::new()
     } else {
@@ -2628,7 +2741,7 @@ pub fn system_prompt(rules: &str) -> String {
          - ユーザーに「これからはこうして」「いつも〜して」のように、これから先も続けてほしいことを頼まれたら、list_ai_rules で今のルールを読み、create_ai_rule か update_ai_rule でルールにしてください。あるワークスペースだけのことなら、そのワークスペースのルールにしてください。\n\
          - 返事は短く、ユーザーの言葉（ふつうは日本語）で書いてください。記法は使わず、ふつうの文章で書いてください。"
     );
-    prompt + &rules
+    prompt + &persona + &rules
 }
 
 #[cfg(test)]
@@ -3585,6 +3698,75 @@ mod tests {
         assert_eq!(
             run(&mut store, "list_ai_rules", json!({}))["global"],
             json!([])
+        );
+    }
+
+    #[test]
+    fn ai_bots_are_added_changed_remember_and_removed() {
+        let mut store = Store::open_in_memory().unwrap();
+        let first = run(&mut store, "list_ai_bots", json!({}))[0].clone();
+        assert_eq!(first["name"], "AI bot");
+        let bot = run(
+            &mut store,
+            "create_ai_bot",
+            json!({"name": "秘書", "instructions": "敬語で短く答える", "motion": "bounce"}),
+        );
+        assert_eq!(bot["motion"], "bounce");
+        assert_eq!(bot["icon"], malakt_core::bots::DEFAULT_BOT_ICON);
+        let id = bot["id"].as_str().unwrap();
+        let changed = run(
+            &mut store,
+            "update_ai_bot",
+            json!({"id": id, "name": "相棒", "motion": "spin"}),
+        );
+        assert_eq!(
+            (changed["name"].clone(), changed["motion"].clone()),
+            (json!("相棒"), json!("spin"))
+        );
+        assert_eq!(changed["instructions"], "敬語で短く答える");
+        assert!(execute(
+            &mut store,
+            None,
+            "update_ai_bot",
+            &json!({"id": id, "motion": "dance"})
+        )
+        .is_err());
+
+        run(
+            &mut store,
+            "remember_for_bot",
+            json!({"bot_id": id, "fact": "金曜は午後休み"}),
+        );
+        let bots = run(&mut store, "list_ai_bots", json!({}));
+        assert_eq!(bots[1]["memories"], json!(["金曜は午後休み"]));
+        let saved = store.ai_bot(id).unwrap();
+        assert!(bot_prompt(&saved).contains("「相棒」"));
+        assert!(bot_prompt(&saved).contains("敬語で短く答える"));
+        // 覚えたことは最初の指示に入れず、メッセージに添える
+        assert!(!bot_prompt(&saved).contains("金曜は午後休み"));
+        assert!(bot_memory_note(&saved).contains("- 金曜は午後休み"));
+        run(
+            &mut store,
+            "forget_for_bot",
+            json!({"bot_id": id, "fact": "金曜は午後休み"}),
+        );
+        assert_eq!(bot_memory_note(&store.ai_bot(id).unwrap()), "");
+
+        assert!(!needs_confirmation("delete_ai_bot"));
+        run(&mut store, "delete_ai_bot", json!({"id": id}));
+        assert!(execute(
+            &mut store,
+            None,
+            "delete_ai_bot",
+            &json!({"id": first["id"]})
+        )
+        .is_err());
+        assert_eq!(
+            run(&mut store, "list_ai_bots", json!({}))
+                .as_array()
+                .unwrap()
+                .len(),
+            1
         );
     }
 

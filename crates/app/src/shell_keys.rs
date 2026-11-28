@@ -157,7 +157,7 @@ pub fn bind(cx: &mut App) {
             KeyBinding::new("shift-f3", FindPrevious, browser),
             KeyBinding::new("ctrl-shift-t", NewTerminal, terminal),
             KeyBinding::new("ctrl-shift-w", CloseTab, terminal),
-            // ダウンロードの一覧（Chrome と同じ）。ブラウザの外の Ctrl+J は AI チャット
+            // ダウンロードの一覧（Chrome と同じ）。ブラウザの外の Ctrl+J は AI bot
             KeyBinding::new("ctrl-j", ShowDownloads, browser),
         ]);
         keys.extend(digits(CTRL_ALT_DIGITS, TERMINAL));

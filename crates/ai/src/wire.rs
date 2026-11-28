@@ -111,6 +111,9 @@ pub struct Request<'a> {
     pub prefix_ttl: Option<&'static str>,
     /// 中身をそのまま渡せるファイルの種類。
     pub media: Media,
+    /// Responses API で、ChatGPT のプランで呼ぶ（[`crate::chatgpt`]）。返事はストリームで受け取り、
+    /// ツールは名前空間 [`crate::chatgpt::NAMESPACE`] にまとめる。
+    pub plan: bool,
 }
 
 /// Messages API の 1 回の返事の上限。ストリーミングなしで時間切れにならない大きさにする。
@@ -582,12 +585,16 @@ fn responses_body(request: &Request) -> Value {
                         input.push(json!({"role": "assistant", "content": text}));
                     }
                     for call in calls {
-                        input.push(json!({
+                        let mut item = json!({
                             "type": "function_call",
                             "call_id": call.id,
                             "name": call.name,
                             "arguments": call.args.to_string(),
-                        }));
+                        });
+                        if request.plan {
+                            item["namespace"] = json!(crate::chatgpt::NAMESPACE);
+                        }
+                        input.push(item);
                     }
                 }
             },
@@ -610,6 +617,17 @@ fn responses_body(request: &Request) -> Value {
             })
         })
         .collect();
+    let tools = if request.plan && !tools.is_empty() {
+        // ChatGPT のプランでは、関数のツールを名前空間に入れて渡す
+        vec![json!({
+            "type": "namespace",
+            "name": crate::chatgpt::NAMESPACE,
+            "description": "Malakt Mahoz のタスクと画面を読み書きするツール",
+            "tools": tools,
+        })]
+    } else {
+        tools
+    };
     let mut body = json!({
         "model": request.model,
         "instructions": request.system,
@@ -619,6 +637,10 @@ fn responses_body(request: &Request) -> Value {
         "store": false,
         "include": ["reasoning.encrypted_content"],
     });
+    if request.plan {
+        // ChatGPT のプランは、ストリームでしか受け付けない
+        body["stream"] = json!(true);
+    }
     if let Some(effort) = request.effort.wire() {
         body["reasoning"] = json!({"effort": effort});
     }
@@ -974,6 +996,7 @@ mod tests {
             fallbacks: false,
             prefix_ttl: None,
             media: Media::All,
+            plan: false,
         }
     }
 
@@ -1287,6 +1310,38 @@ mod tests {
         let body = super::body(Wire::Responses, &request(&turns, &tools, Effort::Default));
         assert_eq!(body["input"], response["output"]);
         assert!(body.get("reasoning").is_none());
+        assert!(body.get("stream").is_none());
+    }
+
+    #[test]
+    fn the_chatgpt_plan_streams_and_puts_tools_in_a_namespace() {
+        let (turns, tools) = (conversation(None), tools());
+        let mut plan = request(&turns, &tools, Effort::Default);
+        plan.plan = true;
+        let body = body(Wire::Responses, &plan);
+        assert_eq!(body["stream"], true);
+        assert_eq!(body["store"], false);
+        let namespaces = body["tools"].as_array().unwrap();
+        assert_eq!(namespaces.len(), 1);
+        assert_eq!(namespaces[0]["type"], "namespace");
+        assert_eq!(namespaces[0]["name"], crate::chatgpt::NAMESPACE);
+        assert_eq!(namespaces[0]["tools"][0]["name"], "list_tasks");
+        assert_eq!(namespaces[0]["tools"][0]["type"], "function");
+        // ほかの形式から続けた呼び出しにも、名前空間を付ける
+        assert_eq!(body["input"][2]["namespace"], crate::chatgpt::NAMESPACE);
+        assert_eq!(body["input"][2]["name"], "list_tasks");
+
+        // ツールがなければ、名前空間も送らない
+        let none = super::body(Wire::Responses, &Request { tools: &[], ..plan });
+        assert_eq!(none["tools"], json!([]));
+
+        // 名前空間の中の関数の呼び出しは、名前だけで読む
+        let response = json!({"status": "completed", "output": [
+            {"type": "function_call", "call_id": "c1", "name": "get_task",
+             "namespace": "malakt", "arguments": "{\"id\":\"1\"}"},
+        ]});
+        let reply = parse(Wire::Responses, &response).unwrap();
+        assert_eq!(reply.calls[0].name, "get_task");
     }
 
     #[test]

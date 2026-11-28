@@ -189,6 +189,7 @@ mod tests {
         ("pomodoro.rs", include_str!("pomodoro.rs")),
         ("timing_view.rs", include_str!("timing_view.rs")),
         ("keys_help.rs", include_str!("keys_help.rs")),
+        ("caldav_settings.rs", include_str!("caldav_settings.rs")),
     ];
 
     /// コメントを除いたコードの行。

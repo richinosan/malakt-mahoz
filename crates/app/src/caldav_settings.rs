@@ -2,18 +2,24 @@
 //! 追加・外す・今すぐ同期と、サーバーのカレンダーをワークスペースにつなぐメニュー。
 //!
 //! 「アカウントを追加」で設定の上にダイアログを重ね、プロバイダを選んでから、
-//! サーバー・ユーザー名・パスワード・説明を入れて足す。パスワードは OS のキーチェーンに入れる。
-//! サーバーのカレンダーごとに、つなぐワークスペースを選ぶ（新しく作る・今あるもの・つながない）。
+//! サーバー・ユーザー名・パスワード・説明を入れ、同期するカレンダーにチェックを付けて足す
+//! （最初は全部オン）。チェックしたカレンダーは、アカウントの名前のワークスペースの下に、
+//! カレンダーごとのサブワークスペースを作ってつなぐ。パスワードは OS のキーチェーンに入れる。
+//! 足したあとも、一覧のチェックボックスでつなぐ・接続しないを切り替え、メニューで
+//! つなぐワークスペースを選び直せる。
 
 use std::collections::HashMap;
 
 use gpui_kit::base::TestSupportExt;
 use gpui_kit::component::button::ButtonVariants;
+use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::PopupMenuItem;
+use gpui_kit::component::scroll::ScrollableElement;
 use gpui_kit::component::{ActiveTheme, Disableable, Sizable};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
+use malakt_caldav::http::Discovery;
 use malakt_core::caldav::{Account, Calendar};
 use malakt_core::{view, Id, Workspace};
 
@@ -116,6 +122,18 @@ enum Step {
     Pick,
     /// 選んだプロバイダのアカウントを書く
     Form(Provider),
+    /// 見つかったカレンダーから、同期するものを選ぶ
+    Calendars(Provider),
+}
+
+/// 調べ終わって、カレンダーを選んでいるアカウント。
+struct Pending {
+    user: String,
+    password: String,
+    name: String,
+    found: Discovery,
+    /// カレンダーごとの、同期するか（`found.calendars` と同じ順）
+    on: Vec<bool>,
 }
 
 /// 追加のダイアログを開く・閉じる。設定の上に重ねるのは、設定を出しているビュー。
@@ -139,7 +157,11 @@ pub fn server_url(input: &str) -> String {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Target {
     None,
+    /// アカウントのワークスペースの下に、新しく作る
     New,
+    /// チェックを付け直した。アカウントのワークスペースの下に、同じ名前でどこにも
+    /// つないでいないワークスペースがあればそれに、なければ新しく作ってつなぐ
+    Again,
     Workspace(Id),
 }
 
@@ -155,6 +177,8 @@ pub struct CalDavSettings {
     step: Option<Step>,
     /// 最後に出した段階。閉じたダイアログが消えるまでの間も、同じ中身を描く。
     shown: Step,
+    /// 調べ終わったアカウント。カレンダーを選んで「追加」を押すまで、まだ足さない。
+    pending: Option<Pending>,
     /// 追加のダイアログを開くたび・閉じるたびに進める。古い接続の結果は捨てる。
     add_gen: u64,
     /// サーバーを調べている。
@@ -198,6 +222,7 @@ impl CalDavSettings {
             name,
             step: None,
             shown: Step::Pick,
+            pending: None,
             add_gen: 0,
             connecting: false,
             add_error: None,
@@ -236,7 +261,7 @@ impl CalDavSettings {
     /// 追加のダイアログの見出し。プロバイダを選んだら、その名前。
     pub fn add_title(&self) -> &'static str {
         match self.step.unwrap_or(self.shown) {
-            Step::Form(p) => p.name(),
+            Step::Form(p) | Step::Calendars(p) => p.name(),
             Step::Pick => "アカウントを追加",
         }
     }
@@ -246,6 +271,7 @@ impl CalDavSettings {
         self.add_gen += 1;
         self.step = Some(Step::Pick);
         self.shown = Step::Pick;
+        self.pending = None;
         self.connecting = false;
         self.add_error = None;
         for input in [&self.url, &self.user, &self.password, &self.name] {
@@ -259,6 +285,7 @@ impl CalDavSettings {
     pub fn end_adding(&mut self, cx: &mut Context<Self>) {
         if self.step.take().is_some() {
             self.add_gen += 1;
+            self.pending = None;
             self.connecting = false;
             self.add_error = None;
             cx.notify();
@@ -301,7 +328,7 @@ impl CalDavSettings {
         cx.notify();
     }
 
-    /// 入れたサーバー・ユーザー名・パスワードでサーバーを調べ、アカウントを足す。
+    /// 入れたサーバー・ユーザー名・パスワードでサーバーを調べ、見つかったカレンダーを並べる。
     fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(Step::Form(provider)) = self.step else {
             return;
@@ -335,7 +362,7 @@ impl CalDavSettings {
             cx.notify();
             return;
         };
-        let (discover, secrets) = (caldav.discover.clone(), caldav.secrets.clone());
+        let discover = caldav.discover.clone();
         self.connecting = true;
         self.add_error = None;
         cx.notify();
@@ -370,48 +397,122 @@ impl CalDavSettings {
                     cx.notify();
                     return;
                 }
-                let added = this.db.update(cx, |db, cx| {
-                    let added = db.store.add_caldav_account(
-                        &found.base,
-                        &user,
-                        &name,
-                        &found.addresses,
-                        &found.calendars,
-                    );
-                    cx.notify();
-                    added
+                this.pending = Some(Pending {
+                    on: vec![true; found.calendars.len()],
+                    user,
+                    password,
+                    name,
+                    found,
                 });
-                let account = match added {
-                    Ok(a) => a,
-                    Err(e) => {
-                        this.add_error =
-                            Some(format!("アカウントを保存できませんでした。{e}").into());
-                        cx.notify();
-                        return;
-                    }
-                };
-                // パスワードを入れられなければ、足したアカウントも戻す
-                if let Err(e) = secrets.set(&account.id, &password) {
-                    let undone = this
-                        .db
-                        .update(cx, |db, _| db.store.remove_caldav_account(&account.id));
-                    this.add_error = Some(match undone {
-                        Ok(()) => e.into(),
-                        Err(more) => {
-                            format!("{e}（追加したアカウントも外せませんでした。{more}）").into()
-                        }
-                    });
-                    cx.notify();
-                    return;
-                }
-                this.error = found
-                    .calendars
-                    .is_empty()
-                    .then(|| "このアカウントには、タスクを入れられるカレンダーがありません".into());
-                this.close_adding(cx);
+                this.step = Some(Step::Calendars(provider));
+                cx.notify();
             });
         })
         .detach();
+    }
+
+    /// 選んだカレンダーで、アカウントを足す。チェックしたカレンダーは、アカウントの名前の
+    /// ワークスペースの下に、カレンダーごとのサブワークスペースを作ってつなぎ、すぐ同期する。
+    fn finish(&mut self, cx: &mut Context<Self>) {
+        let Some(pending) = self.pending.take() else {
+            return;
+        };
+        let Some(caldav) = cx.try_global::<CalDav>() else {
+            self.add_error = Some("この環境ではサーバーに接続できません".into());
+            self.pending = Some(pending);
+            cx.notify();
+            return;
+        };
+        let secrets = caldav.secrets.clone();
+        let Pending {
+            user,
+            password,
+            name,
+            found,
+            on,
+        } = &pending;
+        let added = self.db.update(cx, |db, cx| {
+            let added = db.store.add_caldav_account(
+                &found.base,
+                user,
+                name,
+                &found.addresses,
+                &found.calendars,
+            );
+            cx.notify();
+            added
+        });
+        let account = match added {
+            Ok(a) => a,
+            Err(e) => {
+                self.add_error = Some(format!("アカウントを保存できませんでした。{e}").into());
+                self.pending = Some(pending);
+                cx.notify();
+                return;
+            }
+        };
+        // パスワードを入れられなければ、足したアカウントも戻す
+        if let Err(e) = secrets.set(&account.id, password) {
+            let undone = self
+                .db
+                .update(cx, |db, _| db.store.remove_caldav_account(&account.id));
+            self.add_error = Some(match undone {
+                Ok(()) => e.into(),
+                Err(more) => format!("{e}（追加したアカウントも外せませんでした。{more}）").into(),
+            });
+            self.pending = Some(pending);
+            cx.notify();
+            return;
+        }
+        let chosen: Vec<&str> = found
+            .calendars
+            .iter()
+            .zip(on)
+            .filter(|(_, on)| **on)
+            .map(|(c, _)| c.href.as_str())
+            .collect();
+        let linked = self.db.update(cx, |db, cx| {
+            let store = &mut db.store;
+            let linked = (|| -> malakt_core::Result<usize> {
+                let cals: Vec<Calendar> = store
+                    .caldav_calendars(&account.id)?
+                    .into_iter()
+                    .filter(|c| chosen.contains(&c.href.as_str()))
+                    .collect();
+                if cals.is_empty() {
+                    return Ok(0);
+                }
+                let parent = store.create_workspace(None, &account.label())?;
+                for c in &cals {
+                    let w = store.create_workspace(Some(&parent.id), &c.name)?;
+                    store.link_caldav_calendar(&c.id, Some(&w.id))?;
+                }
+                Ok(cals.len())
+            })();
+            cx.notify();
+            linked
+        });
+        self.error = match linked {
+            Ok(0) if found.calendars.is_empty() => {
+                Some("このアカウントには、タスクを入れられるカレンダーがありません".into())
+            }
+            Ok(0) => None,
+            Ok(_) => {
+                let id = account.id.clone();
+                self.syncer.update(cx, |s, cx| s.request(&id, true, cx));
+                None
+            }
+            Err(e) => Some(format!("カレンダーをワークスペースにつなげませんでした。{e}").into()),
+        };
+        self.close_adding(cx);
+    }
+
+    /// 追加のダイアログで、カレンダーのチェックを切り替える。
+    fn toggle_pending(&mut self, ix: usize, cx: &mut Context<Self>) {
+        if let Some(on) = self.pending.as_mut().and_then(|p| p.on.get_mut(ix)) {
+            *on = !*on;
+            cx.notify();
+        }
     }
 
     /// リマインダーとの同期をやめる。このアプリが「リマインダー」に作ったものは消える。
@@ -423,21 +524,69 @@ impl CalDavSettings {
     }
 
     /// カレンダーをワークスペースにつなぐ・外す。つないだらすぐ同期する。
+    /// 新しいワークスペースは、アカウントのワークスペース（ほかのカレンダーをつないだ
+    /// ワークスペースの親、なければアカウントの名前のいちばん上のワークスペース。それも
+    /// なければ作る）の下に作る。
     fn link(
         &mut self,
-        account_id: &str,
+        account: &Account,
         calendar: &Calendar,
         target: Target,
         cx: &mut Context<Self>,
     ) {
+        let account_id = account.id.as_str();
         let result = self.db.update(cx, |db, cx| {
             let store = &mut db.store;
             let result = match &target {
                 Target::None => store.link_caldav_calendar(&calendar.id, None),
                 Target::Workspace(w) => store.link_caldav_calendar(&calendar.id, Some(w)),
-                Target::New => store
-                    .create_workspace(None, &calendar.name)
-                    .and_then(|w| store.link_caldav_calendar(&calendar.id, Some(&w.id))),
+                Target::New | Target::Again => (|| {
+                    let mut parent = None;
+                    for c in store.caldav_calendars(account_id)? {
+                        if let Some(w) = c.workspace_id.as_deref() {
+                            if let Some(p) = store.workspace(w)?.parent_id {
+                                parent = Some(p);
+                                break;
+                            }
+                        }
+                    }
+                    // ほかにつないだカレンダーがなければ、アカウントの名前のワークスペースを使う
+                    let label = account.label();
+                    if parent.is_none() {
+                        parent = store
+                            .workspaces()?
+                            .into_iter()
+                            .find(|w| w.parent_id.is_none() && w.name == label)
+                            .map(|w| w.id);
+                    }
+                    let parent = match parent {
+                        Some(p) => p,
+                        None => store.create_workspace(None, &label)?.id,
+                    };
+                    let mut reuse = None;
+                    if target == Target::Again {
+                        let mut linked = std::collections::HashSet::new();
+                        for a in store.caldav_accounts()? {
+                            for c in store.caldav_calendars(&a.id)? {
+                                linked.extend(c.workspace_id);
+                            }
+                        }
+                        reuse = store
+                            .workspaces()?
+                            .into_iter()
+                            .find(|w| {
+                                w.parent_id.as_deref() == Some(parent.as_str())
+                                    && w.name == calendar.name
+                                    && !linked.contains(&w.id)
+                            })
+                            .map(|w| w.id);
+                    }
+                    let w = match reuse {
+                        Some(w) => w,
+                        None => store.create_workspace(Some(&parent), &calendar.name)?.id,
+                    };
+                    store.link_caldav_calendar(&calendar.id, Some(&w))
+                })(),
             };
             cx.notify();
             result
@@ -559,16 +708,12 @@ impl CalDavSettings {
             .as_deref()
             .and_then(|w| names.iter().find(|(ws, _)| ws.id == w))
             .map(|(_, n)| n.clone());
-        let label: SharedString = current
-            .clone()
-            .unwrap_or_else(|| "つながない".into())
-            .into();
         let view = cx.entity().downgrade();
         let choices: Vec<(Target, String, bool, bool)> = {
             let mut list = vec![
                 (
                     Target::None,
-                    "つながない".to_owned(),
+                    "接続しない".to_owned(),
                     cal.workspace_id.is_none(),
                     true,
                 ),
@@ -582,15 +727,20 @@ impl CalDavSettings {
             }
             list
         };
-        let (account_id, calendar) = (account.id.clone(), cal.clone());
+        let on = cal.workspace_id.is_some();
+        let (toggle_account, toggle_cal) = (account.clone(), cal.clone());
+        let (account, calendar) = (account.clone(), cal.clone());
         row()
             .h(ROW_HEIGHT)
             .gap_2()
             .pl_6()
             .child(
-                app_icon(if cal.read_only { "lock" } else { "calendar" })
-                    .size_4()
-                    .text_color(theme.muted_foreground),
+                Checkbox::new(("caldav-on", ix))
+                    .checked(on)
+                    .on_click(cx.listener(move |this, _: &bool, _, cx| {
+                        let target = if on { Target::None } else { Target::Again };
+                        this.link(&toggle_account, &toggle_cal, target, cx)
+                    })),
             )
             .child(
                 div()
@@ -607,38 +757,44 @@ impl CalDavSettings {
                     })
                     .test_support(),
             )
-            .child(
-                button(("caldav-link", ix))
-                    .label(label)
-                    .icon(app_icon("chevron-down"))
-                    .outline()
-                    .small()
-                    .w(PICK_WIDTH)
-                    .pop_menu(move |menu, _, _| {
-                        let mut menu = menu;
-                        for (i, (target, name, checked, enabled)) in
-                            choices.iter().cloned().enumerate()
-                        {
-                            if i == 2 {
-                                menu = menu.separator();
+            .when(cal.read_only, |d| {
+                d.child(app_icon("lock").size_4().text_color(theme.muted_foreground))
+            })
+            // つないでいるときだけ、つなぐワークスペースを選び直すメニューを出す
+            .when_some(current, |d, current| {
+                d.child(
+                    button(("caldav-link", ix))
+                        .label(current)
+                        .icon(app_icon("chevron-down"))
+                        .outline()
+                        .small()
+                        .w(PICK_WIDTH)
+                        .pop_menu(move |menu, _, _| {
+                            let mut menu = menu;
+                            for (i, (target, name, checked, enabled)) in
+                                choices.iter().cloned().enumerate()
+                            {
+                                if i == 2 {
+                                    menu = menu.separator();
+                                }
+                                let (view, account, calendar) =
+                                    (view.clone(), account.clone(), calendar.clone());
+                                menu = menu.item(
+                                    PopupMenuItem::new(name)
+                                        .checked(checked)
+                                        .disabled(!enabled)
+                                        .on_click(move |_, _, cx| {
+                                            // 設定を閉じたあとなら、反映する先がない
+                                            let _ = view.update(cx, |this, cx| {
+                                                this.link(&account, &calendar, target.clone(), cx)
+                                            });
+                                        }),
+                                );
                             }
-                            let (view, account_id, calendar) =
-                                (view.clone(), account_id.clone(), calendar.clone());
-                            menu = menu.item(
-                                PopupMenuItem::new(name)
-                                    .checked(checked)
-                                    .disabled(!enabled)
-                                    .on_click(move |_, _, cx| {
-                                        // 設定を閉じたあとなら、反映する先がない
-                                        let _ = view.update(cx, |this, cx| {
-                                            this.link(&account_id, &calendar, target.clone(), cx)
-                                        });
-                                    }),
-                            );
-                        }
-                        menu
-                    }),
-            )
+                            menu
+                        }),
+                )
+            })
     }
 
     fn account_header(&self, account: &Account, ix: usize, cx: &mut Context<Self>) -> Div {
@@ -778,6 +934,7 @@ impl CalDavSettings {
         }
         let body = match self.shown {
             Step::Form(provider) => self.add_form(provider, cx),
+            Step::Calendars(_) => self.add_calendars(cx),
             Step::Pick => {
                 let mut list = col().id("caldav-providers").gap_1();
                 for provider in self.providers(cx) {
@@ -818,6 +975,71 @@ impl CalDavSettings {
                 .child(e)
                 .test_support()
         }))
+    }
+
+    /// 見つかったカレンダーの一覧。チェックしたものを同期する（最初は全部オン）。
+    fn add_calendars(&self, cx: &mut Context<Self>) -> Div {
+        let theme = cx.theme().clone();
+        let mut list = col().id("caldav-new-calendars").gap_1();
+        if let Some(p) = &self.pending {
+            for (ix, (cal, on)) in p.found.calendars.iter().zip(&p.on).enumerate() {
+                list = list.child(
+                    row()
+                        .h(ROW_HEIGHT)
+                        .gap_2()
+                        .child(
+                            Checkbox::new(("caldav-new-on", ix))
+                                .checked(*on)
+                                .label(cal.name.clone())
+                                .on_click(cx.listener(move |this, _: &bool, _, cx| {
+                                    this.toggle_pending(ix, cx)
+                                })),
+                        )
+                        .when(cal.read_only, |d| {
+                            d.child(app_icon("lock").size_4().text_color(theme.muted_foreground))
+                        }),
+                );
+            }
+            if p.found.calendars.is_empty() {
+                list = list.child(
+                    div()
+                        .text_sm()
+                        .text_color(theme.muted_foreground)
+                        .child("タスクを入れられるカレンダーがありません"),
+                );
+            }
+        }
+        col()
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(theme.muted_foreground)
+                    .child("同期するカレンダー"),
+            )
+            .child(
+                div()
+                    .id("caldav-new-calendars-scroll")
+                    .max_h(px(360.))
+                    .overflow_y_scrollbar()
+                    .child(list),
+            )
+            .child(
+                row()
+                    .gap_2()
+                    .justify_end()
+                    .child(feel::gloss(
+                        button("caldav-cancel")
+                            .label("キャンセル")
+                            .ghost()
+                            .on_click(cx.listener(|this, _, _, cx| this.close_adding(cx))),
+                    ))
+                    .child(feel::gloss(
+                        button("caldav-finish")
+                            .label("追加")
+                            .primary()
+                            .on_click(cx.listener(|this, _, _, cx| this.finish(cx))),
+                    )),
+            )
     }
 
     /// 選んだプロバイダのアカウントの欄。項目の名前を左に、入力欄を右に並べる。
@@ -867,7 +1089,7 @@ impl CalDavSettings {
                     ))
                     .child(feel::gloss(
                         button("caldav-connect")
-                            .label("追加")
+                            .label("次へ")
                             .primary()
                             .loading(self.connecting)
                             .disabled(self.connecting)

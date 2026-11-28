@@ -5,7 +5,7 @@
 //! 上の欄で絞り込める。
 //!
 //! タスクの画面のウィンドウでは、ほかのダイアログと同じ重ね方にするため `MainView` が出す
-//! （`PaneOverlay::Help`）。ほかのウィンドウ（AI チャット、ターミナル、ブラウザの小窓、タイマー、
+//! （`PaneOverlay::Help`）。ほかのウィンドウ（AI bot、ターミナル、ブラウザの小窓、タイマー、
 //! ポモドーロ）は [`toggle`] と [`overlay`] で出す。
 
 use std::collections::HashMap;
@@ -97,11 +97,7 @@ pub fn groups(panes: Option<Keys>) -> Vec<Group> {
         ));
     }
     all.extend([
-        group(
-            Place::AiChat,
-            "AI チャット",
-            own(crate::ai_view::chat_help()),
-        ),
+        group(Place::AiChat, "AI bot", own(crate::ai_view::chat_help())),
         group(
             Place::AiShell,
             "AI のタブ",
@@ -537,7 +533,7 @@ mod tests {
                 "ブラウザのタブ",
                 "どのウィンドウでも",
                 "タスクの画面",
-                "AI チャット"
+                "AI bot"
             ]
         );
         let all = ordered(groups(Some(Keys::default())), Place::Tasks);

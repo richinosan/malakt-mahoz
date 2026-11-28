@@ -1,4 +1,4 @@
-//! AI チャットから、アプリの操作（画面、カスタマイズ、設定、データ）を頼むシナリオテスト。
+//! AI bot から、アプリの操作（画面、カスタマイズ、設定、データ）を頼むシナリオテスト。
 //! AI の返事だけを差し替え、ツールは本物の画面とデータベースで動かす。
 
 use std::collections::VecDeque;
@@ -80,6 +80,7 @@ fn start(cx: &mut TestAppContext, store: Store) -> World {
         }),
         get: Arc::new(|url, _| Err(format!("テストでは {url} を読めません"))),
         probe: Arc::new(|url, _| Err(format!("テストでは {url} に接続しません"))),
+        form: Arc::new(|url, _| Err(format!("テストでは {url} に送れません"))),
         gh: Arc::new(|_| Spec::shell("exit 1")),
         slack: Arc::new(|_| Vec::new()),
         whoami: Arc::new(|_| vec![Spec::shell("exit 1")]),

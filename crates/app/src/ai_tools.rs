@@ -1,4 +1,4 @@
-//! アプリの画面と設定を、AI チャットから操作するためのツール。
+//! アプリの画面と設定を、AI bot から操作するためのツール。
 //!
 //! データベースだけで済む操作（タスク、ワークスペース、担当者、コメントなど）は
 //! `malakt_ai::tools` にあり、MCP でつなぐ外のエージェントにも同じものを出す。
@@ -202,6 +202,7 @@ pub fn summary(name: &str, args: &Value) -> Option<String> {
         "redo" => "やり直す".into(),
         "find_icons" => format!("アイコンを検索: {}", arg("query")),
         "set_workspace_icon" => "ワークスペースのアイコンを変更".into(),
+        "set_bot_icon" => "AI bot のアイコンを変更".into(),
         "get_customization" => "カスタマイズを取得".into(),
         "list_fonts" => "書体の一覧を取得".into(),
         "apply_theme" => format!("テーマを変更: {}", arg("name")),
@@ -213,6 +214,7 @@ pub fn summary(name: &str, args: &Value) -> Option<String> {
         "get_ai_settings" => "AI の設定を取得".into(),
         "set_ai_settings" => "AI の設定を変更".into(),
         "check_github" => "GitHub を確認".into(),
+        "hand_off_to_bot" => "ほかの bot に渡す".into(),
         "list_plugins" => "プラグインの一覧を取得".into(),
         "run_plugin_command" => format!("プラグインのコマンドを実行: {}", arg("command_id")),
         "set_plugin_enabled" => match args.get("enabled").and_then(Value::as_bool) {
@@ -592,6 +594,53 @@ impl MainView {
                     })
                     .ok_or_else(|| self.take_error("アイコンを変えられませんでした"))?;
                 json!({"id": saved.id, "icon": saved.icon, "color": saved.color})
+            }
+            "set_bot_icon" => {
+                let id = required(args, "id")?;
+                let bot = self
+                    .db
+                    .read(cx)
+                    .store
+                    .ai_bot(id)
+                    .map_err(|e| e.to_string())?;
+                let pick = |key: &str, now: Option<String>| -> Result<Option<String>, String> {
+                    match args.get(key) {
+                        None => Ok(now),
+                        Some(Value::Null) => Ok(None),
+                        Some(Value::String(s)) if s.trim().is_empty() => Ok(None),
+                        Some(Value::String(s)) => Ok(Some(s.trim().to_owned())),
+                        Some(other) => Err(format!("{key} が正しくありません: {other}")),
+                    }
+                };
+                let mut icon = pick("icon", bot.icon)?;
+                let color = pick("color", bot.color)?;
+                if let Some(path) = str_arg(args, "image_path").filter(|p| !p.trim().is_empty()) {
+                    if args.get("icon").is_some() {
+                        return Err("icon と image_path は一緒に渡せません".into());
+                    }
+                    let path = malakt_ai::tools::expand_dir(path.trim());
+                    let png = crate::icons::shrink_file(&path)?;
+                    icon = Some(
+                        self.write(cx, |s| s.add_custom_icon(&png))
+                            .ok_or_else(|| self.take_error("画像をアイコンにできませんでした"))?,
+                    );
+                }
+                if let Some(icon) = &icon {
+                    if !malakt_core::icon::is_custom(icon) && crate::icons::svg(icon).is_none() {
+                        return Err(format!(
+                            "アイコン「{icon}」はありません。find_icons で探してください"
+                        ));
+                    }
+                }
+                let patch = malakt_core::bots::BotPatch {
+                    icon: Some(icon),
+                    color: Some(color),
+                    ..Default::default()
+                };
+                let saved = self
+                    .write(cx, |s| s.update_ai_bot(id, &patch))
+                    .ok_or_else(|| self.take_error("bot のアイコンを変えられませんでした"))?;
+                json!({"id": saved.id, "icon": saved.icon_name(), "color": saved.color})
             }
             "get_customization" => self.customization_json(cx),
             "list_fonts" => {
@@ -1033,7 +1082,7 @@ impl MainView {
                 }
                 _ => {}
             }
-            // シェルは AI チャットの横に出るので、チャットも出す
+            // シェルは AI bot の横に出るので、チャットも出す
             if shell && chat.is_none() && !self.ai_open {
                 self.toggle_ai(window, cx);
             }
@@ -1584,6 +1633,17 @@ impl Session {
     ) -> Result<String, String> {
         match name {
             "get_ai_settings" => {}
+            "hand_off_to_bot" => {
+                let bot = args
+                    .get("bot_id")
+                    .and_then(Value::as_str)
+                    .ok_or("bot_id が必要です")?;
+                let message = args
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .ok_or("message が必要です")?;
+                return self.hand_off(bot, message, cx);
+            }
             "set_ai_settings" => self.ai_set_settings(args, cx)?,
             "check_github" => {
                 if !self.watch.enabled {
