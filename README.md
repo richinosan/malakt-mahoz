@@ -38,6 +38,7 @@
 - **ロック**: パスキー（Windows Hello、Touch ID、fprintd）。`Ctrl + Shift + L`（macOS は `⇧⌘L`）か、上のバーの右クリック。操作がないときに自動でロックする時間を選べます。ロック中も OS の通知は届きます（[docs/lock.md](docs/lock.md)）
 - **エクスポート / インポート**: 全データを zip 1 つに書き出し、別の端末で取り込み
 - **リマインダーとの連携**（標準はオフ）: macOS の「リマインダー」、Windows の通知（[docs/reminders.md](docs/reminders.md)）
+- **スタートアップ**（標準はオフ）: PC にログインしたときに起動（[docs/startup.md](docs/startup.md)）
 - **自動アップデート**: GitHub Releases の新しい版に入れ替え（[docs/update.md](docs/update.md)）
 - **完了チケット**: コマンドからタスクを完了にする（[docs/tickets.md](docs/tickets.md)）
 - **AI チャット**: `Ctrl/⌘ + J`（[docs/ai.md](docs/ai.md)）
@@ -85,6 +86,7 @@ mise run mutants    # ミューテーションテスト（cargo-mutants が必�
 - [ターミナル](docs/terminal.md)
 - [Claude Code などから使う（MCP）](docs/mcp.md)
 - [リマインダーとの連携](docs/reminders.md)
+- [スタートアップ](docs/startup.md)
 - [自動アップデート](docs/update.md)
 - [エクスポートの形式](docs/export.md)
 - [設計（構成、速さ、ディスクの使い方、モバイル）](docs/design.md)

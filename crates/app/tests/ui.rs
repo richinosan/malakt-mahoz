@@ -5337,6 +5337,83 @@ fn auto_update_can_be_turned_off(cx: &mut TestAppContext) {
     assert!(has(cx, window, "update-now"));
 }
 
+/// スタートアップの OS への登録を差し替える。返すのは、登録しているかどうか。
+fn launcher(
+    cx: &mut TestAppContext,
+    write: Result<(), &'static str>,
+) -> std::sync::Arc<std::sync::Mutex<bool>> {
+    let on = std::sync::Arc::new(std::sync::Mutex::new(false));
+    let (read, written) = (on.clone(), on.clone());
+    cx.update(|cx| {
+        cx.set_global(malakt_mahoz::autostart::Launcher {
+            available: true,
+            read: std::sync::Arc::new(move || Ok(*read.lock().unwrap())),
+            write: std::sync::Arc::new(move |value| {
+                write.map_err(str::to_owned)?;
+                *written.lock().unwrap() = value;
+                Ok(())
+            }),
+        })
+    });
+    on
+}
+
+/// 設定の「スタートアップ」のスイッチで、OS に登録する・外す。
+#[gpui_kit::test]
+fn autostart_is_switched_in_settings(cx: &mut TestAppContext) {
+    start(cx);
+    let (window, view) = open(cx, wide());
+    let on = launcher(cx, Ok(()));
+    let section = malakt_mahoz::state::CustomizeSection::Startup;
+
+    press_in_settings(cx, window, &view, section, "autostart-switch");
+    assert!(*on.lock().unwrap());
+    cx.update(|cx| {
+        assert!(malakt_mahoz::autostart::enabled(cx));
+        assert!(view.read(cx).error.is_none());
+    });
+
+    press_in_settings(cx, window, &view, section, "autostart-switch");
+    assert!(!*on.lock().unwrap());
+    cx.update(|cx| assert!(!malakt_mahoz::autostart::enabled(cx)));
+}
+
+/// 登録できなかったら、理由が画面に出て、オフのまま。
+#[gpui_kit::test]
+fn a_failed_autostart_is_shown(cx: &mut TestAppContext) {
+    start(cx);
+    let (window, view) = open(cx, wide());
+    let on = launcher(cx, Err("スタートアップに登録できませんでした: 拒否"));
+    press_in_settings(
+        cx,
+        window,
+        &view,
+        malakt_mahoz::state::CustomizeSection::Startup,
+        "autostart-switch",
+    );
+    assert!(!*on.lock().unwrap());
+    cx.update(|cx| {
+        assert_eq!(
+            view.read(cx).error.as_deref(),
+            Some("スタートアップに登録できませんでした: 拒否")
+        );
+    });
+}
+
+/// 登録できない OS では、設定に出さない。
+#[gpui_kit::test]
+fn autostart_is_hidden_where_it_cannot_be_registered(cx: &mut TestAppContext) {
+    start(cx);
+    let (window, view) = open(cx, wide());
+    ui(cx, window, |window, cx| window.click("open-settings", cx));
+    ui(cx, window, |window, cx| {
+        view.update(cx, |v, cx| {
+            v.show_appearance_section(malakt_mahoz::state::CustomizeSection::Startup, window, cx)
+        })
+    });
+    assert!(!has(cx, window, "autostart-switch"));
+}
+
 /// 閉じるときに入れ替えられなかったら、次に開いたウィンドウに理由が 1 回だけ出て、
 /// その版はもう取ってこない。
 #[gpui_kit::test]

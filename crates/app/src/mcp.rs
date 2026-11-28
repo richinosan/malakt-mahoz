@@ -29,6 +29,11 @@ pub const ENV_KEY: &str = "MALAKT_MAHOZ_KEY";
 /// [`config_json`] の中身を書いたファイルの場所。`claude --mcp-config "$MALAKT_MAHOZ_MCP_CONFIG"` で使う。
 pub const ENV_CONFIG: &str = "MALAKT_MAHOZ_MCP_CONFIG";
 
+/// スタートアップ（OS にログインしたときにアプリを起動するか）を読むツール。
+pub const GET_AUTOSTART: &str = "get_autostart";
+/// スタートアップに登録する・外すツール。
+pub const SET_AUTOSTART: &str = "set_autostart";
+
 /// 対応している MCP の版。新しい順。
 const PROTOCOLS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
 
@@ -108,6 +113,21 @@ pub fn tool_list() -> Vec<Value> {
         .collect();
     let empty = || json!({"type": "object", "properties": {}, "additionalProperties": false});
     list.push(json!({
+        "name": GET_AUTOSTART,
+        "description": "OS にログインしたときに malakt-mahoz のアプリを起動するか（スタートアップ）を読む。available が false なら、この OS では登録できない。",
+        "inputSchema": empty(),
+    }));
+    list.push(json!({
+        "name": SET_AUTOSTART,
+        "description": "OS にログインしたときに malakt-mahoz のアプリを起動するか（スタートアップ）を変える。enabled が true で登録、false で外す。undo では戻らないので、戻すときはもう一度呼ぶ。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"enabled": {"type": "boolean"}},
+            "required": ["enabled"],
+            "additionalProperties": false,
+        },
+    }));
+    list.push(json!({
         "name": "undo",
         "description": "このサーバーからの直前の変更を 1 つ元に戻す。続けて呼ぶと、さらに前の変更を戻す。",
         "inputSchema": empty(),
@@ -178,6 +198,7 @@ fn run_tool(store: &mut Store, name: &str, args: &Value) -> Result<String, Strin
         tools::GITHUB_FETCH | tools::SLACK_FETCH | tools::RUN_SHELL => {
             Err(format!("{name} というツールはありません"))
         }
+        GET_AUTOSTART | SET_AUTOSTART => autostart(&crate::autostart::process(), name, args),
         _ => {
             // 自分が登録されていれば、コメントの書き手にする（AI チャットと同じ）
             let author = store
@@ -197,6 +218,26 @@ fn run_tool(store: &mut Store, name: &str, args: &Value) -> Result<String, Strin
             result
         }
     }
+}
+
+/// スタートアップのツール。データベースではなく OS の登録を読み書きする。
+fn autostart(
+    launcher: &crate::autostart::Launcher,
+    name: &str,
+    args: &Value,
+) -> Result<String, String> {
+    if name == SET_AUTOSTART {
+        let on = args
+            .get("enabled")
+            .and_then(Value::as_bool)
+            .ok_or("enabled（true か false）が必要です")?;
+        if !launcher.available {
+            return Err("この OS ではスタートアップに登録できません".into());
+        }
+        (launcher.write)(on)?;
+    }
+    let on = launcher.available && (launcher.read)()?;
+    Ok(json!({"autostart": on, "available": launcher.available}).to_string())
 }
 
 /// Claude Code の `.mcp.json` や `--mcp-config` に渡す設定。
@@ -787,6 +828,59 @@ mod tests {
         // アプリが落ちて印が残っても、古い印では読めない
         lock::mark_open(&mut app, 1_000 - lock::OPEN_FOR - 1).unwrap();
         assert_eq!(failure(&mut s, "list_tasks", json!({})), LOCKED);
+    }
+
+    /// スタートアップのツールは、OS の登録を読み書きし、変えたあとの状態を返す。
+    #[test]
+    fn autostart_is_read_and_switched() {
+        use std::sync::{Arc, Mutex};
+        let on = Arc::new(Mutex::new(false));
+        let (read, write) = (on.clone(), on.clone());
+        let launcher = crate::autostart::Launcher {
+            available: true,
+            read: Arc::new(move || Ok(*read.lock().unwrap())),
+            write: Arc::new(move |value| {
+                *write.lock().unwrap() = value;
+                Ok(())
+            }),
+        };
+        let call = |name, args| -> Value {
+            serde_json::from_str(&autostart(&launcher, name, &args).unwrap()).unwrap()
+        };
+        assert_eq!(call(GET_AUTOSTART, json!({}))["autostart"], false);
+        assert_eq!(
+            call(SET_AUTOSTART, json!({"enabled": true}))["autostart"],
+            true
+        );
+        assert!(*on.lock().unwrap());
+        assert_eq!(call(GET_AUTOSTART, json!({}))["autostart"], true);
+        assert_eq!(
+            call(SET_AUTOSTART, json!({"enabled": false}))["autostart"],
+            false
+        );
+        assert!(autostart(&launcher, SET_AUTOSTART, &json!({})).is_err());
+
+        // 登録できない OS では、読むと available が false、変えようとすると理由が返る
+        let none = crate::autostart::Launcher::none();
+        let text = autostart(&none, GET_AUTOSTART, &json!({})).unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&text).unwrap(),
+            json!({"autostart": false, "available": false})
+        );
+        assert_eq!(
+            autostart(&none, SET_AUTOSTART, &json!({"enabled": true})),
+            Err("この OS ではスタートアップに登録できません".into())
+        );
+        // 失敗は、そのまま返す
+        let broken = crate::autostart::Launcher {
+            available: true,
+            read: Arc::new(|| Ok(false)),
+            write: Arc::new(|_| Err("スタートアップに登録できませんでした: 拒否".into())),
+        };
+        assert_eq!(
+            autostart(&broken, SET_AUTOSTART, &json!({"enabled": true})),
+            Err("スタートアップに登録できませんでした: 拒否".into())
+        );
     }
 
     fn keyed<'a>(

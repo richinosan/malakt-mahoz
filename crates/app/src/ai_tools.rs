@@ -310,10 +310,11 @@ pub fn definitions() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "set_app_options",
-            description: "アプリの設定を変える。渡した項目だけが変わる。reminders は OS のリマインダーとの連携、auto_update は自動アップデート、pane_keys はペインのキー操作（herdr / tmux）。",
+            description: "アプリの設定を変える。渡した項目だけが変わる。reminders は OS のリマインダーとの連携、autostart は OS にログインしたときにアプリを起動するか（スタートアップ）、auto_update は自動アップデート、pane_keys はペインのキー操作（herdr / tmux）。",
             schema: object(
                 json!({
                     "reminders": {"type": "boolean"},
+                    "autostart": {"type": "boolean"},
                     "auto_update": {"type": "boolean"},
                     "pane_keys": {"type": "string", "enum": ["herdr", "tmux"]},
                 }),
@@ -1087,6 +1088,7 @@ impl MainView {
             "lock_enabled": self.lock_enabled(cx),
             "lock": self.lock_json(cx),
             "reminders": crate::reminders::enabled(cx),
+            "autostart": crate::autostart::enabled(cx),
             "auto_update": crate::update::enabled(cx),
             "update_ready": crate::update::ready_version(cx).map(|v| v.to_string()),
             "terminal_shells": shells,
@@ -1547,6 +1549,7 @@ impl MainView {
 
     fn ai_set_options(&mut self, args: &Value, cx: &mut Context<Self>) -> Result<Value, String> {
         let reminders = bool_arg(args, "reminders")?;
+        let autostart = bool_arg(args, "autostart")?;
         let auto_update = bool_arg(args, "auto_update")?;
         let keys = match str_arg(args, "pane_keys") {
             None => None,
@@ -1557,6 +1560,10 @@ impl MainView {
                     .ok_or_else(|| format!("pane_keys は herdr / tmux のどれかです: {code}"))?,
             ),
         };
+        // OS に書くものから先に変える。失敗したら、ほかの項目も変えない
+        if let Some(on) = autostart {
+            crate::autostart::set_enabled(on, cx)?;
+        }
         if let Some(on) = reminders {
             crate::reminders::set_enabled(on, cx)
                 .map_err(|e| format!("リマインダーの設定を保存できませんでした: {e}"))?;
@@ -1573,6 +1580,7 @@ impl MainView {
         cx.notify();
         Ok(json!({
             "reminders": crate::reminders::enabled(cx),
+            "autostart": crate::autostart::enabled(cx),
             "auto_update": crate::update::enabled(cx),
             "pane_keys": self.pane_keys.code(),
         }))

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/core", "crates/ai", "crates/app", "crates/passkey", "crates/reminders", "crates/update", "crates/term"]
+members = ["crates/core", "crates/ai", "crates/app", "crates/passkey", "crates/reminders", "crates/update", "crates/term", "crates/autostart"]
 
 [workspace.package]
 version = "0.1.0"
@@ -15,6 +15,7 @@ malakt-passkey = { path = "crates/passkey" }
 malakt-reminders = { path = "crates/reminders" }
 malakt-update = { path = "crates/update" }
 malakt-term = { path = "crates/term" }
+malakt-autostart = { path = "crates/autostart" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
