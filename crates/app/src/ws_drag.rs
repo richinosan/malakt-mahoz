@@ -2,7 +2,7 @@
 //!
 //! 行の上の 1/4 に落とすとその行の前、下の 1/4 なら後ろ、真ん中ならその行のサブワークスペースの末尾に入る。
 //! 一覧の下の空いたところに落とすと、最上位の末尾に入る。
-//! AI チャットの上に落とすと、並びは変えずに、チャットの入力欄に添える。
+//! AI bot の上に落とすと、並びは変えずに、チャットの入力欄に添える。
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -218,7 +218,7 @@ pub struct WsDrag {
     pub over: Option<Spot>,
     /// 閉じた行を開くのを待っている回。乗せ直すと数が変わる。
     pub wait: usize,
-    /// 上にある AI チャットの画面。落とすと、そのチャットに添える。
+    /// 上にある AI bot の画面。落とすと、そのチャットに添える。
     pub chat: Option<WeakEntity<MainView>>,
 }
 
@@ -245,7 +245,7 @@ impl MainView {
         self.ws_dropped || self.ws_drag.as_ref().is_some_and(|d| d.moved)
     }
 
-    /// ドラッグ中のマウスの位置から、落とし先を探す。AI チャットの上なら、チャットが落とし先になる。
+    /// ドラッグ中のマウスの位置から、落とし先を探す。AI bot の上なら、チャットが落とし先になる。
     pub fn drag_ws_at(&mut self, at: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
         let me = cx.entity().downgrade();
         let chat = crate::drops::hit(&me, at, window, cx)
@@ -260,7 +260,7 @@ impl MainView {
         self.drag_ws_chat(chat, cx);
     }
 
-    /// ドラッグ中のワークスペースが上にある AI チャットの画面。動かし始める前は何もしない。
+    /// ドラッグ中のワークスペースが上にある AI bot の画面。動かし始める前は何もしない。
     pub fn drag_ws_chat(&mut self, chat: Option<WeakEntity<MainView>>, cx: &mut Context<Self>) {
         let Some(drag) = self.ws_drag.as_mut().filter(|d| d.moved) else {
             return;

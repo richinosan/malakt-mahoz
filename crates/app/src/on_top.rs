@@ -1,7 +1,7 @@
 //! ウィンドウを常に最前面に表示する。どのウィンドウでも、上のバーの右クリックメニューで切り替える。
 //!
 //! 覚え方はウィンドウの種類で違う。タスクのウィンドウは、ほかの画面の状態と一緒に
-//! `session.windows` に残す（[`crate::session::WindowState::on_top`]）。ポモドーロ、AI チャット、
+//! `session.windows` に残す（[`crate::session::WindowState::on_top`]）。ポモドーロ、AI bot、
 //! シェルのウィンドウは、種類ごとに [`SETTING`] に残し、次に開いたときに戻す。
 //! ブラウザの小さなウィンドウは、開いている間だけ覚える。
 //!
@@ -16,7 +16,7 @@ use gpui_kit::{AnyWindowHandle, App, Global, Window, WindowId};
 use malakt_core::Store;
 use serde_json::{json, Map, Value};
 
-/// ポモドーロ、AI チャット、シェルのウィンドウを最前面に出しておくか（種類の名前 → true / false）。
+/// ポモドーロ、AI bot、シェルのウィンドウを最前面に出しておくか（種類の名前 → true / false）。
 pub const SETTING: &str = "window.on_top";
 /// MCP のサーバーからの切り替えの頼み。後ろに種類の名前が付き、中身は "1"（出す）か "0"（戻す）。
 pub const ASK_PREFIX: &str = "window.on_top.ask.";
@@ -28,7 +28,7 @@ pub enum Kind {
     Task,
     Pomodoro,
     Timer,
-    /// AI チャットだけのウィンドウ
+    /// AI bot だけのウィンドウ
     Chat,
     /// シェル（ターミナルとブラウザのタブ）だけのウィンドウ
     Shell,
@@ -69,7 +69,7 @@ impl Kind {
             Kind::Task => "タスクのウィンドウ",
             Kind::Pomodoro => "ポモドーロのウィンドウ",
             Kind::Timer => "タイマーのウィンドウ",
-            Kind::Chat => "AI チャットのウィンドウ",
+            Kind::Chat => "AI bot のウィンドウ",
             Kind::Shell => "シェルのウィンドウ",
         }
     }

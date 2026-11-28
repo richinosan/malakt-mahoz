@@ -17,5 +17,5 @@
 
 ## AI と MCP から
 
-- アプリの AI チャット: 「スタートアップに登録して」のように頼むと、`set_app_options` の `autostart` で切り替えます
+- アプリの AI bot: 「スタートアップに登録して」のように頼むと、`set_app_options` の `autostart` で切り替えます
 - MCP: `get_autostart` で読み、`set_autostart`（`{"enabled": true}`）で切り替えます。`malakt-mahoz call set_autostart '{"enabled":true}'` でも同じです

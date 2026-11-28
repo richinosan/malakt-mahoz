@@ -238,7 +238,7 @@ pub fn init_with(store: malakt_core::Store, ai: AiConfig, cx: &mut App) {
             MenuItem::action("元に戻す", shortcuts::Undo),
             MenuItem::action("やり直す", shortcuts::Redo),
             MenuItem::action("検索", shortcuts::Find),
-            MenuItem::action("AI チャット", ToggleAi),
+            MenuItem::action("AI bot", ToggleAi),
             MenuItem::action("全画面", shortcuts::ToggleFullscreen),
             MenuItem::action("キー操作", shortcuts::ShowKeys),
             MenuItem::action("今すぐロック", LockNow),
@@ -375,7 +375,7 @@ fn follow_main(main: &mut Window, cx: &mut App) {
 }
 
 /// メインのウィンドウ（最初に開いた 1 枚）を閉じたら、ほかのウィンドウ（追加のウィンドウ、
-/// 別ウィンドウに出したペイン、AI チャット、シェル）もすべて閉じて終了する。
+/// 別ウィンドウに出したペイン、AI bot、シェル）もすべて閉じて終了する。
 /// 閉じたウィンドウは次の起動で戻す。新しい版を取ってあれば、ここで入れ替える。
 pub fn quit_when_main_closes(cx: &mut App) {
     cx.on_window_closed(|cx, _| {
@@ -478,7 +478,7 @@ pub fn window_title(name: &str) -> String {
     format!("{name} - {APP_NAME}")
 }
 
-/// AI チャット、またはシェルだけのウィンドウを開く。
+/// AI bot、またはシェルだけのウィンドウを開く。
 pub fn open_ai_window(mode: PaneMode, cx: &mut App) -> Result<AnyWindowHandle> {
     let px = |value: f32| px(value * UI_SCALE);
     let (title, window_size) = match mode {
@@ -486,7 +486,7 @@ pub fn open_ai_window(mode: PaneMode, cx: &mut App) -> Result<AnyWindowHandle> {
             window_title(&term::shared(cx).read(cx).active_label()),
             size(px(640.), px(480.)),
         ),
-        _ => (window_title("AI チャット"), size(px(860.), px(720.))),
+        _ => (window_title("AI bot"), size(px(860.), px(720.))),
     };
     let offset = px(28.) * (cx.windows().len() % 8) as f32;
     // 前に置いていた位置と大きさがあれば、そこに開く

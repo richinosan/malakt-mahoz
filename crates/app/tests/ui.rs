@@ -3880,7 +3880,7 @@ fn themes_are_chosen_and_saved_in_settings(cx: &mut TestAppContext) {
     assert_eq!(hex(cx.update(|cx| cx.theme().background)), "#fdf1f5");
 }
 
-/// 「カスタマイズ」でレイアウトを選ぶと、詳細の出し方・一覧の形・パネルの形・AI チャットの並びが変わる。
+/// 「カスタマイズ」でレイアウトを選ぶと、詳細の出し方・一覧の形・パネルの形・AI bot の並びが変わる。
 #[gpui_kit::test]
 fn layouts_are_chosen_in_settings(cx: &mut TestAppContext) {
     use malakt_mahoz::theme::{self, Layout};
@@ -3962,7 +3962,7 @@ fn layouts_are_chosen_in_settings(cx: &mut TestAppContext) {
     assert_eq!(saved(cx, "panels.float").as_deref(), Some("1"));
     assert_eq!(list(cx), full);
 
-    // 3 カラムは AI チャットも右に並べ、「一覧と詳細」はチャットを閉じる
+    // 3 カラムは AI bot も右に並べ、「一覧と詳細」はチャットを閉じる
     choose(cx, "3 カラム");
     assert_eq!(saved(cx, "panels.float"), None);
     assert_eq!(saved(cx, "panel.overlay").as_deref(), Some("0"));
@@ -4074,7 +4074,7 @@ fn customize_settings_are_searched(cx: &mut TestAppContext) {
     assert!(cx.update(|cx| view.read(cx).modal == Modal::None));
 }
 
-/// 1920 幅の画面でも、3 カラムにすると一覧・詳細・AI チャットの 3 つが並ぶ。
+/// 1920 幅の画面でも、3 カラムにすると一覧・詳細・AI bot の 3 つが並ぶ。
 #[gpui_kit::test]
 fn three_columns_fit_a_1920_wide_screen(cx: &mut TestAppContext) {
     use malakt_mahoz::state::PANEL_MIN;
@@ -5893,7 +5893,7 @@ fn a_bad_download_is_reported_but_being_offline_is_not(cx: &mut TestAppContext) 
 }
 
 /// どの幅でも、一覧の上のボタンは重ならず、タイトルは読める幅で残る。サブワークスペースの見出しも出る。
-/// AI チャットを開いても、列を広げても同じ。
+/// AI bot を開いても、列を広げても同じ。
 #[gpui_kit::test]
 fn narrow_widths_keep_the_title_and_never_overlap(cx: &mut TestAppContext) {
     use malakt_mahoz::state::{Column, COLUMN_MAX, TITLE_MIN};
@@ -5942,7 +5942,7 @@ fn narrow_widths_keep_the_title_and_never_overlap(cx: &mut TestAppContext) {
                 })
             })
             .unwrap();
-            let case = format!("幅 {width}、AI チャット {ai}、列を広げた {widened}");
+            let case = format!("幅 {width}、AI bot {ai}、列を広げた {widened}");
             ui(cx, window, |window, _| {
                 // 右のボタンは、たがいに重ならない
                 let mut right = px(0.);
@@ -5960,7 +5960,7 @@ fn narrow_widths_keep_the_title_and_never_overlap(cx: &mut TestAppContext) {
                         right = button.right();
                     }
                 }
-                // AI チャットがウィンドウを覆う幅では、一覧は見えない
+                // AI bot がウィンドウを覆う幅では、一覧は見えない
                 let chat = window.try_find("ai-resize").map(|e| e.bounds().left());
                 if chat.is_some_and(|left| left < px(200.)) {
                     return;
@@ -5970,7 +5970,7 @@ fn narrow_widths_keep_the_title_and_never_overlap(cx: &mut TestAppContext) {
                     .try_find(("folder", 0usize))
                     .unwrap_or_else(|| panic!("{case}: サブワークスペースの見出しが出ていない"))
                     .bounds();
-                // タイトルは、表でもカードでも読める幅がある。重ねた AI チャットにも隠れない
+                // タイトルは、表でもカードでも読める幅がある。重ねた AI bot にも隠れない
                 let title = window
                     .try_find(("title", 0usize))
                     .unwrap_or_else(|| panic!("{case}: タイトルが出ていない"))
@@ -7248,7 +7248,7 @@ fn clicking_outside_closes_the_top_dialog(cx: &mut TestAppContext) {
     assert_eq!(comment(cx), "");
 }
 
-/// メインのウィンドウを閉じると、追加のウィンドウと AI チャットのウィンドウも閉じる。
+/// メインのウィンドウを閉じると、追加のウィンドウと AI bot のウィンドウも閉じる。
 /// 閉じたメインのウィンドウは、次の起動で追加のウィンドウと一緒に戻る。
 #[gpui_kit::test]
 fn closing_main_window_closes_the_others(cx: &mut TestAppContext) {
