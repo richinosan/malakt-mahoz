@@ -361,6 +361,12 @@ const APPEARANCE_WIDTH: Pixels = px(1280.);
 const APPEARANCE_HEIGHT: Pixels = px(700.);
 /// 「設定」の右に出すプレビューの幅。
 const PREVIEW_WIDTH: Pixels = px(300.);
+/// 「設定」のダイアログがこれより狭いときは、プレビューを出さない。
+const SETTINGS_PREVIEW_WIDTH: Pixels = px(1080.);
+/// 「設定」のダイアログがこれより狭いときは、左をアイコンだけの列にする。
+const SETTINGS_COMPACT_WIDTH: Pixels = px(760.);
+/// 「設定」のカードの幅の上限。広いダイアログでも、名前と変えるものを離しすぎない。
+const SETTINGS_CONTENT_WIDTH: Pixels = px(860.);
 /// 「カスタマイズ」の行の右に置く、一覧を開くボタンやスライダーの幅。
 const CONTROL_WIDTH: Pixels = px(220.);
 const PRESET_WIDTH: Pixels = px(124.);
@@ -1375,6 +1381,35 @@ impl MainView {
             .active(|s| s.bg(theme.accent).opacity(0.8))
             .child(icon)
             .child(div().flex_1().truncate().child(label.into()))
+    }
+
+    /// 「設定」の左で、開いているページの下に並べる見出し。ページより小さく、アイコンなしで出す。
+    fn sub_nav_link(
+        &self,
+        id: impl Into<ElementId>,
+        label: &'static str,
+        active: bool,
+        cx: &App,
+    ) -> Stateful<Div> {
+        let theme = cx.theme();
+        row()
+            .id(id)
+            .flex_1()
+            .min_w_0()
+            .px_3()
+            .py_1()
+            .rounded(feel::md())
+            .text_sm()
+            .cursor_pointer()
+            .text_color(if active {
+                theme.foreground
+            } else {
+                theme.muted_foreground
+            })
+            .when(active, |d| d.bg(theme.accent.opacity(0.5)))
+            .when(!active, |d| d.lit(theme.accent.opacity(0.6), cx))
+            .active(|s| s.bg(theme.accent).opacity(0.8))
+            .child(div().flex_1().truncate().child(label))
     }
 
     fn nav_item(
@@ -6518,12 +6553,15 @@ impl MainView {
         body
     }
 
-    /// 「設定」。左に検索と目次、まん中にすべての設定を見出しごとに 1 本の縦スクロールで並べ、
-    /// 右に見た目のプレビューを出す。左を押すとその見出しへスクロールし、
-    /// スクロールすると、いちばん上に見えている見出しを左で光らせる。
+    /// 「設定」。左に検索とページ、まん中に今のページの設定を見出しごとに 1 本の縦スクロールで並べ、
+    /// 「見た目」のページでは右に見た目のプレビューを出す。左のページを押すとそのページを出し、
+    /// 今のページの下に並ぶ見出しを押すと、その見出しまでスクロールする。スクロールすると、
+    /// いちばん上に見えている見出しを左で光らせる。検索している間は、当たった設定をページをまたいで並べる。
+    /// 狭いウィンドウでは、プレビューを出さず、左はアイコンだけの列にする。
     /// 書体と背景の画像の一覧は、この上にもう 1 枚重ねて出す。
     fn render_appearance(&self, cx: &mut Context<Self>) -> Div {
         use crate::state::CustomizeSection as Section;
+        use crate::state::SettingsPage as Page;
         let theme = cx.theme().clone();
         let query = self
             .inputs
@@ -6533,104 +6571,185 @@ impl MainView {
             .trim()
             .to_lowercase();
         let searching = !query.is_empty();
-        let items: Vec<Setting> = self
-            .customize_settings(cx)
+        let every = self.customize_settings(cx);
+        // 今出せる設定があるページ（この OS にない連携だけのページは出さない）
+        let pages: Vec<Page> = Page::ALL
             .into_iter()
-            .filter(|item| !searching || item.matches(&query))
+            .filter(|page| every.iter().any(|item| item.section.page() == *page))
+            .collect();
+        let page = self.appearance_section.page();
+        let items: Vec<Setting> = every
+            .into_iter()
+            .filter(|item| {
+                if searching {
+                    item.matches(&query)
+                } else {
+                    item.section.page() == page
+                }
+            })
             .collect();
         let shown: Vec<Section> = Section::ALL
             .into_iter()
             .filter(|section| items.iter().any(|item| item.section == *section))
             .collect();
         // 左を押した直後はその見出し、スクロールしたら、いちばん上に見えている見出し
-        let active = if self.appearance_pinned {
+        let active = if self.appearance_pinned && shown.contains(&self.appearance_section) {
             self.appearance_section
         } else {
             shown
                 .get(self.appearance_scroll.top_item())
+                .or(shown.first())
                 .copied()
-                .unwrap_or(Section::Theme)
+                .unwrap_or(self.appearance_section)
+        };
+        // ダイアログの幅。狭いウィンドウでは、ウィンドウに合わせて縮む
+        let width = if self.viewport_width * 0.94 < APPEARANCE_WIDTH {
+            self.viewport_width * 0.94
+        } else {
+            APPEARANCE_WIDTH
+        };
+        let compact = width < SETTINGS_COMPACT_WIDTH;
+        let with_preview = !searching && page == Page::Appearance && width >= SETTINGS_PREVIEW_WIDTH;
+
+        let search = || {
+            Input::new(&self.inputs.customize_search)
+                .id("customize-search")
+                .aria_label("設定を検索")
+                .prefix(app_icon("search").small())
+                .cleanable(true)
         };
 
-        // 左: 検索と、見出しでまとめた目次
-        let mut nav = col().gap_0p5().child(
-            div().pb_2().child(
-                Input::new(&self.inputs.customize_search)
-                    .id("customize-search")
-                    .aria_label("設定を検索")
-                    .prefix(app_icon("search").small()),
-            ),
-        );
-        let mut group = "";
-        for (ix, section) in Section::ALL.into_iter().enumerate() {
-            // 今出せる設定がないカテゴリ（この OS にない連携など）は出さない
-            if !shown.contains(&section) {
-                continue;
+        // 左: 検索とページ。今のページの下に、そのページの見出しを並べる
+        let nav = if compact {
+            let mut rail = col().items_center().gap_1();
+            for (ix, each) in Page::ALL.into_iter().enumerate() {
+                if !pages.contains(&each) {
+                    continue;
+                }
+                let found = !searching || shown.iter().any(|s| s.page() == each);
+                rail = rail.child(
+                    self.rail_link(
+                        ("settings-page", ix),
+                        app_icon(each.icon()).small().into_any_element(),
+                        each.label(),
+                        !searching && page == each,
+                        cx,
+                    )
+                    .when(!found, |d| d.opacity(0.4))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        this.show_settings_page(each, window, cx)
+                    }))
+                    .test_support(),
+                );
             }
-            if section.group() != group {
-                group = section.group();
-                nav = nav.child(
+            col()
+                .w(px(RAIL_BUTTON + 16.))
+                .flex_none()
+                .min_h_0()
+                .border_r_1()
+                .border_color(theme.border)
+                .child(
+                    div()
+                        .id("customize-nav-list")
+                        .flex_1()
+                        .min_h_0()
+                        .pr_2()
+                        .child(rail)
+                        .overflow_y_scrollbar(),
+                )
+        } else {
+            let mut list = col().gap_0p5().child(div().pb_3().child(search()));
+            for (ix, each) in Page::ALL.into_iter().enumerate() {
+                if !pages.contains(&each) {
+                    continue;
+                }
+                let here = !searching && page == each;
+                // 検索している間は、当たったもののないページを薄く出す
+                let found = !searching || shown.iter().any(|s| s.page() == each);
+                list = list.child(
+                    row().child(
+                        self.nav_link(
+                            ("settings-page", ix),
+                            app_icon(each.icon()).small(),
+                            each.label(),
+                            here,
+                            cx,
+                        )
+                        .when(!found, |d| d.opacity(0.4))
+                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                            this.show_settings_page(each, window, cx)
+                        }))
+                        .test_support(),
+                    ),
+                );
+                // 見出しが 2 つ以上あるページは、開いている間だけ見出しを下に並べる
+                if here && shown.len() > 1 {
+                    let mut sub = col().gap_0p5().pl_5().pb_1();
+                    for section in &shown {
+                        let section = *section;
+                        let ix = Section::ALL.iter().position(|s| *s == section).unwrap();
+                        sub = sub.child(
+                            row().child(
+                                self.sub_nav_link(
+                                    ("customize-nav", ix),
+                                    section.label(),
+                                    active == section,
+                                    cx,
+                                )
+                                .on_click(cx.listener(
+                                    move |this, _: &ClickEvent, window, cx| {
+                                        this.show_appearance_section(section, window, cx)
+                                    },
+                                ))
+                                .test_support(),
+                            ),
+                        );
+                    }
+                    list = list.child(if self.motion {
+                        sub.with_animation(("settings-sub-in", ix), appear(180), |d, t| {
+                            d.opacity(t)
+                        })
+                        .into_any_element()
+                    } else {
+                        sub.into_any_element()
+                    });
+                }
+            }
+            // 低いウィンドウで入りきらないときは、左の列だけスクロールする。版はいちばん下
+            col()
+                .w(px(216.))
+                .flex_none()
+                .min_h_0()
+                .border_r_1()
+                .border_color(theme.border)
+                .child(
+                    div()
+                        .id("customize-nav-list")
+                        .flex_1()
+                        .min_h_0()
+                        // 右の端はスクロールバーの場所
+                        .pr_3()
+                        .child(list)
+                        .overflow_y_scrollbar(),
+                )
+                .child(
                     div()
                         .px_3()
                         .pt_2()
-                        .pb_0p5()
                         .text_xs()
                         .text_color(theme.muted_foreground)
-                        .child(group),
-                );
-            }
-            nav = nav.child(
-                row().child(
-                    self.nav_link(
-                        ("customize-nav", ix),
-                        app_icon(section.icon()).small(),
-                        section.label(),
-                        active == section,
-                        cx,
-                    )
-                    // 見出しが多いので、左のメニューより詰めて並べる
-                    .py_1()
-                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                        this.show_appearance_section(section, window, cx)
-                    }))
-                    .test_support(),
-                ),
-            );
-        }
-        // 低いウィンドウで入りきらないときは、目次の列だけスクロールする。版はいちばん下
-        let nav = col()
-            .w(px(208.))
-            .flex_none()
-            .min_h_0()
-            .border_r_1()
-            .border_color(theme.border)
-            .child(
-                div()
-                    .id("customize-nav-list")
-                    .flex_1()
-                    .min_h_0()
-                    // 右の端はスクロールバーの場所
-                    .pr_3()
-                    .child(nav)
-                    .overflow_y_scrollbar(),
-            )
-            .child(
-                div()
-                    .px_3()
-                    .pt_2()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .child(concat!("v", env!("CARGO_PKG_VERSION"))),
-            );
+                        .child(concat!("v", env!("CARGO_PKG_VERSION"))),
+                )
+        };
 
         // まん中: 見出しとカード。1 つの見出しが、スクロールする所の子 1 つ
         let mut list = div()
             .id("appearance-scroll")
             .size_full()
-            .pl_5()
+            .pl_6()
             // 右の端はスクロールバーの場所
-            .pr_4()
-            .pb_2()
+            .pr_5()
+            .pb_4()
             .track_scroll(&self.appearance_scroll)
             .overflow_y_scroll()
             .on_scroll(cx.listener(|this, _, _, cx| {
@@ -6639,12 +6758,19 @@ impl MainView {
                     cx.notify();
                 }
             }));
-        let mut group = "";
-        for section in &shown {
-            let mut block = col().gap_2().pb_6();
-            if section.group() != group {
-                group = section.group();
-                block = block.child(div().px_1().text_xl().child(group));
+        let single = shown.len() == 1 && !searching;
+        let mut heading = None;
+        for (ix, section) in shown.iter().enumerate() {
+            let mut block = col().max_w(SETTINGS_CONTENT_WIDTH).gap_3().pb_8();
+            // ページの名前。検索している間は、当たったページごとに出す
+            let title = if searching {
+                (heading != Some(section.page())).then(|| section.page().label())
+            } else {
+                (ix == 0).then(|| page.label())
+            };
+            heading = Some(section.page());
+            if let Some(title) = title {
+                block = block.child(div().px_1().pb_1().text_xl().child(title));
             }
             let mut card = setting_card(cx);
             let mut first = true;
@@ -6652,14 +6778,20 @@ impl MainView {
                 card = card.child(self.setting_row(item, first, cx));
                 first = false;
             }
+            // 見出しが 1 つだけのページで、ページと同じ名前なら、見出しは出さない
+            let label = !(single && section.label() == page.label());
             list = list.child(
                 block
-                    .child(
-                        div()
-                            .px_1()
-                            .text_color(theme.muted_foreground)
-                            .child(section.label()),
-                    )
+                    .when(label, |d| {
+                        d.child(
+                            row()
+                                .px_1()
+                                .gap_2()
+                                .text_color(theme.muted_foreground)
+                                .child(app_icon(section.icon()).small())
+                                .child(section.label()),
+                        )
+                    })
                     .child(card),
             );
         }
@@ -6672,22 +6804,36 @@ impl MainView {
                     .child("見つかりません。"),
             );
         }
+        let scroller = col()
+            .relative()
+            .flex_1()
+            .min_h_0()
+            .child(list.test_support())
+            .vertical_scrollbar(&self.appearance_scroll);
+        // ページを切り替えたら、中身を少し下からふわっと出す
+        let scroller = if self.motion {
+            let key = if searching { 99 } else { page as usize };
+            scroller
+                .with_animation(("settings-page-in", key), appear(200), |d, t| {
+                    d.opacity(0.2 + 0.8 * t).top(px(8.) * (1. - t))
+                })
+                .into_any_element()
+        } else {
+            scroller.into_any_element()
+        };
         let content = col()
             .flex_1()
             .min_w_0()
             .min_h_0()
             .gap_2()
-            .child(
-                col()
-                    .relative()
-                    .flex_1()
-                    .min_h_0()
-                    .child(list.test_support())
-                    .vertical_scrollbar(&self.appearance_scroll),
-            )
+            // 狭いときは、検索をまん中の上に出す
+            .when(compact, |d| {
+                d.child(div().pl_6().pr_5().pb_2().child(search()))
+            })
+            .child(scroller)
             // 失敗の理由は、どこまでスクロールしていても見える所に出す
             .when_some(self.error.clone(), |d, error| {
-                d.child(div().pl_5().text_sm().text_color(theme.danger).child(error))
+                d.child(div().pl_6().text_sm().text_color(theme.danger).child(error))
             });
         let body = row()
             .flex_1()
@@ -6695,7 +6841,7 @@ impl MainView {
             .items_stretch()
             .child(nav)
             .child(content)
-            .child(self.appearance_preview(cx));
+            .when(with_preview, |d| d.child(self.appearance_preview(cx)));
         let sized = |id: &'static str, body: Div, cx: &mut Context<Self>| {
             self.dialog_sized(
                 id,
@@ -6969,6 +7115,7 @@ impl MainView {
             .child(detail)
             .children(chat_panel);
         col()
+            .id("appearance-preview")
             .w(PREVIEW_WIDTH)
             .flex_none()
             .pl_4()
@@ -7418,7 +7565,7 @@ impl MainView {
                 list(&["読み込み", "復元"]),
             ),
             Setting::new(
-                Section::Data,
+                Section::Browser,
                 SettingKey::BrowserData,
                 "ブラウザのデータ",
                 Some("アプリ内ブラウザのログインの情報とキャッシュ"),
@@ -10309,6 +10456,7 @@ impl Render for MainView {
             self.caldav_settings.update(cx, |s, cx| s.end_adding(cx));
         }
         self.tick_dialog_motion(window);
+        self.viewport_width = window.viewport_size().width;
         if self.embedded {
             return self.render_embedded(window, cx);
         }
