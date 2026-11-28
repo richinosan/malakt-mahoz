@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/core", "crates/ai", "crates/app", "crates/passkey", "crates/reminders", "crates/update", "crates/term", "crates/autostart", "crates/caldav", "crates/media"]
+members = ["crates/core", "crates/plugins", "crates/ai", "crates/app", "crates/passkey", "crates/reminders", "crates/update", "crates/term", "crates/autostart", "crates/caldav", "crates/media"]
 
 [workspace.package]
 version = "0.1.0"
@@ -10,6 +10,7 @@ repository = "https://github.com/richinosan/malakt-mahoz"
 
 [workspace.dependencies]
 malakt-core = { path = "crates/core" }
+malakt-plugins = { path = "crates/plugins" }
 malakt-ai = { path = "crates/ai" }
 malakt-passkey = { path = "crates/passkey" }
 malakt-reminders = { path = "crates/reminders" }

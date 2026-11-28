@@ -139,11 +139,12 @@ pub enum CustomizeSection {
     Sync,
     Keys,
     Window,
+    Plugins,
     Data,
 }
 
 impl CustomizeSection {
-    pub const ALL: [CustomizeSection; 20] = [
+    pub const ALL: [CustomizeSection; 21] = [
         CustomizeSection::Theme,
         CustomizeSection::Layout,
         CustomizeSection::Backdrop,
@@ -163,6 +164,7 @@ impl CustomizeSection {
         CustomizeSection::Sync,
         CustomizeSection::Keys,
         CustomizeSection::Window,
+        CustomizeSection::Plugins,
         CustomizeSection::Data,
     ];
 
@@ -187,6 +189,7 @@ impl CustomizeSection {
             CustomizeSection::Sync => "同期",
             CustomizeSection::Keys => "キー操作",
             CustomizeSection::Window => "ウィンドウ",
+            CustomizeSection::Plugins => "プラグイン",
             CustomizeSection::Data => "データ",
         }
     }
@@ -212,6 +215,7 @@ impl CustomizeSection {
             CustomizeSection::Sync => "calendar-sync",
             CustomizeSection::Keys => "keyboard",
             CustomizeSection::Window => "app-window",
+            CustomizeSection::Plugins => "puzzle",
             CustomizeSection::Data => "database",
         }
     }
@@ -232,6 +236,7 @@ impl CustomizeSection {
             | CustomizeSection::Sync
             | CustomizeSection::Keys
             | CustomizeSection::Window
+            | CustomizeSection::Plugins
             | CustomizeSection::Data => "アプリ",
             _ => "見た目",
         }
@@ -282,6 +287,8 @@ pub enum SubModal {
     DonePeople,
     /// ほかの人の完了を知らせるワークスペースを選ぶ
     DoneWorkspaces,
+    /// プラグインを有効にする前の承認
+    EnablePlugin,
 }
 
 /// 詳細で日付と時刻を入れる 2 つの項目。
@@ -405,6 +412,8 @@ pub struct MainView {
     pub pending_key_unlock: Option<Id>,
     /// 期限と時間帯の欄を開いているアクセスキー。
     pub key_limits_open: Option<Id>,
+    /// 承認の画面を出しているプラグインの ID と、出したときのファイルのハッシュ。
+    pub plugin_approving: Option<(String, String)>,
     /// その場で書き直している、アクセスキーの開始・期限・時刻。
     pub key_limit_editing: Option<(Id, LimitField)>,
     /// 左のメニューで名前を書いているワークスペース。
@@ -999,6 +1008,7 @@ impl MainView {
             issued_access_key: None,
             pending_key_unlock: None,
             key_limits_open: None,
+            plugin_approving: None,
             key_limit_editing: None,
             naming_task: None,
             workspaces: Vec::new(),
@@ -2988,6 +2998,9 @@ impl MainView {
         self.issued_access_key = None;
         self.key_limits_open = None;
         self.key_limit_editing = None;
+        self.plugin_approving = None;
+        // プラグインのフォルダーは、開くたびに読み直す
+        crate::plugins::refresh(cx);
         self.appearance_section = CustomizeSection::Theme;
         self.appearance_pinned = false;
         self.preview_pick = None;
@@ -5585,6 +5598,7 @@ bundled_icons! {
         "maximize-2",
         "minimize-2",
         "plug",
+        "puzzle",
         "rotate-ccw-clock",
         "rotate-ccw",
         "image",
