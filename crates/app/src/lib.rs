@@ -22,6 +22,7 @@ pub mod fonts;
 mod history_view;
 pub mod icons;
 pub mod mcp;
+pub mod mcp_http;
 mod mcp_keys;
 pub mod mcp_register;
 pub mod now_playing;
