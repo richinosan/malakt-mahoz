@@ -1798,6 +1798,8 @@ pub fn execute(
                 }
                 _ => None,
             };
+            // 長さを渡したら、ストップウォッチのままでもカウントダウンにする（mode を渡したらそれに従う）
+            let mode = mode.or(seconds.map(|_| Mode::Countdown));
             let mut ops = Vec::new();
             match required(args, "action")? {
                 "start" => {
