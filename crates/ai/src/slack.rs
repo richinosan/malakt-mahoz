@@ -134,63 +134,9 @@ impl Link {
         ]
     }
 
-    /// シェルの中で Slack CLI を呼ぶ 1 行。sh・bash・zsh・fish のどれでも通る書き方にする。
-    /// `slack` の名前でも呼ぶのは、その名前が Slack のアプリを指さない所（macOS と WSL）だけ。
-    fn script(&self, also_slack: bool) -> String {
-        let args = self.args().join(" ");
-        if also_slack {
-            format!("command -v slack-cli >/dev/null 2>&1 && exec slack-cli {args} || exec slack {args}")
-        } else {
-            format!("exec slack-cli {args}")
-        }
-    }
-
-    fn display(&self) -> String {
-        format!("slack-cli {}", self.args().join(" "))
-    }
-
-    /// その人のログインシェルで呼ぶ。シェルの設定にある PATH とトークンを読ませる。
-    fn login(&self, shell: &str, also_slack: bool) -> Spec {
-        let mut spec = Spec::direct(shell, vec!["-lic".into(), self.script(also_slack)]);
-        spec.display = self.display();
-        spec
-    }
-
-    /// Windows で、`slack-cli` をそのまま呼ぶ。
-    fn native(&self) -> Spec {
-        Spec::direct("slack-cli", self.args())
-    }
-
-    /// WSL の中の、その人のログインシェルで呼ぶ。`wslenv` は、今の `WSLENV`。
-    fn wsl(&self, wslenv: Option<&str>) -> Spec {
-        let names = match wslenv.filter(|names| !names.is_empty()) {
-            Some(names) => format!("{names}:{ENV_RUN}"),
-            None => ENV_RUN.to_owned(),
-        };
-        Spec {
-            program: "wsl.exe".into(),
-            args: vec!["--".into(), "sh".into()],
-            display: format!("wsl.exe -- {}", self.display()),
-            env: vec![
-                (ENV_RUN.into(), self.script(true)),
-                ("WSLENV".into(), names),
-            ],
-            stdin: Some(format!("exec \"${{SHELL:-bash}}\" -lic \"${ENV_RUN}\"\n")),
-            ..Default::default()
-        }
-    }
-
     /// 取りに行くコマンド。前のものが起動できなければ、次のものを試す。
     pub fn commands(&self) -> Vec<Spec> {
-        if cfg!(windows) {
-            let wslenv = std::env::var("WSLENV").ok();
-            return vec![self.native(), self.wsl(wslenv.as_deref())];
-        }
-        let shell = std::env::var("SHELL")
-            .ok()
-            .filter(|shell| !shell.is_empty())
-            .unwrap_or_else(|| "sh".into());
-        vec![self.login(&shell, cfg!(target_os = "macos"))]
+        commands(&self.args())
     }
 
     /// CLI の出力を、AI に渡す文章にする。`time` は、秒を画面に出す時刻にする。
@@ -266,6 +212,215 @@ impl Link {
         }
         Ok(out)
     }
+}
+
+/// シェルの中で Slack CLI を呼ぶ 1 行。sh・bash・zsh・fish のどれでも通る書き方にする。
+/// `slack` の名前でも呼ぶのは、その名前が Slack のアプリを指さない所（macOS と WSL）だけ。
+fn script(args: &[String], also_slack: bool) -> String {
+    let args = args.join(" ");
+    if also_slack {
+        format!(
+            "command -v slack-cli >/dev/null 2>&1 && exec slack-cli {args} || exec slack {args}"
+        )
+    } else {
+        format!("exec slack-cli {args}")
+    }
+}
+
+fn display(args: &[String]) -> String {
+    format!("slack-cli {}", args.join(" "))
+}
+
+/// その人のログインシェルで呼ぶ。シェルの設定にある PATH とトークンを読ませる。
+fn login(args: &[String], shell: &str, also_slack: bool) -> Spec {
+    let mut spec = Spec::direct(shell, vec!["-lic".into(), script(args, also_slack)]);
+    spec.display = display(args);
+    spec
+}
+
+/// Windows で、`slack-cli` をそのまま呼ぶ。
+fn native(args: &[String]) -> Spec {
+    Spec::direct("slack-cli", args.to_vec())
+}
+
+/// WSL の中の、その人のログインシェルで呼ぶ。`wslenv` は、今の `WSLENV`。
+fn wsl(args: &[String], wslenv: Option<&str>) -> Spec {
+    let names = match wslenv.filter(|names| !names.is_empty()) {
+        Some(names) => format!("{names}:{ENV_RUN}"),
+        None => ENV_RUN.to_owned(),
+    };
+    Spec {
+        program: "wsl.exe".into(),
+        args: vec!["--".into(), "sh".into()],
+        display: format!("wsl.exe -- {}", display(args)),
+        env: vec![
+            (ENV_RUN.into(), script(args, true)),
+            ("WSLENV".into(), names),
+        ],
+        stdin: Some(format!("exec \"${{SHELL:-bash}}\" -lic \"${ENV_RUN}\"\n")),
+        ..Default::default()
+    }
+}
+
+/// Slack CLI を呼ぶコマンド。前のものが起動できなければ、次のものを試す。
+fn commands(args: &[String]) -> Vec<Spec> {
+    if cfg!(windows) {
+        let wslenv = std::env::var("WSLENV").ok();
+        return vec![native(args), wsl(args, wslenv.as_deref())];
+    }
+    let shell = std::env::var("SHELL")
+        .ok()
+        .filter(|shell| !shell.is_empty())
+        .unwrap_or_else(|| "sh".into());
+    vec![login(args, &shell, cfg!(target_os = "macos"))]
+}
+
+/// Slack の Web API の 1 回の呼び出し（`slack-cli api <method> key=value …`）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Api {
+    pub method: String,
+    pub params: Vec<(String, String)>,
+}
+
+impl Api {
+    /// 値は英数字と `-._` だけにする（シェルを通しても崩れない）。ほかの文字が入る値は渡さない。
+    pub fn new(method: &str, params: &[(&str, &str)]) -> Option<Self> {
+        let safe = |s: &str| {
+            !s.is_empty()
+                && s.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "-._".contains(c))
+        };
+        if !safe(method) || !params.iter().all(|(k, v)| safe(k) && safe(v)) {
+            return None;
+        }
+        Some(Api {
+            method: method.to_owned(),
+            params: params
+                .iter()
+                .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+                .collect(),
+        })
+    }
+
+    fn args(&self) -> Vec<String> {
+        let mut args: Vec<String> = vec![
+            "api".into(),
+            self.method.clone(),
+            "--skip-update".into(),
+            "--no-color".into(),
+        ];
+        args.extend(self.params.iter().map(|(k, v)| format!("{k}={v}")));
+        args
+    }
+
+    pub fn commands(&self) -> Vec<Spec> {
+        commands(&self.args())
+    }
+
+    /// 呼んで、出力（標準出力）を返す。待つので、画面のスレッドでは呼ばない。
+    pub fn call(&self) -> Result<String, String> {
+        for spec in self.commands() {
+            match crate::shell::run(&spec) {
+                Ok((Some(0), stdout, _)) => return Ok(stdout),
+                Ok((Some(127), _, _)) => {
+                    return Err("Slack CLI（slack-cli）が見つかりませんでした".into())
+                }
+                Ok((code, stdout, all)) => {
+                    // Slack が断ったときも、JSON の答えは標準出力に出る
+                    if stdout.contains("\"ok\"") {
+                        return Ok(stdout);
+                    }
+                    return Err(format!(
+                        "Slack CLI が失敗しました（終了コード {}）: {}",
+                        code.map_or("なし".to_owned(), |c| c.to_string()),
+                        all.trim().chars().take(1000).collect::<String>()
+                    ));
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(format!("Slack CLI を起動できませんでした: {e}")),
+            }
+        }
+        Err("Slack CLI（slack-cli）が見つかりませんでした".into())
+    }
+}
+
+/// Slack のリマインダーを、取り込む中身にする。待つので、画面のスレッドでは呼ばない。
+pub fn import_reminders() -> Result<malakt_core::intake::Batch, String> {
+    use malakt_core::intake::slack;
+    let api = Api::new("reminders.list", &[]).ok_or("呼び出しを作れませんでした")?;
+    let value = slack::json_of(&api.call()?).map_err(|e| e.to_string())?;
+    Ok(slack::reminders(&value))
+}
+
+/// Slack リストの項目を、取り込む中身にする。`target` はリストの URL か ID。
+/// 担当者の名前は `users.info` で調べる。調べられない人がいれば、取り込まずにエラーにする。
+pub fn import_list(target: &str) -> Result<malakt_core::intake::Batch, String> {
+    use malakt_core::intake::slack;
+    let (id, host) = slack::list_target(target)
+        .ok_or_else(|| format!("「{}」は Slack リストの URL ではありません", target.trim()))?;
+    let mut items: Vec<serde_json::Value> = Vec::new();
+    let mut first: Option<serde_json::Value> = None;
+    let mut cursor = String::new();
+    // 1 回に 1000 件まで、全部で 20 回まで
+    for _ in 0..20 {
+        let mut params = vec![
+            ("list_id", id.as_str()),
+            ("limit", "1000"),
+            ("include_list_metadata", "true"),
+        ];
+        if !cursor.is_empty() {
+            params.push(("cursor", cursor.as_str()));
+        }
+        let api = Api::new("slackLists.items.list", &params).ok_or("呼び出しを作れませんでした")?;
+        let value = slack::json_of(&api.call()?).map_err(|e| e.to_string())?;
+        if let Some(list) = value.get("items").and_then(serde_json::Value::as_array) {
+            items.extend(list.iter().cloned());
+        }
+        cursor = value
+            .pointer("/response_metadata/next_cursor")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        if first.is_none() {
+            first = Some(value);
+        }
+        if cursor.is_empty() {
+            break;
+        }
+    }
+    let mut all = first.ok_or("Slack リストを読めませんでした")?;
+    all["items"] = serde_json::Value::Array(items);
+    let mut names = std::collections::HashMap::new();
+    let mut missing = Vec::new();
+    for user in slack::list_users(&all) {
+        let name = Api::new("users.info", &[("user", user.as_str())])
+            .ok_or_else(|| format!("ユーザー {user}"))
+            .and_then(|api| api.call())
+            .ok()
+            .and_then(|out| slack::json_of(&out).ok())
+            .and_then(|v| slack::user_name(&v));
+        match name {
+            Some(n) => {
+                names.insert(user, n);
+            }
+            None => missing.push(user),
+        }
+    }
+    if !missing.is_empty() {
+        return Err(format!(
+            "Slack の担当者の名前を読めませんでした（{}）。トークンに users:read の権限があるか確かめてください",
+            missing.join("・")
+        ));
+    }
+    let url = host.map(|h| {
+        let team = target
+            .split("/lists/")
+            .nth(1)
+            .and_then(|rest| rest.split('/').next())
+            .unwrap_or_default();
+        format!("https://{h}/lists/{team}/{id}")
+    });
+    Ok(slack::list_items(&all, &names, url.as_deref()))
 }
 
 #[cfg(test)]
@@ -397,12 +552,12 @@ mod tests {
         let link = link("1700000000.123456", None);
         let args = link.args().join(" ");
 
-        let native = link.native();
+        let native = native(&link.args());
         assert_eq!(native.program, "slack-cli");
         assert_eq!(native.args, link.args());
         assert_eq!(native.stdin, None);
 
-        let mac = link.login("/bin/zsh", true);
+        let mac = login(&link.args(), "/bin/zsh", true);
         assert_eq!(mac.program, "/bin/zsh");
         assert_eq!(
             mac.args,
@@ -413,10 +568,10 @@ mod tests {
         );
         assert_eq!(mac.display, format!("slack-cli {args}"));
         // Linux の `slack` は Slack のアプリのことがあるので、呼ばない
-        let linux = link.login("/bin/bash", false);
+        let linux = login(&link.args(), "/bin/bash", false);
         assert_eq!(linux.args[1], format!("exec slack-cli {args}"));
 
-        let wsl = link.wsl(Some("FOO/p"));
+        let wsl = wsl(&link.args(), Some("FOO/p"));
         assert_eq!(wsl.program, "wsl.exe");
         assert_eq!(wsl.args, ["--", "sh"]);
         assert_eq!(
@@ -428,8 +583,28 @@ mod tests {
             wsl.env[1],
             ("WSLENV".to_owned(), "FOO/p:MALAKT_MAHOZ_RUN".to_owned())
         );
-        assert_eq!(link.wsl(None).env[1].1, "MALAKT_MAHOZ_RUN");
-        assert_eq!(link.wsl(Some("")).env[1].1, "MALAKT_MAHOZ_RUN");
+        assert_eq!(super::wsl(&link.args(), None).env[1].1, "MALAKT_MAHOZ_RUN");
+        assert_eq!(
+            super::wsl(&link.args(), Some("")).env[1].1,
+            "MALAKT_MAHOZ_RUN"
+        );
+    }
+
+    #[test]
+    fn api_calls_take_only_safe_values() {
+        let api = Api::new("reminders.list", &[("limit", "100")]).unwrap();
+        assert_eq!(
+            api.args(),
+            [
+                "api",
+                "reminders.list",
+                "--skip-update",
+                "--no-color",
+                "limit=100"
+            ]
+        );
+        assert!(Api::new("users.info", &[("user", "U1; rm -rf ~")]).is_none());
+        assert!(Api::new("a b", &[]).is_none());
     }
 
     #[test]

@@ -135,9 +135,10 @@ impl Person {
 }
 
 /// iCalendar の VTODO の STATUS と同じ 4 つ。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Status {
+    #[default]
     NeedsAction,
     InProcess,
     Completed,
