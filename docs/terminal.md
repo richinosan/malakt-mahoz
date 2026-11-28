@@ -16,7 +16,7 @@
   - どのターミナルにも `MALAKT_MAHOZ_BIN` と `MALAKT_MAHOZ_DB` が渡ります。WSL 以外では、`malakt-mahoz` の名前でもこのアプリを呼べます
 - **ファイルのドロップ**: ファイルや画像をターミナルにドロップすると、その場所が入力の行に入ります。空白のある場所は引用符で囲み、WSL では `/mnt/c/...` に読み替えます。Claude Code などは、画像の場所を画像として受け取ります
 - **表示**: 256 色と TrueColor、太字・斜体・下線・取り消し線、全角の文字、代替画面に対応します。罫線とブロックの文字は、マスいっぱいに線を引くので、枠がつながって見えます。場所の大きさを変えると、桁と行がプログラムに伝わります
-  - Nerd Font のアイコン（oh-my-posh や Starship のプロンプトの記号）は、同梱の JetBrainsMono Nerd Font Mono で描きます。PC に Nerd Font を入れていなくても、Windows Terminal と同じように記号が出ます。Powerline の三角と半円はマスいっぱいに描くので、となりの色とすき間なくつながります
+  - 文字は「設定」の「等幅フォント」の優先順で、1 文字ずつ上からその文字を持つフォントで描きます。標準は、PC の等幅フォントと、同梱の JetBrainsMono Nerd Font Mono の 2 つです。Nerd Font のアイコン（oh-my-posh や Starship のプロンプトの記号）は 2 つ目で描くので、PC に Nerd Font を入れていなくても、Windows Terminal と同じように記号が出ます。Powerline の三角と半円はマスいっぱいに描くので、となりの色とすき間なくつながります
 - **キー**: ターミナルにいる間は、キーはアプリのショートカットより先に、動いているプログラムに届きます（`Ctrl + C`、`Esc`、`Ctrl + L` など）。`Shift + Enter` は改行として届きます
   - タブの操作と全画面は、Windows Terminal と同じキーでアプリが受けます。`Ctrl + Shift + T` で新しいターミナル、`Ctrl + Shift + W` でタブを閉じる、`Ctrl + Tab` / `Ctrl + Shift + Tab` で次 / 前のタブ、`Ctrl + Alt + 1〜9` でその番号のタブ（9 は最後）、`F11` で全画面。macOS は `⌘ + T`、`⌘ + W`、`⌘ + 1〜9`、`⌃ + ⌘ + F`
 - **ブラウザのタブのキー**: Chrome や Edge と同じキーが、ページの中にいても URL の欄にいても使えます。`Ctrl + R` / `F5` で読み込み直す、`Alt + ←` / `Alt + →` で戻る / 進む、`Ctrl + L`・`Alt + D`・`F6` で URL の欄、`Ctrl + T` で新しいタブ、`Ctrl + W` で閉じる、`Ctrl + Shift + T` で閉じたタブを開き直す、`Ctrl + Tab` と `Ctrl + 1〜9` でタブの切り替え、`Ctrl + F` でページ内を検索（`Enter` / `F3` で次、`Shift + Enter` で前、`Esc` で閉じる）、`Ctrl + P` で印刷・PDF に保存、`Ctrl + J` でダウンロード、`F11` で全画面。macOS は `⌘` で、戻る / 進むは `⌘ + [` / `⌘ + ]`、ダウンロードは `⌥ + ⌘ + L`。ブラウザの外の `Ctrl + J` は AI チャット

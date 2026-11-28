@@ -407,7 +407,7 @@ pub fn definitions() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "set_appearance",
-            description: "見た目を 1 つずつ変える。渡した項目だけが変わる。mode はライト・ダーク、scene は背景の画像（none / sky / forest / dusk か、画像ファイルの絶対パス）、clear は面の透明度 0〜70、blur は背景のぼかし 0〜100、cards は一覧をカードで出す、floating はパネルを浮かせる、overlay は詳細を一覧の上に重ねる、density は行の詰め方、feel はホバーと押したときの描き方、due_format は一覧の期限の出し方（date は「11/24～11/27」、relative は「明日」「あと 3 日」「2 日前」）、font は書体の名前（null で標準の LINE Seed JP）、accent / light_background / dark_background は #rrggbb の色（null で標準の色）。",
+            description: "見た目を 1 つずつ変える。渡した項目だけが変わる。mode はライト・ダーク、scene は背景の画像（none / sky / forest / dusk か、画像ファイルの絶対パス）、clear は面の透明度 0〜70、blur は背景のぼかし 0〜100、cards は一覧をカードで出す、floating はパネルを浮かせる、overlay は詳細を一覧の上に重ねる、density は行の詰め方、feel はホバーと押したときの描き方、due_format は一覧の期限の出し方（date は「11/24～11/27」、relative は「明日」「あと 3 日」「2 日前」）、fonts は画面の書体の優先順（名前の配列。文字ごとに上から順に、その文字を持つ書体で描く。null で標準の LINE Seed JP）、mono_fonts はターミナルとコードの等幅の書体の優先順（null で標準）、font は書体を 1 つだけにする、accent / light_background / dark_background は #rrggbb の色（null で標準の色）。",
             schema: object(
                 json!({
                     "mode": {"type": "string", "enum": names(&MODES)},
@@ -421,6 +421,8 @@ pub fn definitions() -> Vec<ToolDef> {
                     "feel": {"type": "string", "enum": names(&FEELS), "description": "標準 / ガラス / くっきり / 色づく"},
                     "due_format": {"type": "string", "enum": names(&DUE_FORMATS), "description": "日付 / 相対"},
                     "font": {"type": ["string", "null"]},
+                    "fonts": {"type": ["array", "null"], "items": {"type": "string"}},
+                    "mono_fonts": {"type": ["array", "null"], "items": {"type": "string"}},
                     "accent": {"type": ["string", "null"]},
                     "light_background": {"type": ["string", "null"]},
                     "dark_background": {"type": ["string", "null"]},
@@ -1659,7 +1661,8 @@ impl MainView {
             "density": key_of(&DENSITIES, theme::density(cx)),
             "feel": key_of(&FEELS, theme::feel(cx)),
             "due_format": key_of(&DUE_FORMATS, theme::due_format(cx)),
-            "font": look.font.clone().unwrap_or_else(|| theme::DEFAULT_FONT.to_owned()),
+            "fonts": crate::fonts::ui_list(cx),
+            "mono_fonts": crate::fonts::mono_list(cx),
             "accent": color(Slot::Accent),
             "light_background": color(Slot::Light),
             "dark_background": color(Slot::Dark),
@@ -1725,25 +1728,47 @@ impl MainView {
         let due_format = str_arg(args, "due_format")
             .map(|f| parse_in(&DUE_FORMATS, f, "due_format"))
             .transpose()?;
-        let font = match args.get("font") {
-            None => None,
-            Some(Value::Null) => Some(None),
-            Some(Value::String(s)) if s.trim().is_empty() || s.trim() == theme::DEFAULT_FONT => {
-                Some(None)
-            }
-            Some(Value::String(s)) => {
-                let fonts = theme::fonts(cx);
-                let found = fonts
-                    .iter()
-                    .find(|f| *f == s.trim())
-                    .or_else(|| fonts.iter().find(|f| f.eq_ignore_ascii_case(s.trim())))
-                    .ok_or_else(|| {
-                        format!("書体「{s}」はこの PC にありません。list_fonts で探してください")
-                    })?;
-                Some(Some(found.clone()))
-            }
-            Some(other) => return Err(format!("font が正しくありません: {other}")),
+        // 書体の名前は、この PC にあるものの綴りにそろえる
+        let installed = theme::fonts(cx);
+        let find = |name: &str| -> Result<String, String> {
+            let name = name.trim();
+            installed
+                .iter()
+                .find(|f| *f == name)
+                .or_else(|| installed.iter().find(|f| f.eq_ignore_ascii_case(name)))
+                .cloned()
+                .ok_or_else(|| {
+                    format!("書体「{name}」はこの PC にありません。list_fonts で探してください")
+                })
         };
+        let list = |key: &str| -> Result<Option<Option<Vec<String>>>, String> {
+            match args.get(key) {
+                None => Ok(None),
+                Some(Value::Null) => Ok(Some(None)),
+                Some(Value::Array(items)) => {
+                    let names = items
+                        .iter()
+                        .map(|item| match item {
+                            Value::String(name) => find(name),
+                            other => Err(format!("{key} が正しくありません: {other}")),
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    Ok(Some((!names.is_empty()).then_some(names)))
+                }
+                Some(other) => Err(format!("{key} が正しくありません: {other}")),
+            }
+        };
+        let mut fonts = list("fonts")?;
+        match args.get("font") {
+            None => {}
+            Some(Value::Null) => fonts = Some(None),
+            Some(Value::String(s)) if s.trim().is_empty() || s.trim() == theme::DEFAULT_FONT => {
+                fonts = Some(None)
+            }
+            Some(Value::String(s)) => fonts = Some(Some(vec![find(s)?])),
+            Some(other) => return Err(format!("font が正しくありません: {other}")),
+        }
+        let mono_fonts = list("mono_fonts")?;
         let mut colors = Vec::new();
         for (key, slot) in [
             ("accent", Slot::Accent),
@@ -1794,8 +1819,11 @@ impl MainView {
         if let Some(format) = due_format {
             theme::set_due_format(format, cx).map_err(core)?;
         }
-        if let Some(font) = font {
-            theme::set_font(font.as_deref(), cx).map_err(core)?;
+        if let Some(fonts) = fonts {
+            theme::set_fonts(&fonts.unwrap_or_default(), cx).map_err(core)?;
+        }
+        if let Some(fonts) = mono_fonts {
+            theme::set_mono_fonts(fonts.as_deref(), cx).map_err(core)?;
         }
         for (slot, color) in colors {
             theme::set_color(slot, color, cx).map_err(core)?;

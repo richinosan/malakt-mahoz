@@ -13,7 +13,12 @@ use gpui_kit::{App, Global, Hsla, RenderImage, Rgba, Window, WindowAppearance};
 use crate::db;
 
 const SETTING: &str = "theme";
+/// 前の形の書体の設定（1 つだけ）。読むだけで、書くときは消す。
 const FONT: &str = "font.family";
+/// 書体の優先順（JSON の文字列の配列）。文字ごとに、上から順にその文字を持つ書体で描く。
+const FONTS: &str = "font.families";
+/// 等幅の書体の優先順（ターミナル・コード）。形は `FONTS` と同じ。
+const MONO: &str = "font.mono";
 /// 同梱している書体。何も選んでいないときに使う。
 pub const DEFAULT_FONT: &str = "LINE Seed JP";
 /// 同梱している、Nerd Font のアイコンを持つ等幅の書体。ターミナルがプロンプトの記号を描くのに使う。
@@ -165,7 +170,8 @@ impl Slot {
 /// 自分で選んだ書体と色。選んでいないものは `None`（同梱の配色のまま）。
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Look {
-    pub font: Option<String>,
+    /// 書体の優先順。空は同梱の書体だけ。
+    pub fonts: Vec<String>,
     pub accent: Option<Color>,
     pub light: Option<Color>,
     pub dark: Option<Color>,
@@ -433,7 +439,7 @@ impl Preset {
         Preset {
             mode: Some(mode),
             look: Look {
-                font: None,
+                fonts: Vec::new(),
                 accent,
                 light: page.filter(|_| !dark),
                 dark: page.filter(|_| dark),
@@ -459,7 +465,7 @@ impl Preset {
         let dense = |mut preset: Preset, font: Option<String>| {
             preset.density = Density::Compact;
             preset.feel = Feel::Crisp;
-            preset.look.font = font;
+            preset.look.fonts = font.into_iter().collect();
             preset
         };
         vec![
@@ -529,7 +535,7 @@ impl Preset {
             "name": self.name,
             "mode": self.mode.map(Choice::key),
             "scene": self.scene.key(),
-            "font": self.look.font,
+            "fonts": self.look.fonts,
             "accent": self.look.accent.map(Color::hex),
             "light": self.look.light.map(Color::hex),
             "dark": self.look.dark.map(Color::hex),
@@ -551,7 +557,14 @@ impl Preset {
             mode: text("mode").map(Choice::from_key),
             scene: text("scene").map_or(Scene::None, Scene::from_key),
             look: Look {
-                font: text("font").map(str::to_owned),
+                // 前の形は書体を 1 つだけ "font" に持っていた
+                fonts: match value["fonts"].as_array() {
+                    Some(list) => list
+                        .iter()
+                        .map(|name| name.as_str().map(str::to_owned))
+                        .collect::<Option<Vec<_>>>()?,
+                    None => text("font").map(str::to_owned).into_iter().collect(),
+                },
                 accent: color("accent"),
                 light: color("light"),
                 dark: color("dark"),
@@ -963,8 +976,16 @@ pub fn look(cx: &App) -> Look {
     let store = &db::shared(cx).read(cx).store;
     let read = |key: &str| store.setting(key).ok().flatten();
     let color = |slot: Slot| read(slot.key()).and_then(|hex| Color::parse(&hex));
+    // 前の形（書体 1 つ）しかなければ、それを 1 つだけの優先順として読む
+    let fonts = match read(FONTS) {
+        Some(saved) => parse_fonts(&saved),
+        None => read(FONT)
+            .filter(|name| !name.is_empty())
+            .into_iter()
+            .collect(),
+    };
     Look {
-        font: read(FONT).filter(|name| !name.is_empty()),
+        fonts,
         accent: color(Slot::Accent),
         light: color(Slot::Light),
         dark: color(Slot::Dark),
@@ -1070,11 +1091,11 @@ pub fn apply_preset(preset: &Preset, window: &mut Window, cx: &mut App) -> Resul
     let hex = |color: Option<Color>| color.map(Color::hex);
     let flag = |on: bool| on.then(|| "1".to_owned());
     let look = &preset.look;
-    let font = look.font.clone().filter(|name| name != DEFAULT_FONT);
     let values = [
         (SETTING, Some(mode.key().to_owned())),
         (SCENE, preset.scene.key()),
-        (FONT, font),
+        (FONTS, fonts_text(&look.fonts)),
+        (FONT, None),
         (Slot::Accent.key(), hex(look.accent)),
         (Slot::Light.key(), hex(look.light)),
         (Slot::Dark.key(), hex(look.dark)),
@@ -1282,6 +1303,7 @@ pub fn fonts(cx: &App) -> Vec<String> {
 
 /// 配色を読み込んで、保存してある選択で塗る。`gpui_kit::init` のあとに 1 回呼ぶ。
 pub fn init(cx: &mut App) {
+    crate::fonts::init(cx);
     cx.set_global(Shown::default());
     FEEL_NOW.set(saved_feel(cx));
     install(&with_scene(look(cx), &scene(cx)), cx);
@@ -1296,12 +1318,57 @@ pub fn set(choice: Choice, window: &mut Window, cx: &mut App) -> malakt_core::Re
     })
 }
 
-/// 書体を保存して、すべてのウィンドウに使う。`None` は同梱の書体。
-pub fn set_font(font: Option<&str>, cx: &mut App) -> malakt_core::Result<()> {
-    let font = font.filter(|name| *name != DEFAULT_FONT);
-    db::shared(cx).update(cx, |db, _| db.store.set_setting(FONT, font))?;
+/// 書体の優先順を保存して、すべてのウィンドウに使う。空は同梱の書体。
+pub fn set_fonts(fonts: &[String], cx: &mut App) -> malakt_core::Result<()> {
+    let text = fonts_text(fonts);
+    db::shared(cx).update(cx, |db, _| {
+        db.store.set_setting(FONTS, text.as_deref())?;
+        db.store.set_setting(FONT, None)
+    })?;
     reload(cx);
     Ok(())
+}
+
+/// 保存してある等幅の書体の優先順。`None` は標準（`crate::fonts::default_mono`）。
+pub fn mono_fonts(cx: &App) -> Option<Vec<String>> {
+    let saved = db::shared(cx).read(cx).store.setting(MONO).ok().flatten()?;
+    Some(parse_fonts(&saved)).filter(|fonts| !fonts.is_empty())
+}
+
+/// 等幅の書体の優先順を保存して、ターミナルとコードに使う。`None` は標準に戻す。
+pub fn set_mono_fonts(fonts: Option<&[String]>, cx: &mut App) -> malakt_core::Result<()> {
+    let fonts = fonts.map(tidy_fonts).filter(|fonts| !fonts.is_empty());
+    let text = fonts.map(|fonts| serde_json::Value::from(fonts).to_string());
+    db::shared(cx).update(cx, |db, _| db.store.set_setting(MONO, text.as_deref()))?;
+    reload(cx);
+    Ok(())
+}
+
+/// 空白だけの名前と、2 度目に出てきた名前を除く。順番はそのまま。
+pub fn tidy_fonts(fonts: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for name in fonts {
+        let name = name.trim();
+        if !name.is_empty() && !out.iter().any(|have| have == name) {
+            out.push(name.to_owned());
+        }
+    }
+    out
+}
+
+/// 書体の優先順を保存する形。同梱の書体だけなら `None`（何も選んでいない）。
+fn fonts_text(fonts: &[String]) -> Option<String> {
+    let fonts = tidy_fonts(fonts);
+    if fonts.is_empty() || fonts == [DEFAULT_FONT] {
+        return None;
+    }
+    Some(serde_json::Value::from(fonts).to_string())
+}
+
+/// 保存した優先順を読む。読めない中身は、何も選んでいないのと同じに扱う。
+fn parse_fonts(saved: &str) -> Vec<String> {
+    let list: Vec<String> = serde_json::from_str(saved).unwrap_or_default();
+    tidy_fonts(&list)
 }
 
 /// 色を保存して、すべてのウィンドウを塗り直す。`None` は同梱の配色の色。
@@ -1344,7 +1411,8 @@ fn themes(look: &Look) -> ThemeSet {
 fn overlaid(look: &Look) -> serde_json::Value {
     let mut set = stock();
     for theme in set["themes"].as_array_mut().into_iter().flatten() {
-        if let Some(font) = &look.font {
+        // 先頭の書体を主の書体にする。2 つ目からは `crate::fonts` が文字ごとに使う
+        if let Some(font) = look.fonts.first() {
             theme["font.family"] = font.as_str().into();
         }
         let dark = theme["mode"] == "dark";
@@ -1538,6 +1606,8 @@ fn repaint(mode: ThemeMode, cx: &mut App) {
         // 輪は角の丸みが枠とずれて二重に見え、スクロールする所では端が切れる
         theme.focus_ring = false;
     });
+    // 書体の優先順を読み直して、主の書体を配色に入れる
+    crate::fonts::refresh(cx);
     sync_corners(cx);
 }
 
@@ -1584,7 +1654,7 @@ mod tests {
             ("#3f88c5", "#3f88c5", "#3f88c5"),
         ] {
             let look = Look {
-                font: Some("Noto Sans".into()),
+                fonts: vec!["Noto Sans".into(), "Noto Sans SC".into()],
                 accent: Color::parse(accent),
                 light: Color::parse(light),
                 dark: Color::parse(dark),
@@ -1628,7 +1698,7 @@ mod tests {
             );
             // 配色として読めて、保存した形から同じものが戻る
             themes(&super::with_scene(preset.look.clone(), &preset.scene));
-            preset.look.font = Some("Noto Serif".into());
+            preset.look.fonts = vec!["Noto Serif".into(), "Noto Sans SC".into()];
             assert_eq!(Preset::from_json(&preset.to_json()), Some(preset.clone()));
             // 同梱の画像は、ライトとダークの両方がある
             if preset.scene != Scene::None {
@@ -1643,6 +1713,31 @@ mod tests {
         };
         assert_eq!(Preset::from_json(&own.to_json()), Some(own));
         assert_eq!(Preset::from_json(&serde_json::json!({ "name": "x" })), None);
+    }
+
+    #[test]
+    fn font_lists_are_tidied_and_old_presets_keep_their_font() {
+        use super::{fonts_text, parse_fonts, tidy_fonts, Preset};
+        let list = |names: &[&str]| names.iter().map(|n| (*n).to_owned()).collect::<Vec<_>>();
+        assert_eq!(
+            tidy_fonts(&list(&[" Inter ", "", "Inter", "LINE Seed JP"])),
+            list(&["Inter", "LINE Seed JP"])
+        );
+        // 同梱の書体だけなら、何も選んでいない形
+        assert_eq!(fonts_text(&list(&["LINE Seed JP"])), None);
+        assert_eq!(fonts_text(&[]), None);
+        let saved = fonts_text(&list(&["源ノ角ゴシック", "LINE Seed JP"])).unwrap();
+        assert_eq!(
+            parse_fonts(&saved),
+            list(&["源ノ角ゴシック", "LINE Seed JP"])
+        );
+        assert!(parse_fonts("壊れた").is_empty());
+        // 前の形のテーマは、書体を 1 つだけ "font" に持っていた
+        let mut old = Preset::recommended().remove(0).to_json();
+        old.as_object_mut().unwrap().remove("fonts");
+        old["font"] = "Noto Serif".into();
+        let read = Preset::from_json(&old).unwrap();
+        assert_eq!(read.look.fonts, list(&["Noto Serif"]));
     }
 
     #[test]

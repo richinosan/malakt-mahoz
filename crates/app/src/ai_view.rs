@@ -3,6 +3,7 @@
 use std::ops::Range;
 use std::time::Duration;
 
+use crate::fonts::MonoFont;
 use crate::press::{button, Unpressed};
 use gpui_kit::base::{TestSupportExt, TextSelection};
 use gpui_kit::component::button::ButtonVariants;
@@ -2768,7 +2769,7 @@ impl AiPane {
                         .py_2()
                         .bg(rgb(TERM_BG))
                         .text_color(rgb(TERM_FG))
-                        .font_family(theme.mono_font_family.clone())
+                        .mono_font(cx)
                         .text_size(term_font(cx))
                         .cursor_text()
                         // どこをクリックしても、入力行に打てる
