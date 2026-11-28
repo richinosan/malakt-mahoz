@@ -8,6 +8,8 @@ fn main() {
     let path = malakt_mahoz::database_path();
     // 引数があれば、ウィンドウを開かずにコマンドとして動く（MCP サーバー、完了チケットの引き換えなど）
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // スタートアップの登録は、画面からも MCP サーバーからも、本物の OS に書く
+    malakt_mahoz::autostart::use_system();
     if malakt_mahoz::cli::is_command(&args) {
         // Windows のリリース版はコンソールを持たないので、呼び出したターミナルに出力をつなぐ
         malakt_term::console::attach();
@@ -60,6 +62,7 @@ fn main() {
             malakt_mahoz::ai::shared(cx).update(cx, |ai, cx| ai.read_github(cx));
             malakt_mahoz::reminders::connect_system(cx);
             malakt_mahoz::update::connect_system(cx);
+            let autostart = malakt_mahoz::autostart::connect_system(cx);
             malakt_mahoz::db::watch(cx);
             malakt_mahoz::quit_when_main_closes(cx);
             let (window, view) =
@@ -69,6 +72,9 @@ fn main() {
                 .update(cx, |_, window, cx| {
                     view.update(cx, |view, cx| {
                         view.request_unlock(window, cx);
+                        if let Err(error) = &autostart {
+                            view.error = Some(error.clone().into());
+                        }
                         // AI を使っていなければ、AI のおすすめを出す
                         view.offer_ai(cx);
                     })

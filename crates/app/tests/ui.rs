@@ -3074,14 +3074,85 @@ fn font_and_colors_are_chosen_in_settings(cx: &mut TestAppContext) {
             cx.notify();
         })
     });
-    // 検索で絞って選ぶ
-    ui(cx, window, |window, cx| window.input("serif", cx));
+    let chain = |cx: &mut TestAppContext| cx.update(|cx| view.read(cx).font_list(false, cx));
+    // 検索の言葉を入れ直す
+    let search = |cx: &mut TestAppContext, text: &str| {
+        ui(cx, window, |window, cx| {
+            let input = view.read(cx).inputs.font_search.clone();
+            input.update(cx, |s, cx| s.set_value("", window, cx));
+            window.input(text, cx);
+        })
+    };
+
+    // 検索で絞って押すと、優先順の末尾に足される
+    search(cx, "serif");
     ui(cx, window, |window, cx| {
         assert!(window.try_find(("font", 1usize)).is_none());
         window.click(("font", 0usize), cx)
     });
+    assert_eq!(chain(cx), ["LINE Seed JP", "Noto Serif"]);
+    assert_eq!(
+        saved(cx, "font.families").as_deref(),
+        Some(r#"["LINE Seed JP","Noto Serif"]"#)
+    );
+    // 先頭が主の書体
+    assert_eq!(font(cx), "LINE Seed JP");
+    search(cx, "sans");
+    ui(cx, window, |window, cx| window.click(("font", 0usize), cx));
+    assert_eq!(chain(cx), ["LINE Seed JP", "Noto Serif", "Noto Sans"]);
+
+    // 行をドラッグして並べ替える。少し動かしただけでは動かない
+    let center = |cx: &mut TestAppContext, ix: usize| {
+        let mut at = Point::default();
+        ui(cx, window, |window, _| {
+            at = window.find(("font-chain-row", ix)).bounds().center()
+        });
+        at
+    };
+    let drag = |cx: &mut TestAppContext, from: Point<Pixels>, to: Point<Pixels>| {
+        let mut v = gpui_kit::VisualTestContext::from_window(window, cx);
+        v.simulate_mouse_down(from, MouseButton::Left, Modifiers::default());
+        for step in 1..=4 {
+            let t = step as f32 / 4.;
+            let at = Point::new(from.x + (to.x - from.x) * t, from.y + (to.y - from.y) * t);
+            v.simulate_mouse_move(at, MouseButton::Left, Modifiers::default());
+            v.update(|window, cx| window.render_frame(cx));
+        }
+        v.simulate_mouse_up(to, MouseButton::Left, Modifiers::default());
+        v.run_until_parked();
+    };
+    let first = center(cx, 0);
+    drag(cx, first, Point::new(first.x, first.y + px(3.)));
+    assert_eq!(chain(cx), ["LINE Seed JP", "Noto Serif", "Noto Sans"]);
+    let (first, third) = (center(cx, 0), center(cx, 2));
+    drag(cx, third, first);
+    assert_eq!(chain(cx), ["Noto Sans", "LINE Seed JP", "Noto Serif"]);
+    assert_eq!(font(cx), "Noto Sans");
+    cx.update(|cx| assert!(view.read(cx).font_drag.is_none()));
+
+    // × で外す。入っている書体を一覧で押しても外れる。最後の 1 つは外せない
+    ui(cx, window, |window, cx| {
+        window.click(("font-remove", 0usize), cx)
+    });
+    assert_eq!(chain(cx), ["LINE Seed JP", "Noto Serif"]);
+    search(cx, "serif");
+    ui(cx, window, |window, cx| window.click(("font", 0usize), cx));
+    assert_eq!(chain(cx), ["LINE Seed JP"]);
+    assert_eq!(saved(cx, "font.families"), None);
+    ui(cx, window, |window, _| {
+        assert!(window.try_find(("font-remove", 0usize)).is_none())
+    });
+    search(cx, "serif");
+    ui(cx, window, |window, cx| window.click(("font", 0usize), cx));
+    ui(cx, window, |window, cx| {
+        window.click(("font-remove", 0usize), cx)
+    });
+    assert_eq!(chain(cx), ["Noto Serif"]);
     assert_eq!(font(cx), "Noto Serif");
-    assert_eq!(saved(cx, "font.family").as_deref(), Some("Noto Serif"));
+    assert_eq!(
+        saved(cx, "font.families").as_deref(),
+        Some(r#"["Noto Serif"]"#)
+    );
 
     // Esc は重ねたほうだけを閉じ、もう一度で設定を閉じる
     ui(cx, window, |window, cx| window.press("escape", cx));
@@ -3152,6 +3223,7 @@ fn font_and_colors_are_chosen_in_settings(cx: &mut TestAppContext) {
     }
     for key in [
         "font.family",
+        "font.families",
         "color.accent",
         "color.background.light",
         "color.background.dark",
@@ -3169,6 +3241,113 @@ fn font_and_colors_are_chosen_in_settings(cx: &mut TestAppContext) {
     assert_eq!(
         cx.update(|cx| theme::shown(Slot::Accent, cx).hex()),
         "#86600f"
+    );
+}
+
+/// 等幅フォントの優先順は、標準が配色の等幅の書体と同梱の Nerd Font。足すと保存され、標準に戻せる。
+#[gpui_kit::test]
+fn mono_fonts_are_chosen_in_settings(cx: &mut TestAppContext) {
+    use gpui_kit::component::ActiveTheme;
+    use malakt_mahoz::state::SubModal;
+    use malakt_mahoz::theme::SYMBOL_FONT;
+    start(cx);
+    let (window, view) = open(cx, wide());
+    let saved = |cx: &mut TestAppContext| store(cx, |s| s.setting("font.mono").unwrap());
+    let stock = cx.update(|cx| cx.theme().mono_font_family.to_string());
+    let chain = |cx: &mut TestAppContext| cx.update(|cx| view.read(cx).font_list(true, cx));
+    // 検索の言葉を入れ直す
+    let search = |cx: &mut TestAppContext, text: &str| {
+        ui(cx, window, |window, cx| {
+            let input = view.read(cx).inputs.font_search.clone();
+            input.update(cx, |s, cx| s.set_value("", window, cx));
+            window.input(text, cx);
+        })
+    };
+
+    assert_eq!(chain(cx), [stock.as_str(), SYMBOL_FONT]);
+    assert_eq!(
+        cx.update(|cx| malakt_mahoz::fonts::mono(cx)
+            .fallbacks
+            .unwrap()
+            .fallback_list()
+            .to_vec()),
+        [SYMBOL_FONT]
+    );
+
+    ui(cx, window, |window, cx| {
+        view.update(cx, |v, cx| v.open_appearance(window, cx))
+    });
+    ui(cx, window, |window, cx| {
+        window.click(("customize-nav", 3usize), cx)
+    });
+    ui(cx, window, |window, cx| window.click("mono-font-open", cx));
+    cx.update(|cx| {
+        view.update(cx, |v, cx| {
+            assert_eq!(v.sub_modal, Some(SubModal::MonoFont));
+            v.fonts = ["LINE Seed JP", "Noto Sans Mono", "Sarasa Mono SC"]
+                .map(String::from)
+                .to_vec();
+            cx.notify();
+        })
+    });
+    search(cx, "sarasa");
+    ui(cx, window, |window, cx| window.click(("font", 0usize), cx));
+    assert_eq!(chain(cx), [stock.as_str(), SYMBOL_FONT, "Sarasa Mono SC"]);
+    assert!(saved(cx).is_some());
+    // 画面のフォントは変わらない
+    assert_eq!(
+        cx.update(|cx| view.read(cx).font_list(false, cx)),
+        ["LINE Seed JP"]
+    );
+    // 外して標準と同じ並びに戻ると、何も選んでいない形になる
+    ui(cx, window, |window, cx| {
+        window.click(("font-remove", 2usize), cx)
+    });
+    assert_eq!(saved(cx), None);
+    ui(cx, window, |window, cx| {
+        window.click(("font-remove", 0usize), cx)
+    });
+    assert_eq!(chain(cx), [SYMBOL_FONT]);
+    assert_eq!(
+        cx.update(|cx| cx.theme().mono_font_family.to_string()),
+        SYMBOL_FONT
+    );
+    ui(cx, window, |window, cx| window.press("escape", cx));
+    ui(cx, window, |window, cx| window.click("mono-font-reset", cx));
+    assert_eq!(saved(cx), None);
+    assert_eq!(chain(cx), [stock.as_str(), SYMBOL_FONT]);
+    assert_eq!(
+        cx.update(|cx| cx.theme().mono_font_family.to_string()),
+        stock
+    );
+}
+
+/// 前の形（書体 1 つだけ）の設定は、1 つだけの優先順として読み、変えたら新しい形で書く。
+#[gpui_kit::test]
+fn the_old_single_font_setting_is_read_as_a_list(cx: &mut TestAppContext) {
+    use gpui_kit::component::ActiveTheme;
+    let mut old = Store::open_in_memory().unwrap();
+    old.set_setting("font.family", Some("Noto Serif")).unwrap();
+    cx.update(|cx| malakt_mahoz::init(old, cx));
+    let (_window, view) = open(cx, wide());
+    assert_eq!(
+        cx.update(|cx| cx.theme().font_family.to_string()),
+        "Noto Serif"
+    );
+    assert_eq!(
+        cx.update(|cx| view.read(cx).font_list(false, cx)),
+        ["Noto Serif"]
+    );
+    cx.update(|cx| {
+        view.update(cx, |v, cx| {
+            v.set_font_list(false, vec!["Inter".into(), "Noto Serif".into()], cx)
+        })
+    });
+    let saved = |cx: &mut TestAppContext, key: &str| store(cx, |s| s.setting(key).unwrap());
+    assert_eq!(saved(cx, "font.family"), None);
+    assert_eq!(
+        saved(cx, "font.families").as_deref(),
+        Some(r#"["Inter","Noto Serif"]"#)
     );
 }
 
@@ -3797,13 +3976,16 @@ fn density_and_editor_themes(cx: &mut TestAppContext) {
     pick(cx, &["LINE Seed JP", "Menlo", "Consolas"]);
     assert_eq!(saved(cx, "density").as_deref(), Some("compact"));
     // 候補の並びで先にあるものを使う
-    assert_eq!(saved(cx, "font.family").as_deref(), Some("Consolas"));
+    assert_eq!(
+        saved(cx, "font.families").as_deref(),
+        Some(r#"["Consolas"]"#)
+    );
     assert_eq!(saved(cx, "theme").as_deref(), Some("dark"));
     assert_eq!(row(cx), compact);
 
     // 等幅の書体がなければ、標準の書体のまま
     pick(cx, &["LINE Seed JP", "Noto Serif"]);
-    assert_eq!(saved(cx, "font.family"), None);
+    assert_eq!(saved(cx, "font.families"), None);
     assert_eq!(saved(cx, "density").as_deref(), Some("compact"));
 
     // 標準のテーマに戻すと、密度も書体も戻る
@@ -5337,6 +5519,83 @@ fn auto_update_can_be_turned_off(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert_eq!(checked.lock().unwrap().len(), 2);
     assert!(has(cx, window, "update-now"));
+}
+
+/// スタートアップの OS への登録を差し替える。返すのは、登録しているかどうか。
+fn launcher(
+    cx: &mut TestAppContext,
+    write: Result<(), &'static str>,
+) -> std::sync::Arc<std::sync::Mutex<bool>> {
+    let on = std::sync::Arc::new(std::sync::Mutex::new(false));
+    let (read, written) = (on.clone(), on.clone());
+    cx.update(|cx| {
+        cx.set_global(malakt_mahoz::autostart::Launcher {
+            available: true,
+            read: std::sync::Arc::new(move || Ok(*read.lock().unwrap())),
+            write: std::sync::Arc::new(move |value| {
+                write.map_err(str::to_owned)?;
+                *written.lock().unwrap() = value;
+                Ok(())
+            }),
+        })
+    });
+    on
+}
+
+/// 設定の「スタートアップ」のスイッチで、OS に登録する・外す。
+#[gpui_kit::test]
+fn autostart_is_switched_in_settings(cx: &mut TestAppContext) {
+    start(cx);
+    let (window, view) = open(cx, wide());
+    let on = launcher(cx, Ok(()));
+    let section = malakt_mahoz::state::CustomizeSection::Startup;
+
+    press_in_settings(cx, window, &view, section, "autostart-switch");
+    assert!(*on.lock().unwrap());
+    cx.update(|cx| {
+        assert!(malakt_mahoz::autostart::enabled(cx));
+        assert!(view.read(cx).error.is_none());
+    });
+
+    press_in_settings(cx, window, &view, section, "autostart-switch");
+    assert!(!*on.lock().unwrap());
+    cx.update(|cx| assert!(!malakt_mahoz::autostart::enabled(cx)));
+}
+
+/// 登録できなかったら、理由が画面に出て、オフのまま。
+#[gpui_kit::test]
+fn a_failed_autostart_is_shown(cx: &mut TestAppContext) {
+    start(cx);
+    let (window, view) = open(cx, wide());
+    let on = launcher(cx, Err("スタートアップに登録できませんでした: 拒否"));
+    press_in_settings(
+        cx,
+        window,
+        &view,
+        malakt_mahoz::state::CustomizeSection::Startup,
+        "autostart-switch",
+    );
+    assert!(!*on.lock().unwrap());
+    cx.update(|cx| {
+        assert_eq!(
+            view.read(cx).error.as_deref(),
+            Some("スタートアップに登録できませんでした: 拒否")
+        );
+    });
+}
+
+/// 登録できない OS では、設定に出さない。
+#[gpui_kit::test]
+fn autostart_is_hidden_where_it_cannot_be_registered(cx: &mut TestAppContext) {
+    start(cx);
+    let (window, view) = open(cx, wide());
+    ui(cx, window, |window, cx| window.click("open-settings", cx));
+    ui(cx, window, |window, cx| {
+        view.update(cx, |v, cx| {
+            v.show_appearance_section(malakt_mahoz::state::CustomizeSection::Startup, window, cx)
+        })
+    });
+    assert!(!has(cx, window, "autostart-switch"));
 }
 
 /// 閉じるときに入れ替えられなかったら、次に開いたウィンドウに理由が 1 回だけ出て、
