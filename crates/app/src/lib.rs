@@ -23,6 +23,7 @@ pub mod icons;
 pub mod mcp;
 mod mcp_keys;
 pub mod mcp_register;
+pub mod now_playing;
 pub mod panes;
 pub mod passkey;
 pub mod plugins;
@@ -169,6 +170,7 @@ pub fn init_with(store: malakt_core::Store, ai: AiConfig, cx: &mut App) {
     caldav::init(cx);
     update::init(cx);
     autostart::init(cx);
+    now_playing::init(cx);
     pomodoro::init(cx);
     theme::init(cx);
     cx.bind_keys([
