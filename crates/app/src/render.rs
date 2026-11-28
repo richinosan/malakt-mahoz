@@ -8605,6 +8605,56 @@ impl MainView {
                 self.dialog(title, body, cx)
             }
             Modal::Appearance => self.render_appearance(cx),
+            Modal::AiPromo => {
+                let body = col()
+                    .gap_4()
+                    .child(
+                        row()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .text_color(theme.primary)
+                                    .child(app_icon("sparkles").size_8())
+                                    .with_animation(
+                                        "ai-promo-icon",
+                                        Animation::new(std::time::Duration::from_millis(1600))
+                                            .repeat()
+                                            .with_easing(pulsating_between(0.55, 1.)),
+                                        |d, t| d.opacity(t),
+                                    ),
+                            )
+                            .child(muted(
+                                "頼むだけで、AI がタスクの追加・整理・更新をします。".to_owned(),
+                            )),
+                    )
+                    .child(
+                        row()
+                            .gap_2()
+                            .child(
+                                Checkbox::new("ai-promo-never")
+                                    .py(px(4.))
+                                    .my(px(-4.))
+                                    .label("今後は表示しない")
+                                    .checked(self.ai_promo_never)
+                                    .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                                        this.set_ai_promo_never(*checked, cx)
+                                    })),
+                            )
+                            .child(div().flex_1())
+                            .child(cancel(cx))
+                            .child(feel::gloss(
+                                button("ai-promo-open")
+                                    .icon(app_icon("sparkles"))
+                                    .label("AI チャットを開く")
+                                    .primary()
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.open_ai_from_promo(window, cx)
+                                    })),
+                            )),
+                    );
+                self.dialog("AI で楽々タスク管理", body, cx)
+            }
             Modal::DeleteWorkspace(id) => {
                 let name = self.workspace_name(Some(id));
                 let body = col()
@@ -9654,6 +9704,10 @@ impl Render for MainView {
             return self.render_embedded(window, cx);
         }
         self.arm_notice(cx);
+        // 起動してすぐ出した AI のおすすめを、Esc で閉じられるようにする
+        if std::mem::take(&mut self.ai_promo_focus) {
+            self.focus.focus(window, cx);
+        }
         // 落とせる場所を覚え直す。描かれなかったペインと AI チャットの場所は残さない
         self.drops.begin(crate::drops::ROOT);
         for child in self.children.values() {

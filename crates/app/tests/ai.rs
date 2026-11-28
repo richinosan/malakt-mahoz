@@ -4493,3 +4493,122 @@ fn a_schedule_makes_a_new_task_and_runs_its_ai_instruction(cx: &mut TestAppConte
     let next = schedules_in(cx, Some(&workspace))[0].next_at.clone();
     assert_ne!(next, made.next_at);
 }
+
+/// 起動したときの AI のおすすめを出し、待つ。
+fn offer_ai(cx: &mut TestAppContext, view: &Entity<MainView>) {
+    cx.update(|cx| view.update(cx, |view, cx| view.offer_ai(cx)));
+    cx.run_until_parked();
+}
+
+/// API キーがないまま起動すると、AI のおすすめが出る。「AI チャットを開く」で右にチャットが開き、
+/// そこから API キーの設定に進める。
+#[gpui_kit::test]
+fn the_ai_promo_opens_the_chat_without_a_key(cx: &mut TestAppContext) {
+    let world = start(cx);
+    let (window, view) = open(cx, wide());
+    offer_ai(cx, &view);
+    cx.update(|cx| assert_eq!(view.read(cx).modal, malakt_mahoz::Modal::AiPromo));
+    ui(cx, window, |window, _| {
+        assert!(window.find("ai-promo-open").visible());
+        assert!(window.find("ai-promo-never").visible());
+        assert!(window.find("modal-cancel").visible());
+    });
+
+    ui(cx, window, |window, cx| window.click("ai-promo-open", cx));
+    let pane = cx.update(|cx| {
+        let view = view.read(cx);
+        assert_eq!(view.modal, malakt_mahoz::Modal::None);
+        assert!(view.ai_open);
+        view.ai_pane.clone().expect("チャットが開く")
+    });
+    ui(cx, window, |window, cx| window.click("ai-empty-key", cx));
+    assert!(cx.update(|cx| pane.read(cx).settings_open));
+    // 調べただけで、通信はしない
+    assert!(world.sent().is_empty());
+    assert!(world.fetched.lock().unwrap().is_empty());
+}
+
+/// 「今後は表示しない」に印を付けると、次の起動から出ない。キャンセルと Esc は 1 回閉じるだけ。
+#[gpui_kit::test]
+fn the_ai_promo_can_be_hidden_for_good(cx: &mut TestAppContext) {
+    let _world = start(cx);
+    let (window, view) = open(cx, wide());
+    let hidden = |cx: &mut TestAppContext| {
+        cx.update(|cx| {
+            db::shared(cx)
+                .read(cx)
+                .store
+                .setting(malakt_mahoz::state::AI_PROMO_SETTING)
+                .unwrap()
+        })
+    };
+
+    // キャンセルは閉じるだけで、次の起動でまた出る
+    offer_ai(cx, &view);
+    ui(cx, window, |window, cx| window.click("modal-cancel", cx));
+    cx.update(|cx| {
+        assert_eq!(view.read(cx).modal, malakt_mahoz::Modal::None);
+        assert!(!view.read(cx).ai_open);
+    });
+    assert_eq!(hidden(cx), None);
+    offer_ai(cx, &view);
+    cx.update(|cx| assert_eq!(view.read(cx).modal, malakt_mahoz::Modal::AiPromo));
+    ui(cx, window, |window, cx| window.press("escape", cx));
+    cx.update(|cx| assert_eq!(view.read(cx).modal, malakt_mahoz::Modal::None));
+
+    // 印を付けると、すぐ保存する。外し直せば、また出る
+    offer_ai(cx, &view);
+    ui(cx, window, |window, cx| window.click("ai-promo-never", cx));
+    assert_eq!(hidden(cx).as_deref(), Some("1"));
+    ui(cx, window, |window, cx| window.click("ai-promo-never", cx));
+    assert_eq!(hidden(cx), None);
+    ui(cx, window, |window, cx| window.click("ai-promo-never", cx));
+    assert!(cx.update(|cx| view.read(cx).ai_promo_never));
+    ui(cx, window, |window, cx| window.click("modal-cancel", cx));
+    assert_eq!(hidden(cx).as_deref(), Some("1"));
+
+    offer_ai(cx, &view);
+    cx.update(|cx| assert_eq!(view.read(cx).modal, malakt_mahoz::Modal::None));
+}
+
+/// API キーがあれば（AI を使っていれば）、おすすめは出ない。
+#[gpui_kit::test]
+fn the_ai_promo_stays_hidden_with_a_key(cx: &mut TestAppContext) {
+    let world = start(cx);
+    world
+        .keys
+        .set(Provider::Claude, "sk-ant-test-12345678")
+        .unwrap();
+    let (_window, view) = open(cx, wide());
+    offer_ai(cx, &view);
+    assert!(matches!(
+        read(cx, |s| s.key.clone()),
+        KeyState::Present { .. }
+    ));
+    cx.update(|cx| assert_eq!(view.read(cx).modal, malakt_mahoz::Modal::None));
+}
+
+/// ロックしているあいだは出さず、解除したら出す。
+#[gpui_kit::test]
+fn the_ai_promo_waits_for_the_unlock(cx: &mut TestAppContext) {
+    let _world = start(cx);
+    let (_window, view) = open(cx, wide());
+    cx.update(|cx| {
+        db::shared(cx).update(cx, |db, _| {
+            malakt_core::lock::enable(&mut db.store).unwrap()
+        })
+    });
+    cx.update(db::lock_now);
+    cx.run_until_parked();
+    offer_ai(cx, &view);
+    cx.update(|cx| assert_eq!(view.read(cx).modal, malakt_mahoz::Modal::None));
+
+    cx.update(|cx| {
+        db::shared(cx).update(cx, |db, cx| {
+            db.unlocked = true;
+            cx.notify();
+        })
+    });
+    cx.run_until_parked();
+    cx.update(|cx| assert_eq!(view.read(cx).modal, malakt_mahoz::Modal::AiPromo));
+}
