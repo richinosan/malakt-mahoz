@@ -1,7 +1,8 @@
-//! 設定の「同期」。同期するアカウント（CalDAV のサーバーと、macOS のリマインダー）の一覧、
+//! 設定の「連携と同期」。同期するアカウント（CalDAV のサーバーと、macOS のリマインダー）の一覧、
 //! 追加・外す・今すぐ同期と、サーバーのカレンダーをワークスペースにつなぐメニュー。
+//! ほかのツール（Notion・Redmine・Backlog・ClickUp・Slack）からの取り込みも、ここから選ぶ。
 //!
-//! 「アカウントを追加」で設定の上にダイアログを重ね、プロバイダを選んでから、
+//! 「連携を追加」で設定の上にダイアログを重ね、プロバイダを選んでから、
 //! サーバー・ユーザー名・パスワード・説明を入れて足す。パスワードは OS のキーチェーンに入れる。
 //! サーバーのカレンダーごとに、つなぐワークスペースを選ぶ（新しく作る・今あるもの・つながない）。
 
@@ -15,6 +16,7 @@ use gpui_kit::component::{ActiveTheme, Disableable, Sizable};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use malakt_core::caldav::{Account, Calendar};
+use malakt_core::intake::{Batch, FileOptions, Source};
 use malakt_core::{view, Id, Workspace};
 
 use crate::ai_view::icon_button;
@@ -41,14 +43,25 @@ pub enum Provider {
     Nextcloud,
     /// ほかの CalDAV のサーバー
     Other,
+    // ここから下は取り込み
+    Notion,
+    Redmine,
+    Backlog,
+    ClickUp,
+    Slack,
 }
 
 impl Provider {
-    pub const ALL: [Provider; 4] = [
+    pub const ALL: [Provider; 9] = [
         Provider::Reminders,
         Provider::Fastmail,
         Provider::Nextcloud,
         Provider::Other,
+        Provider::Notion,
+        Provider::Redmine,
+        Provider::Backlog,
+        Provider::ClickUp,
+        Provider::Slack,
     ];
 
     pub fn name(self) -> &'static str {
@@ -57,6 +70,11 @@ impl Provider {
             Provider::Fastmail => "Fastmail",
             Provider::Nextcloud => "Nextcloud",
             Provider::Other => "その他の CalDAV アカウント",
+            Provider::Notion => "Notion",
+            Provider::Redmine => "Redmine",
+            Provider::Backlog => "Backlog",
+            Provider::ClickUp => "ClickUp",
+            Provider::Slack => "Slack",
         }
     }
 
@@ -66,6 +84,11 @@ impl Provider {
             Provider::Fastmail => "mail",
             Provider::Nextcloud => "cloud",
             Provider::Other => "server",
+            Provider::Notion => "book",
+            Provider::Redmine => "bug",
+            Provider::Backlog => "layers",
+            Provider::ClickUp => "check-check",
+            Provider::Slack => "message-square",
         }
     }
 
@@ -76,6 +99,27 @@ impl Provider {
             Provider::Fastmail => "caldav-pick-fastmail",
             Provider::Nextcloud => "caldav-pick-nextcloud",
             Provider::Other => "caldav-pick-other",
+            Provider::Notion => "intake-pick-notion",
+            Provider::Redmine => "intake-pick-redmine",
+            Provider::Backlog => "intake-pick-backlog",
+            Provider::ClickUp => "intake-pick-clickup",
+            Provider::Slack => "intake-pick-slack",
+        }
+    }
+
+    /// 取り込みのプロバイダ（同期ではない）。
+    pub fn imports(self) -> bool {
+        self.source().is_some() || self == Provider::Slack
+    }
+
+    /// ファイルから取り込むときの形式。
+    fn source(self) -> Option<Source> {
+        match self {
+            Provider::Notion => Some(Source::Notion),
+            Provider::Redmine => Some(Source::Redmine),
+            Provider::Backlog => Some(Source::Backlog),
+            Provider::ClickUp => Some(Source::ClickUp),
+            _ => None,
         }
     }
 
@@ -90,6 +134,8 @@ impl Provider {
     fn server_hint(self) -> &'static str {
         match self {
             Provider::Nextcloud => "cloud.example.com",
+            Provider::Redmine => "redmine.example.com（省略可）",
+            Provider::Backlog => "example.backlog.jp（省略可）",
             _ => "caldav.example.com",
         }
     }
@@ -119,10 +165,28 @@ enum Step {
 }
 
 /// 追加のダイアログを開く・閉じる。設定の上に重ねるのは、設定を出しているビュー。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AddDialog {
     Open,
     Close,
+    /// 取り込みが終わった。知らせる文
+    Imported(SharedString),
+}
+
+/// Slack から何を取り込むか。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SlackKind {
+    Reminders,
+    List,
+}
+
+impl SlackKind {
+    fn label(self) -> &'static str {
+        match self {
+            SlackKind::Reminders => "リマインダー",
+            SlackKind::List => "Slack リスト",
+        }
+    }
 }
 
 /// サーバーの欄に書いたものを URL にする。`https://` などがなければ `https://` を付ける。
@@ -151,6 +215,13 @@ pub struct CalDavSettings {
     password: Entity<InputState>,
     /// 説明（アカウントに付ける名前）
     name: Entity<InputState>,
+    /// 取り込む Slack リストの URL
+    list: Entity<InputState>,
+    /// 取り込むファイル
+    file: Option<std::path::PathBuf>,
+    /// 取り込む先。`None` は新しいワークスペース
+    import_to: Option<Id>,
+    slack_kind: SlackKind,
     /// 追加のダイアログの段階。閉じていれば `None`。
     step: Option<Step>,
     /// 最後に出した段階。閉じたダイアログが消えるまでの間も、同じ中身を描く。
@@ -176,11 +247,13 @@ impl CalDavSettings {
         let user = cx.new(|cx| InputState::new(window, cx));
         let password = cx.new(|cx| InputState::new(window, cx).masked(true));
         let name = cx.new(|cx| InputState::new(window, cx).placeholder("省略可"));
+        let list = cx
+            .new(|cx| InputState::new(window, cx).placeholder("https://example.slack.com/lists/…"));
         let mut subs = vec![
             cx.observe(&db, |_, _, cx| cx.notify()),
             cx.observe(&syncer, |_, _, cx| cx.notify()),
         ];
-        for input in [&url, &user, &password, &name] {
+        for input in [&url, &user, &password, &name, &list] {
             subs.push(
                 cx.subscribe_in(input, window, |this, _, event: &InputEvent, window, cx| {
                     if matches!(event, InputEvent::PressEnter { .. }) {
@@ -196,6 +269,10 @@ impl CalDavSettings {
             user,
             password,
             name,
+            list,
+            file: None,
+            import_to: None,
+            slack_kind: SlackKind::Reminders,
             step: None,
             shown: Step::Pick,
             add_gen: 0,
@@ -237,7 +314,7 @@ impl CalDavSettings {
     pub fn add_title(&self) -> &'static str {
         match self.step.unwrap_or(self.shown) {
             Step::Form(p) => p.name(),
-            Step::Pick => "アカウントを追加",
+            Step::Pick => "連携を追加",
         }
     }
 
@@ -248,9 +325,18 @@ impl CalDavSettings {
         self.shown = Step::Pick;
         self.connecting = false;
         self.add_error = None;
-        for input in [&self.url, &self.user, &self.password, &self.name] {
+        for input in [
+            &self.url,
+            &self.user,
+            &self.password,
+            &self.name,
+            &self.list,
+        ] {
             input.update(cx, |s, cx| s.set_value("", window, cx));
         }
+        self.file = None;
+        self.import_to = None;
+        self.slack_kind = SlackKind::Reminders;
         cx.emit(AddDialog::Open);
         cx.notify();
     }
@@ -285,7 +371,9 @@ impl CalDavSettings {
         }
         self.step = Some(Step::Form(provider));
         self.add_error = None;
-        let first = if provider.server().is_some() {
+        let first = if provider == Provider::Slack {
+            &self.list
+        } else if provider.server().is_some() {
             &self.user
         } else {
             &self.url
@@ -307,6 +395,10 @@ impl CalDavSettings {
             return;
         };
         if self.connecting {
+            return;
+        }
+        if provider.imports() {
+            self.start_import(provider, window, cx);
             return;
         }
         let url = match provider.server() {
@@ -412,6 +504,141 @@ impl CalDavSettings {
             });
         })
         .detach();
+    }
+
+    /// 取り込むファイルを選ぶダイアログを出す。
+    fn pick_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let chosen = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("取り込む".into()),
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(paths))) = chosen.await else {
+                return;
+            };
+            let Some(path) = paths.into_iter().next() else {
+                return;
+            };
+            // 設定を閉じたあとなら、反映する先がない
+            let _ = this.update(cx, |this, cx| this.choose_file(path, cx));
+        })
+        .detach();
+    }
+
+    /// 取り込むファイルを決める。
+    pub fn choose_file(&mut self, path: std::path::PathBuf, cx: &mut Context<Self>) {
+        self.file = Some(path);
+        self.add_error = None;
+        cx.notify();
+    }
+
+    /// 読んで、取り込む。読むのは裏で、入れるのは画面のスレッドで。
+    fn start_import(&mut self, provider: Provider, window: &mut Window, cx: &mut Context<Self>) {
+        enum Pull {
+            File(std::path::PathBuf, FileOptions),
+            Reminders,
+            List(String),
+        }
+        let pull = if let Some(source) = provider.source() {
+            let Some(path) = self.file.clone() else {
+                self.add_error = Some("ファイルを選んでください".into());
+                cx.notify();
+                return;
+            };
+            let base = self.url.read(cx).value().trim().to_owned();
+            Pull::File(
+                path,
+                FileOptions {
+                    source: Some(source),
+                    base_url: (source.needs_base_url() && !base.is_empty()).then_some(base),
+                },
+            )
+        } else {
+            match self.slack_kind {
+                SlackKind::Reminders => Pull::Reminders,
+                SlackKind::List => {
+                    let list = self.list.read(cx).value().trim().to_owned();
+                    if list.is_empty() {
+                        self.add_error = Some("Slack リストの URL を入れてください".into());
+                        cx.notify();
+                        return;
+                    }
+                    Pull::List(list)
+                }
+            }
+        };
+        self.connecting = true;
+        self.add_error = None;
+        cx.notify();
+        let gen = self.add_gen;
+        let task = cx.background_executor().spawn(async move {
+            match pull {
+                Pull::File(path, options) => {
+                    malakt_core::intake::read_file(&path, &options).map_err(|e| e.to_string())
+                }
+                Pull::Reminders => malakt_ai::slack::import_reminders(),
+                Pull::List(list) => malakt_ai::slack::import_list(&list),
+            }
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let batch = task.await;
+            // 設定を閉じたあとなら、反映する先がない
+            let _ = this.update_in(cx, |this, _, cx| {
+                // 待っている間にダイアログを閉じたら、取り込まない
+                if this.add_gen != gen {
+                    return;
+                }
+                this.connecting = false;
+                match batch.and_then(|batch| this.import_batch(provider, &batch, cx)) {
+                    Ok(done) => {
+                        this.close_adding(cx);
+                        cx.emit(AddDialog::Imported(done.into()));
+                    }
+                    Err(e) => {
+                        this.add_error = Some(e.into());
+                        cx.notify();
+                    }
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// 読んだ中身を入れる。新しいワークスペースに入れるときは、取り込めなければ作ったものも消す。
+    /// 全体を、元に戻す 1 つの段にする。
+    fn import_batch(
+        &mut self,
+        provider: Provider,
+        batch: &Batch,
+        cx: &mut Context<Self>,
+    ) -> Result<String, String> {
+        let target = self.import_to.clone();
+        self.db.update(cx, |db, cx| {
+            let store = &mut db.store;
+            let result = store.undo_mark().and_then(|()| match &target {
+                Some(w) => store.import_batch(Some(w), batch),
+                None => {
+                    let w = store.create_workspace(None, provider.name())?;
+                    match store.import_batch(Some(&w.id), batch) {
+                        Ok(report) => Ok(report),
+                        Err(e) => match store.delete_workspace(&w.id) {
+                            Ok(()) => Err(e),
+                            Err(more) => Err(malakt_core::Error::Invalid(format!(
+                                "{e}（作ったワークスペースも消せませんでした。{more}）"
+                            ))),
+                        },
+                    }
+                }
+            });
+            let marked = store.undo_mark();
+            cx.notify();
+            let report = result
+                .and_then(|r| marked.map(|()| r))
+                .map_err(|e| e.to_string())?;
+            Ok(report.summary(batch.source))
+        })
     }
 
     /// リマインダーとの同期をやめる。このアプリが「リマインダー」に作ったものは消える。
@@ -777,10 +1004,17 @@ impl CalDavSettings {
             self.shown = step;
         }
         let body = match self.shown {
+            Step::Form(provider) if provider.imports() => self.import_form(provider, cx),
             Step::Form(provider) => self.add_form(provider, cx),
             Step::Pick => {
                 let mut list = col().id("caldav-providers").gap_1();
+                let mut was_sync = false;
                 for provider in self.providers(cx) {
+                    // 同期のプロバイダと、取り込みのプロバイダの間に線を引く
+                    if provider.imports() && was_sync {
+                        list = list.child(div().my_1().h(px(1.)).bg(theme.border));
+                    }
+                    was_sync = !provider.imports();
                     list = list.child(feel::gloss(
                         button(provider.id())
                             .ghost()
@@ -818,6 +1052,164 @@ impl CalDavSettings {
                 .child(e)
                 .test_support()
         }))
+    }
+
+    /// 取り込みのプロバイダの欄。ファイル（Slack は種類とリスト）、サーバー、取り込む先。
+    fn import_form(&self, provider: Provider, cx: &mut Context<Self>) -> Div {
+        let theme = cx.theme().clone();
+        let label = |text: &'static str| {
+            div()
+                .w(LABEL_WIDTH)
+                .flex_none()
+                .text_sm()
+                .text_color(theme.muted_foreground)
+                .child(text)
+        };
+        let line = |name: &'static str, field: AnyElement| {
+            row()
+                .gap_3()
+                .child(label(name))
+                .child(div().flex_1().min_w_0().child(field))
+        };
+        let view = cx.entity().downgrade();
+        let mut fields = col().gap_2();
+        if provider.source().is_some() {
+            let chosen: SharedString = self
+                .file
+                .as_ref()
+                .and_then(|p| p.file_name())
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "ファイルを選ぶ".into())
+                .into();
+            fields = fields.child(line(
+                "ファイル",
+                feel::gloss(
+                    button("intake-file")
+                        .label(chosen)
+                        .icon(app_icon("folder"))
+                        .outline()
+                        .small()
+                        .w_full()
+                        .on_click(cx.listener(|this, _, window, cx| this.pick_file(window, cx))),
+                )
+                .into_any_element(),
+            ));
+            if provider.source().is_some_and(Source::needs_base_url) {
+                fields = fields.child(line(
+                    "サーバー",
+                    Input::new(&self.url)
+                        .id("intake-server")
+                        .aria_label("サーバー")
+                        .into_any_element(),
+                ));
+            }
+        } else {
+            let kind = self.slack_kind;
+            let v = view.clone();
+            fields = fields.child(line(
+                "種類",
+                button("intake-slack-kind")
+                    .label(kind.label())
+                    .icon(app_icon("chevron-down"))
+                    .outline()
+                    .small()
+                    .w_full()
+                    .pop_menu(move |menu, _, _| {
+                        let mut menu = menu;
+                        for k in [SlackKind::Reminders, SlackKind::List] {
+                            let v = v.clone();
+                            menu = menu.item(
+                                PopupMenuItem::new(k.label()).checked(k == kind).on_click(
+                                    move |_, _, cx| {
+                                        // 設定を閉じたあとなら、反映する先がない
+                                        let _ = v.update(cx, |this, cx| {
+                                            this.slack_kind = k;
+                                            this.add_error = None;
+                                            cx.notify();
+                                        });
+                                    },
+                                ),
+                            );
+                        }
+                        menu
+                    })
+                    .into_any_element(),
+            ));
+            if kind == SlackKind::List {
+                fields = fields.child(line(
+                    "リスト",
+                    Input::new(&self.list)
+                        .id("intake-list")
+                        .aria_label("リスト")
+                        .into_any_element(),
+                ));
+            }
+        }
+        let names = self.workspace_names(cx);
+        let current: SharedString = self
+            .import_to
+            .as_deref()
+            .and_then(|w| names.iter().find(|(ws, _)| ws.id == w))
+            .map(|(_, n)| n.clone())
+            .unwrap_or_else(|| "新しいワークスペース".into())
+            .into();
+        let picked = self.import_to.clone();
+        fields = fields.child(line(
+            "取り込む先",
+            button("intake-target")
+                .label(current)
+                .icon(app_icon("chevron-down"))
+                .outline()
+                .small()
+                .w_full()
+                .pop_menu(move |menu, _, _| {
+                    let mut menu = menu;
+                    let choices = std::iter::once((None, "新しいワークスペース".to_owned()))
+                        .chain(names.iter().map(|(w, n)| (Some(w.id.clone()), n.clone())));
+                    for (i, (target, name)) in choices.enumerate() {
+                        if i == 1 {
+                            menu = menu.separator();
+                        }
+                        let v = view.clone();
+                        let checked = target == picked;
+                        menu = menu.item(PopupMenuItem::new(name).checked(checked).on_click(
+                            move |_, _, cx| {
+                                // 設定を閉じたあとなら、反映する先がない
+                                let _ = v.update(cx, |this, cx| {
+                                    this.import_to = target.clone();
+                                    cx.notify();
+                                });
+                            },
+                        ));
+                    }
+                    menu
+                })
+                .into_any_element(),
+        ));
+        col()
+            .key_context("CalDavForm")
+            .on_action(cx.listener(|this, _: &crate::CancelKeyEdit, _, cx| this.close_adding(cx)))
+            .child(fields)
+            .child(
+                row()
+                    .gap_2()
+                    .justify_end()
+                    .child(feel::gloss(
+                        button("caldav-cancel")
+                            .label("キャンセル")
+                            .ghost()
+                            .disabled(self.connecting)
+                            .on_click(cx.listener(|this, _, _, cx| this.close_adding(cx))),
+                    ))
+                    .child(feel::gloss(
+                        button("intake-run")
+                            .label("取り込む")
+                            .primary()
+                            .loading(self.connecting)
+                            .disabled(self.connecting)
+                            .on_click(cx.listener(|this, _, window, cx| this.submit(window, cx))),
+                    )),
+            )
     }
 
     /// 選んだプロバイダのアカウントの欄。項目の名前を左に、入力欄を右に並べる。
@@ -902,7 +1294,7 @@ impl Render for CalDavSettings {
         list.child(
             row().child(feel::gloss(
                 button("caldav-add")
-                    .label("アカウントを追加")
+                    .label("連携を追加")
                     .icon(app_icon("plus"))
                     .outline()
                     .small()

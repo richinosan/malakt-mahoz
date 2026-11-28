@@ -39,6 +39,7 @@
 - **タイマー**（別ウィンドウ）: カウントダウンとストップウォッチ。カウントダウンが 0 になると通知が出る（[docs/timer.md](docs/timer.md)）
 - **ロック**: パスキー（Windows Hello、Touch ID、fprintd）。`Ctrl + Shift + L`（macOS は `⇧⌘L`）か、上のバーの右クリック。操作がないときに自動でロックする時間を選べます。ロック中も OS の通知は届きます（[docs/lock.md](docs/lock.md)）
 - **エクスポート / インポート**: 全データを zip 1 つに書き出し、別の端末で取り込み
+- **ほかのツールからの取り込み**: Notion・Redmine・Backlog・ClickUp のエクスポートと、Slack のリマインダー・Slack リスト。同じものは二度取り込みません（[docs/import.md](docs/import.md)）
 - **リマインダーとの連携**（標準はオフ）: macOS の「リマインダー」との同期、Windows の通知の予約（[docs/reminders.md](docs/reminders.md)）
 - **スタートアップ**（標準はオフ）: PC にログインしたときに起動（[docs/startup.md](docs/startup.md)）
 - **CalDAV との同期**（標準はオフ）: Fastmail・Nextcloud などのサーバーのタスクを、ワークスペースと両方向に同期（[docs/caldav.md](docs/caldav.md)）
@@ -94,6 +95,7 @@ mise run api        # API の定義（api/*.tsp）からツールの一覧を作
 - [リマインダーとの連携](docs/reminders.md)
 - [スタートアップ](docs/startup.md)
 - [CalDAV との同期](docs/caldav.md)
+- [ほかのツールからの取り込み](docs/import.md)
 - [ポモドーロ](docs/pomodoro.md)
 - [タイマー](docs/timer.md)
 - [自動アップデート](docs/update.md)

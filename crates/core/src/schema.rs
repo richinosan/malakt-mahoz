@@ -495,6 +495,16 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     r#"
     ALTER TABLE caldav_accounts ADD COLUMN name TEXT NOT NULL DEFAULT '';
     "#,
+    // 29: ほかのツール（Notion・Redmine など）から取り込んだタスクの元。同じものを二度取り込まない
+    r#"
+    CREATE TABLE import_keys (
+        source TEXT NOT NULL,
+        key TEXT NOT NULL,
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        PRIMARY KEY (source, key)
+    ) STRICT, WITHOUT ROWID;
+    CREATE INDEX import_keys_task ON import_keys(task_id);
+    "#,
 ];
 
 pub(crate) fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {

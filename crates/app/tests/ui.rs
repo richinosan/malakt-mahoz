@@ -8753,3 +8753,89 @@ fn pr_times_become_the_elapsed_basis(cx: &mut TestAppContext) {
     );
     assert_eq!(task_span(cx), None);
 }
+
+/// 一覧の上のインポートで、ほかのツール（Redmine）の CSV を今のワークスペースに取り込める。
+/// もう一度取り込んでも増えない。
+#[gpui_kit::test]
+fn importing_another_tools_csv_into_the_workspace(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("issues.csv");
+    std::fs::write(
+        &path,
+        "#,トラッカー,ステータス,題名,担当者\n5,機能,新規,見積を出す,佐藤\n6,バグ,終了,表示が崩れる,\n",
+    )
+    .unwrap();
+    start(cx);
+    let workspace = cx.update(|cx| {
+        db::shared(cx).update(cx, |db, _| db.store.create_workspace(None, "案件").unwrap())
+    });
+    let (_window, view) = open(cx, wide());
+    cx.run_until_parked();
+    cx.update(|cx| view.update(cx, |v, cx| v.go(Nav::Workspace(workspace.id.clone()), cx)));
+    cx.update(|cx| view.update(cx, |v, cx| v.import_from(&path, cx)));
+    cx.run_until_parked();
+    let tasks = store(cx, |s| {
+        s.tasks(workspace.id.as_str(), &TaskFilter::default())
+            .unwrap()
+    });
+    assert_eq!(tasks.len(), 2);
+    cx.update(|cx| {
+        let notice = view.read(cx).notice.clone().unwrap();
+        assert!(notice.contains("Redmine から 2 件"), "{notice}");
+    });
+    cx.update(|cx| view.update(cx, |v, cx| v.import_from(&path, cx)));
+    assert_eq!(
+        store(cx, |s| s
+            .tasks(workspace.id.as_str(), &TaskFilter::default())
+            .unwrap())
+        .len(),
+        2
+    );
+    cx.update(|cx| {
+        let notice = view.read(cx).notice.clone().unwrap();
+        assert!(notice.contains("2 件は取り込み済み"), "{notice}");
+    });
+}
+
+/// 「連携と同期」の「連携を追加」で Redmine を選び、ファイルとサーバーを入れて取り込むと、
+/// 新しいワークスペースにチケットの URL つきで入る。ファイルを選ばずに押すとエラーが出る。
+#[gpui_kit::test]
+fn importing_from_the_integrations_settings(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("issues.csv");
+    std::fs::write(&path, "#,題名,ステータス\n12,ログイン画面,進行中\n").unwrap();
+    start(cx);
+    let (window, view) = open(cx, wide());
+    cx.run_until_parked();
+    pick_sync_provider(cx, window, &view, "intake-pick-redmine");
+    ui(cx, window, |window, cx| window.click("intake-run", cx));
+    ui(cx, window, |window, _| {
+        assert!(window.find("caldav-add-error").visible());
+    });
+    cx.update(|cx| {
+        let settings = view.read(cx).caldav_settings.clone();
+        settings.update(cx, |s, cx| s.choose_file(path.clone(), cx));
+    });
+    ui(cx, window, |window, cx| window.click("intake-server", cx));
+    ui(cx, window, |window, cx| {
+        window.input("redmine.example.com", cx)
+    });
+    ui(cx, window, |window, cx| window.click("intake-run", cx));
+    cx.run_until_parked();
+    wait_sub_closed(cx, window);
+    let ws = store(cx, |s| s.workspaces().unwrap())
+        .into_iter()
+        .find(|w| w.name == "Redmine")
+        .expect("新しいワークスペース");
+    let tasks = store(cx, |s| {
+        s.tasks(ws.id.as_str(), &TaskFilter::default()).unwrap()
+    });
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(tasks[0].status, malakt_core::Status::InProcess);
+    assert_eq!(tasks[0].urls, vec!["https://redmine.example.com/issues/12"]);
+    ui(cx, window, |window, _| {
+        assert!(window.try_find("intake-run").is_none());
+        assert!(window.find("caldav-add").visible());
+    });
+    cx.update(|cx| assert!(view.read(cx).notice.is_some()));
+}

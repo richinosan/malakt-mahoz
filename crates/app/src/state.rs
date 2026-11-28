@@ -194,7 +194,7 @@ impl CustomizeSection {
             CustomizeSection::Startup => "スタートアップ",
             CustomizeSection::Update => "アップデート",
             CustomizeSection::People => "担当者",
-            CustomizeSection::Sync => "同期",
+            CustomizeSection::Sync => "連携と同期",
             CustomizeSection::Keys => "キー操作",
             CustomizeSection::Window => "ウィンドウ",
             CustomizeSection::Plugins => "プラグイン",
@@ -751,6 +751,10 @@ impl MainView {
                                 this.sub_modal = None;
                                 this.focus.focus(window, cx);
                             }
+                        }
+                        crate::caldav_settings::AddDialog::Imported(done) => {
+                            this.show_notice(done.clone());
+                            this.reload(cx);
                         }
                     }
                     cx.notify();
@@ -4795,10 +4799,43 @@ impl MainView {
         .detach();
     }
 
+    /// ファイルを取り込む。このアプリのエクスポートなら全体を戻し、ほかのツール（Notion・Redmine・
+    /// Backlog・ClickUp）のファイルなら、今のワークスペースに入れる（開いていなければ新しく作る）。
     pub fn import_from(&mut self, path: &std::path::Path, cx: &mut Context<Self>) {
-        if let Some(manifest) = self.write(cx, |s| archive::import_from_path(s, path)) {
-            self.notice =
-                Some(format!("{} 件のタスクを取り込みました。", manifest.counts.tasks).into());
+        if archive::is_export(path) {
+            if let Some(manifest) = self.write(cx, |s| archive::import_from_path(s, path)) {
+                self.notice =
+                    Some(format!("{} 件のタスクを取り込みました。", manifest.counts.tasks).into());
+            }
+            return;
+        }
+        let batch = match malakt_core::intake::read_file(path, &Default::default()) {
+            Ok(batch) => batch,
+            Err(e) => {
+                self.error = Some(e.to_string().into());
+                cx.notify();
+                return;
+            }
+        };
+        let workspace = self.current_workspace().map(str::to_owned);
+        let report = self.write(cx, |s| match workspace {
+            Some(w) => s.import_batch(Some(&w), &batch),
+            None => {
+                let w = s.create_workspace(None, batch.source.label())?;
+                match s.import_batch(Some(&w.id), &batch) {
+                    Ok(report) => Ok(report),
+                    // 取り込めなければ、作ったワークスペースも残さない
+                    Err(e) => match s.delete_workspace(&w.id) {
+                        Ok(()) => Err(e),
+                        Err(more) => Err(malakt_core::Error::Invalid(format!(
+                            "{e}（作ったワークスペースも消せませんでした。{more}）"
+                        ))),
+                    },
+                }
+            }
+        });
+        if let Some(report) = report {
+            self.show_notice(report.summary(batch.source).into());
         }
     }
 

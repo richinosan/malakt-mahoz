@@ -7736,14 +7736,19 @@ impl MainView {
             Setting::new(
                 Section::Sync,
                 SettingKey::CalDav,
-                if crate::reminders::is_app(cx) {
-                    "CalDAV・リマインダー同期"
-                } else {
-                    "CalDAV 同期"
-                },
+                "連携と同期",
                 None,
                 list(&[
                     "同期",
+                    "連携",
+                    "取り込み",
+                    "インポート",
+                    "Notion",
+                    "Redmine",
+                    "Backlog",
+                    "ClickUp",
+                    "Slack",
+                    "CSV",
                     "CalDAV",
                     "サーバー",
                     "カレンダー",

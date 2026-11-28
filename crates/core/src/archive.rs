@@ -69,6 +69,8 @@ pub struct Data {
     pub schedule_files: Vec<crate::schedule::ScheduleFile>,
     /// ポモドーロの作業の記録。
     pub work_logs: Vec<crate::pomodoro::WorkLog>,
+    /// ほかのツールから取り込んだタスクの元（同じものを二度取り込まないため）。
+    pub import_origins: Vec<crate::intake::Origin>,
 }
 
 impl Data {
@@ -312,6 +314,10 @@ pub fn export<W: Write + Seek>(store: &Store, out: W) -> Result<Manifest> {
         serde_json::to_vec(&data.schedule_files)?,
     )?;
     put("data/work_logs.json", serde_json::to_vec(&data.work_logs)?)?;
+    put(
+        "data/import_origins.json",
+        serde_json::to_vec(&data.import_origins)?,
+    )?;
     for (name, png) in &data.icons {
         put(&icon_entry(name), png.clone())?;
     }
@@ -370,6 +376,16 @@ pub fn import_from_path(store: &mut Store, path: impl AsRef<Path>) -> Result<Man
     import(store, std::io::BufReader::new(std::fs::File::open(path)?))
 }
 
+/// このアプリのエクスポートの zip か（中に `manifest.json` がある）。
+/// ほかのツールの zip（Notion のエクスポートなど）と見分けるのに使う。
+pub fn is_export(path: impl AsRef<Path>) -> bool {
+    let Ok(file) = std::fs::File::open(path) else {
+        return false;
+    };
+    ZipArchive::new(std::io::BufReader::new(file))
+        .is_ok_and(|zip| zip.index_for_name("manifest.json").is_some())
+}
+
 /// zip を読んで確かめるだけで、取り込まない。
 pub fn read<R: Read + Seek>(input: R) -> Result<(Manifest, Data)> {
     read_zip(&mut ZipArchive::new(input)?)
@@ -418,6 +434,8 @@ fn read_zip<R: Read + Seek>(zip: &mut ZipArchive<R>) -> Result<(Manifest, Data)>
         .iter()
         .map(crate::pomodoro::clean_log)
         .collect::<Result<_>>()?;
+    let import_origins: Vec<crate::intake::Origin> =
+        read_optional(zip, "data/import_origins.json")?;
     let workspaces: Vec<Workspace> = read_json(zip, "data/workspaces.json")?;
     let mut icons: Vec<(String, Vec<u8>)> = Vec::new();
     for w in &workspaces {
@@ -452,6 +470,7 @@ fn read_zip<R: Read + Seek>(zip: &mut ZipArchive<R>) -> Result<(Manifest, Data)>
         schedules,
         schedule_files,
         work_logs,
+        import_origins,
     };
     data.normalize();
     data.validate()?;

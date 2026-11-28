@@ -250,6 +250,65 @@ pub fn confirmation_text(store: &Store, name: &str, args: &Value, shell: &Shell)
     }
 }
 
+/// `import_tasks` の取り込む中身を読む（ファイルか、Slack CLI）。Slack は待つので、
+/// 画面のスレッドでは呼ばずに、先に読んで [`import_json`] に渡す。
+pub fn read_import(args: &Value) -> Result<malakt_core::intake::Batch, String> {
+    match required(args, "source")? {
+        "file" => {
+            let path = expand_dir(required(args, "path")?);
+            let options = malakt_core::intake::FileOptions {
+                source: None,
+                base_url: optional(args, "base_url").map(str::to_owned),
+            };
+            malakt_core::intake::read_file(&path, &options).map_err(|e| e.to_string())
+        }
+        "slack_reminders" => crate::slack::import_reminders(),
+        "slack_list" => crate::slack::import_list(required(args, "list")?),
+        other => Err(format!("source「{other}」は取り込めません")),
+    }
+}
+
+/// 読んだ中身を取り込む。`workspace_id` がなければ、取り込み元の名前で新しいワークスペースを作る。
+/// 取り込めなければ、作ったワークスペースも消す。
+pub fn import_json(
+    store: &mut Store,
+    args: &Value,
+    batch: Result<malakt_core::intake::Batch, String>,
+) -> Result<Value, String> {
+    let batch = batch?;
+    let core = |e: malakt_core::Error| e.to_string();
+    let (workspace_id, created) = match optional(args, "workspace_id").filter(|w| !w.is_empty()) {
+        Some(w) => (store.workspace(w).map_err(core)?.id, false),
+        None => (
+            store
+                .create_workspace(None, batch.source.label())
+                .map_err(core)?
+                .id,
+            true,
+        ),
+    };
+    match store.import_batch(Some(&workspace_id), &batch) {
+        Ok(report) => Ok(json!({
+            "workspace_id": workspace_id,
+            "added": report.added,
+            "already_imported": report.skipped,
+            "new_people": report.people,
+            "task_ids": report.task_ids,
+            "summary": report.summary(batch.source),
+        })),
+        Err(e) => {
+            if created {
+                if let Err(more) = store.delete_workspace(&workspace_id) {
+                    return Err(format!(
+                        "{e}（作ったワークスペースも消せませんでした。{more}）"
+                    ));
+                }
+            }
+            Err(e.to_string())
+        }
+    }
+}
+
 fn required<'a>(args: &'a Value, key: &str) -> Result<&'a str, String> {
     args.get(key)
         .and_then(Value::as_str)
@@ -1442,6 +1501,7 @@ pub fn execute(
                 .map_err(core)?;
             json!({"id": comment.id})
         }
+        "import_tasks" => import_json(store, args, read_import(args))?,
         "create_workspace" => {
             let parent = optional(args, "parent_id").filter(|id| !id.is_empty());
             let w = store
@@ -2450,6 +2510,11 @@ pub fn summary(name: &str, args: &Value) -> String {
         "move_task" => "タスクを移動".into(),
         "delete_task" => "タスクを削除".into(),
         "add_comment" => "コメントを追加".into(),
+        "import_tasks" => match arg("source").as_str() {
+            "slack_reminders" => "Slack のリマインダーを取り込む".into(),
+            "slack_list" => "Slack リストを取り込む".into(),
+            _ => format!("タスクを取り込む: {}", arg("path")),
+        },
         "create_workspace" => format!("ワークスペースを作成: {}", arg("name")),
         "create_person" => format!("担当者を追加: {}", arg("name")),
         "update_workspace" => "ワークスペースを更新".into(),
@@ -2637,6 +2702,41 @@ mod tests {
 
     fn run(store: &mut Store, name: &str, args: Value) -> Value {
         serde_json::from_str(&execute(store, None, name, &args).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn tasks_are_imported_from_other_tools() {
+        let mut store = Store::open_in_memory().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("issues.csv");
+        std::fs::write(&file, "#,題名,ステータス\n7,見積を出す,新規\n").unwrap();
+        let args = json!({
+            "source": "file",
+            "path": file.display().to_string(),
+            "base_url": "https://redmine.example.com",
+        });
+        let done = run(&mut store, "import_tasks", args.clone());
+        assert_eq!(done["added"], 1);
+        let ws = done["workspace_id"].as_str().unwrap().to_owned();
+        assert_eq!(store.workspace(&ws).unwrap().name, "Redmine");
+        let id = done["task_ids"][0].as_str().unwrap();
+        assert_eq!(
+            store.task(id).unwrap().urls,
+            vec!["https://redmine.example.com/issues/7"]
+        );
+        // 同じワークスペースにもう一度取り込んでも増えない
+        let mut again = args.clone();
+        again["workspace_id"] = json!(ws);
+        let again = run(&mut store, "import_tasks", again);
+        assert_eq!(
+            (again["added"].as_u64(), again["already_imported"].as_u64()),
+            (Some(0), Some(1))
+        );
+        // 読めないファイルなら、作ったワークスペースも残さない
+        std::fs::write(&file, "foo,bar\n1,2\n").unwrap();
+        let before = store.workspaces().unwrap().len();
+        assert!(execute(&mut store, None, "import_tasks", &args).is_err());
+        assert_eq!(store.workspaces().unwrap().len(), before);
     }
 
     #[test]

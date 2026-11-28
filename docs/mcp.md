@@ -86,6 +86,7 @@ Windows のアプリは、起動のときに黒い窓を出さないように作
 | `list_schedules` / `create_schedule` / `update_schedule` / `delete_schedule` | 定時タスク（決まった時刻に雛形から新しいタスクを作る。ワークスペースごとと未所属）を読む、足す、変える、削除する。雛形にはタスクと同じ項目（URL・状態・優先度・開始日・期限・通知・進捗・予想工数・所要時間の基準・担当と役・カテゴリ・同期先・親タスク・説明・サブタスク）を入れられる。`ai_instruction` で、作ったタスクでアプリの AI に頼むことを書く（[docs/schedule.md](schedule.md)） |
 | `add_schedule_attachment` / `delete_schedule_attachment` | 定時タスクの雛形にファイルを添付する、外す。作ったタスクに同じファイルが添付される |
 | `get_time_stats` / `set_time_basis` | 所要時間の統計（全体かワークスペース、期間、担当者ごと・ワークスペースごと）を読む、所要時間の基準（開始と完了）を全体の標準かワークスペースに決める。タスクの予想工数と基準は `create_task` / `update_task` の `estimate` / `time_basis`、所要時間は `get_task` の `time`（[docs/timing.md](timing.md)） |
+| `import_tasks` | ほかのツール（Notion・Redmine・Backlog・ClickUp の書き出したファイル、Slack のリマインダー・Slack リスト）のタスクを取り込む。同じものは二度作らない（[docs/import.md](import.md)） |
 | `get_pomodoro` / `pomodoro` / `list_work_logs` | ポモドーロタイマーの状態を読む、始める・止める・設定を変える、作業の記録を読む（[docs/pomodoro.md](pomodoro.md)） |
 | `get_timer` / `timer` | タイマー（カウントダウンとストップウォッチ）の状態を読む、始める・一時停止・リセット・長さを決める・時間を足す（[docs/timer.md](timer.md)） |
 | `get_autostart` / `set_autostart` | PC にログインしたときにアプリを起動するか（スタートアップ）を読む、変える。OS の登録を書き換えるので `undo` では戻らない（[docs/startup.md](startup.md)） |
