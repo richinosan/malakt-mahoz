@@ -7862,6 +7862,8 @@ fn estimate_is_typed_picked_and_counted_in_the_stats(cx: &mut TestAppContext) {
     assert!(task.started_at.is_some());
     ui(cx, window, |window, _| {
         assert!(window.try_find("elapsed-value").is_some());
+        // 予想工数（1時間）に対する所要時間の棒
+        assert!(window.try_find("elapsed-meter").is_some());
     });
     click(cx, "open-stats");
     cx.update(|cx| {
@@ -7871,9 +7873,18 @@ fn estimate_is_typed_picked_and_counted_in_the_stats(cx: &mut TestAppContext) {
         assert_eq!(stats.total.done, 1);
         assert_eq!(stats.total.estimated, 1);
         assert_eq!(stats.total.within, 1);
+        // グラフ: 推移は 1 か月の日ごと、今日の棒に 1 件。分布と比は 1 時間以内・50% 以内に 1 件
+        let charts = &stats.charts;
+        assert_eq!(charts.trend.len(), 30);
+        assert_eq!(charts.trend.last().unwrap().within, 1);
+        assert_eq!(charts.spread[0].within, 1);
+        assert_eq!(charts.ratio[0].within, 1);
     });
     ui(cx, window, |window, _| {
         assert!(window.try_find("stats-done").is_some());
+        assert!(window.try_find("stats-charts").is_some());
+        assert!(window.try_find(("stats-trend", 29usize)).is_some());
+        assert!(window.try_find(("stats-ratio", 0usize)).is_some());
     });
 }
 
@@ -8034,6 +8045,210 @@ fn caldav_account_that_fails_is_not_added(cx: &mut TestAppContext) {
         assert!(window.find("caldav-form-error").visible());
         // 欄は開いたまま、直してもう一度送れる
         assert!(window.find("caldav-url").visible());
+    });
+}
+
+/// プラグインを待つ。コマンドは別のスレッドで動くので、終わるまで画面のタスクを回す。
+fn wait_for(cx: &mut TestAppContext, mut done: impl FnMut(&mut TestAppContext) -> bool) {
+    for _ in 0..400 {
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(5));
+        cx.run_until_parked();
+        if done(cx) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    panic!("プラグインが終わりません");
+}
+
+/// 設定の「プラグイン」で見本のプラグインを承認して有効にし、タスクとワークスペースの右クリックから
+/// 動かす。結果はクリップボードに入り、知らせが出る。ファイルが変わったら「変更あり」になって動かない。
+#[gpui_kit::test]
+fn plugins_are_approved_then_run_from_the_right_click_menu(cx: &mut TestAppContext) {
+    use malakt_mahoz::plugins;
+    use malakt_mahoz::state::{CustomizeSection, SubModal};
+    start(cx);
+    // 見本のプラグインを、作業用のフォルダーに写して読む（標準のフォルダーは読まない）
+    let root = tempfile::tempdir().unwrap();
+    let example = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/plugins/task-markdown");
+    let dir = root.path().join("task-markdown");
+    std::fs::create_dir(&dir).unwrap();
+    for file in ["plugin.toml", "plugin.wasm"] {
+        std::fs::copy(example.join(file), dir.join(file)).unwrap();
+    }
+    let folders = serde_json::to_string(&[root.path().display().to_string()]).unwrap();
+    let (ws, task) = cx.update(|cx| {
+        db::shared(cx).update(cx, |db, _| {
+            let s = &mut db.store;
+            s.set_setting(plugins::SETTING_DEFAULT, Some("off"))
+                .unwrap();
+            s.set_setting(plugins::SETTING_DIRS, Some(&folders))
+                .unwrap();
+            let ws = s.create_workspace(None, "告知").unwrap();
+            let task = s
+                .create_task(
+                    Some(&ws.id),
+                    &malakt_core::TaskDraft {
+                        title: "告知を出す".into(),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            s.create_task(
+                Some(&ws.id),
+                &malakt_core::TaskDraft {
+                    title: "文面".into(),
+                    parent_id: Some(task.id.clone()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            (ws, task)
+        })
+    });
+    let (window, view) = open(cx, wide());
+    ui(cx, window, |window, cx| {
+        view.update(cx, |v, cx| {
+            v.open_appearance(window, cx);
+            v.show_appearance_section(CustomizeSection::Plugins, window, cx);
+        })
+    });
+    let state = |cx: &mut TestAppContext| {
+        cx.update(|cx| {
+            let p = plugins::get(cx);
+            p.plugin("task-markdown").map(|found| p.state(found))
+        })
+    };
+    assert_eq!(state(cx), Some(plugins::State::Off));
+    ui(cx, window, |window, _| {
+        assert!(window.try_find(("plugin", 0usize)).is_some());
+        assert!(window.try_find(("plugin", 1usize)).is_none());
+    });
+
+    // スイッチで承認の画面が出る。キャンセルしたら有効にならない
+    ui(cx, window, |window, cx| {
+        window.click(("plugin-switch", 0usize), cx)
+    });
+    cx.update(|cx| assert_eq!(view.read(cx).sub_modal, Some(SubModal::EnablePlugin)));
+    // 許すこと（読むだけ）と、コマンドを出す場所（タスクとワークスペース）が並ぶ
+    ui(cx, window, |window, _| {
+        assert!(window.try_find(("plugin-permission", 0usize)).is_some());
+        assert!(window.try_find(("plugin-permission", 1usize)).is_none());
+        assert!(window.try_find(("plugin-command", 1usize)).is_some());
+    });
+    ui(cx, window, |window, cx| {
+        window.click("plugin-approve-cancel", cx)
+    });
+    assert_eq!(state(cx), Some(plugins::State::Off));
+
+    // ロックが有効なら、パスキーで確かめてから有効にする
+    enable_lock(cx);
+    let asked = passkey(cx, Ok(()));
+    ui(cx, window, |window, cx| {
+        window.click(("plugin-switch", 0usize), cx)
+    });
+    ui(cx, window, |window, cx| window.click("plugin-approve", cx));
+    cx.run_until_parked();
+    assert_eq!(
+        *asked.lock().unwrap(),
+        ["プラグイン「Markdown でコピー」を有効にする"]
+    );
+    assert_eq!(state(cx), Some(plugins::State::On));
+    cx.update(|cx| assert_eq!(view.read(cx).sub_modal, None));
+
+    // タスクの右クリックから動かすと、Markdown がクリップボードに入る
+    ui(cx, window, |window, cx| {
+        view.update(cx, |v, cx| v.close_top_dialog(window, cx));
+    });
+    ui(cx, window, |window, cx| window.click("nav-all", cx));
+    let right_click = |cx: &mut TestAppContext, id: gpui_kit::ElementId| {
+        let mut at = None;
+        ui(cx, window, |window, _| {
+            at = Some(window.try_find(id).unwrap().bounds().center());
+        });
+        let mut v = gpui_kit::VisualTestContext::from_window(window, cx);
+        v.simulate_mouse_down(at.unwrap(), MouseButton::Right, Modifiers::default());
+        v.simulate_mouse_up(at.unwrap(), MouseButton::Right, Modifiers::default());
+        v.run_until_parked();
+    };
+    let row_of = |cx: &mut TestAppContext, title: &str| {
+        cx.update(|cx| {
+            let v = view.read(cx);
+            v.visible
+                .iter()
+                .position(|&i| v.tasks[i].title == title)
+                .unwrap()
+        })
+    };
+    let clipboard =
+        |cx: &mut TestAppContext| cx.update(|cx| cx.read_from_clipboard().and_then(|i| i.text()));
+    let ix = row_of(cx, &task.title);
+    right_click(cx, ("title", ix).into());
+    pick(cx, window, "Markdown でコピー");
+    wait_for(cx, |cx| clipboard(cx).is_some());
+    assert_eq!(
+        clipboard(cx).as_deref(),
+        Some("- [ ] 告知を出す\n  - [ ] 文面")
+    );
+    cx.update(|cx| {
+        let v = view.read(cx);
+        assert_eq!(v.notice.as_deref(), Some("2 行をコピーしました"));
+        assert_eq!(v.error, None);
+    });
+
+    // ワークスペースの右クリックにも出る
+    cx.update(|cx| cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(String::new())));
+    let ws_ix = cx.update(|cx| {
+        view.read(cx)
+            .workspaces
+            .iter()
+            .position(|w| w.id == ws.id)
+            .unwrap()
+    });
+    right_click(cx, ("ws", ws_ix).into());
+    pick(cx, window, "未完了のタスクを Markdown でコピー");
+    wait_for(cx, |cx| clipboard(cx).is_some_and(|t| !t.is_empty()));
+    assert!(clipboard(cx).unwrap().contains("- [ ] 告知を出す"));
+
+    // AI からも、一覧・無効にする・有効にする（承認の画面を出す）ができる
+    ui(cx, window, |window, cx| {
+        view.update(cx, |v, cx| {
+            let list = v
+                .run_ai_tool("list_plugins", &serde_json::json!({}), window, cx)
+                .unwrap();
+            assert!(list.contains("\"state\":\"on\""), "{list}");
+            let args = serde_json::json!({"plugin_id": "task-markdown", "enabled": false});
+            v.run_ai_tool("set_plugin_enabled", &args, window, cx)
+                .unwrap();
+        })
+    });
+    assert_eq!(state(cx), Some(plugins::State::Off));
+    ui(cx, window, |window, cx| {
+        view.update(cx, |v, cx| {
+            let args = serde_json::json!({"plugin_id": "task-markdown", "enabled": true});
+            v.run_ai_tool("set_plugin_enabled", &args, window, cx)
+                .unwrap();
+        })
+    });
+    cx.update(|cx| {
+        assert_eq!(view.read(cx).modal, Modal::Appearance);
+        assert_eq!(view.read(cx).sub_modal, Some(SubModal::EnablePlugin));
+    });
+    assert_eq!(state(cx), Some(plugins::State::Off));
+    ui(cx, window, |window, cx| window.click("plugin-approve", cx));
+    cx.run_until_parked();
+    assert_eq!(state(cx), Some(plugins::State::On));
+
+    // 有効にしたあとでファイルが変わったら「変更あり」になり、メニューから消える
+    std::fs::write(dir.join("plugin.wasm"), b"\0asm\x01\0\0\0").unwrap();
+    cx.update(plugins::refresh);
+    assert_eq!(state(cx), Some(plugins::State::Changed));
+    let ix = row_of(cx, &task.title);
+    right_click(cx, ("title", ix).into());
+    ui(cx, window, |window, _| {
+        assert!(window.try_find_by_label("Markdown でコピー").is_none());
     });
 }
 
