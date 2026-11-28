@@ -93,7 +93,7 @@ pub enum AiRow {
 }
 
 impl AiRow {
-    pub const ALL: [AiRow; 16] = [
+    pub const ALL: [AiRow; 17] = [
         AiRow::Service,
         AiRow::Server,
         // キーはサービスごとなので、サービスのすぐ下に置く
