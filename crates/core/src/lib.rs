@@ -12,6 +12,7 @@
 //! - `diff`: 文字列の差分（変更履歴の赤と緑）
 //! - `done_notice`: ほかの人が完了にしたときに知らせるか（役・担当者・ワークスペースで選ぶ）
 //! - `defaults`: ワークスペースごとのタスク追加時の既定値と基準日
+//! - `intake`: ほかのツール（Notion・Redmine・Backlog・ClickUp・Slack）からの取り込み
 //! - `history`: 変更履歴を、1 回の変更ごとの差分と、コメント欄に挟む出来事にする
 //! - `links`: 1 つのタスクを複数のワークスペースに表示する
 //! - `notice`: 通知（期限が近い、ほかの人からの変更、タイマーとポモドーロの終わり）
@@ -48,6 +49,7 @@ pub mod error;
 pub mod estimate;
 pub mod history;
 pub mod icon;
+pub mod intake;
 pub mod links;
 pub mod lock;
 pub mod markdown;

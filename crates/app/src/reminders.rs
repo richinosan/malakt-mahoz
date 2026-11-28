@@ -70,7 +70,7 @@ pub fn setting_label(cx: &App) -> Option<&'static str> {
     })
 }
 
-/// 「リマインダー」アプリと同期できる OS か（macOS）。設定の「同期」のアカウントに出す。
+/// 「リマインダー」アプリと同期できる OS か（macOS）。設定の「連携と同期」のアカウントに出す。
 pub fn is_app(cx: &App) -> bool {
     cx.global::<Reminders>().target == Some(Target::Reminders)
 }

@@ -98,12 +98,6 @@ pub const NEW_PRESET_NAME: &str = "マイテーマ";
 /// アクセスキーと MCP の接続の、その場で書き直す値。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LimitField {
-    Starts,
-    Expires,
-    /// 何番目かの時間帯の始まり
-    From(usize),
-    /// 何番目かの時間帯の終わり
-    To(usize),
     /// MCP を HTTP で開くポート（キーにはよらない）
     Port,
 }
@@ -111,10 +105,6 @@ pub enum LimitField {
 impl LimitField {
     pub fn label(self) -> &'static str {
         match self {
-            LimitField::Starts => "開始",
-            LimitField::Expires => "期限",
-            LimitField::From(_) => "時間帯の始まり",
-            LimitField::To(_) => "時間帯の終わり",
             LimitField::Port => "ポート",
         }
     }
@@ -264,7 +254,7 @@ impl CustomizeSection {
             CustomizeSection::Startup => "スタートアップ",
             CustomizeSection::Update => "アップデート",
             CustomizeSection::People => "担当者",
-            CustomizeSection::Sync => "同期",
+            CustomizeSection::Sync => "連携と同期",
             CustomizeSection::Keys => "キー操作",
             CustomizeSection::Window => "ウィンドウ",
             CustomizeSection::Browser => "ブラウザ",
@@ -506,11 +496,15 @@ pub struct MainView {
     pub issued_access_key: Option<malakt_core::access::IssuedKey>,
     /// パスキーの確認が済んだら「ロック中も使える」にするアクセスキー。
     pub pending_key_unlock: Option<Id>,
-    /// 期限と時間帯の欄を開いているアクセスキー。
+    /// 詳細を開いているアクセスキーか、キーなしの接続の決まり。
     pub key_limits_open: Option<Id>,
+    /// 使える時間を「曜日ごと」で決めているアクセスキー（時刻が毎日・平日と同じでも、曜日ごとに出す）。
+    pub key_hours_per_day: Option<Id>,
+    /// MCP を HTTP で開けなかった理由。設定の「HTTP で開く」の欄に出す。
+    pub mcp_http_error: Option<SharedString>,
     /// 承認の画面を出しているプラグインの ID と、出したときのファイルのハッシュ。
     pub plugin_approving: Option<(String, String)>,
-    /// その場で書き直している、アクセスキーの開始・期限・時刻。
+    /// その場で書き直している値（MCP の HTTP のポート）。
     pub key_limit_editing: Option<(Id, LimitField)>,
     /// 左のメニューで名前を書いているワークスペース。
     pub workspace_naming: Option<WorkspaceNaming>,
@@ -719,7 +713,7 @@ pub struct MainView {
     /// 「設定」の AI のカテゴリに出す行。
     pub ai_settings: Entity<crate::ai_settings::AiSettings>,
     pub download_settings: Entity<crate::download_settings::DownloadSettings>,
-    /// 「設定」の「同期」。
+    /// 「設定」の「連携と同期」。
     pub caldav_settings: Entity<crate::caldav_settings::CalDavSettings>,
     pub appearance_scroll: gpui_kit::ScrollHandle,
     /// 自分で保存したテーマ。
@@ -824,7 +818,7 @@ impl MainView {
             cx.observe(&ai_settings, |_, _, cx| cx.notify()),
             cx.observe(&download_settings, |_, _, cx| cx.notify()),
             cx.observe(&caldav_settings, |_, _, cx| cx.notify()),
-            // 「同期」の「アカウントを追加」は、設定の上に重ねて出す
+            // 「連携と同期」の「連携を追加」は、設定の上に重ねて出す
             cx.subscribe_in(
                 &caldav_settings,
                 window,
@@ -838,6 +832,10 @@ impl MainView {
                                 this.sub_modal = None;
                                 this.focus.focus(window, cx);
                             }
+                        }
+                        crate::caldav_settings::AddDialog::Imported(done) => {
+                            this.show_notice(done.clone());
+                            this.reload(cx);
                         }
                     }
                     cx.notify();
@@ -1141,6 +1139,8 @@ impl MainView {
             issued_access_key: None,
             pending_key_unlock: None,
             key_limits_open: None,
+            key_hours_per_day: None,
+            mcp_http_error: None,
             plugin_approving: None,
             key_limit_editing: None,
             naming_task: None,
@@ -3176,6 +3176,7 @@ impl MainView {
         self.key_naming = None;
         self.issued_access_key = None;
         self.key_limits_open = None;
+        self.key_hours_per_day = None;
         self.key_limit_editing = None;
         self.plugin_approving = None;
         // プラグインのフォルダーは、開くたびに読み直す
@@ -3277,6 +3278,12 @@ impl MainView {
                 .set_offset(gpui_kit::Point::default());
             self.preview_pick = None;
         }
+        self.scroll_to_section(section, cx);
+        cx.notify();
+    }
+
+    /// 設定のページの中で、その見出しを上に出す。
+    pub(crate) fn scroll_to_section(&mut self, section: CustomizeSection, cx: &App) {
         // ページの中で何番目の見出しか。スクロールする所の子 1 つが、見出し 1 つ
         if let Some(ix) = self
             .customize_sections(cx)
@@ -3286,7 +3293,6 @@ impl MainView {
         {
             self.appearance_scroll.scroll_to_top_of_item(ix);
         }
-        cx.notify();
     }
 
     /// 「設定」のプレビューに、マウスを乗せた選択肢を映す。外れたら今の設定に戻す。
@@ -4492,16 +4498,26 @@ impl MainView {
     /// 通知を開く。既読にして、そのタスクの詳細を出す。タイマーとポモドーロの通知は、
     /// そのウィンドウを手前に出す。
     pub fn open_notice(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let Some((kind, task_id)) = self
+        let Some((kind, task_id, chat)) = self
             .notices
             .iter()
             .find(|n| n.id == id)
-            .map(|n| (n.kind, n.task_id.clone()))
+            .map(|n| (n.kind, n.task_id.clone(), n.chat_id.clone()))
         else {
             return;
         };
         self.write(cx, |s| s.mark_notice_read(id));
         self.modal = Modal::None;
+        if kind == malakt_core::notice::NoticeKind::BotCheckIn {
+            // bot の声かけは、その会話を AI bot に開く
+            if let Some(chat) = chat {
+                self.ai_session
+                    .update(cx, |s, cx| s.open_check_in(&chat, cx));
+            }
+            self.show_chat_input(window, cx);
+            cx.notify();
+            return;
+        }
         let Some(task_id) = task_id else {
             let action: Box<dyn Action> = match kind {
                 malakt_core::notice::NoticeKind::Pomodoro => {
@@ -4902,10 +4918,43 @@ impl MainView {
         .detach();
     }
 
+    /// ファイルを取り込む。このアプリのエクスポートなら全体を戻し、ほかのツール（Notion・Redmine・
+    /// Backlog・ClickUp）のファイルなら、今のワークスペースに入れる（開いていなければ新しく作る）。
     pub fn import_from(&mut self, path: &std::path::Path, cx: &mut Context<Self>) {
-        if let Some(manifest) = self.write(cx, |s| archive::import_from_path(s, path)) {
-            self.notice =
-                Some(format!("{} 件のタスクを取り込みました。", manifest.counts.tasks).into());
+        if archive::is_export(path) {
+            if let Some(manifest) = self.write(cx, |s| archive::import_from_path(s, path)) {
+                self.notice =
+                    Some(format!("{} 件のタスクを取り込みました。", manifest.counts.tasks).into());
+            }
+            return;
+        }
+        let batch = match malakt_core::intake::read_file(path, &Default::default()) {
+            Ok(batch) => batch,
+            Err(e) => {
+                self.error = Some(e.to_string().into());
+                cx.notify();
+                return;
+            }
+        };
+        let workspace = self.current_workspace().map(str::to_owned);
+        let report = self.write(cx, |s| match workspace {
+            Some(w) => s.import_batch(Some(&w), &batch),
+            None => {
+                let w = s.create_workspace(None, batch.source.label())?;
+                match s.import_batch(Some(&w.id), &batch) {
+                    Ok(report) => Ok(report),
+                    // 取り込めなければ、作ったワークスペースも残さない
+                    Err(e) => match s.delete_workspace(&w.id) {
+                        Ok(()) => Err(e),
+                        Err(more) => Err(malakt_core::Error::Invalid(format!(
+                            "{e}（作ったワークスペースも消せませんでした。{more}）"
+                        ))),
+                    },
+                }
+            }
+        });
+        if let Some(report) = report {
+            self.show_notice(report.summary(batch.source).into());
         }
     }
 
@@ -5266,7 +5315,11 @@ impl MainView {
         if self.date_pick.as_ref().is_some_and(|p| {
             matches!(
                 p.target,
-                DateTarget::Bulk | DateTarget::DefaultDue | DateTarget::BaseDate
+                DateTarget::Bulk
+                    | DateTarget::DefaultDue
+                    | DateTarget::BaseDate
+                    | DateTarget::KeyStarts(_)
+                    | DateTarget::KeyExpires(_)
             )
         }) {
             self.date_pick = None;
@@ -5308,6 +5361,8 @@ impl MainView {
             || self.key_limit_editing.take().is_some()
         {
             // 書きかけの名前を捨てる。ダイアログは開いたまま
+        } else if self.close_access_entry() {
+            // アクセスキーの詳細から、一覧に戻る
         } else if self.modal != Modal::None {
             self.modal = Modal::None;
             self.issued_ticket = None;
@@ -5336,6 +5391,7 @@ impl MainView {
             || self.preset_naming.take().is_some()
             || self.key_naming.take().is_some()
             || self.key_limit_editing.take().is_some()
+            || self.close_access_entry()
         {
         } else if self.modal != Modal::None {
             self.modal = Modal::None;
@@ -5856,6 +5912,7 @@ bundled_icons! {
         "timer",
         "chart-column",
         "minus",
+        "circle-alert",
     ],
 }
 

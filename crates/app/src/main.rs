@@ -65,10 +65,9 @@ fn main() {
             malakt_mahoz::update::connect_system(cx);
             let autostart = malakt_mahoz::autostart::connect_system(cx);
             // 設定で選んでいれば、MCP を HTTP のポートでも開く
-            let http = malakt_mahoz::mcp_http::start_saved(
-                &malakt_mahoz::db::shared(cx).read(cx).store,
-                &malakt_mahoz::database_path(),
-            );
+            let http = malakt_mahoz::db::shared(cx).update(cx, |db, _| {
+                malakt_mahoz::mcp_http::start_saved(&mut db.store, &malakt_mahoz::database_path())
+            });
             malakt_mahoz::db::watch(cx);
             malakt_mahoz::pomodoro::run(cx);
             malakt_mahoz::timer::run(cx);

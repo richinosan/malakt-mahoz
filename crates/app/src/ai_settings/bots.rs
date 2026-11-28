@@ -7,6 +7,7 @@ use crate::press::button;
 use gpui_kit::base::TestSupportExt;
 use gpui_kit::component::button::ButtonVariants;
 use gpui_kit::component::input::{Input, Textarea};
+use gpui_kit::component::menu::PopupMenuItem;
 use gpui_kit::component::{ActiveTheme, Sizable};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
@@ -37,6 +38,8 @@ const BOT_ICONS: [&str; 16] = [
     "coffee",
     "flower",
 ];
+/// 毎日の声かけで選べる時刻（毎時ちょうど）。
+const CHECK_IN_HOURS: std::ops::RangeInclusive<u32> = 6..=22;
 /// アイコンを選ぶところに出す数。
 const ICONS_SHOWN: usize = 48;
 /// 一覧の行のアイコンの大きさ。
@@ -545,6 +548,55 @@ impl AiSettings {
             );
         }
 
+        // 毎日の声かけ。押すと時刻を選ぶメニューが開く
+        let muted = theme.muted_foreground;
+        let shown = match &bot.check_in {
+            Some(time) => format!("毎日 {time}"),
+            None => "しない".to_owned(),
+        };
+        let chosen = bot.check_in.clone();
+        let settings = cx.entity().downgrade();
+        let check_in_id = id.clone();
+        let check_in = button("ai-bot-check-in")
+            .outline()
+            .h_8()
+            .child(
+                row()
+                    .gap_2()
+                    .child(div().child(shown))
+                    .child(app_icon("chevron-down").small().text_color(muted)),
+            )
+            .pop_menu(move |mut menu, _, _| {
+                let mut options: Vec<Option<String>> = vec![None];
+                options.extend(CHECK_IN_HOURS.map(|h| Some(format!("{h:02}:00"))));
+                // AI などで決めた半端な時刻も、選んだものとして並べる
+                if chosen.is_some() && !options.contains(&chosen) {
+                    options.push(chosen.clone());
+                }
+                for time in options {
+                    let label = time.clone().unwrap_or_else(|| "しない".to_owned());
+                    let (settings, id) = (settings.clone(), check_in_id.clone());
+                    let checked = time == chosen;
+                    menu = menu.item(PopupMenuItem::new(label).checked(checked).on_click(
+                        move |_, _, cx| {
+                            let time = time.clone();
+                            // 設定を閉じたあとなら、反映する先がない
+                            let _ = settings.update(cx, |this, cx| {
+                                this.set_bot(
+                                    &id,
+                                    BotPatch {
+                                        check_in: Some(time),
+                                        ..BotPatch::default()
+                                    },
+                                    cx,
+                                )
+                            });
+                        },
+                    ));
+                }
+                menu
+            });
+
         col()
             .id("ai-bot-body")
             .px_3()
@@ -568,6 +620,12 @@ impl AiSettings {
                     .children(icons),
             )
             .child(col().gap_1().child(field_label("動き", cx)).child(motions))
+            .child(
+                col()
+                    .gap_1()
+                    .child(field_label("毎日の声かけ", cx))
+                    .child(row().child(check_in)),
+            )
             .when(!memories.is_empty(), |d| {
                 d.child(
                     col()

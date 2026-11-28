@@ -142,6 +142,30 @@ const MAX_TITLE_CHARS: usize = 40;
 /// 並列で同時に動かせる会話の数。
 pub const MAX_PARALLEL: usize = 3;
 
+/// bot の毎日の声かけで、bot に送るメッセージ。
+pub const CHECK_IN_PROMPT: &str = "毎日の声かけの時間です。今日と明日が期限のタスク、期限を過ぎたタスク、\
+進んでいないタスクをツールで読み、ユーザーに今日伝えたいことを 3 文までで書いてください。\
+タスクは変えず、したほうがよいことは「〜しましょうか」と提案してください。ユーザーが答えたら、この会話で実行します。";
+
+/// bot の毎日の声かけの会話の題。会話の中にも、送った指示の代わりにこれを出す。
+pub const CHECK_IN_TITLE: &str = "毎日の声かけ";
+
+/// bot の声かけを最後にした日（`YYYY-MM-DD`）を覚える設定の鍵。
+fn check_in_key(bot: &str) -> String {
+    format!("ai.bot.check_in.{bot}")
+}
+
+/// bot を `day`（手元の日付）に変えたか。
+fn changed_on(bot: &malakt_core::bots::AiBot, day: &str) -> bool {
+    chrono::DateTime::from_timestamp_millis(bot.updated_at)
+        .map(|t| {
+            t.with_timezone(&chrono::Local)
+                .format("%Y-%m-%d")
+                .to_string()
+        })
+        .is_some_and(|d| d == day)
+}
+
 /// 振り分け役への指示。
 const ROUTE_PROMPT: &str = "あなたは、タスク管理アプリの AI bot の振り分け役です。\n\
 ユーザーは AI と話している途中で、AI が答え終わる前に次のメッセージを送りました。\n\
@@ -186,6 +210,8 @@ pub struct Parallel {
     pub title: SharedString,
     pub done: bool,
     pub error: Option<SharedString>,
+    /// bot の毎日の声かけなら、その bot の名前。終わったら通知を出す。
+    check_in: Option<String>,
     _watch: Subscription,
 }
 
@@ -870,6 +896,10 @@ pub struct Session {
     pub bot: Option<String>,
     /// 並列の会話を動かすための、裏の会話。保存も自動の処理もしない。
     worker: bool,
+    /// 読むだけのツールしか使わない（bot の毎日の声かけ）。
+    read_only: bool,
+    /// bot の毎日の声かけの時刻を見る。
+    check_in_timer: Option<Task<()>>,
     /// 振り分けに使うモデル（サービスごと）。なければ今のモデル。
     coordinators: HashMap<Provider, String>,
     /// 振り分けを待っているメッセージ。
@@ -1201,6 +1231,8 @@ impl Session {
             workspace: None,
             bot,
             worker,
+            read_only: false,
+            check_in_timer: None,
             coordinators,
             routing: Vec::new(),
             queued: Vec::new(),
@@ -1272,6 +1304,7 @@ impl Session {
         this.saved_ui = this.ui_json();
         this.saved_chat = this.chat_mark();
         this.restart_watch(cx);
+        this.start_check_ins(cx);
         // 今あるタスクは、もう見たものにする
         this.tasks_changed(cx);
         this.comments_changed(cx);
@@ -1598,7 +1631,7 @@ impl Session {
     /// 別の会話を裏で始める。終わったら、会話の一覧に足す。
     fn start_parallel(&mut self, queued: Queued, cx: &mut Context<Self>) {
         let bot = self.bot.clone();
-        self.start_parallel_as(queued, bot, None, cx);
+        self.start_parallel_as(queued, bot, None, false, cx);
     }
 
     /// 別の bot に仕事を渡す（`hand_off_to_bot`）。その bot の並列の会話で動き、終わると会話の一覧に残る。
@@ -1637,7 +1670,7 @@ impl Session {
             files: Vec::new(),
         };
         let before = self.parallel.len();
-        self.start_parallel_as(queued, Some(bot.id.clone()), Some(&bot.name), cx);
+        self.start_parallel_as(queued, Some(bot.id.clone()), Some(&bot.name), false, cx);
         if self.parallel.len() == before {
             return Err(self.error.take().map_or_else(
                 || format!("「{}」に渡せませんでした", bot.name),
@@ -1649,11 +1682,13 @@ impl Session {
     }
 
     /// 並列の会話を `bot` で始める。`label` があれば、入力欄の上の題の前に出す（渡した先の bot の名前）。
+    /// `check_in` なら bot の毎日の声かけで、読むだけのツールを使い、終わったら通知を出す。
     fn start_parallel_as(
         &mut self,
         queued: Queued,
         bot: Option<String>,
         label: Option<&str>,
+        check_in: bool,
         cx: &mut Context<Self>,
     ) {
         let (db, config) = (self.db.clone(), self.config.clone());
@@ -1685,6 +1720,7 @@ impl Session {
             w.local_server = local.0;
             w.local_lacks = local.1;
             w.bot = bot;
+            w.read_only = check_in;
             w.attached = queued.attached.clone();
             w.attached_workspaces = queued.attached_workspaces.clone();
             w.files = queued.files.clone();
@@ -1703,13 +1739,27 @@ impl Session {
             );
             return;
         }
+        if check_in {
+            // 声かけの指示は、ユーザーが書いたものではないので、会話には「毎日の声かけ」とだけ出す
+            worker.update(cx, |w, _| {
+                for item in &mut w.items {
+                    if matches!(item, Item::User(text) if text.as_ref() == queued.text) {
+                        *item = Item::Notice(CHECK_IN_TITLE.into());
+                    }
+                }
+            });
+        }
         let watch = cx.observe(&worker, |this, worker, cx| {
             this.parallel_changed(&worker, cx)
         });
-        let title = clip_chars(
-            queued.text.lines().next().unwrap_or_default(),
-            MAX_TITLE_CHARS,
-        );
+        let title = if check_in {
+            CHECK_IN_TITLE.to_owned()
+        } else {
+            clip_chars(
+                queued.text.lines().next().unwrap_or_default(),
+                MAX_TITLE_CHARS,
+            )
+        };
         self.parallel.push(Parallel {
             session: worker,
             title: match label {
@@ -1718,6 +1768,7 @@ impl Session {
             },
             done: false,
             error: None,
+            check_in: check_in.then(|| label.unwrap_or("AI bot").to_owned()),
             _watch: watch,
         });
     }
@@ -1757,10 +1808,49 @@ impl Session {
                 self.save_index(cx);
             }
         }
+        if let Some(name) = self.parallel[ix].check_in.clone() {
+            self.check_in_notice(&name, worker, error.as_ref(), cx);
+        }
         let p = &mut self.parallel[ix];
         p.done = true;
         p.error = error;
         cx.notify();
+    }
+
+    /// bot の毎日の声かけが終わったら、bot が書いたことを通知（ベルと OS）に出す。
+    fn check_in_notice(
+        &mut self,
+        name: &str,
+        worker: &Entity<Session>,
+        error: Option<&SharedString>,
+        cx: &mut Context<Self>,
+    ) {
+        let w = worker.read(cx);
+        let chat = w.conversation.clone();
+        let said = w.items.iter().rev().find_map(|item| match item {
+            Item::Assistant(text) => Some(text.to_string()),
+            _ => None,
+        });
+        let (text, excerpt) = match (said, error) {
+            (_, Some(e)) => (format!("{name} の声かけに失敗しました"), e.to_string()),
+            (Some(said), None) => (format!("{name} から"), said),
+            (None, None) => (
+                format!("{name} の声かけに失敗しました"),
+                "返事が空でした".to_owned(),
+            ),
+        };
+        let excerpt = excerpt.split_whitespace().collect::<Vec<_>>().join(" ");
+        let dedupe = format!("check_in:{chat}");
+        let result = self.db.update(cx, |db, cx| {
+            let made = db
+                .store
+                .add_bot_check_in_notice(&text, &excerpt, &chat, &dedupe);
+            cx.notify();
+            made
+        });
+        if let Err(e) = result {
+            self.error = Some(format!("{name} の声かけを通知に出せませんでした: {e}").into());
+        }
     }
 
     /// 終わった並列の会話を開く。
@@ -1771,6 +1861,19 @@ impl Session {
         let id = p.session.read(cx).conversation.clone();
         self.parallel.remove(ix);
         self.open_chat(&id, cx);
+    }
+
+    /// bot の声かけの通知から、その会話を開く。並列の会話の表示に残っていれば消す。
+    pub fn open_check_in(&mut self, chat: &str, cx: &mut Context<Self>) {
+        if !self.chats.iter().any(|c| c.id == chat) {
+            self.error = Some("声かけの会話が見つかりません（会話の一覧から消えています）".into());
+            cx.notify();
+            return;
+        }
+        self.parallel
+            .retain(|p| !(p.done && p.session.read(cx).conversation == chat));
+        self.open_chat(chat, cx);
+        cx.notify();
     }
 
     /// 並列の会話の表示を消す。動いている途中なら止める。
@@ -2934,6 +3037,93 @@ impl Session {
         };
         self.restart_watch(cx);
         cx.notify();
+    }
+
+    /// bot の毎日の声かけの時刻を、1 分ごとに見る（起動したときにも見る）。
+    fn start_check_ins(&mut self, cx: &mut Context<Self>) {
+        self.check_in_timer = Some(cx.spawn(async move |this, cx| loop {
+            let alive = this.update(cx, |s, cx| {
+                let now = chrono::DateTime::from_timestamp(s.watch_now(cx), 0)
+                    .map(|t| t.with_timezone(&chrono::Local));
+                if let Some(now) = now {
+                    let (day, time) = (now.format("%Y-%m-%d"), now.format("%H:%M"));
+                    s.check_in_at(&day.to_string(), &time.to_string(), cx);
+                }
+            });
+            if alive.is_err() {
+                break;
+            }
+            cx.background_executor().timer(WATCH_TICK).await;
+        }));
+    }
+
+    /// `day` の `time`（HH:MM）になった bot の声かけを、並列の会話で始める。始めた数を返す。
+    /// 1 日に 1 回。時刻を過ぎてから起動した日も、その日のうちに 1 回声をかける。
+    /// 声かけの時刻を初めて決めた日は、時刻を過ぎていれば次の日から。
+    pub fn check_in_at(&mut self, day: &str, time: &str, cx: &mut Context<Self>) -> usize {
+        if self.worker {
+            return 0;
+        }
+        let bots = match self.db.read(cx).store.ai_bots() {
+            Ok(bots) => bots,
+            Err(e) => {
+                self.error = Some(format!("bot の声かけの時刻を読めませんでした: {e}").into());
+                cx.notify();
+                return 0;
+            }
+        };
+        let mut started = 0;
+        for bot in bots {
+            let Some(at) = bot.check_in.as_deref().filter(|at| *at <= time) else {
+                continue;
+            };
+            let key = check_in_key(&bot.id);
+            let last = match self.db.read(cx).store.setting(&key) {
+                Ok(last) => last,
+                Err(e) => {
+                    self.error = Some(
+                        format!(
+                            "「{}」の声かけを最後にした日を読めませんでした: {e}",
+                            bot.name
+                        )
+                        .into(),
+                    );
+                    continue;
+                }
+            };
+            // 今日か、それより後の日（PC の時計を戻したとき）にしていれば、しない
+            if last.as_deref().is_some_and(|last| last >= day) {
+                continue;
+            }
+            if last.is_none() && at < time && changed_on(&bot, day) {
+                // 今日決めた時刻がもう過ぎていれば、次の日から
+                self.save_setting(&key, day, cx);
+                continue;
+            }
+            if self.running_parallel() >= MAX_PARALLEL {
+                // 次の確認（1 分後）で始める
+                break;
+            }
+            if !self.save_setting(&key, day, cx) {
+                continue;
+            }
+            let queued = Queued {
+                text: CHECK_IN_PROMPT.to_owned(),
+                place: self.place.clone(),
+                attached: Vec::new(),
+                attached_workspaces: Vec::new(),
+                files: Vec::new(),
+            };
+            let before = self.parallel.len();
+            self.start_parallel_as(queued, Some(bot.id.clone()), Some(&bot.name), true, cx);
+            if self.parallel.len() > before {
+                started += 1;
+            }
+        }
+        if started > 0 {
+            cx.notify();
+        }
+        started
     }
 
     fn restart_watch(&mut self, cx: &mut Context<Self>) {
@@ -4893,9 +5083,14 @@ impl Session {
             tools::needs_confirmation(name)
         };
         // 並列の会話では、確認が要る操作をしない（確認を出す場所がない）
-        let (auto, from_app) = this
-            .read_with(cx, |s, _| (s.auto || s.worker, s.auto))
+        let (auto, from_app, read_only) = this
+            .read_with(cx, |s, _| (s.auto || s.worker, s.auto, s.read_only))
             .map_err(gone)?;
+        if read_only && !crate::mcp::reads(name) {
+            return Ok(Err(ToolError::Failed(
+                "毎日の声かけでは、読むだけのツールしか使えません。変えたほうがよいことは、ユーザーへの提案として書いてください".into(),
+            )));
+        }
         if from_app && app_tool {
             return Ok(Err(ToolError::Failed(
                 "アプリが自動で始めた実行からは、画面と設定は変えられません".into(),
@@ -5031,6 +5226,17 @@ impl Session {
                 }
             }
             _ => {
+                // 取り込みは、ファイルや Slack CLI を読むのを先に裏で済ませる（画面を止めない）
+                let import = if name == "import_tasks" {
+                    let args = call.args.clone();
+                    Some(
+                        cx.background_executor()
+                            .spawn(async move { tools::read_import(&args) })
+                            .await,
+                    )
+                } else {
+                    None
+                };
                 let result = this
                     .update(cx, |s, cx| {
                         // ユーザーが作って、まだ整えていないタスク
@@ -5077,8 +5283,10 @@ impl Session {
                                 Ok(())
                             };
                             let result = marked.and_then(|()| {
-                                db.store.acting(actor, |store| {
-                                    tools::execute(store, author.as_deref(), name, args)
+                                db.store.acting(actor, |store| match import {
+                                    Some(batch) => tools::import_json(store, args, batch)
+                                        .map(|v| v.to_string()),
+                                    None => tools::execute(store, author.as_deref(), name, args),
                                 })
                             });
                             if write {

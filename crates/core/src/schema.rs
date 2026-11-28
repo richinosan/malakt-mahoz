@@ -514,6 +514,21 @@ pub(crate) const MIGRATIONS: &[&str] = &[
                 CAST(strftime('%s', 'now') AS INTEGER) * 1000,
                 CAST(strftime('%s', 'now') AS INTEGER) * 1000);
     "#,
+    // 30: ほかのツール（Notion・Redmine など）から取り込んだタスクの元。同じものを二度取り込まない
+    r#"
+    CREATE TABLE import_keys (
+        source TEXT NOT NULL,
+        key TEXT NOT NULL,
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        PRIMARY KEY (source, key)
+    ) STRICT, WITHOUT ROWID;
+    CREATE INDEX import_keys_task ON import_keys(task_id);
+    "#,
+    // 31: bot から毎日声をかける時刻（HH:MM）と、声かけの通知から開く会話
+    r#"
+    ALTER TABLE ai_bots ADD COLUMN check_in TEXT;
+    ALTER TABLE notices ADD COLUMN chat_id TEXT;
+    "#,
 ];
 
 pub(crate) fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {

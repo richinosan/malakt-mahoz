@@ -435,8 +435,6 @@ enum SettingKey {
     McpKeyless,
     McpKeys,
     McpHttp,
-    McpHttpPort,
-    McpHttpUrl,
     People,
     CalDav,
     Keys,
@@ -462,8 +460,6 @@ impl SettingKey {
                 | SettingKey::DoneRoles
                 | SettingKey::DonePeople
                 | SettingKey::DoneWorkspaces
-                | SettingKey::McpHttpPort
-                | SettingKey::McpHttpUrl
         )
     }
 }
@@ -7401,30 +7397,13 @@ impl MainView {
                     "HTTP",
                     "ポート",
                     "URL",
+                    "自動",
+                    "固定",
                     "Streamable HTTP",
                     "Claude Code",
                 ]),
             ),
         ]);
-        // ポートと URL は、HTTP で開いているときだけ
-        if self.mcp_http(cx).0 {
-            all.extend([
-                Setting::new(
-                    Section::McpConnection,
-                    SettingKey::McpHttpPort,
-                    "ポート",
-                    None,
-                    list(&["MCP", "HTTP", "ポート"]),
-                ),
-                Setting::new(
-                    Section::McpConnection,
-                    SettingKey::McpHttpUrl,
-                    "URL",
-                    None,
-                    list(&["MCP", "HTTP", "URL", "アドレス"]),
-                ),
-            ]);
-        }
         all.extend([
             Setting::new(
                 Section::Notices,
@@ -7487,7 +7466,7 @@ impl MainView {
                 ),
             ]);
         }
-        // macOS のリマインダーは「同期」のアカウントに並べる。ここは Windows の通知の予約
+        // macOS のリマインダーは「連携と同期」のアカウントに並べる。ここは Windows の通知の予約
         if let Some(name) =
             crate::reminders::setting_label(cx).filter(|_| !crate::reminders::is_app(cx))
         {
@@ -7540,14 +7519,19 @@ impl MainView {
             Setting::new(
                 Section::Sync,
                 SettingKey::CalDav,
-                if crate::reminders::is_app(cx) {
-                    "CalDAV・リマインダー同期"
-                } else {
-                    "CalDAV 同期"
-                },
+                "連携",
                 None,
                 list(&[
                     "同期",
+                    "連携",
+                    "取り込み",
+                    "インポート",
+                    "Notion",
+                    "Redmine",
+                    "Backlog",
+                    "ClickUp",
+                    "Slack",
+                    "CSV",
                     "CalDAV",
                     "サーバー",
                     "カレンダー",
@@ -7773,11 +7757,16 @@ impl MainView {
                 return setting_line(
                     item.name,
                     item.note,
-                    self.keyless_editor(cx).into_any_element(),
+                    self.keyless_editor(cx),
                     true,
                     first,
                     &theme,
                 );
+            }
+            SettingKey::McpHttp => {
+                return edge(div().py_3())
+                    .child(self.mcp_http_editor(cx))
+                    .into_any_element();
             }
             SettingKey::Plugins => {
                 return edge(div().py_3())
@@ -7848,6 +7837,7 @@ impl MainView {
                 | SettingKey::CalDav
                 | SettingKey::McpKeys
                 | SettingKey::McpKeyless
+                | SettingKey::McpHttp
                 | SettingKey::Plugins
                 | SettingKey::PluginFolders
                 | SettingKey::Keys
@@ -8265,18 +8255,6 @@ impl MainView {
                         })
                         .into_any_element()
                 }
-                SettingKey::McpHttp => {
-                    let on = self.mcp_http(cx).0;
-                    on_off(
-                        on,
-                        Switch::new("mcp-http-switch").checked(on).on_click(
-                            cx.listener(|this, on: &bool, _, cx| this.set_mcp_http(*on, cx)),
-                        ),
-                        cx,
-                    )
-                }
-                SettingKey::McpHttpPort => self.mcp_port_control(cx),
-                SettingKey::McpHttpUrl => self.mcp_url_control(cx),
                 SettingKey::LockedNotices => {
                     let view = cx.entity().downgrade();
                     let notices = self.locked_notices(cx);
@@ -10622,7 +10600,7 @@ impl MainView {
 
 impl Render for MainView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // 「アカウントを追加」を Esc や外側で閉じたら、調べている途中の結果を捨てる。
+        // 「連携を追加」を Esc や外側で閉じたら、調べている途中の結果を捨てる。
         // 前に描いたときに出していたかで見る（開いた直後は、まだ `sub_modal` に入っていない）
         if self.sub_seen == Some(SubModal::AddAccount)
             && self.sub_modal != Some(SubModal::AddAccount)

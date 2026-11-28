@@ -5565,6 +5565,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "criterion 0.5.1",
+ "encoding_rs",
  "flate2",
  "jiff",
  "malakt-caldav",

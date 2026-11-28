@@ -2057,7 +2057,7 @@ fn auto_lock_after_the_chosen_minutes(cx: &mut TestAppContext) {
 }
 
 /// 設定の「アクセスキー」で、アクセスキーを発行し、名前を付け、できることを変え、失効させる。
-/// キーの文字列は発行した行の下にだけ出る。
+/// 一覧には状態を文字で出し、押すと詳細を開く。キーの文字列は発行したキーの詳細にだけ出る。
 #[gpui_kit::test]
 fn access_keys_are_issued_named_limited_and_revoked(cx: &mut TestAppContext) {
     use malakt_core::access::{self, NEW_KEY_NAME};
@@ -2071,12 +2071,17 @@ fn access_keys_are_issued_named_limited_and_revoked(cx: &mut TestAppContext) {
         })
     });
     let keys = |cx: &mut TestAppContext| store(cx, |s| s.access_keys().unwrap());
+    ui(cx, window, |window, _| {
+        assert!(window.find("access-key-none").visible())
+    });
 
-    // ＋ で「新規アクセスキー」が増え、その行で名前を書ける。キーの文字列はその下に出る
+    // 「アクセスキーを発行」で「新規アクセスキー」が増え、その詳細でそのまま名前を書ける。
+    // キーの文字列は詳細の上に出る
     ui(cx, window, |window, cx| window.click("access-key-add", cx));
     assert_eq!(keys(cx)[0].name, NEW_KEY_NAME);
     let secret = cx.update(|cx| view.read(cx).issued_access_key.clone().unwrap().secret);
     ui(cx, window, |window, cx| {
+        assert!(window.find("access-key-detail").visible());
         assert!(window.find("access-key-input").visible());
         assert!(window.find("access-key-secret").visible());
         window.input("Claude Code", cx);
@@ -2104,7 +2109,10 @@ fn access_keys_are_issued_named_limited_and_revoked(cx: &mut TestAppContext) {
     let copied = cx
         .update(|cx| cx.read_from_clipboard().and_then(|i| i.text()))
         .unwrap();
-    assert!(copied.starts_with("claude mcp add --scope user malakt-mahoz -e MALAKT_MAHOZ_KEY="));
+    assert!(
+        copied.starts_with("claude mcp add --scope user malakt-mahoz -e MALAKT_MAHOZ_KEY="),
+        "{copied}"
+    );
     assert!(copied.contains(&secret));
     ui(cx, window, |window, cx| {
         window.click("access-key-copy-config", cx)
@@ -2118,33 +2126,40 @@ fn access_keys_are_issued_named_limited_and_revoked(cx: &mut TestAppContext) {
         secret.as_str()
     );
 
-    // 読み取りのみと、ロック中も使えるを、行のボタンで切り替える
+    // できることは「読み書き」「読み取りのみ」から選ぶ
     ui(cx, window, |window, cx| {
-        window.click(("access-key-write", 0usize), cx)
+        window.click("access-entry-read", cx)
     });
     assert!(keys(cx)[0].read_only);
-    // ロックが無効なら、パスキーは聞かない
+    ui(cx, window, |window, cx| {
+        window.click("access-entry-write", cx)
+    });
+    assert!(!keys(cx)[0].read_only);
+    ui(cx, window, |window, cx| {
+        window.click("access-entry-read", cx)
+    });
+    // ロック中も使うかは、スイッチ。ロックが無効なら、パスキーは聞かない
     let asked = passkey(cx, Ok(()));
     ui(cx, window, |window, cx| {
-        window.click(("access-key-lock", 0usize), cx)
+        window.click("access-entry-lock", cx)
     });
     assert!(keys(cx)[0].while_locked);
     assert!(asked.lock().unwrap().is_empty());
     ui(cx, window, |window, cx| {
-        window.click(("access-key-lock", 0usize), cx)
+        window.click("access-entry-lock", cx)
     });
     assert!(!keys(cx)[0].while_locked);
     // ロックが有効なら、オンにするときだけパスキーで確かめる。断ったら変えない
     enable_lock(cx);
     passkey(cx, Err(Failure::Denied));
     ui(cx, window, |window, cx| {
-        window.click(("access-key-lock", 0usize), cx)
+        window.click("access-entry-lock", cx)
     });
     cx.run_until_parked();
     assert!(!keys(cx)[0].while_locked);
     let asked = passkey(cx, Ok(()));
     ui(cx, window, |window, cx| {
-        window.click(("access-key-lock", 0usize), cx)
+        window.click("access-entry-lock", cx)
     });
     cx.run_until_parked();
     assert_eq!(
@@ -2159,17 +2174,38 @@ fn access_keys_are_issued_named_limited_and_revoked(cx: &mut TestAppContext) {
         assert!(window.try_find("access-key-secret").is_none())
     });
 
-    // 失効は、ゴミ箱のメニューから
-    ui(cx, window, |window, cx| {
-        window.click(("access-key-revoke", 0usize), cx)
+    // Esc で一覧に戻る。一覧の行には、できること・ロック中・使える時間・今使えるかを文字で出す
+    ui(cx, window, |window, cx| window.press("escape", cx));
+    cx.update(|cx| {
+        let v = view.read(cx);
+        assert_eq!(v.modal, Modal::Appearance);
+        assert!(v.key_limits_open.is_none());
     });
-    pick(cx, window, "失効させる");
+    ui(cx, window, |window, _| {
+        assert!(window.try_find("access-key-detail").is_none());
+        assert!(window.find(("access-key", 0usize)).visible());
+    });
+
+    // 行を押して詳細を開き、「失効させる」のメニューで失効させる
+    ui(cx, window, |window, cx| {
+        window.click(("access-key", 0usize), cx)
+    });
+    ui(cx, window, |window, cx| {
+        window.click("access-key-revoke", cx)
+    });
+    pick(cx, window, "このキーを失効させる（元に戻せません）");
     assert!(keys(cx).is_empty());
     assert_eq!(check(cx, &secret), Err(access::Denied::BadKey));
+    ui(cx, window, |window, _| {
+        assert!(window.try_find("access-key-detail").is_none());
+        assert!(window.find("access-key-none").visible());
+    });
 
-    // 発行したキーの文字列は、設定を閉じると消える
+    // 発行したキーの文字列は、設定を閉じると消える（Esc は詳細、設定の順に閉じる）
     ui(cx, window, |window, cx| window.click("access-key-add", cx));
     ui(cx, window, |window, cx| window.press("enter", cx));
+    ui(cx, window, |window, cx| window.press("escape", cx));
+    cx.update(|cx| assert_eq!(view.read(cx).modal, Modal::Appearance));
     ui(cx, window, |window, cx| window.press("escape", cx));
     cx.update(|cx| {
         let v = view.read(cx);
@@ -2197,38 +2233,46 @@ fn keyless_rules_are_added_changed_and_removed(cx: &mut TestAppContext) {
         assert!(window.find(("keyless", 0usize)).visible());
         assert!(window.try_find("keyless-none").is_none());
     });
-    // 読み取りのみにする
+    // 押すと詳細。読み取りのみにして、平日だけにする
     ui(cx, window, |window, cx| {
-        window.click(("keyless-write", 0usize), cx)
+        window.click(("keyless", 0usize), cx)
+    });
+    ui(cx, window, |window, cx| {
+        assert!(window.find("keyless-detail").visible());
+        window.click("access-entry-read", cx);
     });
     assert!(rules(cx)[0].read_only);
-    // ＋ で足すと、期限と時間帯の欄が開く。時間帯を足すと、その時間だけ
+    ui(cx, window, |window, cx| {
+        window.click(("access-entry-hours", 2usize), cx)
+    });
+    assert_eq!(rules(cx)[0].when_label(), "平日 9:00〜18:00");
+    // 「←」で一覧に戻る
+    ui(cx, window, |window, cx| {
+        window.click("access-entry-back", cx)
+    });
+    ui(cx, window, |window, _| {
+        assert!(window.try_find("keyless-detail").is_none());
+        assert!(window.find(("keyless", 0usize)).visible());
+    });
+    // 足すと、その詳細が開く。ロック中も使う（ロックしていなければ、そのまま切り替わる）
     ui(cx, window, |window, cx| window.click("keyless-add", cx));
     assert_eq!(rules(cx).len(), 2);
     assert!(!rules(cx)[1].read_only);
     ui(cx, window, |window, cx| {
-        window.click("access-key-window-add", cx)
-    });
-    assert_eq!(rules(cx)[1].windows.len(), 1);
-    assert_eq!(rules(cx)[1].when_label(), "毎日 9:00〜18:00");
-    // 行を押すと、欄を閉じる・開く
-    ui(cx, window, |window, cx| {
-        window.click(("keyless", 1usize), cx)
-    });
-    ui(cx, window, |window, _| {
-        assert!(window.try_find("access-key-window-add").is_none())
-    });
-    // ロック中も使える（ロックしていなければ、そのまま切り替わる）
-    ui(cx, window, |window, cx| {
-        window.click(("keyless-lock", 1usize), cx)
+        assert!(window.find("keyless-detail").visible());
+        window.click("access-entry-lock", cx);
     });
     assert!(rules(cx)[1].while_locked);
-    // 全部外すと、キーが必要
+    // 「この決まりを外す」で外すと、一覧に戻る。全部外すと、キーが必要
+    ui(cx, window, |window, cx| window.click("keyless-remove", cx));
+    assert_eq!(rules(cx).len(), 1);
     ui(cx, window, |window, cx| {
-        window.click(("keyless-remove", 1usize), cx)
+        assert!(window.try_find("keyless-detail").is_none());
+        window.click(("keyless", 0usize), cx);
     });
     ui(cx, window, |window, cx| {
-        window.click(("keyless-remove", 0usize), cx)
+        assert!(window.find("keyless-detail").visible());
+        window.click("keyless-remove", cx);
     });
     assert!(rules(cx).is_empty());
     ui(cx, window, |window, _| {
@@ -2237,10 +2281,14 @@ fn keyless_rules_are_added_changed_and_removed(cx: &mut TestAppContext) {
     cx.update(|cx| assert_eq!(view.read(cx).modal, Modal::Appearance));
 }
 
-/// 設定の「MCP の接続」で、HTTP を開き、ポートを変え、閉じる。
+/// MCP の HTTP のサーバーはアプリに 1 つなので、HTTP を開くテストは 1 つずつ動かす。
+static HTTP_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// 設定の「MCP の接続」で、HTTP を開き、ポートの決め方を変え、閉じる。
 #[gpui_kit::test]
 fn mcp_opens_over_http_from_the_settings(cx: &mut TestAppContext) {
-    use malakt_mahoz::mcp_http;
+    let _one = HTTP_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+    use malakt_mahoz::mcp_http::{self, Config, PortMode};
     use malakt_mahoz::state::CustomizeSection;
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("data.sqlite3");
@@ -2253,7 +2301,15 @@ fn mcp_opens_over_http_from_the_settings(cx: &mut TestAppContext) {
     };
     let (first, second) = (free(), free());
     let mut opened = Store::open(&path).unwrap();
-    mcp_http::save(&mut opened, false, first).unwrap();
+    mcp_http::save(
+        &mut opened,
+        &Config {
+            on: false,
+            mode: PortMode::Auto,
+            port: first,
+        },
+    )
+    .unwrap();
     cx.update(|cx| malakt_mahoz::init(opened, cx));
     let (window, view) = open(cx, wide());
     ui(cx, window, |window, cx| {
@@ -2262,31 +2318,49 @@ fn mcp_opens_over_http_from_the_settings(cx: &mut TestAppContext) {
             v.show_appearance_section(CustomizeSection::McpConnection, window, cx);
         })
     });
+    let saved = |cx: &mut TestAppContext| store(cx, |s| mcp_http::config(s).unwrap());
     ui(cx, window, |window, _| {
         assert!(window.try_find("mcp-http-url").is_none())
     });
+    // オンにすると受付中になり、URL が出る
     ui(cx, window, |window, cx| window.click("mcp-http-switch", cx));
     assert_eq!(mcp_http::running_port(), Some(first));
     ui(cx, window, |window, _| {
-        assert!(window.find("mcp-http-url").visible())
+        assert!(window.find("mcp-http-url").visible());
     });
-    // ポートをその場で書き直すと、そのポートで開き直す
+    ui(cx, window, |window, cx| window.click("mcp-http-copy", cx));
+    let copied = cx.update(|cx| cx.read_from_clipboard().and_then(|i| i.text()));
+    assert_eq!(copied, Some(mcp_http::url(first)));
+    // 固定にすると、今のポートのまま。ポートをその場で書き直すと、そのポートで開き直す
+    ui(cx, window, |window, cx| {
+        window.click(("mcp-http-port-mode", 1usize), cx)
+    });
+    assert_eq!(saved(cx).mode, PortMode::Fixed);
+    assert_eq!(mcp_http::running_port(), Some(first));
     ui(cx, window, |window, cx| window.click("mcp-http-port", cx));
     ui(cx, window, |window, cx| {
         window.input(&second.to_string(), cx);
         window.press("enter", cx);
     });
     assert_eq!(mcp_http::running_port(), Some(second));
-    assert_eq!(store_port(cx), second);
-    // 読めないポートは、何も変えずにエラー
+    assert_eq!(saved(cx).port, second);
+    // 読めないポートは、何も変えずに欄の中に理由を出す（画面の下のエラーには出さない）
     ui(cx, window, |window, cx| window.click("mcp-http-port", cx));
     ui(cx, window, |window, cx| {
         window.input("http", cx);
         window.press("enter", cx);
     });
     cx.update(|cx| {
-        let error = view.read(cx).error.clone().unwrap_or_default();
-        assert!(error.contains("ポート番号として読めません"), "{error}");
+        let v = view.read(cx);
+        let error = v.mcp_http_error.clone().unwrap_or_default();
+        assert!(
+            error.contains("ポート番号は 1〜65535 の数字です"),
+            "{error}"
+        );
+        assert!(v.error.is_none());
+    });
+    ui(cx, window, |window, _| {
+        assert!(window.find("mcp-http-error").visible())
     });
     ui(cx, window, |window, cx| window.press("escape", cx));
     assert_eq!(mcp_http::running_port(), Some(second));
@@ -2298,20 +2372,113 @@ fn mcp_opens_over_http_from_the_settings(cx: &mut TestAppContext) {
             v.save_access_key_name(window, cx);
         })
     });
-    ui(cx, window, |window, _| {
-        assert!(window.find("access-key-copy-http").visible())
+    ui(cx, window, |window, cx| {
+        window.click("access-key-copy-http", cx)
+    });
+    let copied = cx
+        .update(|cx| cx.read_from_clipboard().and_then(|i| i.text()))
+        .unwrap();
+    assert!(copied.contains(&mcp_http::url(second)), "{copied}");
+    // オフにすると止まり、設定もオフ
+    ui(cx, window, |window, cx| {
+        view.update(cx, |v, cx| {
+            v.close_access_entry();
+            v.show_appearance_section(CustomizeSection::McpConnection, window, cx);
+        })
     });
     ui(cx, window, |window, cx| window.click("mcp-http-switch", cx));
     assert_eq!(mcp_http::running_port(), None);
-    assert!(!store(cx, |s| mcp_http::enabled(s).unwrap()));
+    assert!(!saved(cx).on);
+    ui(cx, window, |window, _| {
+        assert!(window.try_find("mcp-http-url").is_none());
+        assert!(window.try_find("mcp-http-error").is_none());
+    });
 }
 
-fn store_port(cx: &mut TestAppContext) -> u16 {
-    store(cx, |s| malakt_mahoz::mcp_http::port(s).unwrap())
+/// 開こうとしたポートを先にほかのアプリが使っているとき（Windows の os error 10048）。
+/// 固定なら開かずに欄の中に理由を出し、自動なら空いているポートで開いて覚える。
+#[gpui_kit::test]
+fn mcp_http_on_a_port_that_is_already_taken(cx: &mut TestAppContext) {
+    let _one = HTTP_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+    use malakt_mahoz::mcp_http::{self, Config, PortMode};
+    use malakt_mahoz::state::CustomizeSection;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("data.sqlite3");
+    let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let busy = taken.local_addr().unwrap().port();
+    let mut opened = Store::open(&path).unwrap();
+    mcp_http::save(
+        &mut opened,
+        &Config {
+            on: false,
+            mode: PortMode::Fixed,
+            port: busy,
+        },
+    )
+    .unwrap();
+    cx.update(|cx| malakt_mahoz::init(opened, cx));
+    let (window, view) = open(cx, wide());
+    ui(cx, window, |window, cx| {
+        view.update(cx, |v, cx| {
+            v.open_appearance(window, cx);
+            v.show_appearance_section(CustomizeSection::McpConnection, window, cx);
+        })
+    });
+    let saved = |cx: &mut TestAppContext| store(cx, |s| mcp_http::config(s).unwrap());
+
+    // 固定: オンにしても開かず、スイッチはオフのまま。理由は欄の中に 1 回だけ（OS の文は出さない）
+    ui(cx, window, |window, cx| window.click("mcp-http-switch", cx));
+    assert_eq!(mcp_http::running_port(), None);
+    assert!(!saved(cx).on);
+    cx.update(|cx| {
+        let v = view.read(cx);
+        let error = v.mcp_http_error.clone().unwrap();
+        assert!(
+            error.contains(&format!("ポート {busy} はほかのアプリが使っています")),
+            "{error}"
+        );
+        assert!(!error.contains("os error"), "{error}");
+        assert!(v.error.is_none());
+    });
+    ui(cx, window, |window, _| {
+        assert!(window.find("mcp-http-error").visible());
+        assert!(window.try_find("mcp-http-url").is_none());
+    });
+
+    // 自動にしてオンにすると、空いているポートで開き、そのポートを覚える。理由の文は消える
+    ui(cx, window, |window, cx| {
+        window.click(("mcp-http-port-mode", 0usize), cx)
+    });
+    ui(cx, window, |window, cx| window.click("mcp-http-switch", cx));
+    let port = mcp_http::running_port().unwrap();
+    assert_ne!(port, busy);
+    assert_eq!(
+        saved(cx),
+        Config {
+            on: true,
+            mode: PortMode::Auto,
+            port
+        }
+    );
+    cx.update(|cx| assert!(view.read(cx).mcp_http_error.is_none()));
+    ui(cx, window, |window, _| {
+        assert!(window.try_find("mcp-http-error").is_none());
+        assert!(window.find("mcp-http-url").visible());
+    });
+    // オフ・オンを繰り返しても、同じポートで開き直せる
+    for _ in 0..3 {
+        ui(cx, window, |window, cx| window.click("mcp-http-switch", cx));
+        assert_eq!(mcp_http::running_port(), None);
+        ui(cx, window, |window, cx| window.click("mcp-http-switch", cx));
+        assert_eq!(mcp_http::running_port(), Some(port));
+    }
+    ui(cx, window, |window, cx| window.click("mcp-http-switch", cx));
+    assert_eq!(mcp_http::running_port(), None);
+    drop(taken);
 }
 
-/// アクセスキーの時計のボタンで、開始・期限・時間帯をその場で決める。
-/// 期限は書いても、今からの長さで選んでもよく、今使えないキーには名前の横に印が出る。
+/// アクセスキーの詳細で、開始・期限（カレンダー）と使える時間（いつでも・毎日・平日・曜日ごと）を決める。
+/// 今使えないキーは、一覧に理由が出る。
 #[gpui_kit::test]
 fn access_keys_get_a_period_and_hours(cx: &mut TestAppContext) {
     use malakt_core::access::Window as Hours;
@@ -2332,32 +2499,40 @@ fn access_keys_get_a_period_and_hours(cx: &mut TestAppContext) {
         })
     });
     let key = |cx: &mut TestAppContext| store(cx, |s| s.access_keys().unwrap().remove(0));
+    let type_in = |cx: &mut TestAppContext, id: &'static str, text: &'static str| {
+        ui(cx, window, |window, cx| {
+            window.click(id, cx);
+            window.press("secondary-a", cx);
+            window.press("backspace", cx);
+            if !text.is_empty() {
+                window.input(text, cx);
+            }
+            window.press("enter", cx);
+        });
+    };
     ui(cx, window, |window, cx| {
-        assert!(window.try_find("access-key-expires").is_none());
-        window.click(("access-key-limits", 0usize), cx);
+        assert!(window.try_find("access-entry-expires").is_none());
+        window.click(("access-key", 0usize), cx);
     });
 
-    // 期限を書く。過ぎた期限なら、名前の横に印が出る
+    // 期限はカレンダーで決める。過ぎた期限なら、今の状態が「使えません（期限切れ）」
     ui(cx, window, |window, cx| {
-        window.click("access-key-expires", cx)
+        window.click("access-entry-expires", cx)
     });
-    ui(cx, window, |window, cx| {
-        window.input("2000/1/1 9:00", cx);
-        window.press("enter", cx);
-    });
-    assert_eq!(key(cx).expires.as_deref(), Some("2000-01-01 09:00"));
-    // 開き直すと見えている書き方で入っていて、そのまま Enter しても変わらない
-    ui(cx, window, |window, cx| {
-        window.click("access-key-expires", cx)
-    });
-    ui(cx, window, |window, cx| window.press("enter", cx));
-    assert_eq!(key(cx).expires.as_deref(), Some("2000-01-01 09:00"));
+    cx.update(|cx| assert!(view.read(cx).date_pick.is_some()));
+    type_in(cx, "pick-date-input", "2000/1/1");
+    assert_eq!(key(cx).expires.as_deref(), Some("2000-01-01"));
+    let usable = |cx: &mut TestAppContext| key(cx).usable_at(malakt_core::access::now_local());
+    assert!(matches!(
+        usable(cx),
+        Err(malakt_core::access::Denied::Expired { .. })
+    ));
     ui(cx, window, |window, _| {
-        assert!(window.find(("access-key-off", 0usize)).visible())
+        assert!(window.find("access-entry-status").visible())
     });
-    // 今からの長さで選ぶと、印は消える
+    // 今からの長さで選ぶと、使える
     ui(cx, window, |window, cx| {
-        window.click("access-key-expiry-menu", cx)
+        window.click("access-entry-expiry-menu", cx)
     });
     pick(cx, window, "7 日");
     let expires = key(cx).expires.unwrap();
@@ -2365,74 +2540,91 @@ fn access_keys_get_a_period_and_hours(cx: &mut TestAppContext) {
         expires.as_str() > malakt_core::view::now().as_str(),
         "{expires}"
     );
-    ui(cx, window, |window, _| {
-        assert!(window.try_find(("access-key-off", 0usize)).is_none())
-    });
-
-    // 時間帯を足すと、毎日 9:00〜18:00。曜日と時刻をその場で変える
+    assert_eq!(usable(cx), Ok(()));
+    // 開始もカレンダーで決め、「外す」で発行したときから
     ui(cx, window, |window, cx| {
-        window.click("access-key-window-add", cx)
+        window.click("access-entry-starts", cx)
+    });
+    type_in(cx, "pick-date-input", "2099/1/1");
+    assert_eq!(key(cx).starts.as_deref(), Some("2099-01-01"));
+    assert!(matches!(
+        usable(cx),
+        Err(malakt_core::access::Denied::NotYet { .. })
+    ));
+    ui(cx, window, |window, cx| {
+        window.click("access-entry-starts-clear", cx)
+    });
+    assert_eq!(key(cx).starts, None);
+
+    // 使える時間は「いつでも / 毎日 / 平日 / 曜日ごと」。毎日にすると 9:00〜18:00
+    ui(cx, window, |window, cx| {
+        window.click(("access-entry-hours", 1usize), cx)
     });
     assert_eq!(key(cx).windows, vec![Hours::standard()]);
-    // 土曜を外す（7 つずつ並ぶ。5 番目が土）
+    // 時刻はメニューで選ぶ（メニューは今の時刻のあたりを出して開く）
     ui(cx, window, |window, cx| {
-        window.click(("access-key-day", 5usize), cx)
+        window.click(("access-entry-to", 0usize), cx)
     });
-    assert_eq!(key(cx).windows[0].days, vec![0, 1, 2, 3, 4, 6]);
-    ui(cx, window, |window, cx| {
-        window.click(("access-key-from", 0usize), cx)
-    });
-    ui(cx, window, |window, cx| {
-        window.input("22", cx);
-        window.press("enter", cx);
-    });
-    ui(cx, window, |window, cx| {
-        window.click(("access-key-to", 0usize), cx)
-    });
-    ui(cx, window, |window, cx| {
-        window.input("6:00", cx);
-        window.press("enter", cx);
-    });
+    pick(cx, window, "19:00");
     let hours = key(cx).windows[0].clone();
-    assert_eq!((hours.from, hours.to), (22 * 60, 6 * 60));
+    assert_eq!((hours.from, hours.to), (9 * 60, 19 * 60));
+    ui(cx, window, |window, cx| {
+        window.click(("access-entry-from", 0usize), cx)
+    });
+    pick(cx, window, "10:00");
+    assert_eq!(key(cx).windows[0].from, 10 * 60);
+    // 平日にしても、時刻はそのまま
+    ui(cx, window, |window, cx| {
+        window.click(("access-entry-hours", 2usize), cx)
+    });
+    let w = key(cx).windows[0].clone();
+    assert_eq!(
+        (w.days, w.from, w.to),
+        (vec![0, 1, 2, 3, 4], 10 * 60, 19 * 60)
+    );
 
-    // 読めない時刻は、何も変えずにエラーを出す。Esc は書きかけを捨てて、設定は開いたまま
+    // 曜日ごと: 曜日のスイッチで使う日を選び、曜日ごとに時刻を変える
     ui(cx, window, |window, cx| {
-        window.click(("access-key-to", 0usize), cx)
+        window.click(("access-entry-hours", 3usize), cx)
+    });
+    ui(cx, window, |window, _| {
+        assert!(window.find(("access-entry-day", 6usize)).visible())
+    });
+    // 日曜を足す（ほかの曜日と同じ時刻）、月曜を外す
+    ui(cx, window, |window, cx| {
+        window.click(("access-entry-day", 6usize), cx)
     });
     ui(cx, window, |window, cx| {
-        window.input("あとで", cx);
-        window.press("enter", cx);
+        window.click(("access-entry-day", 0usize), cx)
     });
-    cx.update(|cx| {
-        let v = view.read(cx);
-        assert!(v
-            .error
-            .as_deref()
-            .unwrap_or("")
-            .contains("時刻として読めません"));
-        assert!(v.key_limit_editing.is_some());
+    assert_eq!(key(cx).windows[0].days, vec![1, 2, 3, 4, 6]);
+    // 曜日ごとのまま（時刻が平日と同じでも、曜日ごとの欄が出たまま）
+    ui(cx, window, |window, _| {
+        assert!(window.find(("access-entry-day", 0usize)).visible())
     });
-    ui(cx, window, |window, cx| window.press("escape", cx));
-    cx.update(|cx| {
-        let v = view.read(cx);
-        assert!(v.key_limit_editing.is_none());
-        assert_eq!(v.modal, Modal::Appearance);
+    // 日曜（曜日 6、1 つ目の時刻）の始まりだけ変える
+    ui(cx, window, |window, cx| {
+        window.click(("access-entry-from", 1 + 6 * 8usize), cx)
     });
-    assert_eq!(key(cx).windows[0], hours);
+    pick(cx, window, "11:00");
+    let windows = key(cx).windows;
+    assert_eq!(windows.len(), 2);
+    assert_eq!(windows[0].days, vec![1, 2, 3, 4]);
+    assert_eq!(
+        (windows[1].days.clone(), windows[1].from),
+        (vec![6], 11 * 60)
+    );
 
-    // 期限を空にすると、期限なし。時間帯の × で外すと、いつでも
+    // 「いつでも」にすると、時間帯なし
     ui(cx, window, |window, cx| {
-        window.click("access-key-expires", cx)
+        window.click(("access-entry-hours", 0usize), cx)
     });
+    assert!(key(cx).windows.is_empty());
+    // カレンダーで期限を消す（クリア）と、期限なし
     ui(cx, window, |window, cx| {
-        window.press("backspace", cx);
-        window.press("enter", cx);
+        window.click("access-entry-expires", cx)
     });
-    assert_eq!(key(cx).expires, None);
-    ui(cx, window, |window, cx| {
-        window.click(("access-key-window-remove", 0usize), cx)
-    });
+    ui(cx, window, |window, cx| window.click("date-clear", cx));
     assert!(!key(cx).limited());
 }
 
@@ -5554,11 +5746,11 @@ fn reminders(
     os
 }
 
-/// 「設定」の「同期」の「アカウントを追加」でリマインダーを選び、設定を閉じる。
+/// 「設定」の「連携と同期」の「連携を追加」でリマインダーを選び、設定を閉じる。
 fn start_reminders_sync(cx: &mut TestAppContext, window: AnyWindowHandle, view: &Entity<MainView>) {
     pick_sync_provider(cx, window, view, "caldav-pick-reminders");
     ui(cx, window, |window, _| {
-        // 選ぶとダイアログが閉じ、「同期」の一覧にリマインダーが出る
+        // 選ぶとダイアログが閉じ、「連携と同期」の一覧にリマインダーが出る
         assert!(window.try_find("caldav-pick-other").is_none());
         assert!(window.find("reminders-account").visible());
     });
@@ -5566,7 +5758,7 @@ fn start_reminders_sync(cx: &mut TestAppContext, window: AnyWindowHandle, view: 
     ui(cx, window, |window, cx| window.click("dialog-close", cx));
 }
 
-/// 「設定」の「同期」で、リマインダーのごみ箱の「同期をやめる」を選ぶ。
+/// 「設定」の「連携と同期」で、リマインダーのごみ箱の「同期をやめる」を選ぶ。
 fn stop_reminders_sync(cx: &mut TestAppContext, window: AnyWindowHandle, view: &Entity<MainView>) {
     ui(cx, window, |window, cx| window.click("open-settings", cx));
     ui(cx, window, |window, cx| {
@@ -8338,7 +8530,7 @@ fn caldav(
     (server, secrets)
 }
 
-/// 「設定」の「同期」を開き、「アカウントを追加」でプロバイダを選ぶ。
+/// 「設定」の「連携と同期」を開き、「連携を追加」でプロバイダを選ぶ。
 fn pick_sync_provider(
     cx: &mut TestAppContext,
     window: AnyWindowHandle,
@@ -8414,7 +8606,7 @@ fn caldav_calendar_syncs_with_a_workspace(cx: &mut TestAppContext) {
     assert_eq!(accounts.len(), 1);
     assert_eq!(accounts[0].label(), "チーム");
     ui(cx, window, |window, _| {
-        // 足したら重ねたダイアログは閉じ、「同期」の一覧にアカウントが出る
+        // 足したら重ねたダイアログは閉じ、「連携と同期」の一覧にアカウントが出る
         assert!(window.try_find("caldav-name").is_none());
         assert!(window.find(("caldav-account", 0usize)).visible());
     });
@@ -9049,4 +9241,90 @@ fn pr_times_become_the_elapsed_basis(cx: &mut TestAppContext) {
         Some("https://github.com/o/r/pull/7")
     );
     assert_eq!(task_span(cx), None);
+}
+
+/// 一覧の上のインポートで、ほかのツール（Redmine）の CSV を今のワークスペースに取り込める。
+/// もう一度取り込んでも増えない。
+#[gpui_kit::test]
+fn importing_another_tools_csv_into_the_workspace(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("issues.csv");
+    std::fs::write(
+        &path,
+        "#,トラッカー,ステータス,題名,担当者\n5,機能,新規,見積を出す,佐藤\n6,バグ,終了,表示が崩れる,\n",
+    )
+    .unwrap();
+    start(cx);
+    let workspace = cx.update(|cx| {
+        db::shared(cx).update(cx, |db, _| db.store.create_workspace(None, "案件").unwrap())
+    });
+    let (_window, view) = open(cx, wide());
+    cx.run_until_parked();
+    cx.update(|cx| view.update(cx, |v, cx| v.go(Nav::Workspace(workspace.id.clone()), cx)));
+    cx.update(|cx| view.update(cx, |v, cx| v.import_from(&path, cx)));
+    cx.run_until_parked();
+    let tasks = store(cx, |s| {
+        s.tasks(workspace.id.as_str(), &TaskFilter::default())
+            .unwrap()
+    });
+    assert_eq!(tasks.len(), 2);
+    cx.update(|cx| {
+        let notice = view.read(cx).notice.clone().unwrap();
+        assert!(notice.contains("Redmine から 2 件"), "{notice}");
+    });
+    cx.update(|cx| view.update(cx, |v, cx| v.import_from(&path, cx)));
+    assert_eq!(
+        store(cx, |s| s
+            .tasks(workspace.id.as_str(), &TaskFilter::default())
+            .unwrap())
+        .len(),
+        2
+    );
+    cx.update(|cx| {
+        let notice = view.read(cx).notice.clone().unwrap();
+        assert!(notice.contains("2 件は取り込み済み"), "{notice}");
+    });
+}
+
+/// 「連携と同期」の「連携を追加」で Redmine を選び、ファイルとサーバーを入れて取り込むと、
+/// 新しいワークスペースにチケットの URL つきで入る。ファイルを選ばずに押すとエラーが出る。
+#[gpui_kit::test]
+fn importing_from_the_integrations_settings(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("issues.csv");
+    std::fs::write(&path, "#,題名,ステータス\n12,ログイン画面,進行中\n").unwrap();
+    start(cx);
+    let (window, view) = open(cx, wide());
+    cx.run_until_parked();
+    pick_sync_provider(cx, window, &view, "intake-pick-redmine");
+    ui(cx, window, |window, cx| window.click("intake-run", cx));
+    ui(cx, window, |window, _| {
+        assert!(window.find("caldav-add-error").visible());
+    });
+    cx.update(|cx| {
+        let settings = view.read(cx).caldav_settings.clone();
+        settings.update(cx, |s, cx| s.choose_file(path.clone(), cx));
+    });
+    ui(cx, window, |window, cx| window.click("intake-server", cx));
+    ui(cx, window, |window, cx| {
+        window.input("redmine.example.com", cx)
+    });
+    ui(cx, window, |window, cx| window.click("intake-run", cx));
+    cx.run_until_parked();
+    wait_sub_closed(cx, window);
+    let ws = store(cx, |s| s.workspaces().unwrap())
+        .into_iter()
+        .find(|w| w.name == "Redmine")
+        .expect("新しいワークスペース");
+    let tasks = store(cx, |s| {
+        s.tasks(ws.id.as_str(), &TaskFilter::default()).unwrap()
+    });
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(tasks[0].status, malakt_core::Status::InProcess);
+    assert_eq!(tasks[0].urls, vec!["https://redmine.example.com/issues/12"]);
+    ui(cx, window, |window, _| {
+        assert!(window.try_find("intake-run").is_none());
+        assert!(window.find("caldav-add").visible());
+    });
+    cx.update(|cx| assert!(view.read(cx).notice.is_some()));
 }

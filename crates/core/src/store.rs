@@ -1559,6 +1559,7 @@ impl Store {
             schedules: self.all_schedules()?,
             schedule_files: self.all_schedule_files()?,
             work_logs: self.all_work_logs()?,
+            import_origins: self.import_origins()?,
         })
     }
 
@@ -1700,6 +1701,9 @@ impl Store {
         for l in &data.work_logs {
             crate::pomodoro::insert_log(&tx, l)?;
         }
+        for o in &data.import_origins {
+            crate::intake::save_origin(&tx, o)?;
+        }
         // 取り込んだ結果、親子が輪になっていないか確かめる。
         let reachable: i64 = tx.query_row(
             "WITH RECURSIVE down(id) AS ( \
@@ -1815,7 +1819,7 @@ fn insert_workspace(conn: &Connection, w: &Workspace) -> rusqlite::Result<usize>
     ])
 }
 
-fn insert_person(conn: &Connection, p: &Person) -> rusqlite::Result<usize> {
+pub(crate) fn insert_person(conn: &Connection, p: &Person) -> rusqlite::Result<usize> {
     conn.prepare_cached(
         "INSERT INTO people(id, name, is_self, note, created_at, updated_at) \
          VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
@@ -1833,7 +1837,7 @@ fn insert_person(conn: &Connection, p: &Person) -> rusqlite::Result<usize> {
 }
 
 /// 担当者を使うワークスペースを、`p` のとおりに置き換える。
-fn put_person_workspaces(conn: &Connection, p: &Person) -> rusqlite::Result<()> {
+pub(crate) fn put_person_workspaces(conn: &Connection, p: &Person) -> rusqlite::Result<()> {
     conn.execute(
         "DELETE FROM person_workspaces WHERE person_id = ?1",
         params![p.id],
@@ -1949,7 +1953,7 @@ fn insert_assignees(
     Ok(())
 }
 
-fn insert_comment(conn: &Connection, c: &Comment) -> rusqlite::Result<usize> {
+pub(crate) fn insert_comment(conn: &Connection, c: &Comment) -> rusqlite::Result<usize> {
     conn.prepare_cached(
         "INSERT INTO comments(id, task_id, author_id, body, pinned, created_at, updated_at, \
          status, review, anchor, reply_to, resolved_at, mentions, actor) \

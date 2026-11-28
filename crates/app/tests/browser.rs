@@ -2209,3 +2209,120 @@ fn downloads_move_to_the_chosen_place(cx: &mut TestAppContext) {
     let items = cx.update(|cx| downloads::shared(cx).read(cx).items.clone());
     assert_eq!(items.len(), 1, "{items:?}");
 }
+
+/// 上のバーを右クリックする（ウィンドウのメニュー）。
+fn right_click_header(cx: &mut TestAppContext, window: AnyWindowHandle) {
+    ui(cx, window, |window, cx| {
+        let at = window.find("toggle-sidebar").bounds().center() + point(px(300.), px(0.));
+        window.pointer_move(at, None, cx);
+        window.pointer_down(at, MouseButton::Right, cx);
+        window.pointer_up(at, MouseButton::Right, cx);
+    });
+}
+
+/// 右クリックのメニューを閉じたら、ページがまた見える。メニューの部品が残っていても、
+/// 閉じたメニューでページを隠し続けない（上のバーのメニューのあとでページが消えていた）。
+#[gpui_kit::test]
+fn the_page_comes_back_after_a_right_click_menu(cx: &mut TestAppContext) {
+    let world = start(cx, Store::open_in_memory().unwrap());
+    let (window, _view) = open(cx);
+    ui(cx, window, |window, cx| window.click("ai-toggle", cx));
+    cx.update_window(window, |_, window, cx| {
+        browser::open("https://example.com/", window, cx)
+    })
+    .unwrap();
+    ui(cx, window, |_, _| {});
+    let tab = terms(cx, |t| t.active_page().map(|p| p.id)).expect("タブが開く");
+    let fake = world.fake(tab);
+    assert!(fake.visible.get());
+    // 開いている間は隠れ、Esc で閉じると見える
+    right_click_header(cx, window);
+    assert!(cx.update(|cx| browser::menus_open(cx)));
+    assert!(!fake.visible.get());
+    ui(cx, window, |window, cx| window.press("escape", cx));
+    assert!(!cx.update(|cx| browser::menus_open(cx)));
+    assert!(fake.visible.get(), "Esc でメニューを閉じたらページが見える");
+    // 項目を選んで閉じても見える
+    right_click_header(cx, window);
+    assert!(!fake.visible.get());
+    pick(cx, window, "常に最前面に表示");
+    assert!(!cx.update(|cx| browser::menus_open(cx)));
+    assert!(fake.visible.get(), "項目を選んだらページが見える");
+    // 外を押して閉じても見える
+    right_click_header(cx, window);
+    assert!(!fake.visible.get());
+    ui(cx, window, |window, cx| window.click("toggle-sidebar", cx));
+    assert!(!cx.update(|cx| browser::menus_open(cx)));
+    assert!(fake.visible.get(), "外を押して閉じたらページが見える");
+}
+
+/// 印刷のダイアログを出したままほかのタブに切り替えても、どちらのページも消えない。
+/// ダイアログはそのページのものなので閉じ、切り替えた先のページを見せ、戻ると元のページも見える。
+#[gpui_kit::test]
+fn switching_tabs_under_the_print_dialog_keeps_both_pages(cx: &mut TestAppContext) {
+    let world = start(cx, Store::open_in_memory().unwrap());
+    let (window, _view) = open(cx);
+    ui(cx, window, |window, cx| window.click("ai-toggle", cx));
+    let first = open_page(cx, window, "https://example.com/one");
+    let second = open_page(cx, window, "https://example.com/two");
+    let (one, two) = (world.fake(first), world.fake(second));
+    press_in_page(cx, &world, window, second, key("ctrl-p", "cmd-p"));
+    ui(cx, window, |window, _| {
+        assert!(window.find("browser-print").visible())
+    });
+    assert!(!two.visible.get(), "ダイアログの間はページを隠す");
+    ui(cx, window, |window, cx| {
+        window.click(("browser-tab", first as usize), cx)
+    });
+    ui(cx, window, |window, _| {
+        assert!(
+            window.try_find("browser-print").is_none(),
+            "ダイアログを閉じる"
+        )
+    });
+    assert!(one.visible.get(), "切り替えた先のページが見える");
+    ui(cx, window, |window, cx| {
+        window.click(("browser-tab", second as usize), cx)
+    });
+    assert!(two.visible.get(), "戻ると元のページも見える");
+    assert!(!one.visible.get());
+}
+
+/// ダウンロードの一覧を出したままタブを切り替えると、一覧は出したまま切り替えた先のページを隠し、
+/// 閉じるとそのページが見える。前のページも、戻ると見える。
+#[gpui_kit::test]
+fn the_downloads_list_hides_the_page_that_is_shown(cx: &mut TestAppContext) {
+    let world = start(cx, Store::open_in_memory().unwrap());
+    let (window, _view) = open(cx);
+    ui(cx, window, |window, cx| window.click("ai-toggle", cx));
+    let first = open_page(cx, window, "https://example.com/one");
+    let second = open_page(cx, window, "https://example.com/two");
+    let (one, two) = (world.fake(first), world.fake(second));
+    let dir = tempfile::tempdir().unwrap();
+    world.send(
+        second,
+        Event::Download(Note::Started {
+            url: "https://example.com/a.zip".into(),
+            path: dir.path().join("a.zip"),
+            ask: false,
+        }),
+    );
+    cx.run_until_parked();
+    ui(cx, window, |window, cx| window.click("open-downloads", cx));
+    assert!(!two.visible.get(), "一覧の間はページを隠す");
+    // Ctrl+Tab で切り替える（一覧は出したまま）
+    ui(cx, window, |window, cx| {
+        window.press(key("ctrl-shift-tab", "ctrl-shift-tab"), cx)
+    });
+    assert_eq!(terms(cx, |t| t.active_page().map(|p| p.id)), Some(first));
+    ui(cx, window, |window, _| {
+        assert!(window.find("downloads").visible())
+    });
+    assert!(!one.visible.get(), "一覧の間は、切り替えた先のページも隠す");
+    ui(cx, window, |window, cx| window.press("escape", cx));
+    assert!(one.visible.get(), "閉じると見える");
+    ui(cx, window, |window, cx| {
+        window.click(("browser-tab", second as usize), cx)
+    });
+    assert!(two.visible.get(), "前のページも戻ると見える");
+}

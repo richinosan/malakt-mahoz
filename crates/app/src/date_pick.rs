@@ -107,6 +107,10 @@ pub enum DateTarget {
     DefaultDue,
     /// ワークスペースの基準日（時刻はない）
     BaseDate,
+    /// アクセスキー（キーなしの接続の決まり）の開始
+    KeyStarts(Id),
+    /// アクセスキー（キーなしの接続の決まり）の期限
+    KeyExpires(Id),
 }
 
 impl DateTarget {
@@ -129,6 +133,8 @@ impl DateTarget {
             DateTarget::Task { .. } | DateTarget::Quick | DateTarget::Bulk => "due",
             DateTarget::DefaultDue => "def-due",
             DateTarget::BaseDate => "ws-date",
+            DateTarget::KeyStarts(_) => "key-starts",
+            DateTarget::KeyExpires(_) => "key-expires",
         }
     }
 
@@ -138,6 +144,7 @@ impl DateTarget {
                 which: When::Start, ..
             } => "開始日",
             DateTarget::BaseDate => "基準日",
+            DateTarget::KeyStarts(_) => "開始",
             _ => "期限",
         }
     }
@@ -229,6 +236,8 @@ impl MainView {
                 let date = when::resolve(&date, &view::now(), None);
                 malakt_core::is_valid_date(&date).then_some(date)
             }
+            DateTarget::KeyStarts(id) => self.access_entry(id, cx)?.starts,
+            DateTarget::KeyExpires(id) => self.access_entry(id, cx)?.expires,
         }
     }
 
@@ -280,6 +289,22 @@ impl MainView {
                 self.inputs
                     .ws_date
                     .update(cx, |s, cx| s.set_value(date, window, cx));
+            }
+            DateTarget::KeyStarts(id) | DateTarget::KeyExpires(id) => {
+                let patch = if matches!(target, DateTarget::KeyStarts(_)) {
+                    malakt_core::access::KeyPatch {
+                        starts: Some(value),
+                        ..Default::default()
+                    }
+                } else {
+                    malakt_core::access::KeyPatch {
+                        expires: Some(value),
+                        ..Default::default()
+                    }
+                };
+                if !self.update_key(id, patch, cx) {
+                    return false;
+                }
             }
         }
         cx.notify();
@@ -629,7 +654,10 @@ impl MainView {
                     .as_deref()
                     .and_then(calendar::parse_date)
             }
-            DateTarget::Bulk | DateTarget::BaseDate => None,
+            DateTarget::Bulk
+            | DateTarget::BaseDate
+            | DateTarget::KeyStarts(_)
+            | DateTarget::KeyExpires(_) => None,
         }?;
         self.workspaces
             .iter()
@@ -640,6 +668,18 @@ impl MainView {
 
     /// 期間のもう一方の端（期限なら開始日、開始日なら期限）と、どちらの端か（`true` は始まり）。
     fn date_other_end(&self, target: &DateTarget, cx: &App) -> Option<(NaiveDate, bool)> {
+        // キーの開始と期限も、同じ帯で見せる
+        match target {
+            DateTarget::KeyStarts(id) => {
+                let end = self.access_entry(id, cx)?.expires?;
+                return Some((calendar::parse_date(&end)?, false));
+            }
+            DateTarget::KeyExpires(id) => {
+                let start = self.access_entry(id, cx)?.starts?;
+                return Some((calendar::parse_date(&start)?, true));
+            }
+            _ => {}
+        }
         let DateTarget::Task { id, which, list } = target else {
             return None;
         };
