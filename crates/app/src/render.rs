@@ -95,7 +95,7 @@ pub(crate) fn row_sizes(
 }
 
 /// 枠つきのボタン。乗せると淡い金、押している間ははっきり濃くなる。
-trait Framed {
+pub(crate) trait Framed {
     fn framed(self, cx: &App) -> Self;
 }
 
@@ -375,6 +375,8 @@ enum SettingKey {
     DonePeople,
     DoneWorkspaces,
     LockNow,
+    McpKeyless,
+    McpKeys,
     People,
     Keys,
     NewWindow,
@@ -6163,7 +6165,9 @@ impl MainView {
             .child(self.drops.mark(cx.entity().downgrade(), None, false))
             // 名前を書いている途中で外を押したら、その 1 回は名前を確定するだけにする
             .capture_any_mouse_down(cx.listener(|this, _, _, _| {
-                this.outside_busy = this.person_naming.is_some() || this.preset_naming.is_some();
+                this.outside_busy = this.person_naming.is_some()
+                    || this.preset_naming.is_some()
+                    || this.key_naming.is_some();
             }))
             .on_click(cx.listener(|this, _, window, cx| this.dismiss_outside(window, cx)))
             .child(
@@ -6929,6 +6933,30 @@ impl MainView {
         }
         all.extend([
             Setting::new(
+                Section::Mcp,
+                SettingKey::McpKeyless,
+                "キーなしの接続",
+                None,
+                list(&["MCP", "アクセスキー", "エージェント", "Claude Code"]),
+            ),
+            Setting::new(
+                Section::Mcp,
+                SettingKey::McpKeys,
+                "アクセスキー",
+                None,
+                list(&[
+                    "MCP",
+                    "キー",
+                    "トークン",
+                    "エージェント",
+                    "Claude Code",
+                    "Cursor",
+                    "Codex",
+                ]),
+            ),
+        ]);
+        all.extend([
+            Setting::new(
                 Section::Notices,
                 SettingKey::AlertTimed,
                 "時刻つきの期限",
@@ -7121,6 +7149,16 @@ impl MainView {
                     .child(self.keys_help(cx))
                     .into_any_element();
             }
+            SettingKey::McpKeys => {
+                return edge(div().py_3())
+                    .child(
+                        col()
+                            .gap_2()
+                            .child(div().text_sm().child(item.name))
+                            .child(self.access_keys_editor(cx)),
+                    )
+                    .into_any_element();
+            }
             _ => {}
         }
         use crate::state::PreviewPick as Pick;
@@ -7171,6 +7209,7 @@ impl MainView {
                 | SettingKey::AlertTimed
                 | SettingKey::AlertDate
                 | SettingKey::People
+                | SettingKey::McpKeys
                 | SettingKey::Keys => unreachable!(),
                 SettingKey::LockNow => feel::gloss(
                     button("lock-now")
@@ -7522,6 +7561,28 @@ impl MainView {
                                             // ウィンドウを閉じたあとなら、反映する先がない
                                             let _ = view.update(cx, |this, cx| {
                                                 this.set_auto_lock(minutes, cx);
+                                            });
+                                        }),
+                                );
+                            }
+                            menu
+                        })
+                        .into_any_element()
+                }
+                SettingKey::McpKeyless => {
+                    let view = cx.entity().downgrade();
+                    let keyless = self.keyless(cx);
+                    menu_choice("mcp-keyless", keyless.label().into(), &theme)
+                        .pop_menu(move |mut menu, _, _| {
+                            for option in malakt_core::access::Keyless::ALL {
+                                let view = view.clone();
+                                menu = menu.item(
+                                    PopupMenuItem::new(option.label())
+                                        .checked(keyless == option)
+                                        .on_click(move |_, _, cx| {
+                                            // ウィンドウを閉じたあとなら、反映する先がない
+                                            let _ = view.update(cx, |this, cx| {
+                                                this.set_keyless(option, cx);
                                             });
                                         }),
                                 );

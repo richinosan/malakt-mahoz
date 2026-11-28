@@ -107,6 +107,7 @@ pub enum CustomizeSection {
     AiSchedules,
     AiGithub,
     Lock,
+    Mcp,
     Notices,
     Update,
     People,
@@ -116,7 +117,7 @@ pub enum CustomizeSection {
 }
 
 impl CustomizeSection {
-    pub const ALL: [CustomizeSection; 17] = [
+    pub const ALL: [CustomizeSection; 18] = [
         CustomizeSection::Theme,
         CustomizeSection::Layout,
         CustomizeSection::Backdrop,
@@ -128,6 +129,7 @@ impl CustomizeSection {
         CustomizeSection::AiSchedules,
         CustomizeSection::AiGithub,
         CustomizeSection::Lock,
+        CustomizeSection::Mcp,
         CustomizeSection::Notices,
         CustomizeSection::Update,
         CustomizeSection::People,
@@ -149,6 +151,7 @@ impl CustomizeSection {
             CustomizeSection::AiSchedules => crate::ai_settings::AiGroup::Schedules.label(),
             CustomizeSection::AiGithub => crate::ai_settings::AiGroup::Github.label(),
             CustomizeSection::Lock => "ロック",
+            CustomizeSection::Mcp => "MCP",
             CustomizeSection::Notices => "通知",
             CustomizeSection::Update => "アップデート",
             CustomizeSection::People => "担当者",
@@ -171,6 +174,7 @@ impl CustomizeSection {
             CustomizeSection::AiSchedules => "alarm-clock",
             CustomizeSection::AiGithub => "github",
             CustomizeSection::Lock => "lock",
+            CustomizeSection::Mcp => "plug",
             CustomizeSection::Notices => "bell",
             CustomizeSection::Update => "refresh-cw",
             CustomizeSection::People => "users",
@@ -189,6 +193,7 @@ impl CustomizeSection {
             | CustomizeSection::AiSchedules
             | CustomizeSection::AiGithub => "AI",
             CustomizeSection::Lock
+            | CustomizeSection::Mcp
             | CustomizeSection::Notices
             | CustomizeSection::Update
             | CustomizeSection::People
@@ -315,6 +320,8 @@ pub struct Inputs {
     pub font_search: Entity<InputState>,
     pub customize_search: Entity<InputState>,
     pub preset_name: Entity<InputState>,
+    /// 設定の「MCP」の、アクセスキーの名前
+    pub key_name: Entity<InputState>,
     pub name: Entity<InputState>,
     pub title: Entity<InputState>,
     /// タスクに足す URL。
@@ -353,6 +360,12 @@ pub struct MainView {
     pub naming_task: Option<Id>,
     /// 担当者の一覧で名前を書いている担当者。
     pub person_naming: Option<Id>,
+    /// 設定の「MCP」で名前を書いているアクセスキー。
+    pub key_naming: Option<Id>,
+    /// 発行したばかりのアクセスキー。文字列は設定を閉じるまでだけ出す。
+    pub issued_access_key: Option<malakt_core::access::IssuedKey>,
+    /// パスキーの確認が済んだら「ロック中も使える」にするアクセスキー。
+    pub pending_key_unlock: Option<Id>,
     /// 左のメニューで名前を書いているワークスペース。
     pub workspace_naming: Option<WorkspaceNaming>,
     /// アイコンを選ぶ画面で選んでいるカテゴリ。
@@ -594,6 +607,7 @@ impl MainView {
             customize_search: input(window, cx, "設定を検索"),
             preset_name: input(window, cx, "テーマの名前"),
             name: input(window, cx, "名前"),
+            key_name: input(window, cx, "名前"),
             title: input(window, cx, "タイトル"),
             url: input(window, cx, "https://"),
             // 長い指示も全部見えるように、書いた分だけ伸ばす（8 行を超えたらスクロール）
@@ -695,6 +709,16 @@ impl MainView {
         }
         on_enter!(quick_add, submit_quick_add);
         on_enter!(name, save_person_name);
+        on_enter!(key_name, save_access_key_name);
+        subs.push(cx.subscribe_in(
+            &inputs.key_name,
+            window,
+            |this, _, event: &InputEvent, window, cx| {
+                if matches!(event, InputEvent::Blur) && this.key_naming.is_some() {
+                    this.save_access_key_name(window, cx);
+                }
+            },
+        ));
         on_enter!(preset_name, save_preset_name);
         subs.push(cx.subscribe_in(
             &inputs.preset_name,
@@ -912,6 +936,9 @@ impl MainView {
             icon_category: None,
             workspace_naming: None,
             person_naming: None,
+            key_naming: None,
+            issued_access_key: None,
+            pending_key_unlock: None,
             naming_task: None,
             workspaces: Vec::new(),
             tree: Vec::new(),
@@ -1694,7 +1721,7 @@ impl MainView {
 
     /// Enter で書き終えた入力欄は消えるので、フォーカスを画面に戻して Esc などのキーを受けられるようにする。
     /// ほかの場所を押して書き終えたときは、押した先のフォーカスをそのままにする。
-    fn leave_input(
+    pub(crate) fn leave_input(
         &mut self,
         input: &Entity<InputState>,
         window: &mut Window,
@@ -3006,6 +3033,8 @@ impl MainView {
         // 「AI のタブのシェル」で選べるシェルの一覧
         crate::term::shared(cx).update(cx, |terms, cx| terms.load_profiles(cx));
         self.preset_naming = None;
+        self.key_naming = None;
+        self.issued_access_key = None;
         self.appearance_section = CustomizeSection::Theme;
         self.appearance_pinned = false;
         self.preview_pick = None;
@@ -3716,7 +3745,7 @@ impl MainView {
     }
 
     /// パスキーで本人確認をして、通ったら `done` を実行する。
-    fn with_passkey(
+    pub(crate) fn with_passkey(
         &mut self,
         action: &str,
         window: &mut Window,
@@ -4942,8 +4971,10 @@ impl MainView {
         }
         self.person_naming = None;
         self.preset_naming = None;
+        self.key_naming = None;
         self.modal = Modal::None;
         self.issued_ticket = None;
+        self.issued_access_key = None;
         cx.notify();
     }
 
@@ -4955,7 +4986,7 @@ impl MainView {
             return;
         }
         if self.sub_modal.is_none() && self.pane_overlay.is_none() {
-            if self.issued_ticket.is_some() {
+            if self.issued_ticket.is_some() || self.issued_access_key.is_some() {
                 return;
             }
             if let Modal::Status(id, _) = &self.modal {
@@ -4976,11 +5007,15 @@ impl MainView {
         } else if self.pane_prefix || self.pane_resize {
             self.pane_prefix = false;
             self.pane_resize = false;
-        } else if self.person_naming.take().is_some() || self.preset_naming.take().is_some() {
+        } else if self.person_naming.take().is_some()
+            || self.preset_naming.take().is_some()
+            || self.key_naming.take().is_some()
+        {
             // 書きかけの名前を捨てる。ダイアログは開いたまま
         } else if self.modal != Modal::None {
             self.modal = Modal::None;
             self.issued_ticket = None;
+            self.issued_access_key = None;
         } else if self.workspace_naming.take().is_some() {
             // 書きかけの名前を捨てる
         } else {
@@ -5002,10 +5037,12 @@ impl MainView {
         if self.sub_modal.take().is_some()
             || self.person_naming.take().is_some()
             || self.preset_naming.take().is_some()
+            || self.key_naming.take().is_some()
         {
         } else if self.modal != Modal::None {
             self.modal = Modal::None;
             self.issued_ticket = None;
+            self.issued_access_key = None;
         } else if self.editing.is_some() {
             self.editing = None;
         } else if self.assignee_picker {
