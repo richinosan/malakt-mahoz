@@ -1016,6 +1016,42 @@ fn repeat_json(store: &Store, task_id: &str) -> Result<Value, String> {
     }))
 }
 
+/// ポモドーロの状態と設定。時刻が来た段は進めてから返す。
+fn pomodoro_json(store: &mut Store) -> Result<Value, String> {
+    use malakt_core::pomodoro;
+    let core = |e: malakt_core::Error| e.to_string();
+    let now = malakt_core::now_ms();
+    let timer = store.pomodoro_now(now).map_err(core)?;
+    let settings = store.pomodoro_settings().map_err(core)?;
+    let task = match &timer.task_id {
+        Some(id) => store
+            .task(id)
+            .ok()
+            .map(|t| json!({"id": t.id, "title": t.title})),
+        None => None,
+    };
+    let today = pomodoro::day_start(&malakt_core::view::today()).unwrap_or(0);
+    let (count, seconds) = store.work_total_since(today).map_err(core)?;
+    Ok(json!({
+        "phase": timer.phase.as_str(),
+        "run": timer.run().as_str(),
+        "remaining_seconds": (timer.remaining_ms(now) + 999) / 1000,
+        "remaining_text": pomodoro::clock_label(timer.remaining_ms(now)),
+        "task": task,
+        "done": timer.done,
+        "settings": {
+            "work_minutes": settings.work,
+            "short_break_minutes": settings.short_break,
+            "long_break_minutes": settings.long_break,
+            "rounds": settings.rounds,
+            "auto_break": settings.auto_break,
+            "work_media": settings.work_media.as_str(),
+            "break_media": settings.break_media.as_str(),
+        },
+        "today": {"count": count, "seconds": seconds, "text": pomodoro::duration_label(seconds)},
+    }))
+}
+
 fn task_row(task: &Task) -> Value {
     let mut row = task_json(task);
     if let Some(map) = row.as_object_mut() {
@@ -1131,6 +1167,8 @@ pub fn execute(
             task["active_tickets"] = json!(store.active_ticket_count(id).map_err(core)?);
             task["due_alerts"] = due_alerts_json(store, Some(id))?;
             task["repeat"] = repeat_json(store, id)?;
+            let (count, seconds) = store.work_total(id).map_err(core)?;
+            task["work"] = json!({"count": count, "seconds": seconds});
             task["subtasks"] = store
                 .subtasks(id)
                 .map_err(core)?
@@ -1513,6 +1551,112 @@ pub fn execute(
             }
             store.set_done_notices(&notices).map_err(core)?;
             done_notices_json(store)?
+        }
+        "get_pomodoro" => pomodoro_json(store)?,
+        "pomodoro" => {
+            use malakt_core::pomodoro::{Media, Op};
+            let now = malakt_core::now_ms();
+            let task = match args.get("task_id") {
+                None | Some(Value::Null) => None,
+                Some(Value::String(id)) if id.trim().is_empty() => None,
+                Some(Value::String(id)) => Some(id.trim().to_owned()),
+                Some(other) => return Err(format!("task_id が正しくありません: {other}")),
+            };
+            let op = match required(args, "action")? {
+                "start" => Some(Op::Start {
+                    task: args.get("task_id").map(|_| task.clone()),
+                }),
+                "pause" => Some(Op::Pause),
+                "stop" => Some(Op::Stop),
+                "skip" => Some(Op::Skip),
+                "set_task" => Some(Op::SetTask(task.clone())),
+                "set_settings" => None,
+                other => return Err(format!("action が正しくありません: {other}")),
+            };
+            match op {
+                Some(op) => {
+                    store.pomodoro(op, now).map_err(core)?;
+                }
+                None => {
+                    let mut settings = store.pomodoro_settings().map_err(core)?;
+                    let minutes = |key: &str| -> Result<Option<u32>, String> {
+                        match args.get(key) {
+                            None => Ok(None),
+                            Some(v) => v
+                                .as_u64()
+                                .and_then(|n| u32::try_from(n).ok())
+                                .map(Some)
+                                .ok_or_else(|| format!("{key} が正しくありません: {v}")),
+                        }
+                    };
+                    let media = |key: &str| -> Result<Option<Media>, String> {
+                        match args.get(key) {
+                            None => Ok(None),
+                            Some(v) => {
+                                v.as_str().and_then(Media::parse).map(Some).ok_or_else(|| {
+                                    format!("{key} は none / play / pause です: {v}")
+                                })
+                            }
+                        }
+                    };
+                    if let Some(m) = minutes("work_minutes")? {
+                        settings.work = m;
+                    }
+                    if let Some(m) = minutes("short_break_minutes")? {
+                        settings.short_break = m;
+                    }
+                    if let Some(m) = minutes("long_break_minutes")? {
+                        settings.long_break = m;
+                    }
+                    if let Some(m) = minutes("rounds")? {
+                        settings.rounds = m;
+                    }
+                    match args.get("auto_break") {
+                        None => {}
+                        Some(Value::Bool(b)) => settings.auto_break = *b,
+                        Some(other) => {
+                            return Err(format!("auto_break が正しくありません: {other}"))
+                        }
+                    }
+                    if let Some(m) = media("work_media")? {
+                        settings.work_media = m;
+                    }
+                    if let Some(m) = media("break_media")? {
+                        settings.break_media = m;
+                    }
+                    store.set_pomodoro_settings(&settings).map_err(core)?;
+                }
+            }
+            pomodoro_json(store)?
+        }
+        "list_work_logs" => {
+            let since = match optional(args, "since").filter(|s| !s.trim().is_empty()) {
+                Some(day) => Some(
+                    malakt_core::pomodoro::day_start(day.trim())
+                        .ok_or_else(|| format!("since は YYYY-MM-DD です: {day}"))?,
+                ),
+                None => None,
+            };
+            let limit = args
+                .get("limit")
+                .and_then(Value::as_u64)
+                .map_or(LIST_LIMIT, |n| (n as usize).clamp(1, 500));
+            let task_id = optional(args, "task_id").filter(|s| !s.is_empty());
+            if let Some(id) = task_id {
+                store.task(id).map_err(core)?;
+            }
+            let logs = store.work_logs(task_id, since, limit).map_err(core)?;
+            let total: i64 = logs.iter().map(|l| l.seconds).sum();
+            json!({
+                "logs": logs.iter().map(|l| json!({
+                    "task_id": l.task_id,
+                    "started_at": malakt_core::view::format_datetime(l.started_at),
+                    "ended_at": malakt_core::view::format_datetime(l.ended_at),
+                    "seconds": l.seconds,
+                })).collect::<Vec<_>>(),
+                "total_seconds": total,
+                "total_text": malakt_core::pomodoro::duration_label(total),
+            })
         }
         "get_due_alerts" => due_alerts_json(store, optional(args, "task_id"))?,
         "set_repeat" => {
@@ -2056,6 +2200,16 @@ pub fn summary(name: &str, args: &Value) -> String {
         "get_workspace_settings" => "ワークスペースの設定を取得".into(),
         "get_done_notices" => "完了の通知の設定を取得".into(),
         "set_done_notices" => "完了の通知の設定を変更".into(),
+        "get_pomodoro" => "ポモドーロの状態を取得".into(),
+        "pomodoro" => match arg("action").as_str() {
+            "start" => "ポモドーロを開始".into(),
+            "pause" => "ポモドーロを一時停止".into(),
+            "stop" => "ポモドーロを停止".into(),
+            "skip" => "ポモドーロの段を飛ばす".into(),
+            "set_task" => "ポモドーロのタスクを変更".into(),
+            _ => "ポモドーロの設定を変更".into(),
+        },
+        "list_work_logs" => "作業の記録を取得".into(),
         "get_due_alerts" => "期限の通知のタイミングを取得".into(),
         "set_due_alerts" => "期限の通知のタイミングを変更".into(),
         "update_workspace_settings" => "ワークスペースの設定を変更".into(),
@@ -2775,7 +2929,7 @@ mod tests {
     /// 上限の数は api/data.tsp に書き、core の値と同じであることをここで確かめる
     #[test]
     fn limits_in_the_api_match_the_code() {
-        use malakt_core::{alert, repeat, rules, schedule};
+        use malakt_core::{alert, pomodoro, repeat, rules, schedule};
         let tools = definitions();
         let props = |tool: &str| {
             tools
@@ -2827,6 +2981,13 @@ mod tests {
             let body = p["body"]["description"].as_str().unwrap();
             assert!(body.contains(&format!("（{} 文字まで）", rules::MAX_RULE_CHARS)));
         }
+        let timer = props("pomodoro");
+        for key in ["work_minutes", "short_break_minutes", "long_break_minutes"] {
+            assert_eq!(timer[key]["minimum"], json!(pomodoro::MIN_MINUTES), "{key}");
+            assert_eq!(timer[key]["maximum"], json!(pomodoro::MAX_MINUTES), "{key}");
+        }
+        assert_eq!(timer["rounds"]["minimum"], json!(pomodoro::MIN_ROUNDS));
+        assert_eq!(timer["rounds"]["maximum"], json!(pomodoro::MAX_ROUNDS));
         // RACI の説明は、システムの指示と同じ文
         let roles = &props("set_assignee")["roles"]["description"];
         assert!(roles.as_str().unwrap().contains(RACI), "{roles}");
@@ -2855,7 +3016,8 @@ mod tests {
         // ほかはどれも書き込みとして元に戻す段になる。アプリの側で動くもの（@inAppOnly）は除く
         for tool in definitions() {
             let reads = tool.name.starts_with("list_") || tool.name.starts_with("get_");
-            if !in_app_only(tool.name) {
+            // ポモドーロの状態と設定は設定の表にあり、元に戻す相手にしない
+            if !in_app_only(tool.name) && tool.name != "pomodoro" {
                 assert_eq!(writes(tool.name), !reads, "{}", tool.name);
             }
         }

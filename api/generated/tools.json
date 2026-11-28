@@ -1067,6 +1067,112 @@
       "writes": true
     },
     {
+      "name": "get_pomodoro",
+      "group": "data",
+      "description": "ポモドーロタイマーの今の状態（段 phase: work / short_break / long_break、run: ready / running / paused、残り秒、作業しているタスク、済んだ作業の数）、設定、今日の作業の合計を返す。",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "pomodoro",
+      "group": "data",
+      "description": "ポモドーロタイマーを操作する。start（始める。一時停止していれば続きから。task_id を渡すと、そのタスクで測る）、pause（一時停止）、stop（止めて最初の作業に戻す）、skip（今の段を飛ばして次へ）、set_task（作業するタスクを変える。task_id を null か省くとタスクなし）、set_settings（渡した項目だけ変える）。作業の段が終わると、測った時間がタスクの作業の記録に残る。work_media / break_media は、作業 / 休憩を始めたときに OS で再生中の音楽をどうするか（none / play / pause）。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "start",
+              "pause",
+              "stop",
+              "skip",
+              "set_task",
+              "set_settings"
+            ]
+          },
+          "task_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "work_minutes": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 180
+          },
+          "short_break_minutes": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 180
+          },
+          "long_break_minutes": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 180
+          },
+          "rounds": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 12,
+            "description": "長い休憩までの作業の回数"
+          },
+          "auto_break": {
+            "type": "boolean",
+            "description": "作業が終わったら休憩をそのまま始める"
+          },
+          "work_media": {
+            "type": "string",
+            "enum": [
+              "none",
+              "play",
+              "pause"
+            ]
+          },
+          "break_media": {
+            "type": "string",
+            "enum": [
+              "none",
+              "play",
+              "pause"
+            ]
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "list_work_logs",
+      "group": "data",
+      "description": "ポモドーロで測った作業の記録を新しい順に返す。task_id でそのタスクだけ、since（YYYY-MM-DD）でその日以降だけ。合計の秒数も返す。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "task_id": {
+            "type": "string"
+          },
+          "since": {
+            "type": "string"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 500
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    {
       "name": "get_due_alerts",
       "group": "data",
       "description": "期限をいつ知らせるか（OS の通知とリマインダー）を返す。task_id を渡すと、そのタスクで使うもの（own が null なら全体の標準のまま）。",
@@ -2234,10 +2340,18 @@
     {
       "name": "open_window",
       "group": "app",
-      "description": "メインのウィンドウをもう 1 枚開く。",
+      "description": "新しいウィンドウを開く。kind は main（タスクの画面をもう 1 枚。標準）か pomodoro（ポモドーロタイマー。開いていれば手前に出す。タイマーの操作は pomodoro ツール）。",
       "input_schema": {
         "type": "object",
-        "properties": {},
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "main",
+              "pomodoro"
+            ]
+          }
+        },
         "required": [],
         "additionalProperties": false
       },

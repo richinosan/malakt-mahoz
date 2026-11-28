@@ -64,6 +64,7 @@ fn main() {
             malakt_mahoz::update::connect_system(cx);
             let autostart = malakt_mahoz::autostart::connect_system(cx);
             malakt_mahoz::db::watch(cx);
+            malakt_mahoz::pomodoro::run(cx);
             malakt_mahoz::quit_when_main_closes(cx);
             let (window, view) =
                 malakt_mahoz::open_saved_windows(cx).expect("ウィンドウを開けませんでした");
@@ -80,6 +81,7 @@ fn main() {
                     })
                 })
                 .expect("開いたばかりのウィンドウがありません");
+            malakt_mahoz::pomodoro::reopen(cx);
             cx.activate(true);
         });
 }

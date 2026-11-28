@@ -119,10 +119,7 @@ op set_list_view(
  * width は 56〜480、null で最初の幅。
  */
 @view
-op set_columns(
-  columns?: ColumnSetting[],
-  order?: Column[],
-): void;
+op set_columns(columns?: ColumnSetting[], order?: Column[]): void;
 
 /**
  * 画面の部分を出す・隠す、幅を変える。
@@ -199,9 +196,12 @@ op open_dialog(
   task_id?: string,
 ): void;
 
-/** メインのウィンドウをもう 1 枚開く。 */
+/**
+ * 新しいウィンドウを開く。
+ * kind は main（タスクの画面をもう 1 枚。標準）か pomodoro（ポモドーロタイマー。開いていれば手前に出す。タイマーの操作は pomodoro ツール）。
+ */
 @view
-op open_window(): void;
+op open_window(kind?: "main" | "pomodoro"): void;
 
 /**
  * ターミナルを開く。

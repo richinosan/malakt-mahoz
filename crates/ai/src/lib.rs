@@ -5,6 +5,7 @@
 //! - `provider`: 対応しているサービスと、送り先の決め方
 //! - `wire`: 各 API の形式への変換（リクエストの組み立てと、返事の読み取り）
 //! - `api`: ツールの定義（`api/*.tsp` から作った一覧）
+//! - `files`: チャットに添えるファイルの見分け方、AI への渡し方、置き場所
 //! - `tools`: AI がタスクを読み書きするためのツール
 //! - `github`: GitHub のリンクの検出と、取得のためのコマンド
 //! - `watch`: GitHub の定期チェックで、issue とプルリクエストの進展を読む
@@ -15,6 +16,7 @@
 
 pub mod ansi;
 pub mod api;
+pub mod files;
 pub mod github;
 pub mod http;
 pub mod keys;

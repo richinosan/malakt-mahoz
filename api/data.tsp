@@ -41,6 +41,18 @@ scalar AlertDays extends int32;
 @maxValue(6)
 scalar Weekday extends int32;
 
+/** ポモドーロの段の分数。範囲は malakt_core::pomodoro::MIN_MINUTES〜MAX_MINUTES */
+@minValue(1)
+@maxValue(180)
+scalar PomodoroMinutes extends int32;
+
+/** 作業・休憩を始めたときに、OS で再生中の音楽をどうするか */
+union PomodoroMedia {
+  "none",
+  "play",
+  "pause",
+}
+
 /** タスクの繰り返し */
 model RepeatRule {
   unit: "day" | "week" | "month" | "year";
@@ -512,6 +524,45 @@ op update_ai_rule(
 /** AI のルールを削除する。使わないだけなら update_ai_rule で enabled を false にする。 */
 @writes
 op delete_ai_rule(id: string): void;
+
+/**
+ * ポモドーロタイマーの今の状態（段 phase: work / short_break / long_break、run: ready / running / paused、残り秒、作業しているタスク、済んだ作業の数）、設定、今日の作業の合計を返す。
+ */
+op get_pomodoro(): void;
+
+/**
+ * ポモドーロタイマーを操作する。
+ * start（始める。一時停止していれば続きから。task_id を渡すと、そのタスクで測る）、pause（一時停止）、stop（止めて最初の作業に戻す）、skip（今の段を飛ばして次へ）、set_task（作業するタスクを変える。task_id を null か省くとタスクなし）、set_settings（渡した項目だけ変える）。
+ * 作業の段が終わると、測った時間がタスクの作業の記録に残る。
+ * work_media / break_media は、作業 / 休憩を始めたときに OS で再生中の音楽をどうするか（none / play / pause）。
+ */
+op pomodoro(
+  action: "start" | "pause" | "stop" | "skip" | "set_task" | "set_settings",
+  task_id?: string | null,
+  work_minutes?: PomodoroMinutes,
+  short_break_minutes?: PomodoroMinutes,
+  long_break_minutes?: PomodoroMinutes,
+
+  /** 長い休憩までの作業の回数 */
+  @minValue(1) @maxValue(12) rounds?: int32,
+
+  /** 作業が終わったら休憩をそのまま始める */
+  auto_break?: boolean,
+
+  work_media?: PomodoroMedia,
+  break_media?: PomodoroMedia,
+): void;
+
+/**
+ * ポモドーロで測った作業の記録を新しい順に返す。
+ * task_id でそのタスクだけ、since（YYYY-MM-DD）でその日以降だけ。
+ * 合計の秒数も返す。
+ */
+op list_work_logs(
+  task_id?: string,
+  since?: string,
+  @minValue(1) @maxValue(500) limit?: int32,
+): void;
 
 /**
  * 期限をいつ知らせるか（OS の通知とリマインダー）を返す。

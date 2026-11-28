@@ -239,8 +239,8 @@ pub(crate) fn window_controls(
 pub(crate) fn window_menu(
     menu: PopupMenu,
     main: Option<WeakEntity<MainView>>,
-    window: &Window,
-    cx: &App,
+    window: &mut Window,
+    cx: &mut Context<PopupMenu>,
 ) -> PopupMenu {
     let unlocked = crate::db::shared(cx).read(cx).unlocked;
     let supported = window.window_controls();
@@ -254,20 +254,38 @@ pub(crate) fn window_menu(
     } else {
         ("maximize-2", "全画面")
     };
-    menu.item(
+    let menu = menu.item(
         // ロックが無効なときは、ロックの設定を開く（`lib.rs` の LockNow）
         PopupMenuItem::new("ロックする")
             .icon(app_icon("lock"))
             .action(Box::new(LockNow))
             .disabled(!unlocked),
-    )
-    .when(unlocked, |menu| {
-        menu.item(
-            PopupMenuItem::new("新しいウィンドウ")
-                .icon(app_icon("app-window"))
-                .action(Box::new(NewWindow)),
+    );
+    // 新しいウィンドウは、タスクの画面のほかに、ポモドーロも開ける
+    let menu = if unlocked {
+        menu.submenu_with_icon(
+            Some(app_icon("app-window")),
+            "新しいウィンドウ",
+            window,
+            cx,
+            |menu, _, _| {
+                menu.item(
+                    PopupMenuItem::new("タスク")
+                        .icon(app_icon("list-todo"))
+                        .action(Box::new(NewWindow)),
+                )
+                .item(
+                    PopupMenuItem::new("ポモドーロ")
+                        .icon(app_icon("timer"))
+                        .action(Box::new(crate::pomodoro::OpenPomodoro)),
+                )
+            },
         )
-        .item(
+    } else {
+        menu
+    };
+    menu.when(unlocked, |menu| {
+        menu.item(
             PopupMenuItem::new("設定")
                 .icon(app_icon("settings"))
                 .action(Box::new(crate::shortcuts::OpenSettings))
@@ -391,6 +409,7 @@ enum SettingKey {
     People,
     Keys,
     NewWindow,
+    Pomodoro,
 }
 
 impl Setting {
@@ -651,7 +670,7 @@ pub(crate) fn selectable_text(
     gpui_kit::base::SelectableText::new(id, text).selection_color(cx.theme().selection)
 }
 
-fn chip(
+pub(crate) fn chip(
     id: impl Into<ElementId>,
     label: impl Into<SharedString>,
     active: bool,
@@ -713,8 +732,8 @@ pub(crate) fn remove_x(
         })
 }
 
-/// ダウンロードの一覧に出す、ファイルの種類のアイコン。
-fn file_icon(name: &str) -> &'static str {
+/// ファイルの種類のアイコン（ダウンロードの一覧、チャットに添えたファイル）。
+pub(crate) fn file_icon(name: &str) -> &'static str {
     let ext = name
         .rsplit_once('.')
         .map(|(_, ext)| ext.to_ascii_lowercase())
@@ -6233,6 +6252,22 @@ impl MainView {
                             d.child(self.property("AI への指示", cx).child(ai))
                         })
                         .child(self.property("進捗", cx).child(percent))
+                        // ポモドーロで測ったことがあるタスクだけに出す
+                        .when(detail.work.0 > 0, |d| {
+                            d.child(self.property("作業時間", cx).child({
+                                let text = format!(
+                                    "{}（{} 回）",
+                                    malakt_core::pomodoro::duration_label(detail.work.1),
+                                    detail.work.0
+                                );
+                                div()
+                                    .id("work-total")
+                                    .text_sm()
+                                    .aria_label(text.clone())
+                                    .child(text)
+                                    .test_support()
+                            }))
+                        })
                         .child(self.property("カテゴリ", cx).child(categories))
                         .child(self.property("親タスク", cx).child(parent))
                         .child(self.property("ワークスペース", cx).child(workspace))
@@ -7473,6 +7508,13 @@ impl MainView {
                 list(&["ウィンドウ", "開く"]),
             ),
             Setting::new(
+                Section::Window,
+                SettingKey::Pomodoro,
+                "ポモドーロ",
+                None,
+                list(&["ウィンドウ", "タイマー", "作業時間", "休憩", "音楽"]),
+            ),
+            Setting::new(
                 Section::Data,
                 SettingKey::Export,
                 "エクスポート",
@@ -7627,6 +7669,17 @@ impl MainView {
                         .outline()
                         .small()
                         .on_click(|_, window, cx| window.dispatch_action(Box::new(NewWindow), cx)),
+                )
+                .into_any_element(),
+                SettingKey::Pomodoro => feel::gloss(
+                    button("open-pomodoro")
+                        .icon(app_icon("timer"))
+                        .label("開く")
+                        .outline()
+                        .small()
+                        .on_click(|_, window, cx| {
+                            window.dispatch_action(Box::new(crate::pomodoro::OpenPomodoro), cx)
+                        }),
                 )
                 .into_any_element(),
                 SettingKey::AlertHour => {
