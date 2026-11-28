@@ -16,7 +16,8 @@ use gpui_kit::{Bounds, Pixels, Window};
 use raw_window_handle::{HandleError, HasWindowHandle, RawWindowHandle, WindowHandle};
 use wry::{dpi, NewWindowResponse, PageLoadEvent, Rect, WebContext, WebView, WebViewBuilder};
 
-use crate::browser::{Engine, Event, Setup, Shot, Zoom};
+use crate::browser::{Engine, Event, PdfDone, Setup, Shot, Zoom};
+use crate::downloads::Note;
 
 thread_local! {
     /// ログインの情報（Cookie）とキャッシュを置く場所。すべてのタブで 1 つを使う。
@@ -366,6 +367,10 @@ impl Engine for Wry {
         self.view.print().map_err(text)
     }
 
+    fn save_pdf(&self, path: &std::path::Path, done: PdfDone) -> Result<(), String> {
+        save_pdf(&self.view, path, done)
+    }
+
     fn find(
         &self,
         query: &str,
@@ -536,6 +541,224 @@ fn snapshot(_view: &WebView, _done: Shot) -> Result<(), String> {
     Err("この OS では、ページの画像を撮れません".into())
 }
 
+/// ダウンロードの進み具合を知らせる間隔。部品はもっと細かく知らせてくる。
+#[cfg(any(windows, target_os = "linux"))]
+const PROGRESS_EVERY: std::time::Duration = std::time::Duration::from_millis(150);
+
+/// Windows: WebView2 のダウンロードの、受け取った大きさと全体の大きさを知らせる。
+#[cfg(windows)]
+fn watch_downloads(view: &WebView, send: impl Fn(Event) + Clone + 'static) -> Result<(), String> {
+    use std::time::Instant;
+
+    use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2_4;
+    use webview2_com::{
+        take_pwstr, BytesReceivedChangedEventHandler, DownloadStartingEventHandler,
+    };
+    use windows::core::{Interface, PWSTR};
+    use wry::WebViewExtWindows;
+
+    let webview: ICoreWebView2_4 = view
+        .webview()
+        .cast()
+        .map_err(|e| format!("ダウンロードの進み具合を読めません: {}", e.message()))?;
+    let handler = DownloadStartingEventHandler::create(Box::new(move |_, args| {
+        let Some(args) = args else {
+            return Ok(());
+        };
+        let operation = unsafe { args.DownloadOperation()? };
+        let mut uri = PWSTR::null();
+        unsafe { operation.Uri(&mut uri)? };
+        let url = take_pwstr(uri);
+        let send = send.clone();
+        let mut last: Option<Instant> = None;
+        let progress = BytesReceivedChangedEventHandler::create(Box::new(move |operation, _| {
+            let Some(operation) = operation else {
+                return Ok(());
+            };
+            if last.is_some_and(|at| at.elapsed() < PROGRESS_EVERY) {
+                return Ok(());
+            }
+            last = Some(Instant::now());
+            let (mut received, mut total) = (0i64, 0i64);
+            unsafe {
+                operation.BytesReceived(&mut received)?;
+                operation.TotalBytesToReceive(&mut total)?;
+            }
+            send(Event::Download(Note::Progress {
+                url: url.clone(),
+                received: received.max(0) as u64,
+                total: (total > 0).then_some(total as u64),
+            }));
+            Ok(())
+        }));
+        let mut token = 0i64;
+        unsafe { operation.add_BytesReceivedChanged(&progress, &mut token)? };
+        Ok(())
+    }));
+    let mut token = 0i64;
+    unsafe { webview.add_DownloadStarting(&handler, &mut token) }
+        .map_err(|e| format!("ダウンロードの進み具合を読めません: {}", e.message()))
+}
+
+/// macOS: 部品は進み具合を知らせないので、ダウンロードの一覧がファイルの大きさを見る。
+#[cfg(target_os = "macos")]
+fn watch_downloads(_: &WebView, _: impl Fn(Event) + Clone + 'static) -> Result<(), String> {
+    Ok(())
+}
+
+/// Linux: WebKitGTK のダウンロードの、受け取った大きさと全体の大きさを知らせる。
+/// ダウンロードはすべてのタブで 1 つの置き場所（WebContext）が受けるので、最初のページを作ったときに 1 回だけ見張る。
+#[cfg(target_os = "linux")]
+fn watch_downloads(view: &WebView, send: impl Fn(Event) + Clone + 'static) -> Result<(), String> {
+    use std::cell::Cell;
+    use std::time::Instant;
+
+    use webkit2gtk::{DownloadExt, URIRequestExt, URIResponseExt, WebContextExt, WebViewExt};
+    use wry::WebViewExtUnix;
+
+    thread_local! {
+        static WATCHING: Cell<bool> = const { Cell::new(false) };
+    }
+    if WATCHING.get() {
+        return Ok(());
+    }
+    let context = view
+        .webview()
+        .context()
+        .ok_or_else(|| "ダウンロードの進み具合を読めません".to_owned())?;
+    WATCHING.set(true);
+    context.connect_download_started(move |_, download| {
+        let send = send.clone();
+        let last: Cell<Option<Instant>> = Cell::new(None);
+        download.connect_received_data(move |download, _| {
+            if last.get().is_some_and(|at| at.elapsed() < PROGRESS_EVERY) {
+                return;
+            }
+            last.set(Some(Instant::now()));
+            let Some(url) = download.request().and_then(|r| r.uri()) else {
+                return;
+            };
+            let total = download
+                .response()
+                .map(|r| r.content_length())
+                .filter(|n| *n > 0);
+            send(Event::Download(Note::Progress {
+                url: url.to_string(),
+                received: download.received_data_length(),
+                total,
+            }));
+        });
+    });
+    Ok(())
+}
+
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
+fn watch_downloads(_: &WebView, _: impl Fn(Event) + Clone + 'static) -> Result<(), String> {
+    Ok(())
+}
+
+/// Windows: WebView2 の PrintToPdf で、ページを印刷したときと同じ形の PDF にする。
+#[cfg(windows)]
+fn save_pdf(view: &WebView, path: &std::path::Path, done: PdfDone) -> Result<(), String> {
+    use webview2_com::Microsoft::Web::WebView2::Win32::{
+        ICoreWebView2PrintSettings, ICoreWebView2_7,
+    };
+    use webview2_com::PrintToPdfCompletedHandler;
+    use windows::core::{Interface, HSTRING};
+    use wry::WebViewExtWindows;
+
+    let webview: ICoreWebView2_7 = view
+        .webview()
+        .cast()
+        .map_err(|e| format!("この WebView2 は PDF を作れません: {}", e.message()))?;
+    let handler = PrintToPdfCompletedHandler::create(Box::new(move |result, saved| {
+        done(match result {
+            Ok(()) if saved => Ok(()),
+            Ok(()) => Err("WebView2 が PDF を書き込めませんでした".to_owned()),
+            Err(e) => Err(e.message().to_string()),
+        });
+        Ok(())
+    }));
+    let path = HSTRING::from(path.as_os_str());
+    unsafe { webview.PrintToPdf(&path, None::<&ICoreWebView2PrintSettings>, &handler) }
+        .map_err(|e| e.message().to_string())
+}
+
+/// macOS: WKWebView の createPDF で、ページ全体を PDF にする。
+#[cfg(target_os = "macos")]
+fn save_pdf(view: &WebView, path: &std::path::Path, done: PdfDone) -> Result<(), String> {
+    use std::cell::Cell;
+
+    use block2::RcBlock;
+    use objc2_foundation::{NSData, NSError};
+    use wry::WebViewExtMacOS;
+
+    let path = path.to_path_buf();
+    let done = Cell::new(Some(done));
+    let block = RcBlock::new(move |data: *mut NSData, error: *mut NSError| {
+        // 完了は 1 回だけ届く
+        let Some(done) = done.take() else {
+            return;
+        };
+        let data = unsafe { data.as_ref() };
+        let error = unsafe { error.as_ref() };
+        match (data, error) {
+            (Some(data), _) => {
+                done(std::fs::write(&path, data.to_vec()).map_err(|e| e.to_string()))
+            }
+            (None, Some(error)) => done(Err(error.localizedDescription().to_string())),
+            (None, None) => done(Err("WKWebView が PDF を作れませんでした".to_owned())),
+        }
+    });
+    unsafe {
+        view.webview()
+            .createPDFWithConfiguration_completionHandler(None, &block)
+    };
+    Ok(())
+}
+
+/// Linux: WebKitGTK の印刷を、ダイアログを出さずに「ファイルへ印刷」（PDF）に送る。
+#[cfg(target_os = "linux")]
+fn save_pdf(view: &WebView, path: &std::path::Path, done: PdfDone) -> Result<(), String> {
+    use webkit2gtk::{PrintOperation, PrintOperationExt};
+    use wry::WebViewExtUnix;
+
+    thread_local! {
+        /// 印刷している途中の PDF。終わるまで持っておく。
+        static PRINTING: RefCell<Vec<PrintOperation>> = const { RefCell::new(Vec::new()) };
+    }
+    let uri = gtk::glib::filename_to_uri(path, None)
+        .map_err(|e| format!("{} を URL にできません: {e}", path.display()))?;
+    let settings = gtk::PrintSettings::new();
+    settings.set_printer("Print to File");
+    settings.set(gtk::PRINT_SETTINGS_OUTPUT_FILE_FORMAT, Some("pdf"));
+    settings.set(gtk::PRINT_SETTINGS_OUTPUT_URI, Some(&uri));
+    let operation = PrintOperation::new(&view.webview());
+    operation.set_print_settings(&settings);
+    let done = Rc::new(RefCell::new(Some(done)));
+    let failed = done.clone();
+    operation.connect_failed(move |_, error| {
+        if let Some(done) = failed.borrow_mut().take() {
+            done(Err(error.to_string()));
+        }
+    });
+    // 失敗したときも、そのあとに finished が届く
+    operation.connect_finished(move |operation| {
+        if let Some(done) = done.borrow_mut().take() {
+            done(Ok(()));
+        }
+        PRINTING.with(|printing| printing.borrow_mut().retain(|p| p != operation));
+    });
+    PRINTING.with(|printing| printing.borrow_mut().push(operation.clone()));
+    operation.print();
+    Ok(())
+}
+
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
+fn save_pdf(_: &WebView, _: &std::path::Path, _: PdfDone) -> Result<(), String> {
+    Err("この OS では、ページを PDF にできません".into())
+}
+
 /// ページを作って、ウィンドウの中に置く。最初は隠しておき、描いたときに見せる。
 pub fn create(window: &mut Window, setup: Setup) -> Result<Rc<dyn Engine>, String> {
     #[cfg(target_os = "linux")]
@@ -620,7 +843,29 @@ pub fn create(window: &mut Window, setup: Setup) -> Result<Rc<dyn Engine>, Strin
                     })
                 }
             })
-            .with_document_title_changed_handler(move |title| send(Event::Title(title)));
+            .with_download_started_handler({
+                let send = send.clone();
+                move |url, path| {
+                    *path = crate::downloads::download_target(path);
+                    // ダウンロードのフォルダがなければ作る。作れなければ、部品がダウンロードの失敗を知らせる
+                    if let Some(dir) = path.parent() {
+                        let _ = std::fs::create_dir_all(dir);
+                    }
+                    send(Event::Download(Note::Started {
+                        url,
+                        path: path.clone(),
+                    }));
+                    true
+                }
+            })
+            .with_download_completed_handler({
+                let send = send.clone();
+                move |url, path, ok| send(Event::Download(Note::Finished { url, path, ok }))
+            })
+            .with_document_title_changed_handler({
+                let send = send.clone();
+                move |title| send(Event::Title(title))
+            });
         #[cfg(windows)]
         let builder = {
             use wry::WebViewBuilderExtWindows;
@@ -633,6 +878,8 @@ pub fn create(window: &mut Window, setup: Setup) -> Result<Rc<dyn Engine>, Strin
         let view = builder
             .build_as_child(&parent)
             .map_err(|e| format!("ブラウザを開けませんでした: {e}"))?;
+        // 進み具合は、部品の知らせから読む（macOS は、ダウンロード中のファイルの大きさを見る）
+        watch_downloads(&view, send)?;
         Ok(Rc::new(Wry { view }) as Rc<dyn Engine>)
     })
 }

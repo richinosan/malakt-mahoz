@@ -11,7 +11,7 @@ use gpui_kit::component::{ActiveTheme, Disableable, Placement, Sizable};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
-use crate::browser::{self, is_web, FindBar, Step, Zoom, ZoomBadge};
+use crate::browser::{self, is_web, FindBar, PrintDialog, Step, Zoom, ZoomBadge};
 use crate::db;
 use crate::feel::{self, Grip};
 use crate::render::{app_icon, row, window_controls};
@@ -117,6 +117,8 @@ pub struct PopupView {
     focus: FocusHandle,
     /// ページの中を探す欄。
     find: Entity<FindBar>,
+    /// 印刷のダイアログ。
+    print: Entity<PrintDialog>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -127,6 +129,7 @@ impl PopupView {
         let here = window.window_handle().window_id();
         terms.update(cx, |terms, _| terms.note_browser_focus(here, &focus));
         let find = cx.new(|cx| FindBar::new(move |_| Some(id), window, cx));
+        let print = cx.new(|cx| PrintDialog::new(move |_| Some(id), window, cx));
         // OS のボタンや Alt+F4 で閉じるときも、ウィンドウより先にページの部品を捨てる
         window.on_window_should_close(cx, |window, cx| {
             browser::window_closing(window, cx);
@@ -153,6 +156,7 @@ impl PopupView {
             window_title: SharedString::default(),
             focus,
             find,
+            print,
             _subscriptions: subscriptions,
         }
     }
@@ -202,9 +206,8 @@ impl PopupView {
                     cx.propagate();
                 }
             }))
-            .on_action(cx.listener(|this, _: &PrintPage, _, cx| {
-                let id = this.id;
-                this.terms.update(cx, |terms, cx| terms.print_page(id, cx));
+            .on_action(cx.listener(|this, _: &PrintPage, window, cx| {
+                this.print.update(cx, |print, cx| print.show(window, cx))
             }))
             .on_action(cx.listener(|this, _: &BrowserZoomIn, _, cx| this.zoom(Zoom::In, cx)))
             .on_action(cx.listener(|this, _: &BrowserZoomOut, _, cx| this.zoom(Zoom::Out, cx)))
@@ -448,7 +451,15 @@ impl Render for PopupView {
                         .on_click(cx.listener(|this, _, _, cx| this.step(Step::Reload, cx))),
                 ))
                 .into_any_element(),
-            None => browser::page_view(self.id, shot, theme.background),
+            None => div()
+                .relative()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_h_0()
+                .child(browser::page_view(self.id, shot, theme.background))
+                .child(self.print.clone())
+                .into_any_element(),
         };
         self.with_keys(base, cx)
             .child(bar)
